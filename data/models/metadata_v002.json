@@ -1,0 +1,97 @@
+{
+  "version": "v002",
+  "feature_version": "v1",
+  "models": {
+    "reject": {
+      "5": "rf_reject_5m_v002.pkl",
+      "15": "rf_reject_15m_v002.pkl",
+      "60": "rf_reject_60m_v002.pkl"
+    },
+    "break": {
+      "5": "rf_break_5m_v002.pkl",
+      "15": "rf_break_15m_v002.pkl",
+      "60": "rf_break_60m_v002.pkl"
+    }
+  },
+  "calibration": {
+    "reject": {
+      "5": "isotonic",
+      "15": "isotonic",
+      "60": "isotonic"
+    },
+    "break": {
+      "5": "none",
+      "15": "none",
+      "60": "none"
+    }
+  },
+  "stats": {
+    "5": {
+      "reject": {
+        "reject_rate": 0.38523573200992556,
+        "mfe_bps_reject": 7.851962989128817,
+        "mfe_bps_other": 6.249827012468125,
+        "mae_bps_reject": -8.334989636224787,
+        "mae_bps_other": -6.716555427674294,
+        "break_rate": 0.0,
+        "mfe_bps_break": null,
+        "mae_bps_break": null
+      },
+      "break": {
+        "reject_rate": 0.38523573200992556,
+        "mfe_bps_reject": 7.851962989128817,
+        "mfe_bps_other": 6.249827012468125,
+        "mae_bps_reject": -8.334989636224787,
+        "mae_bps_other": -6.716555427674294,
+        "break_rate": 0.0,
+        "mfe_bps_break": null,
+        "mae_bps_break": null
+      }
+    },
+    "15": {
+      "reject": {
+        "reject_rate": 0.6096954630205096,
+        "mfe_bps_reject": 11.183590937294387,
+        "mfe_bps_other": 9.212313375206344,
+        "mae_bps_reject": -12.47612139753336,
+        "mae_bps_other": -10.234995536783485,
+        "break_rate": 0.0,
+        "mfe_bps_break": null,
+        "mae_bps_break": null
+      },
+      "break": {
+        "reject_rate": 0.6096954630205096,
+        "mfe_bps_reject": 11.183590937294387,
+        "mfe_bps_other": 9.212313375206344,
+        "mae_bps_reject": -12.47612139753336,
+        "mae_bps_other": -10.234995536783485,
+        "break_rate": 0.0,
+        "mfe_bps_break": null,
+        "mae_bps_break": null
+      }
+    },
+    "60": {
+      "reject": {
+        "reject_rate": 0.8615288220551378,
+        "mfe_bps_reject": 17.265564848688197,
+        "mfe_bps_other": 15.981135317484023,
+        "mae_bps_reject": -20.64566965022847,
+        "mae_bps_other": -18.743676835864836,
+        "break_rate": 0.0,
+        "mfe_bps_break": null,
+        "mae_bps_break": null
+      },
+      "break": {
+        "reject_rate": 0.8615288220551378,
+        "mfe_bps_reject": 17.265564848688197,
+        "mfe_bps_other": 15.981135317484023,
+        "mae_bps_reject": -20.64566965022847,
+        "mae_bps_other": -18.743676835864836,
+        "break_rate": 0.0,
+        "mfe_bps_break": null,
+        "mae_bps_break": null
+      }
+    }
+  },
+  "trained_end_ts": 1770152100000
+}

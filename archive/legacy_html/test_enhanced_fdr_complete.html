@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Enhanced FDR Correction - Complete Test Suite</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #0f2027 0%, #203a43 50%, #2c5364 100%);
+            min-height: 100vh;
+            padding: 20px;
+            color: #e8e8e8;
+            margin: 0;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: rgba(20, 25, 35, 0.95);
+            backdrop-filter: blur(20px);
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+            border: 1px solid rgba(255,255,255,0.1);
+            padding: 25px;
+        }
+
+        h1 {
+            text-align: center;
+            color: #ffffff;
+            margin-bottom: 30px;
+            font-size: 2rem;
+            background: linear-gradient(45deg, #00d4ff, #0096c7);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .test-section {
+            margin: 20px 0;
+            padding: 20px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 10px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .test-section h2 {
+            color: #00d4ff;
+            margin-bottom: 15px;
+            font-size: 1.3rem;
+        }
+
+        .control-panel {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+
+        .control-group {
+            background: rgba(255, 255, 255, 0.03);
+            padding: 15px;
+            border-radius: 8px;
+        }
+
+        .control-group h3 {
+            margin: 0 0 10px 0;
+            color: #ffffff;
+            font-size: 14px;
+        }
+
+        select, button {
+            width: 100%;
+            padding: 8px 12px;
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 6px;
+            color: #ffffff;
+            font-size: 13px;
+        }
+
+        button {
+            background: linear-gradient(135deg, #00d4ff, #0096c7);
+            border: none;
+            cursor: pointer;
+            font-weight: 600;
+            margin: 5px 0;
+            transition: all 0.3s ease;
+        }
+
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0, 212, 255, 0.3);
+        }
+
+        .results-area {
+            margin-top: 20px;
+        }
+
+        .test-log {
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 6px;
+            padding: 15px;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            color: #e8e8e8;
+            overflow-x: auto;
+            max-height: 300px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+        }
+
+        .demo-data {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 10px;
+            margin: 15px 0;
+        }
+
+        .data-item {
+            background: rgba(255, 255, 255, 0.08);
+            padding: 10px;
+            border-radius: 6px;
+            text-align: center;
+            font-size: 12px;
+        }
+
+        .data-value {
+            font-size: 16px;
+            font-weight: bold;
+            color: #00d4ff;
+        }
+
+        .tab-container {
+            margin: 20px 0;
+        }
+
+        .tab-buttons {
+            display: flex;
+            gap: 5px;
+            margin-bottom: 15px;
+        }
+
+        .tab-button {
+            background: rgba(255, 255, 255, 0.1);
+            border: none;
+            color: #cccccc;
+            padding: 10px 20px;
+            border-radius: 6px 6px 0 0;
+            cursor: pointer;
+            font-size: 13px;
+            transition: all 0.3s ease;
+        }
+
+        .tab-button.active {
+            background: rgba(0, 212, 255, 0.3);
+            color: #ffffff;
+        }
+
+        .tab-content {
+            display: none;
+            background: rgba(255, 255, 255, 0.03);
+            padding: 20px;
+            border-radius: 0 8px 8px 8px;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🧪 Enhanced FDR Correction - Complete Test Suite</h1>
+
+        <div class="test-section">
+            <h2>🎛️ Interactive Controls</h2>
+            <div class="control-panel">
+                <div class="control-group">
+                    <h3>Regime</h3>
+                    <select id="regime-select">
+                        <option value="UP-TREND">UP-TREND</option>
+                        <option value="DOWN-TREND">DOWN-TREND</option>
+                        <option value="RANGE" selected>RANGE</option>
+                    </select>
+                </div>
+
+                <div class="control-group">
+                    <h3>Timeframe</h3>
+                    <select id="timeframe-select">
+                        <option value="daily">Daily</option>
+                        <option value="weekly" selected>Weekly</option>
+                        <option value="monthly">Monthly</option>
+                    </select>
+                </div>
+
+                <div class="control-group">
+                    <h3>Test Type</h3>
+                    <select id="test-type-select">
+                        <option value="true" selected>One-sided (H1: p > p0)</option>
+                        <option value="false">Two-sided (H1: p ≠ p0)</option>
+                    </select>
+                </div>
+
+                <div class="control-group">
+                    <h3>Actions</h3>
+                    <button onclick="runInteractiveTest()">Run Analysis</button>
+                    <button onclick="runUnitTests()">Run Unit Tests</button>
+                    <button onclick="generateRandomData()">Random Data</button>
+                </div>
+            </div>
+
+            <div class="demo-data" id="demo-data">
+                <!-- Data will be populated by JavaScript -->
+            </div>
+        </div>
+
+        <div class="tab-container">
+            <div class="tab-buttons">
+                <button class="tab-button active" onclick="switchTab('analysis')">📊 Analysis Results</button>
+                <button class="tab-button" onclick="switchTab('tests')">🧪 Unit Tests</button>
+                <button class="tab-button" onclick="switchTab('debug')">🔬 Debug Info</button>
+            </div>
+
+            <div id="analysis-tab" class="tab-content active">
+                <div id="analysis-results">
+                    <p style="text-align: center; color: #666; padding: 40px;">
+                        Click "Run Analysis" to see enhanced FDR correction results
+                    </p>
+                </div>
+            </div>
+
+            <div id="tests-tab" class="tab-content">
+                <div class="test-log" id="test-log">
+                    Click "Run Unit Tests" to execute comprehensive test suite
+                </div>
+            </div>
+
+            <div id="debug-tab" class="tab-content">
+                <div class="test-log" id="debug-log">
+                    Debug information will appear here during analysis
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Include all required modules -->
+    <script src="enhanced_fdr_correction.js"></script>
+    <script src="enhanced_pivot_display.js"></script>
+    <script src="test_enhanced_fdr.js"></script>
+
+    <script>
+        // Sample data scenarios
+        const DATA_SCENARIOS = {
+            realistic: {
+                name: "Realistic SPX Weekly Data",
+                data: {
+                    R3: { successes: 45, trials: 52 },
+                    R2: { successes: 48, trials: 52 },
+                    R1: { successes: 39, trials: 52 },
+                    PIVOT: { successes: 41, trials: 52 },
+                    S1: { successes: 37, trials: 52 },
+                    S2: { successes: 44, trials: 52 },
+                    S3: { successes: 43, trials: 52 }
+                }
+            },
+            highSuccess: {
+                name: "High Success Rates",
+                data: {
+                    R3: { successes: 48, trials: 52 },
+                    R2: { successes: 49, trials: 52 },
+                    R1: { successes: 44, trials: 52 },
+                    PIVOT: { successes: 46, trials: 52 },
+                    S1: { successes: 45, trials: 52 },
+                    S2: { successes: 47, trials: 52 },
+                    S3: { successes: 43, trials: 52 }
+                }
+            },
+            smallSample: {
+                name: "Small Sample Sizes",
+                data: {
+                    R3: { successes: 8, trials: 10 },
+                    R2: { successes: 9, trials: 10 },
+                    R1: { successes: 6, trials: 10 },
+                    PIVOT: { successes: 5, trials: 10 },
+                    S1: { successes: 4, trials: 10 },
+                    S2: { successes: 7, trials: 10 },
+                    S3: { successes: 8, trials: 10 }
+                }
+            }
+        };
+
+        let currentData = DATA_SCENARIOS.realistic.data;
+
+        // Initialize page
+        document.addEventListener('DOMContentLoaded', () => {
+            displayCurrentData();
+            runInteractiveTest();
+        });
+
+        function switchTab(tabName) {
+            // Hide all tabs
+            document.querySelectorAll('.tab-content').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            document.querySelectorAll('.tab-button').forEach(btn => {
+                btn.classList.remove('active');
+            });
+
+            // Show selected tab
+            document.getElementById(`${tabName}-tab`).classList.add('active');
+            event.target.classList.add('active');
+        }
+
+        function displayCurrentData() {
+            const container = document.getElementById('demo-data');
+            container.innerHTML = '';
+
+            Object.entries(currentData).forEach(([level, stats]) => {
+                const rate = (stats.successes / stats.trials * 100).toFixed(1);
+                container.innerHTML += `
+                    <div class="data-item">
+                        <div class="data-value">${rate}%</div>
+                        <div>${level}: ${stats.successes}/${stats.trials}</div>
+                    </div>
+                `;
+            });
+        }
+
+        function runInteractiveTest() {
+            const regime = document.getElementById('regime-select').value;
+            const timeframe = document.getElementById('timeframe-select').value;
+            const oneSided = document.getElementById('test-type-select').value === 'true';
+
+            console.log(`Running analysis: ${regime} regime, ${timeframe} timeframe, ${oneSided ? 'one-sided' : 'two-sided'}`);
+
+            // Clear previous results
+            document.getElementById('analysis-results').innerHTML = '';
+            document.getElementById('debug-log').innerHTML = '';
+
+            // Perform analysis
+            const options = {
+                alpha: 0.05,
+                oneSided: oneSided,
+                debugMode: true,
+                permutationTests: true
+            };
+
+            try {
+                const results = EnhancedFDRCorrection.analyzePivotSignificanceEnhanced(
+                    currentData, regime, timeframe, options
+                );
+
+                // Create enhanced display
+                const display = EnhancedPivotDisplay.createCompleteEnhancedDisplay(
+                    currentData, regime, timeframe, options
+                );
+
+                document.getElementById('analysis-results').appendChild(display);
+
+                // Add debug information
+                logDebugInfo(results, options);
+
+                console.log('Analysis completed successfully');
+
+            } catch (error) {
+                console.error('Analysis failed:', error);
+                document.getElementById('analysis-results').innerHTML = `
+                    <div style="color: #ff6b6b; padding: 20px; text-align: center;">
+                        Analysis failed: ${error.message}
+                    </div>
+                `;
+            }
+        }
+
+        function logDebugInfo(results, options) {
+            const debugLog = document.getElementById('debug-log');
+            let logText = '';
+
+            logText += `🔬 Debug Information\\n`;
+            logText += `${'='.repeat(50)}\\n\\n`;
+
+            logText += `Configuration:\\n`;
+            logText += `- Regime: ${results.summary.regime}\\n`;
+            logText += `- Timeframe: ${results.summary.timeframe}\\n`;
+            logText += `- Test type: ${results.summary.testType}\\n`;
+            logText += `- FDR level: ${(results.summary.fdrLevel * 100).toFixed(1)}%\\n\\n`;
+
+            logText += `Family Analysis:\\n`;
+            logText += `- Total levels: ${results.summary.totalLevels}\\n`;
+            logText += `- Valid levels: ${results.summary.validLevels}\\n`;
+            logText += `- Significant levels: ${results.summary.significantLevels}\\n`;
+            logText += `- Insufficient data: ${results.summary.insufficientDataLevels}\\n\\n`;
+
+            logText += `Detailed Results:\\n`;
+            const levels = ['R3', 'R2', 'R1', 'PIVOT', 'S1', 'S2', 'S3'];
+            levels.forEach(level => {
+                const result = results.levels[level];
+                if (result && result.hasSufficientData) {
+                    logText += `${level}: `;
+                    logText += `rate=${result.successRate.toFixed(1)}%, `;
+                    logText += `baseline=${result.baseline.toFixed(1)}%, `;
+                    logText += `lift=${result.lift >= 0 ? '+' : ''}${result.lift.toFixed(1)}%, `;
+                    logText += `p=${result.pValue.toFixed(4)}, `;
+                    logText += `q=${result.qValue ? result.qValue.toFixed(4) : 'N/A'}, `;
+                    logText += `sig=${result.significant ? 'YES' : 'NO'}`;
+                    if (result.permutationPValue) {
+                        logText += `, p_perm=${result.permutationPValue.toFixed(4)}`;
+                    }
+                    logText += `\\n`;
+                }
+            });
+
+            debugLog.textContent = logText;
+        }
+
+        function runUnitTests() {
+            const testLog = document.getElementById('test-log');
+            testLog.textContent = 'Running unit tests...\\n\\n';
+
+            // Capture console output
+            const originalLog = console.log;
+            const originalError = console.error;
+            const originalWarn = console.warn;
+
+            let logOutput = '';
+
+            console.log = (...args) => {
+                logOutput += args.join(' ') + '\\n';
+                originalLog(...args);
+            };
+
+            console.error = (...args) => {
+                logOutput += 'ERROR: ' + args.join(' ') + '\\n';
+                originalError(...args);
+            };
+
+            console.warn = (...args) => {
+                logOutput += 'WARN: ' + args.join(' ') + '\\n';
+                originalWarn(...args);
+            };
+
+            try {
+                const results = runAllTests();
+                logOutput += `\\n\\n📊 Final Results: ${results.passed} passed, ${results.failed} failed\\n`;
+
+                if (results.failed === 0) {
+                    logOutput += '🎉 All tests passed successfully!\\n';
+                } else {
+                    logOutput += '❌ Some tests failed. Check the log for details.\\n';
+                }
+
+            } catch (error) {
+                logOutput += `\\n❌ Test suite failed: ${error.message}\\n`;
+            } finally {
+                // Restore console functions
+                console.log = originalLog;
+                console.error = originalError;
+                console.warn = originalWarn;
+
+                testLog.textContent = logOutput;
+            }
+
+            // Switch to tests tab
+            switchTab('tests');
+        }
+
+        function generateRandomData() {
+            const newData = {};
+            const levels = ['R3', 'R2', 'R1', 'PIVOT', 'S1', 'S2', 'S3'];
+
+            levels.forEach(level => {
+                const trials = Math.floor(Math.random() * 40) + 20; // 20-60 trials
+                const successRate = Math.random() * 0.6 + 0.3; // 30-90% success rate
+                const successes = Math.floor(trials * successRate);
+
+                newData[level] = { successes, trials };
+            });
+
+            currentData = newData;
+            displayCurrentData();
+            console.log('Generated new random data');
+        }
+
+        // Keyboard shortcuts
+        document.addEventListener('keydown', (e) => {
+            if (e.ctrlKey || e.metaKey) {
+                switch (e.key) {
+                    case '1':
+                        e.preventDefault();
+                        switchTab('analysis');
+                        break;
+                    case '2':
+                        e.preventDefault();
+                        switchTab('tests');
+                        break;
+                    case '3':
+                        e.preventDefault();
+                        switchTab('debug');
+                        break;
+                    case 'r':
+                        e.preventDefault();
+                        runInteractiveTest();
+                        break;
+                    case 't':
+                        e.preventDefault();
+                        runUnitTests();
+                        break;
+                }
+            }
+        });
+
+        // Add keyboard shortcuts info
+        console.log('🎮 Keyboard shortcuts:');
+        console.log('Ctrl/Cmd + 1: Analysis tab');
+        console.log('Ctrl/Cmd + 2: Unit tests tab');
+        console.log('Ctrl/Cmd + 3: Debug tab');
+        console.log('Ctrl/Cmd + R: Run analysis');
+        console.log('Ctrl/Cmd + T: Run tests');
+    </script>
+</body>
+</html>

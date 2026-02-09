@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Data files (large binaries, regenerable)
+data/*.sqlite
+data/*.duckdb
+data/events.jsonl
+data/exports/
+data/models/*.pkl
+
+# Logs
+logs/*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Build artifacts
+dist/
+build/
+coverage/
+
+# Environment
+.env
+.env.local
+
+# Package lock (optional - uncomment if you want to track it)
+# package-lock.json

@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chart Debug Test</title>
+    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+    <style>
+        body { margin: 0; padding: 20px; background: #1a1d29; color: white; font-family: Arial; }
+        #chartContainer { width: 800px; height: 400px; background: #2d3142; margin: 20px 0; }
+        .info { margin: 10px 0; padding: 10px; background: #252836; border-radius: 4px; }
+        .error { background: #dc2626; }
+        .success { background: #059669; }
+    </style>
+</head>
+<body>
+    <h2>Professional Pivot Calculator - Chart Debug</h2>
+
+    <div id="status" class="info">Loading...</div>
+
+    <div id="chartContainer"></div>
+
+    <div id="pivotLevels" class="info">
+        <h3>Pivot Levels</h3>
+        <div id="levelsOutput">Calculating...</div>
+    </div>
+
+    <script src="enhanced_chart_engine.js"></script>
+    <script src="advanced_pivot_engine.js"></script>
+
+    <script>
+        function updateStatus(message, isError = false) {
+            const status = document.getElementById('status');
+            status.textContent = message;
+            status.className = isError ? 'info error' : 'info success';
+            console.log(message);
+        }
+
+        function testChartAndPivots() {
+            updateStatus('Testing chart and pivot engines...');
+
+            // Test 1: Check if libraries loaded
+            if (typeof window.LightweightCharts === 'undefined') {
+                updateStatus('ERROR: LightweightCharts library not loaded', true);
+                return;
+            }
+
+            if (typeof window.enhancedChartEngine === 'undefined') {
+                updateStatus('ERROR: Enhanced chart engine not loaded', true);
+                return;
+            }
+
+            if (typeof window.advancedPivotEngine === 'undefined') {
+                updateStatus('ERROR: Advanced pivot engine not loaded', true);
+                return;
+            }
+
+            updateStatus('✓ All libraries loaded successfully');
+
+            // Test 2: Generate mock data
+            const mockData = generateMockOHLCData(30);
+            updateStatus(`✓ Generated ${mockData.length} mock candles`);
+
+            // Test 3: Calculate pivot levels
+            try {
+                const pivotData = window.advancedPivotEngine.calculateAdvancedPivots(
+                    mockData,
+                    'standard',
+                    14
+                );
+
+                if (pivotData && pivotData.pivotLevels) {
+                    updateStatus(`✓ Calculated ${Object.keys(pivotData.pivotLevels).length} pivot levels`);
+                    displayPivotLevels(pivotData);
+                } else {
+                    updateStatus('ERROR: Failed to calculate pivot levels', true);
+                    return;
+                }
+            } catch (error) {
+                updateStatus(`ERROR in pivot calculation: ${error.message}`, true);
+                console.error(error);
+                return;
+            }
+
+            // Test 4: Create chart
+            try {
+                const container = document.getElementById('chartContainer');
+                const chart = window.LightweightCharts.createChart(container, {
+                    width: 800,
+                    height: 400,
+                    layout: {
+                        background: { color: '#0c111b' },
+                        textColor: '#e6e6e6'
+                    },
+                    grid: {
+                        vertLines: { color: 'rgba(255,255,255,0.1)' },
+                        horzLines: { color: 'rgba(255,255,255,0.1)' }
+                    },
+                    timeScale: { timeVisible: true, secondsVisible: false }
+                });
+
+                // Add candlestick series
+                const candleSeries = chart.addCandlestickSeries({
+                    upColor: '#26a69a',
+                    downColor: '#ef5350',
+                    borderVisible: false,
+                    wickUpColor: '#26a69a',
+                    wickDownColor: '#ef5350'
+                });
+
+                // Convert mock data for chart
+                const chartData = mockData.map(candle => ({
+                    time: candle.time,
+                    open: candle.open,
+                    high: candle.high,
+                    low: candle.low,
+                    close: candle.close
+                }));
+
+                candleSeries.setData(chartData);
+                updateStatus('✓ Chart created and data loaded successfully');
+
+                // Test 5: Add pivot lines
+                try {
+                    const pivotData = window.advancedPivotEngine.calculateAdvancedPivots(mockData, 'standard', 14);
+                    const currentTime = Math.floor(Date.now() / 1000);
+
+                    Object.entries(pivotData.pivotLevels).forEach(([label, value]) => {
+                        const lineColor = getPivotLineColor(label);
+
+                        const pivotLine = chart.addLineSeries({
+                            color: lineColor,
+                            lineWidth: label === 'PIVOT' ? 2 : 1,
+                            priceLineVisible: true,
+                            lastValueVisible: true,
+                            title: `${label}: ${Number(value).toFixed(2)}`
+                        });
+
+                        pivotLine.setData([
+                            { time: currentTime - 86400, value: value },
+                            { time: currentTime + 86400, value: value }
+                        ]);
+                    });
+
+                    updateStatus('🎉 SUCCESS: Chart with pivot levels is working perfectly!');
+                } catch (error) {
+                    updateStatus(`ERROR adding pivot lines: ${error.message}`, true);
+                }
+
+            } catch (error) {
+                updateStatus(`ERROR creating chart: ${error.message}`, true);
+                console.error(error);
+            }
+        }
+
+        function generateMockOHLCData(days = 30) {
+            const data = [];
+            const currentTime = Math.floor(Date.now() / 1000);
+            const basePrice = 443.50; // SPY-like price
+
+            for (let i = -days; i <= 0; i++) {
+                const time = currentTime + (i * 86400); // Daily intervals
+                const volatility = 0.02;
+                const trend = i * 0.001;
+
+                const open = basePrice + (Math.random() - 0.5) * basePrice * volatility + trend * basePrice;
+                const close = open + (Math.random() - 0.5) * basePrice * volatility * 0.8;
+                const high = Math.max(open, close) + Math.random() * basePrice * volatility * 0.3;
+                const low = Math.min(open, close) - Math.random() * basePrice * volatility * 0.3;
+
+                data.push({
+                    time: time,
+                    open: Number(open.toFixed(2)),
+                    high: Number(high.toFixed(2)),
+                    low: Number(low.toFixed(2)),
+                    close: Number(close.toFixed(2))
+                });
+            }
+
+            return data;
+        }
+
+        function displayPivotLevels(pivotData) {
+            const output = document.getElementById('levelsOutput');
+            let html = '<table style="width: 100%; border-collapse: collapse;">';
+            html += '<tr style="background: #3a3d4a;"><th style="padding: 8px;">Level</th><th style="padding: 8px;">Price</th><th style="padding: 8px;">Type</th></tr>';
+
+            Object.entries(pivotData.pivotLevels).forEach(([label, value]) => {
+                const color = getPivotLineColor(label);
+                html += `<tr style="border-top: 1px solid #555;">
+                    <td style="padding: 8px; color: ${color}; font-weight: bold;">${label}</td>
+                    <td style="padding: 8px; font-family: monospace;">${Number(value).toFixed(2)}</td>
+                    <td style="padding: 8px; color: #888;">${label.includes('R') ? 'Resistance' : label.includes('S') ? 'Support' : 'Pivot'}</td>
+                </tr>`;
+            });
+
+            html += '</table>';
+            html += `<p><strong>ATR:</strong> ${pivotData.atr ? Number(pivotData.atr).toFixed(4) : 'N/A'}</p>`;
+            html += `<p><strong>ATR %:</strong> ${pivotData.atrPercent ? pivotData.atrPercent + '%' : 'N/A'}</p>`;
+
+            output.innerHTML = html;
+        }
+
+        function getPivotLineColor(label) {
+            const colors = {
+                'R3': '#ef5350',
+                'R2': '#ef5350',
+                'R1': '#ef5350',
+                'PIVOT': '#fdd835',
+                'S1': '#66bb6a',
+                'S2': '#66bb6a',
+                'S3': '#66bb6a',
+                'GAMMA_FLIP': '#9c27b0'
+            };
+            return colors[label] || '#b0bec5';
+        }
+
+        // Run test when page loads
+        document.addEventListener('DOMContentLoaded', () => {
+            setTimeout(testChartAndPivots, 1000);
+        });
+    </script>
+</body>
+</html>

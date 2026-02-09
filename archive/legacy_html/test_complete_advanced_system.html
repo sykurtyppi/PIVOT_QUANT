@@ -1,0 +1,672 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Complete Advanced Pivot Analysis System</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #0f2027 0%, #203a43 50%, #2c5364 100%);
+            min-height: 100vh;
+            padding: 20px;
+            color: #e8e8e8;
+            margin: 0;
+        }
+
+        .container {
+            max-width: 1600px;
+            margin: 0 auto;
+            background: rgba(20, 25, 35, 0.95);
+            backdrop-filter: blur(20px);
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+            border: 1px solid rgba(255,255,255,0.1);
+            padding: 25px;
+        }
+
+        h1 {
+            text-align: center;
+            color: #ffffff;
+            margin-bottom: 30px;
+            font-size: 2.2rem;
+            background: linear-gradient(45deg, #00d4ff, #0096c7, #673AB7);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .control-panel {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 25px;
+            padding: 20px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 10px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .control-group {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .control-group label {
+            color: #ffffff;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        select, button {
+            padding: 8px 12px;
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 6px;
+            color: #ffffff;
+            font-size: 13px;
+        }
+
+        button {
+            background: linear-gradient(135deg, #00d4ff, #0096c7);
+            border: none;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.3s ease;
+        }
+
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0, 212, 255, 0.3);
+        }
+
+        .main-grid {
+            display: grid;
+            grid-template-columns: 1fr 400px;
+            gap: 20px;
+        }
+
+        .left-panel {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .right-panel {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .analysis-section {
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: 10px;
+            padding: 20px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .section-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .section-title {
+            color: #00d4ff;
+            font-size: 18px;
+            font-weight: 600;
+            margin: 0;
+        }
+
+        .export-section {
+            margin-top: 25px;
+            padding: 20px;
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: 10px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .export-buttons {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .export-button {
+            background: linear-gradient(135deg, #4CAF50, #2E7D32);
+            padding: 10px 15px;
+            border-radius: 6px;
+            border: none;
+            color: white;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .metadata-preview {
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 6px;
+            padding: 15px;
+            font-family: 'Courier New', monospace;
+            font-size: 11px;
+            color: #e8e8e8;
+            overflow-x: auto;
+            max-height: 200px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            margin-top: 10px;
+        }
+
+        .status-bar {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background: rgba(0, 0, 0, 0.8);
+            color: #ffffff;
+            padding: 10px 15px;
+            border-radius: 6px;
+            font-size: 12px;
+            z-index: 1000;
+        }
+
+        @media (max-width: 1200px) {
+            .main-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        @media (max-width: 768px) {
+            .control-panel {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎯 Complete Advanced Pivot Analysis System</h1>
+
+        <div class="control-panel">
+            <div class="control-group">
+                <label>Market Regime</label>
+                <select id="regime-select">
+                    <option value="UP-TREND">UP-TREND</option>
+                    <option value="DOWN-TREND">DOWN-TREND</option>
+                    <option value="RANGE" selected>RANGE</option>
+                </select>
+            </div>
+
+            <div class="control-group">
+                <label>Timeframe</label>
+                <select id="timeframe-select">
+                    <option value="daily">Daily</option>
+                    <option value="weekly" selected>Weekly</option>
+                    <option value="monthly">Monthly</option>
+                </select>
+            </div>
+
+            <div class="control-group">
+                <label>Test Type</label>
+                <select id="test-type-select">
+                    <option value="true" selected>One-sided (H1: p > p0)</option>
+                    <option value="false">Two-sided (H1: p ≠ p0)</option>
+                </select>
+            </div>
+
+            <div class="control-group">
+                <label>Debug Mode</label>
+                <select id="debug-mode-select">
+                    <option value="false" selected>Production</option>
+                    <option value="true">Debug (with permutation tests)</option>
+                </select>
+            </div>
+
+            <div class="control-group">
+                <label>Actions</label>
+                <button onclick="runCompleteAnalysis()">🚀 Run Complete Analysis</button>
+            </div>
+
+            <div class="control-group">
+                <label>Data</label>
+                <button onclick="generateNewData()">🎲 Generate New Data</button>
+            </div>
+        </div>
+
+        <div class="main-grid">
+            <div class="left-panel">
+                <div class="analysis-section">
+                    <div class="section-header">
+                        <h3 class="section-title">📊 Enhanced Level Reliability</h3>
+                    </div>
+                    <div id="level-reliability-container">
+                        <p style="text-align: center; color: #666; padding: 40px;">
+                            Click "Run Complete Analysis" to see enhanced FDR-corrected results
+                        </p>
+                    </div>
+                </div>
+
+                <div class="analysis-section">
+                    <div class="section-header">
+                        <h3 class="section-title">📈 Walk-Forward Analysis</h3>
+                    </div>
+                    <div id="walk-forward-container">
+                        <p style="text-align: center; color: #666; padding: 40px;">
+                            Rolling 60-bar windows with stability analysis
+                        </p>
+                    </div>
+                </div>
+
+                <div class="analysis-section">
+                    <div class="section-header">
+                        <h3 class="section-title">📊 Volatility × Regime Matrix</h3>
+                    </div>
+                    <div id="volatility-matrix-container">
+                        <p style="text-align: center; color: #666; padding: 40px;">
+                            BH correction per volatility subfamily
+                        </p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="right-panel">
+                <div class="analysis-section">
+                    <div class="section-header">
+                        <h3 class="section-title">🎯 Top Picks</h3>
+                    </div>
+                    <div id="top-picks-container">
+                        <p style="text-align: center; color: #666; padding: 40px;">
+                            Best levels for current regime
+                        </p>
+                    </div>
+                </div>
+
+                <div class="analysis-section">
+                    <div class="section-header">
+                        <h3 class="section-title">🚨 Active Alerts</h3>
+                    </div>
+                    <div id="alerts-container">
+                        <p style="text-align: center; color: #666; padding: 40px;">
+                            Alert rules with bias detection
+                        </p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="export-section">
+            <div class="section-header">
+                <h3 class="section-title">📤 Export & Metadata</h3>
+            </div>
+            <div class="export-buttons">
+                <button class="export-button" onclick="exportCSV()">📊 Export CSV</button>
+                <button class="export-button" onclick="exportJSON()">📋 Export JSON</button>
+                <button class="export-button" onclick="exportMetadata()">🔍 Export Metadata</button>
+                <button class="export-button" onclick="showMetadataPreview()">👁️ Preview Metadata</button>
+            </div>
+            <div id="metadata-preview" class="metadata-preview" style="display: none;"></div>
+        </div>
+    </div>
+
+    <div id="status-bar" class="status-bar" style="display: none;">
+        Ready
+    </div>
+
+    <!-- Include all required modules -->
+    <script src="enhanced_fdr_correction.js"></script>
+    <script src="enhanced_pivot_display.js"></script>
+    <script src="advanced_analytics.js"></script>
+    <script src="advanced_ui_components.js"></script>
+    <script src="volatility_analysis.js"></script>
+
+    <script>
+        // Current analysis state
+        let currentData = null;
+        let currentResults = null;
+        let currentMetadata = null;
+
+        // Sample realistic data
+        const SAMPLE_DATA = {
+            R3: { successes: 45, trials: 52 },
+            R2: { successes: 48, trials: 52 },
+            R1: { successes: 39, trials: 52 },
+            PIVOT: { successes: 41, trials: 52 },
+            S1: { successes: 37, trials: 52 },
+            S2: { successes: 44, trials: 52 },
+            S3: { successes: 43, trials: 52 }
+        };
+
+        // Initialize on page load
+        document.addEventListener('DOMContentLoaded', () => {
+            // Add all required styles
+            EnhancedPivotDisplay.addEnhancedStyles();
+            AdvancedUIComponents.addAdvancedStyles();
+            VolatilityAnalysis.addVolatilityStyles();
+
+            // Initialize with sample data
+            currentData = SAMPLE_DATA;
+            showStatus('System initialized');
+
+            // Run initial analysis
+            setTimeout(runCompleteAnalysis, 500);
+        });
+
+        function showStatus(message) {
+            const statusBar = document.getElementById('status-bar');
+            statusBar.textContent = message;
+            statusBar.style.display = 'block';
+
+            setTimeout(() => {
+                statusBar.style.display = 'none';
+            }, 3000);
+        }
+
+        function runCompleteAnalysis() {
+            showStatus('Running complete analysis...');
+
+            try {
+                const regime = document.getElementById('regime-select').value;
+                const timeframe = document.getElementById('timeframe-select').value;
+                const oneSided = document.getElementById('test-type-select').value === 'true';
+                const debugMode = document.getElementById('debug-mode-select').value === 'true';
+
+                // Step 1: Enhanced FDR Analysis
+                const options = {
+                    alpha: 0.05,
+                    oneSided: oneSided,
+                    debugMode: debugMode,
+                    permutationTests: debugMode
+                };
+
+                const fdrResults = EnhancedFDRCorrection.analyzePivotSignificanceEnhanced(
+                    currentData, regime, timeframe, options
+                );
+
+                currentResults = fdrResults;
+
+                // Step 2: Walk-Forward Analysis (mock data for demo)
+                const walkForwardData = generateWalkForwardData();
+
+                // Step 3: Volatility Analysis
+                const mockPriceData = VolatilityAnalysis.generateMockPriceData(200);
+                const volatilityData = VolatilityAnalysis.classifyVolatility(mockPriceData);
+                const volAnalysisResults = VolatilityAnalysis.runVolatilitySubfamilyAnalysis(
+                    currentData, regime, volatilityData, options
+                );
+
+                // Step 4: Generate metadata
+                currentMetadata = AdvancedAnalytics.createAnalysisMetadata({
+                    regime: regime,
+                    timeframe: timeframe,
+                    volatilityFilter: 'all',
+                    alpha: options.alpha,
+                    testType: oneSided ? 'one_sided' : 'two_sided',
+                    bhFamilyMembers: Object.keys(currentData),
+                    baselines: EnhancedFDRCorrection.DEFAULT_REGIME_BASELINES[regime],
+                    windowSize: 60,
+                    stepSize: 20,
+                    dataSource: 'mock_spx_weekly',
+                    priceData: mockPriceData
+                });
+
+                // Update UI Components
+                updateLevelReliability(fdrResults, regime, timeframe, debugMode);
+                updateTopPicks(fdrResults, regime, walkForwardData);
+                updateWalkForward(walkForwardData, regime);
+                updateVolatilityMatrix(volAnalysisResults, regime);
+                updateAlerts(fdrResults, regime, walkForwardData);
+
+                showStatus('Analysis complete!');
+
+            } catch (error) {
+                console.error('Analysis failed:', error);
+                showStatus('Analysis failed: ' + error.message);
+            }
+        }
+
+        function updateLevelReliability(fdrResults, regime, timeframe, debugMode) {
+            const container = document.getElementById('level-reliability-container');
+            container.innerHTML = '';
+
+            // Create enhanced table
+            const table = EnhancedPivotDisplay.createEnhancedLevelReliabilityTable(
+                fdrResults, regime, timeframe, debugMode
+            );
+
+            // Add summary panel
+            const summary = EnhancedPivotDisplay.createSummaryPanel(fdrResults);
+
+            // Add legend and controls
+            const legend = EnhancedPivotDisplay.createLegendAndControls(
+                fdrResults, debugMode, handleToggle
+            );
+
+            container.appendChild(summary);
+            container.appendChild(table);
+            container.appendChild(legend);
+        }
+
+        function updateTopPicks(fdrResults, regime, walkForwardData) {
+            const container = document.getElementById('top-picks-container');
+            container.innerHTML = '';
+
+            const topPicksCard = AdvancedUIComponents.createTopPicksCard(
+                fdrResults, regime, walkForwardData
+            );
+
+            container.appendChild(topPicksCard);
+        }
+
+        function updateWalkForward(walkForwardData, regime) {
+            const container = document.getElementById('walk-forward-container');
+            container.innerHTML = '';
+
+            const walkForwardSummary = AdvancedUIComponents.createWalkForwardSummary(
+                currentData, regime
+            );
+
+            container.appendChild(walkForwardSummary);
+        }
+
+        function updateVolatilityMatrix(volAnalysisResults, regime) {
+            const container = document.getElementById('volatility-matrix-container');
+            container.innerHTML = '';
+
+            const volatilityMatrix = VolatilityAnalysis.createVolatilityMatrix(
+                volAnalysisResults, regime
+            );
+
+            container.appendChild(volatilityMatrix);
+        }
+
+        function updateAlerts(fdrResults, regime, walkForwardData) {
+            const container = document.getElementById('alerts-container');
+            container.innerHTML = '';
+
+            const alertsPanel = AdvancedUIComponents.createAlertsPanel(
+                fdrResults, regime, walkForwardData
+            );
+
+            container.appendChild(alertsPanel);
+        }
+
+        function handleToggle(type, value) {
+            if (type === 'testMode') {
+                document.getElementById('test-type-select').value = value ? 'false' : 'true';
+            } else if (type === 'debugMode') {
+                document.getElementById('debug-mode-select').value = value ? 'true' : 'false';
+            }
+
+            // Rerun analysis with new settings
+            runCompleteAnalysis();
+        }
+
+        function generateWalkForwardData() {
+            const levels = ['R3', 'R2', 'R1', 'PIVOT', 'S1', 'S2', 'S3'];
+            const walkForwardData = {};
+
+            levels.forEach(level => {
+                const timeSeries = AdvancedUIComponents.generateMockTimeSeries(level, 200);
+                const stability = AdvancedAnalytics.calculateWalkForwardStability(timeSeries, 60, 20);
+                walkForwardData[level] = stability;
+            });
+
+            return walkForwardData;
+        }
+
+        function generateNewData() {
+            const levels = ['R3', 'R2', 'R1', 'PIVOT', 'S1', 'S2', 'S3'];
+            const newData = {};
+
+            levels.forEach(level => {
+                const trials = Math.floor(Math.random() * 40) + 30; // 30-70 trials
+                const baseRate = 0.5 + (Math.random() - 0.5) * 0.4; // 30-70% base rate
+                const successes = Math.floor(trials * baseRate);
+
+                newData[level] = { successes, trials };
+            });
+
+            currentData = newData;
+            showStatus('Generated new random data');
+
+            // Rerun analysis with new data
+            setTimeout(runCompleteAnalysis, 500);
+        }
+
+        function exportCSV() {
+            if (!currentResults) {
+                showStatus('No analysis results to export');
+                return;
+            }
+
+            const csvData = generateCSV(currentResults);
+            downloadFile(csvData, 'pivot_analysis.csv', 'text/csv');
+
+            // Also create metadata sidecar
+            const metadataJSON = JSON.stringify(currentMetadata, null, 2);
+            downloadFile(metadataJSON, 'pivot_analysis_meta.json', 'application/json');
+
+            showStatus('CSV and metadata exported');
+        }
+
+        function exportJSON() {
+            if (!currentResults) {
+                showStatus('No analysis results to export');
+                return;
+            }
+
+            const jsonData = JSON.stringify({
+                results: currentResults,
+                metadata: currentMetadata
+            }, null, 2);
+
+            downloadFile(jsonData, 'pivot_analysis.json', 'application/json');
+            showStatus('JSON exported');
+        }
+
+        function exportMetadata() {
+            if (!currentMetadata) {
+                showStatus('No metadata to export');
+                return;
+            }
+
+            const metadataJSON = JSON.stringify(currentMetadata, null, 2);
+            downloadFile(metadataJSON, 'analysis_meta.json', 'application/json');
+            showStatus('Metadata exported');
+        }
+
+        function showMetadataPreview() {
+            const preview = document.getElementById('metadata-preview');
+
+            if (preview.style.display === 'none') {
+                if (currentMetadata) {
+                    preview.textContent = JSON.stringify(currentMetadata, null, 2);
+                    preview.style.display = 'block';
+                } else {
+                    preview.textContent = 'No metadata available. Run analysis first.';
+                    preview.style.display = 'block';
+                }
+            } else {
+                preview.style.display = 'none';
+            }
+        }
+
+        function generateCSV(results) {
+            const headers = [
+                'Level', 'Success_Rate', 'Baseline', 'Lift', 'Trials', 'N_Effective',
+                'P_Value', 'Q_Value', 'Significant', 'CI_Lower', 'CI_Upper'
+            ];
+
+            const rows = [headers.join(',')];
+
+            Object.entries(results.levels).forEach(([level, result]) => {
+                const row = [
+                    level,
+                    result.successRate.toFixed(2),
+                    result.baseline.toFixed(2),
+                    result.lift.toFixed(2),
+                    result.trials,
+                    result.nEffective,
+                    result.pValue.toFixed(6),
+                    result.qValue ? result.qValue.toFixed(6) : 'NA',
+                    result.significant ? 'TRUE' : 'FALSE',
+                    result.confidenceInterval.lower.toFixed(2),
+                    result.confidenceInterval.upper.toFixed(2)
+                ];
+
+                rows.push(row.join(','));
+            });
+
+            return rows.join('\\n');
+        }
+
+        function downloadFile(content, filename, mimeType) {
+            const blob = new Blob([content], { type: mimeType });
+            const url = URL.createObjectURL(blob);
+
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+
+            URL.revokeObjectURL(url);
+        }
+
+        // Keyboard shortcuts
+        document.addEventListener('keydown', (e) => {
+            if (e.ctrlKey || e.metaKey) {
+                switch (e.key) {
+                    case 'r':
+                        e.preventDefault();
+                        runCompleteAnalysis();
+                        break;
+                    case 'd':
+                        e.preventDefault();
+                        generateNewData();
+                        break;
+                    case 'e':
+                        e.preventDefault();
+                        exportCSV();
+                        break;
+                    case 'm':
+                        e.preventDefault();
+                        showMetadataPreview();
+                        break;
+                }
+            }
+        });
+
+        console.log('🎮 Keyboard shortcuts:');
+        console.log('Ctrl/Cmd + R: Run analysis');
+        console.log('Ctrl/Cmd + D: Generate new data');
+        console.log('Ctrl/Cmd + E: Export CSV');
+        console.log('Ctrl/Cmd + M: Toggle metadata preview');
+    </script>
+</body>
+</html>

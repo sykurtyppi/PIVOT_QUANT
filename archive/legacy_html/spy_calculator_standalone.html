@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SPY Gamma Flip Calculator - Working Version</title>
+    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: linear-gradient(135deg, #0c111b 0%, #1a1d29 100%);
+            color: #e6e6e6;
+            font-family: 'SF Mono', Consolas, 'Monaco', 'Roboto Mono', monospace;
+            line-height: 1.6;
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+            padding: 20px;
+            background: rgba(255,255,255,0.02);
+            border-radius: 12px;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+
+        .header h1 {
+            font-size: 28px;
+            color: #fdd835;
+            margin-bottom: 8px;
+        }
+
+        .main-grid {
+            display: grid;
+            grid-template-columns: 1fr 350px;
+            gap: 20px;
+        }
+
+        .chart-section {
+            background: rgba(255,255,255,0.02);
+            border-radius: 12px;
+            padding: 20px;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+
+        .chart-container {
+            width: 100%;
+            height: 500px;
+            margin-top: 15px;
+        }
+
+        .levels-panel {
+            background: rgba(255,255,255,0.02);
+            border-radius: 12px;
+            padding: 20px;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+
+        .levels-section {
+            margin-bottom: 25px;
+        }
+
+        .levels-section h3 {
+            color: #fdd835;
+            margin-bottom: 15px;
+            font-size: 16px;
+        }
+
+        .level {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 12px;
+            margin: 4px 0;
+            border-radius: 6px;
+            border-left: 3px solid;
+            font-size: 13px;
+            background: rgba(255,255,255,0.03);
+        }
+
+        .level-ema21 { border-left-color: #2196f3; }
+        .level-gamma { border-left-color: #9c27b0; }
+        .level-ema9 { border-left-color: #4caf50; }
+        .level-reversal { border-left-color: #f44336; }
+        .level-ema50 { border-left-color: #ff9800; }
+        .level-ema9w { border-left-color: #e91e63; }
+
+        .level-name {
+            font-weight: 600;
+            color: #e6e6e6;
+        }
+
+        .level-price {
+            font-family: monospace;
+            color: #fdd835;
+            font-weight: 500;
+        }
+
+        .status {
+            padding: 15px;
+            border-radius: 8px;
+            margin: 10px 0;
+            text-align: center;
+            font-weight: 600;
+        }
+
+        .loading { background: rgba(255,193,53,0.2); color: #fdd835; }
+        .success { background: rgba(76,175,80,0.2); color: #4caf50; }
+        .error { background: rgba(244,67,54,0.2); color: #f44336; }
+
+        @media (max-width: 768px) {
+            .main-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>SPY Gamma Flip Calculator</h1>
+            <p>Professional Options Flow Analysis | Current SPY Levels</p>
+        </div>
+
+        <div id="status" class="status loading">Initializing calculations...</div>
+
+        <div class="main-grid">
+            <div class="chart-section">
+                <h3 style="color: #fdd835; margin-bottom: 15px;">SPY Chart with Gamma Levels</h3>
+                <div id="chartContainer" class="chart-container"></div>
+            </div>
+
+            <div class="levels-panel">
+                <div class="levels-section">
+                    <h3>Current SPY Levels</h3>
+                    <div id="spyLevels">
+                        <div class="level level-ema21">
+                            <span class="level-name">21d EMA</span>
+                            <span class="level-price" id="ema21">$672.52</span>
+                        </div>
+                        <div class="level level-gamma">
+                            <span class="level-name">Gamma Flip</span>
+                            <span class="level-price" id="gammaFlip">$670.52-670.72</span>
+                        </div>
+                        <div class="level level-ema9">
+                            <span class="level-name">9d EMA</span>
+                            <span class="level-price" id="ema9">$669.32-669.82</span>
+                        </div>
+                        <div class="level level-reversal">
+                            <span class="level-name">High Reversal</span>
+                            <span class="level-price" id="reversal1">$667.43</span>
+                        </div>
+                        <div class="level level-ema50">
+                            <span class="level-name">50d EMA</span>
+                            <span class="level-price" id="ema50">$666.63-666.83</span>
+                        </div>
+                        <div class="level level-ema9w">
+                            <span class="level-name">9W EMA</span>
+                            <span class="level-price" id="ema9w">$665.33-665.93</span>
+                        </div>
+                        <div class="level level-reversal">
+                            <span class="level-name">Support Zone</span>
+                            <span class="level-price" id="support">$657.85-658.35</span>
+                        </div>
+                        <div class="level level-reversal">
+                            <span class="level-name">Major Support</span>
+                            <span class="level-price" id="support2">$652.67-653.36</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="levels-section">
+                    <h3>Market Status</h3>
+                    <div style="padding: 10px; background: rgba(255,255,255,0.03); border-radius: 6px; font-size: 12px;">
+                        <div style="display: flex; justify-content: space-between; margin: 5px 0;">
+                            <span>Current Price:</span>
+                            <span style="color: #fdd835; font-weight: 600;" id="currentPrice">$670.62</span>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; margin: 5px 0;">
+                            <span>Gamma Direction:</span>
+                            <span style="color: #4caf50; font-weight: 600;">Bullish</span>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; margin: 5px 0;">
+                            <span>Market Regime:</span>
+                            <span style="color: #ff9800; font-weight: 600;">Balanced</span>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; margin: 5px 0;">
+                            <span>Last Update:</span>
+                            <span style="color: #b0bec5;" id="lastUpdate">--</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        class SPYCalculator {
+            constructor() {
+                this.chart = null;
+                this.candleSeries = null;
+                this.currentPrice = 670.62;
+            }
+
+            async initialize() {
+                try {
+                    this.updateStatus('Generating SPY data...', 'loading');
+
+                    // Generate realistic SPY data
+                    const spyData = this.generateSPYData();
+
+                    this.updateStatus('Creating chart...', 'loading');
+
+                    // Initialize chart
+                    this.initializeChart(spyData);
+
+                    this.updateStatus('Adding gamma levels...', 'loading');
+
+                    // Add the exact levels you specified
+                    this.addSPYLevels();
+
+                    this.updateStatus('✅ SPY Gamma Calculator Ready', 'success');
+
+                    // Update timestamp
+                    document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
+
+                } catch (error) {
+                    console.error('Error:', error);
+                    this.updateStatus(`❌ Error: ${error.message}`, 'error');
+                }
+            }
+
+            generateSPYData() {
+                const data = [];
+                const now = Date.now();
+                const currentPrice = this.currentPrice;
+
+                // Generate 60 days of realistic SPY data ending at current price
+                for (let i = 59; i >= 0; i--) {
+                    const date = new Date(now - (i * 24 * 60 * 60 * 1000));
+                    const time = Math.floor(date.getTime() / 1000);
+
+                    // Create realistic price progression
+                    const basePrice = currentPrice - (i * 0.15) + (Math.random() - 0.5) * 8;
+                    const dailyRange = basePrice * 0.012;
+
+                    const open = basePrice + (Math.random() - 0.5) * dailyRange * 0.5;
+                    const close = basePrice + (Math.random() - 0.5) * dailyRange * 0.5;
+                    const high = Math.max(open, close) + Math.random() * dailyRange * 0.4;
+                    const low = Math.min(open, close) - Math.random() * dailyRange * 0.4;
+
+                    data.push({
+                        time: time,
+                        open: Number(open.toFixed(2)),
+                        high: Number(high.toFixed(2)),
+                        low: Number(low.toFixed(2)),
+                        close: Number(close.toFixed(2))
+                    });
+                }
+
+                // Ensure last candle is at current price
+                data[data.length - 1].close = currentPrice;
+
+                return data;
+            }
+
+            initializeChart(data) {
+                const container = document.getElementById('chartContainer');
+
+                this.chart = LightweightCharts.createChart(container, {
+                    width: container.clientWidth,
+                    height: 500,
+                    layout: {
+                        background: { color: 'transparent' },
+                        textColor: '#e6e6e6'
+                    },
+                    grid: {
+                        vertLines: { color: 'rgba(255,255,255,0.05)' },
+                        horzLines: { color: 'rgba(255,255,255,0.05)' }
+                    },
+                    rightPriceScale: {
+                        borderColor: 'rgba(255,255,255,0.1)',
+                        textColor: '#e6e6e6'
+                    },
+                    timeScale: {
+                        borderColor: 'rgba(255,255,255,0.1)',
+                        textColor: '#e6e6e6',
+                        timeVisible: true
+                    }
+                });
+
+                // Add candlestick series
+                this.candleSeries = this.chart.addCandlestickSeries({
+                    upColor: '#26a69a',
+                    downColor: '#ef5350',
+                    borderVisible: false,
+                    wickUpColor: '#26a69a',
+                    wickDownColor: '#ef5350'
+                });
+
+                this.candleSeries.setData(data);
+            }
+
+            addSPYLevels() {
+                // Add the exact levels you specified
+                const levels = [
+                    { price: 672.52, color: '#2196f3', label: '21d EMA', width: 2 },
+                    { price: 670.62, color: '#9c27b0', label: 'Gamma Flip', width: 2 },
+                    { price: 669.57, color: '#4caf50', label: '9d EMA', width: 1 },
+                    { price: 667.43, color: '#f44336', label: 'High Reversal', width: 1 },
+                    { price: 666.73, color: '#ff9800', label: '50d EMA', width: 1 },
+                    { price: 665.63, color: '#e91e63', label: '9W EMA', width: 1 },
+                    { price: 658.10, color: '#f44336', label: 'Support Zone', width: 1 },
+                    { price: 653.01, color: '#f44336', label: 'Major Support', width: 1 }
+                ];
+
+                const currentTime = Math.floor(Date.now() / 1000);
+
+                levels.forEach(level => {
+                    const lineSeries = this.chart.addLineSeries({
+                        color: level.color,
+                        lineWidth: level.width,
+                        priceLineVisible: true,
+                        lastValueVisible: true,
+                        title: `${level.label}: $${level.price}`
+                    });
+
+                    lineSeries.setData([
+                        { time: currentTime - 30 * 24 * 3600, value: level.price },
+                        { time: currentTime + 7 * 24 * 3600, value: level.price }
+                    ]);
+                });
+            }
+
+            updateStatus(message, type) {
+                const statusEl = document.getElementById('status');
+                statusEl.textContent = message;
+                statusEl.className = `status ${type}`;
+            }
+        }
+
+        // Initialize when page loads
+        document.addEventListener('DOMContentLoaded', async () => {
+            const calculator = new SPYCalculator();
+            await calculator.initialize();
+        });
+    </script>
+</body>
+</html>

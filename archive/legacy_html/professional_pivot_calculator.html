@@ -1,0 +1,1380 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Professional Pivot Analysis Platform</title>
+    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+    <style>
+        :root {
+            --primary-bg: #1a1d29;
+            --secondary-bg: #252836;
+            --accent-bg: #2d3142;
+            --border-color: #3a3d4a;
+            --primary-text: #ffffff;
+            --secondary-text: #b8bcc8;
+            --accent-blue: #2563eb;
+            --accent-green: #059669;
+            --accent-red: #dc2626;
+            --accent-orange: #ea580c;
+            --success: #10b981;
+            --warning: #f59e0b;
+            --error: #ef4444;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+            background: var(--primary-bg);
+            color: var(--primary-text);
+            line-height: 1.5;
+            font-size: 14px;
+        }
+
+        .platform-container {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        /* Header */
+        .platform-header {
+            background: var(--secondary-bg);
+            border-bottom: 1px solid var(--border-color);
+            padding: 12px 24px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            height: 60px;
+        }
+
+        .platform-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--primary-text);
+        }
+
+        .platform-subtitle {
+            font-size: 11px;
+            color: var(--secondary-text);
+            font-weight: 400;
+        }
+
+        .header-controls {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+        }
+
+        .symbol-selector {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .symbol-input {
+            background: var(--accent-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            padding: 6px 12px;
+            color: var(--primary-text);
+            font-size: 13px;
+            width: 80px;
+            text-transform: uppercase;
+        }
+
+        .symbol-input:focus {
+            outline: none;
+            border-color: var(--accent-blue);
+        }
+
+        .load-btn {
+            background: var(--accent-blue);
+            border: none;
+            border-radius: 4px;
+            color: white;
+            padding: 6px 16px;
+            font-size: 12px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+
+        .load-btn:hover {
+            background: #1d4ed8;
+        }
+
+        .load-btn:disabled {
+            background: #374151;
+            cursor: not-allowed;
+        }
+
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 11px;
+            color: var(--secondary-text);
+        }
+
+        .status-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: var(--error);
+        }
+
+        .status-dot.connected {
+            background: var(--success);
+        }
+
+        .status-dot.loading {
+            background: var(--warning);
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        /* Navigation */
+        .navigation-tabs {
+            background: var(--secondary-bg);
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            padding: 0 24px;
+        }
+
+        .nav-tab {
+            background: none;
+            border: none;
+            color: var(--secondary-text);
+            padding: 12px 20px;
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            transition: all 0.2s;
+        }
+
+        .nav-tab.active {
+            color: var(--primary-text);
+            border-bottom-color: var(--accent-blue);
+        }
+
+        .nav-tab:hover:not(.active) {
+            color: var(--primary-text);
+        }
+
+        /* Main Content */
+        .main-content {
+            flex: 1;
+            display: flex;
+            overflow: hidden;
+        }
+
+        .tab-panel {
+            display: none;
+            width: 100%;
+            height: 100%;
+        }
+
+        .tab-panel.active {
+            display: flex;
+        }
+
+        /* Overview Tab */
+        .overview-layout {
+            display: grid;
+            grid-template-columns: 320px 1fr 280px;
+            gap: 1px;
+            background: var(--border-color);
+            height: 100%;
+        }
+
+        .market-data-panel,
+        .pivot-levels-panel,
+        .analysis-panel {
+            background: var(--primary-bg);
+            padding: 20px;
+            overflow-y: auto;
+        }
+
+        .panel-header {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--primary-text);
+            margin-bottom: 16px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        /* Market Data Panel */
+        .market-data-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+
+        .data-item {
+            background: var(--secondary-bg);
+            border-radius: 6px;
+            padding: 12px;
+            border: 1px solid var(--border-color);
+        }
+
+        .data-label {
+            font-size: 11px;
+            color: var(--secondary-text);
+            margin-bottom: 4px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .data-value {
+            font-size: 16px;
+            font-weight: 600;
+            color: var(--primary-text);
+        }
+
+        .data-change {
+            font-size: 11px;
+            margin-top: 2px;
+        }
+
+        .data-change.positive {
+            color: var(--success);
+        }
+
+        .data-change.negative {
+            color: var(--error);
+        }
+
+        /* Pivot Levels Table */
+        .pivot-table {
+            width: 100%;
+            border-collapse: collapse;
+            background: var(--secondary-bg);
+            border-radius: 6px;
+            overflow: hidden;
+            border: 1px solid var(--border-color);
+        }
+
+        .pivot-table th {
+            background: var(--accent-bg);
+            padding: 10px 12px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--secondary-text);
+            text-align: left;
+        }
+
+        .pivot-table td {
+            padding: 10px 12px;
+            border-top: 1px solid var(--border-color);
+            font-size: 13px;
+        }
+
+        .level-label {
+            font-weight: 600;
+        }
+
+        .level-label.resistance {
+            color: var(--accent-red);
+        }
+
+        .level-label.support {
+            color: var(--success);
+        }
+
+        .level-label.pivot {
+            color: var(--accent-orange);
+        }
+
+        .level-label.gamma {
+            color: #8b5cf6;
+            font-weight: 700;
+        }
+
+        .price-value {
+            font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+            font-weight: 500;
+        }
+
+        .distance-value {
+            font-size: 12px;
+            font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+        }
+
+        .distance-value.above {
+            color: var(--success);
+        }
+
+        .distance-value.below {
+            color: var(--error);
+        }
+
+        .distance-value.at-price {
+            color: var(--warning);
+            font-weight: 600;
+        }
+
+        /* Chart Panel */
+        .chart-layout {
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+            background: var(--primary-bg);
+        }
+
+        .chart-header {
+            background: var(--secondary-bg);
+            border-bottom: 1px solid var(--border-color);
+            padding: 12px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .chart-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--primary-text);
+        }
+
+        .chart-controls {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .timeframe-btn {
+            background: var(--accent-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            color: var(--secondary-text);
+            padding: 4px 12px;
+            font-size: 11px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .timeframe-btn.active,
+        .timeframe-btn:hover {
+            background: var(--accent-blue);
+            color: white;
+            border-color: var(--accent-blue);
+        }
+
+        #chartContainer {
+            flex: 1;
+            background: var(--secondary-bg);
+        }
+
+        /* Analysis Panel */
+        .analysis-section {
+            margin-bottom: 24px;
+        }
+
+        .analysis-section:last-child {
+            margin-bottom: 0;
+        }
+
+        .section-title {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--primary-text);
+            margin-bottom: 12px;
+        }
+
+        .metric-item {
+            background: var(--secondary-bg);
+            border-radius: 4px;
+            padding: 10px;
+            margin-bottom: 8px;
+            border: 1px solid var(--border-color);
+        }
+
+        .metric-label {
+            font-size: 11px;
+            color: var(--secondary-text);
+            margin-bottom: 2px;
+        }
+
+        .metric-value {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--primary-text);
+        }
+
+        /* Advanced Analytics Panel */
+        .advanced-layout {
+            background: var(--primary-bg);
+            padding: 40px;
+            text-align: center;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }
+
+        .advanced-title {
+            font-size: 24px;
+            font-weight: 600;
+            color: var(--primary-text);
+            margin-bottom: 12px;
+        }
+
+        .advanced-description {
+            font-size: 14px;
+            color: var(--secondary-text);
+            margin-bottom: 32px;
+            max-width: 600px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+
+        .feature-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 20px;
+            margin-bottom: 32px;
+            max-width: 900px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+
+        .feature-card {
+            background: var(--secondary-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 20px;
+            text-align: left;
+        }
+
+        .feature-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--primary-text);
+            margin-bottom: 8px;
+        }
+
+        .feature-description {
+            font-size: 12px;
+            color: var(--secondary-text);
+            line-height: 1.4;
+        }
+
+        .launch-btn {
+            background: var(--accent-blue);
+            border: none;
+            border-radius: 6px;
+            color: white;
+            padding: 12px 32px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+
+        .launch-btn:hover {
+            background: #1d4ed8;
+        }
+
+        /* Loading States */
+        .loading-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(26, 29, 41, 0.8);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+        }
+
+        .loading-spinner {
+            width: 32px;
+            height: 32px;
+            border: 3px solid var(--border-color);
+            border-top: 3px solid var(--accent-blue);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        /* Responsive Design */
+        @media (max-width: 1200px) {
+            .overview-layout {
+                grid-template-columns: 280px 1fr 240px;
+            }
+        }
+
+        @media (max-width: 768px) {
+            .overview-layout {
+                grid-template-columns: 1fr;
+                grid-template-rows: auto auto 1fr;
+            }
+
+            .platform-header {
+                flex-direction: column;
+                height: auto;
+                gap: 8px;
+                padding: 16px;
+            }
+
+            .header-controls {
+                width: 100%;
+                justify-content: space-between;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="platform-container">
+        <!-- Header -->
+        <header class="platform-header">
+            <div>
+                <div class="platform-title">Professional Pivot Analysis Platform</div>
+                <div class="platform-subtitle">Real-time market analysis with institutional-grade statistics</div>
+            </div>
+            <div class="header-controls">
+                <div class="symbol-selector">
+                    <label for="symbol-input" style="font-size: 12px; color: var(--secondary-text);">Symbol:</label>
+                    <input type="text" id="symbol-input" class="symbol-input" value="SPY" maxlength="6">
+                    <button id="load-data-btn" class="load-btn">Load Data</button>
+                </div>
+                <div class="status-indicator">
+                    <div id="status-dot" class="status-dot"></div>
+                    <span id="status-text">Disconnected</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Navigation -->
+        <nav class="navigation-tabs">
+            <button class="nav-tab active" data-tab="overview">Market Overview</button>
+            <button class="nav-tab" data-tab="chart">Chart Analysis</button>
+            <button class="nav-tab" data-tab="advanced">Advanced Analytics</button>
+        </nav>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Overview Tab -->
+            <div id="overview-panel" class="tab-panel active">
+                <div class="overview-layout">
+                    <!-- Market Data Panel -->
+                    <div class="market-data-panel">
+                        <div class="panel-header">Market Data</div>
+                        <div class="market-data-grid">
+                            <div class="data-item">
+                                <div class="data-label">Open</div>
+                                <div class="data-value" id="open-value">--</div>
+                            </div>
+                            <div class="data-item">
+                                <div class="data-label">High</div>
+                                <div class="data-value" id="high-value">--</div>
+                            </div>
+                            <div class="data-item">
+                                <div class="data-label">Low</div>
+                                <div class="data-value" id="low-value">--</div>
+                            </div>
+                            <div class="data-item">
+                                <div class="data-label">Close</div>
+                                <div class="data-value" id="close-value">--</div>
+                                <div class="data-change" id="close-change">--</div>
+                            </div>
+                        </div>
+
+                        <div class="data-item" style="margin-bottom: 20px;">
+                            <div class="data-label">Current Price</div>
+                            <div class="data-value" id="current-value">--</div>
+                            <div class="data-change" id="current-change">--</div>
+                        </div>
+
+                        <div class="data-item">
+                            <div class="data-label">Last Updated</div>
+                            <div class="data-value" id="last-updated" style="font-size: 12px;">--</div>
+                        </div>
+                    </div>
+
+                    <!-- Pivot Levels Panel -->
+                    <div class="pivot-levels-panel">
+                        <div class="panel-header">
+                            <span id="pivot-levels-title">Advanced Pivot Levels</span>
+                            <div style="font-size: 10px; color: var(--secondary-text); margin-top: 4px;">
+                                ATR: <span id="atr-value">--</span> (<span id="atr-percent">--</span>)
+                                | Gamma: <span id="gamma-flip-display">--</span>
+                            </div>
+                        </div>
+                        <table class="pivot-table">
+                            <thead>
+                                <tr>
+                                    <th>Level</th>
+                                    <th>Price</th>
+                                    <th>Distance</th>
+                                    <th>Strength</th>
+                                </tr>
+                            </thead>
+                            <tbody id="pivot-table-body">
+                                <tr>
+                                    <td colspan="4" style="text-align: center; color: var(--secondary-text); padding: 20px;">
+                                        Load market data to calculate pivot levels
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <!-- Analysis Panel -->
+                    <div class="analysis-panel">
+                        <div class="panel-header">Analysis</div>
+
+                        <div class="analysis-section">
+                            <div class="section-title">Market Regime</div>
+                            <div class="metric-item">
+                                <div class="metric-label">Trend</div>
+                                <div class="metric-value" id="trend-value">--</div>
+                            </div>
+                            <div class="metric-item">
+                                <div class="metric-label">Volatility</div>
+                                <div class="metric-value" id="volatility-value">--</div>
+                            </div>
+                        </div>
+
+                        <div class="analysis-section">
+                            <div class="section-title">Key Levels</div>
+                            <div class="metric-item">
+                                <div class="metric-label">Nearest Resistance</div>
+                                <div class="metric-value" id="nearest-resistance">--</div>
+                            </div>
+                            <div class="metric-item">
+                                <div class="metric-label">Nearest Support</div>
+                                <div class="metric-value" id="nearest-support">--</div>
+                            </div>
+                        </div>
+
+                        <div class="analysis-section">
+                            <div class="section-title">Statistics</div>
+                            <div class="metric-item">
+                                <div class="metric-label">Data Points</div>
+                                <div class="metric-value" id="data-points">--</div>
+                            </div>
+                            <div class="metric-item">
+                                <div class="metric-label">Calculation Method</div>
+                                <div class="metric-value">Standard</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Chart Tab -->
+            <div id="chart-panel" class="tab-panel">
+                <div class="chart-layout">
+                    <div class="chart-header">
+                        <div class="chart-title">Price Chart with Pivot Levels</div>
+                        <div class="chart-controls">
+                            <select id="pivot-type-select" class="timeframe-btn" style="margin-right: 12px;">
+                                <option value="standard">Standard</option>
+                                <option value="fibonacci">Fibonacci</option>
+                                <option value="camarilla">Camarilla</option>
+                            </select>
+                            <button class="timeframe-btn active" data-timeframe="1D">1D</button>
+                            <button class="timeframe-btn" data-timeframe="5D">5D</button>
+                            <button class="timeframe-btn" data-timeframe="1M">1M</button>
+                            <button class="timeframe-btn" data-timeframe="3M">3M</button>
+                            <button id="atr-zones-toggle" class="timeframe-btn" style="margin-left: 12px;">ATR Zones</button>
+                        </div>
+                    </div>
+                    <div id="chartContainer"></div>
+                </div>
+            </div>
+
+            <!-- Advanced Analytics Tab -->
+            <div id="advanced-panel" class="tab-panel">
+                <div class="advanced-layout">
+                    <h2 class="advanced-title">Advanced Statistical Analysis</h2>
+                    <p class="advanced-description">
+                        Access institutional-grade analytics including regime-aware significance testing,
+                        walk-forward analysis, volatility-based subfamilies, and comprehensive export capabilities
+                        with full audit trails.
+                    </p>
+
+                    <div class="feature-grid">
+                        <div class="feature-card">
+                            <div class="feature-title">Statistical Testing</div>
+                            <div class="feature-description">
+                                Benjamini-Hochberg FDR correction with regime-aware baselines and
+                                one-sided hypothesis testing for proper significance analysis.
+                            </div>
+                        </div>
+                        <div class="feature-card">
+                            <div class="feature-title">Walk-Forward Analysis</div>
+                            <div class="feature-description">
+                                Rolling window analysis with stability metrics, variance tracking,
+                                and trend visualization using professional sparklines.
+                            </div>
+                        </div>
+                        <div class="feature-card">
+                            <div class="feature-title">Volatility Matrix</div>
+                            <div class="feature-description">
+                                Stratified analysis across volatility regimes with separate
+                                multiple testing correction per subfamily.
+                            </div>
+                        </div>
+                        <div class="feature-card">
+                            <div class="feature-title">Alert System</div>
+                            <div class="feature-description">
+                                Multi-threshold alerting with bias detection, ATR-based stops,
+                                and risk management integration.
+                            </div>
+                        </div>
+                        <div class="feature-card">
+                            <div class="feature-title">Export & Audit</div>
+                            <div class="feature-description">
+                                Complete metadata tracking with SHA1 verification,
+                                structured exports, and full audit trails.
+                            </div>
+                        </div>
+                        <div class="feature-card">
+                            <div class="feature-title">Performance Analytics</div>
+                            <div class="feature-description">
+                                Level scoring algorithms, top picks identification,
+                                and professional reporting capabilities.
+                            </div>
+                        </div>
+                    </div>
+
+                    <button class="launch-btn" onclick="openAdvancedAnalytics()">
+                        Launch Advanced Analytics Platform
+                    </button>
+                </div>
+            </div>
+        </main>
+
+        <!-- Loading Overlay -->
+        <div id="loading-overlay" class="loading-overlay">
+            <div class="loading-spinner"></div>
+        </div>
+    </div>
+
+    <!-- Include chart engine and advanced pivot engine -->
+    <script src="enhanced_chart_engine.js"></script>
+    <script src="advanced_pivot_engine.js"></script>
+
+    <script>
+        class ProfessionalPivotPlatform {
+            constructor() {
+                this.currentSymbol = 'SPY';
+                this.currentData = null;
+                this.chartInitialized = false;
+                this.currentPivotType = 'standard';
+                this.showATRZones = false;
+                this.advancedPivotData = null;
+                this.chart = null;
+                this.candleSeries = null;
+                this.pivotLines = [];
+                this.init();
+            }
+
+            init() {
+                this.setupEventListeners();
+                this.loadDefaultData();
+            }
+
+            setupEventListeners() {
+                // Tab switching
+                document.querySelectorAll('.nav-tab').forEach(tab => {
+                    tab.addEventListener('click', (e) => this.switchTab(e.target.dataset.tab));
+                });
+
+                // Data loading
+                document.getElementById('load-data-btn').addEventListener('click', () => this.loadMarketData());
+                document.getElementById('symbol-input').addEventListener('keypress', (e) => {
+                    if (e.key === 'Enter') this.loadMarketData();
+                });
+
+                // Chart timeframe buttons
+                document.querySelectorAll('.timeframe-btn').forEach(btn => {
+                    btn.addEventListener('click', (e) => this.changeTimeframe(e.target.dataset.timeframe));
+                });
+
+                // Pivot type selector
+                document.getElementById('pivot-type-select').addEventListener('change', (e) => {
+                    this.currentPivotType = e.target.value;
+                    if (this.currentData) {
+                        this.calculateAndDisplayAdvancedPivots(this.currentData);
+                    }
+                });
+
+                // ATR zones toggle
+                document.getElementById('atr-zones-toggle').addEventListener('click', () => {
+                    this.showATRZones = !this.showATRZones;
+                    document.getElementById('atr-zones-toggle').style.backgroundColor =
+                        this.showATRZones ? 'var(--accent-blue)' : '';
+                    if (this.currentData) {
+                        this.updateChart();
+                    }
+                });
+            }
+
+            switchTab(tabName) {
+                // Update navigation
+                document.querySelectorAll('.nav-tab').forEach(tab => {
+                    tab.classList.remove('active');
+                });
+                document.querySelector(`[data-tab="${tabName}"]`).classList.add('active');
+
+                // Update panels
+                document.querySelectorAll('.tab-panel').forEach(panel => {
+                    panel.classList.remove('active');
+                });
+                document.getElementById(`${tabName}-panel`).classList.add('active');
+
+                // Initialize chart if needed
+                if (tabName === 'chart' && !this.chartInitialized) {
+                    this.initializeChart();
+                }
+            }
+
+            async loadMarketData() {
+                const symbol = document.getElementById('symbol-input').value.toUpperCase() || 'SPY';
+                this.currentSymbol = symbol;
+
+                this.setStatus('loading', 'Loading market data...');
+                this.showLoading(true);
+
+                try {
+                    const data = await this.fetchYahooData(symbol);
+                    this.currentData = data;
+                    this.updateMarketData(data);
+                    this.calculateAndDisplayPivots(data);
+                    this.updateAnalysis(data);
+                    this.setStatus('connected', 'Data loaded successfully');
+                } catch (error) {
+                    console.error('Failed to load market data:', error);
+                    this.setStatus('error', 'Failed to load data');
+                    this.showError('Unable to load market data. Please check the symbol and try again.');
+                } finally {
+                    this.showLoading(false);
+                }
+            }
+
+            async fetchYahooData(symbol) {
+                const corsUrls = [
+                    `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?range=1mo&interval=1d`,
+                    `https://api.allorigins.win/raw?url=${encodeURIComponent(`https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?range=1mo&interval=1d`)}`
+                ];
+
+                for (const url of corsUrls) {
+                    try {
+                        const response = await fetch(url);
+                        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+                        const data = await response.json();
+                        if (data.chart?.result?.[0]) {
+                            return this.processYahooData(data.chart.result[0]);
+                        }
+                    } catch (error) {
+                        console.warn(`Failed to fetch from ${url}:`, error);
+                    }
+                }
+
+                throw new Error('All data sources failed');
+            }
+
+            processYahooData(result) {
+                const meta = result.meta;
+                const timestamps = result.timestamp;
+                const ohlc = result.indicators.quote[0];
+
+                const candles = timestamps.map((time, i) => ({
+                    time: time,
+                    open: ohlc.open[i],
+                    high: ohlc.high[i],
+                    low: ohlc.low[i],
+                    close: ohlc.close[i]
+                })).filter(candle =>
+                    Number.isFinite(candle.open) &&
+                    Number.isFinite(candle.high) &&
+                    Number.isFinite(candle.low) &&
+                    Number.isFinite(candle.close)
+                );
+
+                const latest = candles[candles.length - 1];
+                const previous = candles[candles.length - 2];
+
+                return {
+                    symbol: meta.symbol,
+                    currency: meta.currency,
+                    currentPrice: meta.regularMarketPrice || latest.close,
+                    previousClose: meta.previousClose || previous?.close,
+                    open: latest.open,
+                    high: latest.high,
+                    low: latest.low,
+                    close: latest.close,
+                    candles: candles,
+                    lastUpdated: new Date().toLocaleString()
+                };
+            }
+
+            updateMarketData(data) {
+                const change = data.currentPrice - data.previousClose;
+                const changePercent = (change / data.previousClose) * 100;
+
+                document.getElementById('open-value').textContent = data.open.toFixed(2);
+                document.getElementById('high-value').textContent = data.high.toFixed(2);
+                document.getElementById('low-value').textContent = data.low.toFixed(2);
+                document.getElementById('close-value').textContent = data.close.toFixed(2);
+                document.getElementById('current-value').textContent = data.currentPrice.toFixed(2);
+                document.getElementById('last-updated').textContent = data.lastUpdated;
+
+                const closeChange = data.close - data.previousClose;
+                const closeChangePercent = (closeChange / data.previousClose) * 100;
+
+                const closeChangeElement = document.getElementById('close-change');
+                const currentChangeElement = document.getElementById('current-change');
+
+                closeChangeElement.textContent = `${closeChange >= 0 ? '+' : ''}${closeChange.toFixed(2)} (${closeChangePercent >= 0 ? '+' : ''}${closeChangePercent.toFixed(2)}%)`;
+                closeChangeElement.className = `data-change ${closeChange >= 0 ? 'positive' : 'negative'}`;
+
+                currentChangeElement.textContent = `${change >= 0 ? '+' : ''}${change.toFixed(2)} (${changePercent >= 0 ? '+' : ''}${changePercent.toFixed(2)}%)`;
+                currentChangeElement.className = `data-change ${change >= 0 ? 'positive' : 'negative'}`;
+            }
+
+            calculateAndDisplayPivots(data) {
+                this.calculateAndDisplayAdvancedPivots(data);
+            }
+
+            calculateAndDisplayAdvancedPivots(data) {
+                if (!window.advancedPivotEngine || !data.candles) {
+                    console.warn('Advanced pivot engine not available or no candle data');
+                    return;
+                }
+
+                // Calculate advanced pivots with ATR and gamma flip
+                this.advancedPivotData = window.advancedPivotEngine.calculateAdvancedPivots(
+                    data.candles,
+                    this.currentPivotType,
+                    14 // ATR period
+                );
+
+                if (!this.advancedPivotData) {
+                    console.warn('Failed to calculate advanced pivots');
+                    return;
+                }
+
+                // Update UI elements
+                this.updatePivotDisplay();
+                this.updateChart();
+                this.updateAnalysisWithAdvancedData(data);
+            }
+
+            updatePivotDisplay() {
+                if (!this.advancedPivotData) return;
+
+                const { atr, atrPercent, gammaFlip, type } = this.advancedPivotData;
+
+                // Update header information
+                document.getElementById('pivot-levels-title').textContent =
+                    `${type.charAt(0).toUpperCase() + type.slice(1)} Pivot Levels`;
+                document.getElementById('atr-value').textContent = atr || '--';
+                document.getElementById('atr-percent').textContent = atrPercent ? `${atrPercent}%` : '--';
+                document.getElementById('gamma-flip-display').textContent = gammaFlip || '--';
+
+                // Format and display pivot data
+                const formattedData = window.advancedPivotEngine.formatPivotData(this.advancedPivotData);
+                this.displayAdvancedPivotTable(formattedData);
+            }
+
+            displayAdvancedPivotTable(formattedData) {
+                if (!formattedData) return;
+
+                const tbody = document.getElementById('pivot-table-body');
+                tbody.innerHTML = '';
+
+                formattedData.forEach(level => {
+                    const distance = Number(level.distance);
+
+                    let distanceClass = '';
+                    if (Math.abs(distance) < 0.5) distanceClass = 'at-price';
+                    else if (distance > 0) distanceClass = 'above';
+                    else distanceClass = 'below';
+
+                    // Special styling for gamma flip
+                    const isGamma = level.type === 'gamma';
+                    const levelClass = isGamma ? 'gamma' : level.type;
+
+                    const row = document.createElement('tr');
+                    row.innerHTML = `
+                        <td class="level-label ${levelClass}">
+                            ${level.label}${isGamma ? ' 🌊' : ''}
+                        </td>
+                        <td class="price-value">${level.price}</td>
+                        <td class="distance-value ${distanceClass}">
+                            ${distance >= 0 ? '+' : ''}${distance}%
+                        </td>
+                        <td style="text-align: center;">
+                            <div style="
+                                background: ${this.getStrengthColor(level.strength)};
+                                color: white;
+                                padding: 2px 6px;
+                                border-radius: 3px;
+                                font-size: 11px;
+                                font-weight: 600;
+                            ">
+                                ${level.strength}%
+                            </div>
+                        </td>
+                    `;
+                    tbody.appendChild(row);
+                });
+            }
+
+            getStrengthColor(strength) {
+                if (strength >= 80) return '#10b981'; // High strength - green
+                if (strength >= 60) return '#f59e0b'; // Medium strength - yellow
+                if (strength >= 40) return '#ea580c'; // Low strength - orange
+                return '#ef4444'; // Very low strength - red
+            }
+
+            updateAnalysis(data) {
+                // Simple trend analysis
+                const candles = data.candles.slice(-20); // Last 20 days
+                const closes = candles.map(c => c.close);
+                const sma = closes.reduce((sum, close) => sum + close, 0) / closes.length;
+                const trend = data.currentPrice > sma ? 'Bullish' : 'Bearish';
+
+                // Simple volatility calculation
+                const returns = [];
+                for (let i = 1; i < closes.length; i++) {
+                    returns.push(Math.log(closes[i] / closes[i-1]));
+                }
+                const volatility = Math.sqrt(returns.reduce((sum, ret) => sum + ret * ret, 0) / returns.length) * Math.sqrt(252) * 100;
+
+                // Find nearest levels
+                const levels = this.calculatePivotLevels(data);
+                const currentPrice = data.currentPrice;
+
+                const resistanceLevels = levels.filter(l => l.value > currentPrice).sort((a, b) => a.value - b.value);
+                const supportLevels = levels.filter(l => l.value < currentPrice).sort((a, b) => b.value - a.value);
+
+                document.getElementById('trend-value').textContent = trend;
+                document.getElementById('volatility-value').textContent = `${volatility.toFixed(1)}%`;
+                document.getElementById('data-points').textContent = data.candles.length;
+
+                if (resistanceLevels.length > 0) {
+                    const nearest = resistanceLevels[0];
+                    document.getElementById('nearest-resistance').textContent = `${nearest.label}: ${nearest.value.toFixed(2)}`;
+                }
+
+                if (supportLevels.length > 0) {
+                    const nearest = supportLevels[0];
+                    document.getElementById('nearest-support').textContent = `${nearest.label}: ${nearest.value.toFixed(2)}`;
+                }
+            }
+
+            calculatePivotLevels(data) {
+                const { high, low, close } = data;
+                const pivot = (high + low + close) / 3;
+                const r1 = 2 * pivot - low;
+                const r2 = pivot + (high - low);
+                const r3 = r2 + (high - low);
+                const s1 = 2 * pivot - high;
+                const s2 = pivot - (high - low);
+                const s3 = s2 - (high - low);
+
+                return [
+                    { label: 'R3', value: r3 },
+                    { label: 'R2', value: r2 },
+                    { label: 'R1', value: r1 },
+                    { label: 'Pivot', value: pivot },
+                    { label: 'S1', value: s1 },
+                    { label: 'S2', value: s2 },
+                    { label: 'S3', value: s3 }
+                ];
+            }
+
+            initializeChart() {
+                // Direct chart initialization bypassing enhanced engine issues
+                const container = document.getElementById('chartContainer');
+                if (!container) return;
+
+                // Create chart directly with LightweightCharts
+                if (typeof window.LightweightCharts !== 'undefined') {
+                    this.chart = window.LightweightCharts.createChart(container, {
+                        width: container.clientWidth || 800,
+                        height: container.clientHeight || 400,
+                        layout: {
+                            background: { color: '#0c111b' },
+                            textColor: '#e6e6e6'
+                        },
+                        grid: {
+                            vertLines: { color: 'rgba(255,255,255,0.1)' },
+                            horzLines: { color: 'rgba(255,255,255,0.1)' }
+                        },
+                        timeScale: { timeVisible: true, secondsVisible: false },
+                        rightPriceScale: { autoScale: true }
+                    });
+
+                    // Add candlestick series
+                    this.candleSeries = this.chart.addCandlestickSeries({
+                        upColor: '#26a69a',
+                        downColor: '#ef5350',
+                        borderVisible: false,
+                        wickUpColor: '#26a69a',
+                        wickDownColor: '#ef5350'
+                    });
+
+                    // Load mock data immediately for testing
+                    this.loadMockData();
+                    this.chartInitialized = true;
+
+                    // Handle window resize
+                    const resizeHandler = () => {
+                        if (this.chart) {
+                            this.chart.applyOptions({
+                                width: container.clientWidth,
+                                height: container.clientHeight
+                            });
+                        }
+                    };
+                    window.addEventListener('resize', resizeHandler);
+                } else {
+                    console.warn('LightweightCharts library not loaded');
+                }
+            }
+
+            updateChart() {
+                if (!this.chartInitialized || !this.chart || !this.advancedPivotData) {
+                    return;
+                }
+
+                // Clear existing pivot lines
+                if (this.pivotLines) {
+                    this.pivotLines.forEach(line => {
+                        try {
+                            this.chart.removeSeries(line);
+                        } catch (e) {
+                            console.warn('Could not remove pivot line:', e);
+                        }
+                    });
+                }
+                this.pivotLines = [];
+
+                const { pivotLevels, atrZones, atr } = this.advancedPivotData;
+                const currentTime = Math.floor(Date.now() / 1000);
+                const timeRange = {
+                    start: currentTime - (24 * 3600),
+                    end: currentTime + (6 * 3600)
+                };
+
+                // Add pivot lines to chart
+                Object.entries(pivotLevels).forEach(([label, value]) => {
+                    const lineColor = this.getPivotLineColor(label);
+
+                    const pivotLine = this.chart.addLineSeries({
+                        color: lineColor,
+                        lineWidth: label === 'PIVOT' || label === 'GAMMA_FLIP' ? 2 : 1,
+                        lineStyle: label.includes('3') ? 2 : 0, // Dashed for R3/S3
+                        priceLineVisible: true,
+                        lastValueVisible: true,
+                        title: `${label}: ${Number(value).toFixed(2)}`
+                    });
+
+                    const lineData = [
+                        { time: timeRange.start, value: value },
+                        { time: timeRange.end, value: value }
+                    ];
+
+                    pivotLine.setData(lineData);
+                    this.pivotLines.push(pivotLine);
+                });
+
+                console.log(`Updated chart with ${Object.keys(pivotLevels).length} pivot levels`);
+            }
+
+            getPivotLineColor(label) {
+                const colors = {
+                    'R3': 'rgba(239, 83, 80, 0.6)',
+                    'R2': 'rgba(239, 83, 80, 0.8)',
+                    'R1': 'rgba(239, 83, 80, 1.0)',
+                    'PIVOT': 'rgba(253, 216, 53, 1.0)',
+                    'S1': 'rgba(102, 187, 106, 1.0)',
+                    'S2': 'rgba(102, 187, 106, 0.8)',
+                    'S3': 'rgba(102, 187, 106, 0.6)',
+                    'GAMMA_FLIP': 'rgba(147, 51, 234, 1.0)'
+                };
+
+                // Handle Fibonacci and Camarilla levels
+                if (label.includes('R') && !colors[label]) return 'rgba(239, 83, 80, 0.7)';
+                if (label.includes('S') && !colors[label]) return 'rgba(102, 187, 106, 0.7)';
+
+                return colors[label] || 'rgba(180, 180, 180, 0.7)';
+            }
+
+            updateAnalysisWithAdvancedData(data) {
+                if (!this.advancedPivotData) return;
+
+                const { pivotLevels, strength, atr, atrPercent } = this.advancedPivotData;
+                const currentPrice = data.currentPrice;
+
+                // Enhanced trend analysis with ATR
+                const candles = data.candles.slice(-20);
+                const closes = candles.map(c => c.close);
+                const sma = closes.reduce((sum, close) => sum + close, 0) / closes.length;
+
+                // Trend strength based on ATR
+                const atrValue = Number(atr);
+                let trendStrength = 'Neutral';
+                if (Math.abs(currentPrice - sma) > atrValue * 0.5) {
+                    trendStrength = currentPrice > sma ? 'Strong Bullish' : 'Strong Bearish';
+                } else if (Math.abs(currentPrice - sma) > atrValue * 0.2) {
+                    trendStrength = currentPrice > sma ? 'Bullish' : 'Bearish';
+                }
+
+                // Find nearest levels with strength
+                const resistanceLevels = Object.entries(pivotLevels)
+                    .filter(([label, value]) => value > currentPrice && label !== 'GAMMA_FLIP')
+                    .map(([label, value]) => ({ label, value, strength: strength[label]?.strength || 0 }))
+                    .sort((a, b) => a.value - b.value);
+
+                const supportLevels = Object.entries(pivotLevels)
+                    .filter(([label, value]) => value < currentPrice && label !== 'GAMMA_FLIP')
+                    .map(([label, value]) => ({ label, value, strength: strength[label]?.strength || 0 }))
+                    .sort((a, b) => b.value - a.value);
+
+                // Update UI
+                document.getElementById('trend-value').textContent = trendStrength;
+                document.getElementById('volatility-value').textContent = `${atrPercent}%`;
+                document.getElementById('data-points').textContent = data.candles.length;
+
+                if (resistanceLevels.length > 0) {
+                    const nearest = resistanceLevels[0];
+                    document.getElementById('nearest-resistance').textContent =
+                        `${nearest.label}: ${nearest.value.toFixed(2)} (${nearest.strength}%)`;
+                }
+
+                if (supportLevels.length > 0) {
+                    const nearest = supportLevels[0];
+                    document.getElementById('nearest-support').textContent =
+                        `${nearest.label}: ${nearest.value.toFixed(2)} (${nearest.strength}%)`;
+                }
+            }
+
+            loadMockData() {
+                // Generate realistic mock SPY data for immediate chart display
+                const currentTime = Math.floor(Date.now() / 1000);
+                const basePrice = 443.50; // Realistic SPY price
+                const mockData = [];
+
+                for (let i = -30; i <= 0; i++) {
+                    const time = currentTime + (i * 86400); // Daily candles
+                    const volatility = 0.02; // 2% daily volatility
+                    const trend = i * 0.001; // Slight upward trend
+
+                    const open = basePrice + (Math.random() - 0.5) * basePrice * volatility + trend * basePrice;
+                    const close = open + (Math.random() - 0.5) * basePrice * volatility * 0.8;
+                    const high = Math.max(open, close) + Math.random() * basePrice * volatility * 0.3;
+                    const low = Math.min(open, close) - Math.random() * basePrice * volatility * 0.3;
+
+                    mockData.push({
+                        time: time,
+                        open: Number(open.toFixed(2)),
+                        high: Number(high.toFixed(2)),
+                        low: Number(low.toFixed(2)),
+                        close: Number(close.toFixed(2))
+                    });
+                }
+
+                // Set mock data to chart
+                if (this.candleSeries) {
+                    this.candleSeries.setData(mockData);
+                    console.log('Mock data loaded successfully');
+                }
+
+                // Create mock market data object for pivot calculations
+                this.currentData = {
+                    symbol: 'SPY (Mock)',
+                    currentPrice: mockData[mockData.length - 1].close,
+                    previousClose: mockData[mockData.length - 2].close,
+                    change: mockData[mockData.length - 1].close - mockData[mockData.length - 2].close,
+                    high: Math.max(...mockData.map(d => d.high)),
+                    low: Math.min(...mockData.map(d => d.low)),
+                    candles: mockData
+                };
+
+                // Update market data display and calculate pivots
+                this.updateMarketData(this.currentData);
+                this.calculateAndDisplayPivots(this.currentData);
+                this.updateAnalysis(this.currentData);
+                this.setStatus('connected', 'Mock data loaded');
+            }
+
+            changeTimeframe(timeframe) {
+                document.querySelectorAll('.timeframe-btn').forEach(btn => {
+                    btn.classList.remove('active');
+                });
+                document.querySelector(`[data-timeframe="${timeframe}"]`).classList.add('active');
+
+                // TODO: Implement timeframe switching logic
+                console.log(`Switched to ${timeframe} timeframe`);
+            }
+
+            setStatus(type, message) {
+                const dot = document.getElementById('status-dot');
+                const text = document.getElementById('status-text');
+
+                dot.className = `status-dot ${type}`;
+                text.textContent = message;
+            }
+
+            showLoading(show) {
+                const overlay = document.getElementById('loading-overlay');
+                overlay.style.display = show ? 'flex' : 'none';
+
+                const button = document.getElementById('load-data-btn');
+                button.disabled = show;
+                button.textContent = show ? 'Loading...' : 'Load Data';
+            }
+
+            showError(message) {
+                // Simple alert for now - could be enhanced with a proper notification system
+                alert(`Error: ${message}`);
+            }
+
+            loadDefaultData() {
+                // Load default data on startup
+                setTimeout(() => this.loadMarketData(), 1000);
+            }
+        }
+
+        // Initialize the platform
+        document.addEventListener('DOMContentLoaded', () => {
+            window.pivotPlatform = new ProfessionalPivotPlatform();
+        });
+
+        // Advanced analytics launcher
+        function openAdvancedAnalytics() {
+            window.open('test_complete_advanced_system.html', '_blank', 'width=1600,height=1000');
+        }
+    </script>
+</body>
+</html>

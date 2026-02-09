@@ -1,0 +1,937 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Professional Pivot Analysis Platform - FIXED</title>
+    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+    <style>
+        :root {
+            --primary-bg: #1a1d29;
+            --secondary-bg: #252836;
+            --accent-bg: #2d3142;
+            --border-color: #3a3d4a;
+            --primary-text: #ffffff;
+            --secondary-text: #b8bcc8;
+            --accent-blue: #2563eb;
+            --accent-green: #059669;
+            --accent-red: #dc2626;
+            --accent-orange: #ea580c;
+            --success: #10b981;
+            --warning: #f59e0b;
+            --error: #ef4444;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+            background: var(--primary-bg);
+            color: var(--primary-text);
+            line-height: 1.5;
+            font-size: 14px;
+        }
+
+        .platform-container {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        /* Header */
+        .platform-header {
+            background: var(--secondary-bg);
+            border-bottom: 1px solid var(--border-color);
+            padding: 12px 24px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            height: 60px;
+        }
+
+        .platform-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--primary-text);
+        }
+
+        .platform-subtitle {
+            font-size: 11px;
+            color: var(--secondary-text);
+            font-weight: 400;
+        }
+
+        .header-controls {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+        }
+
+        .symbol-selector {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .symbol-input {
+            background: var(--accent-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            padding: 6px 12px;
+            color: var(--primary-text);
+            font-size: 13px;
+            width: 80px;
+            text-transform: uppercase;
+        }
+
+        .symbol-input:focus {
+            outline: none;
+            border-color: var(--accent-blue);
+        }
+
+        .load-btn {
+            background: var(--accent-blue);
+            border: none;
+            border-radius: 4px;
+            color: white;
+            padding: 6px 16px;
+            font-size: 12px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+
+        .load-btn:hover { background: #1d4ed8; }
+        .load-btn:disabled { background: #374151; cursor: not-allowed; }
+
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 11px;
+            color: var(--secondary-text);
+        }
+
+        .status-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: var(--error);
+        }
+
+        .status-dot.connected { background: var(--success); }
+        .status-dot.loading { background: var(--warning); animation: pulse 1.5s infinite; }
+
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+        /* Navigation */
+        .navigation-tabs {
+            background: var(--secondary-bg);
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            padding: 0 24px;
+        }
+
+        .nav-tab {
+            background: none;
+            border: none;
+            color: var(--secondary-text);
+            padding: 12px 20px;
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            transition: all 0.2s;
+        }
+
+        .nav-tab.active {
+            color: var(--primary-text);
+            border-bottom-color: var(--accent-blue);
+        }
+
+        .nav-tab:hover:not(.active) { color: var(--primary-text); }
+
+        /* Main Content */
+        .main-content {
+            flex: 1;
+            display: flex;
+            overflow: hidden;
+        }
+
+        .tab-panel {
+            display: none;
+            width: 100%;
+            height: 100%;
+        }
+
+        .tab-panel.active { display: flex; }
+
+        /* Overview Layout */
+        .overview-layout {
+            display: grid;
+            grid-template-columns: 320px 1fr 280px;
+            gap: 1px;
+            background: var(--border-color);
+            height: 100%;
+        }
+
+        .market-data-panel,
+        .pivot-levels-panel,
+        .analysis-panel {
+            background: var(--primary-bg);
+            padding: 20px;
+            overflow-y: auto;
+        }
+
+        .panel-header {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--primary-text);
+            margin-bottom: 16px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        /* Market Data Panel */
+        .market-data-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+
+        .data-item {
+            background: var(--secondary-bg);
+            border-radius: 6px;
+            padding: 12px;
+            border: 1px solid var(--border-color);
+        }
+
+        .data-label {
+            font-size: 11px;
+            color: var(--secondary-text);
+            margin-bottom: 4px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .data-value {
+            font-size: 16px;
+            font-weight: 600;
+            color: var(--primary-text);
+        }
+
+        .data-change {
+            font-size: 11px;
+            margin-top: 2px;
+        }
+
+        .data-change.positive { color: var(--success); }
+        .data-change.negative { color: var(--error); }
+
+        /* Pivot Levels Table */
+        .pivot-table {
+            width: 100%;
+            border-collapse: collapse;
+            background: var(--secondary-bg);
+            border-radius: 6px;
+            overflow: hidden;
+            border: 1px solid var(--border-color);
+        }
+
+        .pivot-table th {
+            background: var(--accent-bg);
+            padding: 10px 12px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--secondary-text);
+            text-align: left;
+        }
+
+        .pivot-table td {
+            padding: 10px 12px;
+            border-top: 1px solid var(--border-color);
+            font-size: 13px;
+        }
+
+        .level-label { font-weight: 600; }
+        .level-label.resistance { color: var(--accent-red); }
+        .level-label.support { color: var(--success); }
+        .level-label.pivot { color: var(--accent-orange); }
+
+        .price-value {
+            font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+            font-weight: 500;
+        }
+
+        .distance-value {
+            font-size: 12px;
+            font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+        }
+
+        .distance-value.above { color: var(--success); }
+        .distance-value.below { color: var(--error); }
+
+        /* Chart Panel */
+        .chart-layout {
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+            background: var(--primary-bg);
+        }
+
+        .chart-header {
+            background: var(--secondary-bg);
+            border-bottom: 1px solid var(--border-color);
+            padding: 12px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .chart-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--primary-text);
+        }
+
+        .chart-controls {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .timeframe-btn {
+            background: var(--accent-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            color: var(--secondary-text);
+            padding: 4px 12px;
+            font-size: 11px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .timeframe-btn.active,
+        .timeframe-btn:hover {
+            background: var(--accent-blue);
+            color: white;
+            border-color: var(--accent-blue);
+        }
+
+        #chartContainer {
+            flex: 1;
+            background: var(--secondary-bg);
+        }
+
+        /* Analysis Panel */
+        .analysis-section {
+            margin-bottom: 24px;
+        }
+
+        .analysis-section:last-child {
+            margin-bottom: 0;
+        }
+
+        .section-title {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--primary-text);
+            margin-bottom: 12px;
+        }
+
+        .metric-item {
+            background: var(--secondary-bg);
+            border-radius: 4px;
+            padding: 10px;
+            margin-bottom: 8px;
+            border: 1px solid var(--border-color);
+        }
+
+        .metric-label {
+            font-size: 11px;
+            color: var(--secondary-text);
+            margin-bottom: 2px;
+        }
+
+        .metric-value {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--primary-text);
+        }
+
+        /* Loading States */
+        .loading-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(26, 29, 41, 0.8);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+        }
+
+        .loading-spinner {
+            width: 32px;
+            height: 32px;
+            border: 3px solid var(--border-color);
+            border-top: 3px solid var(--accent-blue);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="platform-container">
+        <!-- Header -->
+        <header class="platform-header">
+            <div>
+                <div class="platform-title">Professional Pivot Analysis Platform - FIXED</div>
+                <div class="platform-subtitle">Real-time market analysis with institutional-grade statistics</div>
+            </div>
+            <div class="header-controls">
+                <div class="symbol-selector">
+                    <label for="symbol-input" style="font-size: 12px; color: var(--secondary-text);">Symbol:</label>
+                    <input type="text" id="symbol-input" class="symbol-input" value="SPY" maxlength="6">
+                    <button id="load-data-btn" class="load-btn">Load Data</button>
+                </div>
+                <div class="status-indicator">
+                    <div id="status-dot" class="status-dot"></div>
+                    <span id="status-text">Ready</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Navigation -->
+        <nav class="navigation-tabs">
+            <button class="nav-tab active" data-tab="overview">Market Overview</button>
+            <button class="nav-tab" data-tab="chart">Chart Analysis</button>
+        </nav>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Overview Tab -->
+            <div id="overview-panel" class="tab-panel active">
+                <div class="overview-layout">
+                    <!-- Market Data Panel -->
+                    <div class="market-data-panel">
+                        <div class="panel-header">Market Data</div>
+                        <div class="market-data-grid">
+                            <div class="data-item">
+                                <div class="data-label">Open</div>
+                                <div class="data-value" id="open-value">--</div>
+                            </div>
+                            <div class="data-item">
+                                <div class="data-label">High</div>
+                                <div class="data-value" id="high-value">--</div>
+                            </div>
+                            <div class="data-item">
+                                <div class="data-label">Low</div>
+                                <div class="data-value" id="low-value">--</div>
+                            </div>
+                            <div class="data-item">
+                                <div class="data-label">Close</div>
+                                <div class="data-value" id="close-value">--</div>
+                                <div class="data-change" id="close-change">--</div>
+                            </div>
+                        </div>
+
+                        <div class="data-item" style="margin-bottom: 20px;">
+                            <div class="data-label">Current Price</div>
+                            <div class="data-value" id="current-value">--</div>
+                            <div class="data-change" id="current-change">--</div>
+                        </div>
+
+                        <div class="data-item">
+                            <div class="data-label">Last Updated</div>
+                            <div class="data-value" id="last-updated" style="font-size: 12px;">--</div>
+                        </div>
+                    </div>
+
+                    <!-- Pivot Levels Panel -->
+                    <div class="pivot-levels-panel">
+                        <div class="panel-header">
+                            <span id="pivot-levels-title">Professional Pivot Levels</span>
+                            <div style="font-size: 10px; color: var(--secondary-text); margin-top: 4px;">
+                                ATR: <span id="atr-value">--</span> | Method: <span id="method-display">Standard</span>
+                            </div>
+                        </div>
+                        <table class="pivot-table">
+                            <thead>
+                                <tr>
+                                    <th>Level</th>
+                                    <th>Price</th>
+                                    <th>Distance</th>
+                                </tr>
+                            </thead>
+                            <tbody id="pivot-table-body">
+                                <tr>
+                                    <td colspan="3" style="text-align: center; color: var(--secondary-text); padding: 20px;">
+                                        Loading sample data...
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <!-- Analysis Panel -->
+                    <div class="analysis-panel">
+                        <div class="panel-header">Analysis</div>
+
+                        <div class="analysis-section">
+                            <div class="section-title">Market Regime</div>
+                            <div class="metric-item">
+                                <div class="metric-label">Trend</div>
+                                <div class="metric-value" id="trend-value">--</div>
+                            </div>
+                            <div class="metric-item">
+                                <div class="metric-label">Volatility</div>
+                                <div class="metric-value" id="volatility-value">--</div>
+                            </div>
+                        </div>
+
+                        <div class="analysis-section">
+                            <div class="section-title">Key Levels</div>
+                            <div class="metric-item">
+                                <div class="metric-label">Nearest Resistance</div>
+                                <div class="metric-value" id="nearest-resistance">--</div>
+                            </div>
+                            <div class="metric-item">
+                                <div class="metric-label">Nearest Support</div>
+                                <div class="metric-value" id="nearest-support">--</div>
+                            </div>
+                        </div>
+
+                        <div class="analysis-section">
+                            <div class="section-title">Statistics</div>
+                            <div class="metric-item">
+                                <div class="metric-label">Data Points</div>
+                                <div class="metric-value" id="data-points">--</div>
+                            </div>
+                            <div class="metric-item">
+                                <div class="metric-label">ATR Period</div>
+                                <div class="metric-value">14</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Chart Tab -->
+            <div id="chart-panel" class="tab-panel">
+                <div class="chart-layout">
+                    <div class="chart-header">
+                        <div class="chart-title">Price Chart with Pivot Levels</div>
+                        <div class="chart-controls">
+                            <select id="pivot-type-select" class="timeframe-btn" style="margin-right: 12px;">
+                                <option value="standard">Standard Pivots</option>
+                                <option value="fibonacci">Fibonacci Pivots</option>
+                                <option value="camarilla">Camarilla Pivots</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div id="chartContainer"></div>
+                </div>
+            </div>
+        </main>
+
+        <!-- Loading Overlay -->
+        <div id="loading-overlay" class="loading-overlay">
+            <div class="loading-spinner"></div>
+        </div>
+    </div>
+
+    <script>
+        class FixedPivotPlatform {
+            constructor() {
+                this.chart = null;
+                this.candleSeries = null;
+                this.pivotLines = [];
+                this.currentData = null;
+                this.currentPivotType = 'standard';
+                this.init();
+            }
+
+            init() {
+                this.setupEventListeners();
+                this.setStatus('loading', 'Initializing...');
+
+                // Load default data immediately
+                setTimeout(() => {
+                    this.loadSampleData();
+                }, 500);
+            }
+
+            setupEventListeners() {
+                // Tab switching
+                document.querySelectorAll('.nav-tab').forEach(tab => {
+                    tab.addEventListener('click', (e) => this.switchTab(e.target.dataset.tab));
+                });
+
+                // Data loading
+                document.getElementById('load-data-btn').addEventListener('click', () => this.loadSampleData());
+
+                // Pivot type selector
+                document.getElementById('pivot-type-select').addEventListener('change', (e) => {
+                    this.currentPivotType = e.target.value;
+                    if (this.currentData) {
+                        this.calculateAndDisplayPivots();
+                        this.updateChart();
+                    }
+                });
+            }
+
+            switchTab(tabName) {
+                // Update navigation
+                document.querySelectorAll('.nav-tab').forEach(tab => {
+                    tab.classList.remove('active');
+                });
+                document.querySelector(`[data-tab="${tabName}"]`).classList.add('active');
+
+                // Update panels
+                document.querySelectorAll('.tab-panel').forEach(panel => {
+                    panel.classList.remove('active');
+                });
+                document.getElementById(`${tabName}-panel`).classList.add('active');
+
+                // Initialize chart if needed
+                if (tabName === 'chart' && !this.chart) {
+                    this.initializeChart();
+                }
+            }
+
+            loadSampleData() {
+                this.setStatus('loading', 'Loading sample data...');
+
+                // Generate realistic SPY data
+                const mockData = this.generateMockData();
+                this.currentData = mockData;
+
+                this.updateMarketData(mockData);
+                this.calculateAndDisplayPivots();
+                this.updateAnalysis(mockData);
+
+                this.setStatus('connected', 'Sample data loaded');
+            }
+
+            generateMockData() {
+                const basePrice = 443.50;
+                const candles = [];
+                const currentTime = Math.floor(Date.now() / 1000);
+
+                // Generate 30 days of mock data
+                for (let i = -30; i <= 0; i++) {
+                    const time = currentTime + (i * 86400);
+                    const volatility = 0.02;
+                    const trend = i * 0.001;
+
+                    const open = basePrice + (Math.random() - 0.5) * basePrice * volatility + trend * basePrice;
+                    const close = open + (Math.random() - 0.5) * basePrice * volatility * 0.8;
+                    const high = Math.max(open, close) + Math.random() * basePrice * volatility * 0.3;
+                    const low = Math.min(open, close) - Math.random() * basePrice * volatility * 0.3;
+
+                    candles.push({
+                        time: time,
+                        open: Number(open.toFixed(2)),
+                        high: Number(high.toFixed(2)),
+                        low: Number(low.toFixed(2)),
+                        close: Number(close.toFixed(2))
+                    });
+                }
+
+                const latest = candles[candles.length - 1];
+                const previous = candles[candles.length - 2];
+
+                return {
+                    symbol: 'SPY (Sample)',
+                    currentPrice: latest.close,
+                    previousClose: previous.close,
+                    open: latest.open,
+                    high: latest.high,
+                    low: latest.low,
+                    close: latest.close,
+                    candles: candles,
+                    lastUpdated: new Date().toLocaleString()
+                };
+            }
+
+            updateMarketData(data) {
+                const change = data.currentPrice - data.previousClose;
+                const changePercent = (change / data.previousClose) * 100;
+
+                document.getElementById('open-value').textContent = data.open.toFixed(2);
+                document.getElementById('high-value').textContent = data.high.toFixed(2);
+                document.getElementById('low-value').textContent = data.low.toFixed(2);
+                document.getElementById('close-value').textContent = data.close.toFixed(2);
+                document.getElementById('current-value').textContent = data.currentPrice.toFixed(2);
+                document.getElementById('last-updated').textContent = data.lastUpdated;
+
+                const changeElement = document.getElementById('current-change');
+                changeElement.textContent = `${change >= 0 ? '+' : ''}${change.toFixed(2)} (${changePercent >= 0 ? '+' : ''}${changePercent.toFixed(2)}%)`;
+                changeElement.className = `data-change ${change >= 0 ? 'positive' : 'negative'}`;
+            }
+
+            calculateAndDisplayPivots() {
+                const { high, low, close } = this.currentData;
+                let pivotLevels = {};
+
+                // Calculate based on selected type
+                switch (this.currentPivotType) {
+                    case 'standard':
+                        pivotLevels = this.calculateStandardPivots(high, low, close);
+                        break;
+                    case 'fibonacci':
+                        pivotLevels = this.calculateFibonacciPivots(high, low, close);
+                        break;
+                    case 'camarilla':
+                        pivotLevels = this.calculateCamarillaPivots(high, low, close);
+                        break;
+                }
+
+                // Calculate ATR
+                const atr = this.calculateATR(this.currentData.candles);
+
+                this.updatePivotDisplay(pivotLevels, atr);
+                this.currentPivotLevels = pivotLevels;
+                this.currentATR = atr;
+            }
+
+            calculateStandardPivots(high, low, close) {
+                const pivot = (high + low + close) / 3;
+                return {
+                    R3: 2 * pivot + (high - low),
+                    R2: pivot + (high - low),
+                    R1: 2 * pivot - low,
+                    PP: pivot,
+                    S1: 2 * pivot - high,
+                    S2: pivot - (high - low),
+                    S3: 2 * pivot - (high - low)
+                };
+            }
+
+            calculateFibonacciPivots(high, low, close) {
+                const pivot = (high + low + close) / 3;
+                const range = high - low;
+                return {
+                    'R2': pivot + (range * 0.618),
+                    'R1': pivot + (range * 0.382),
+                    'PP': pivot,
+                    'S1': pivot - (range * 0.382),
+                    'S2': pivot - (range * 0.618)
+                };
+            }
+
+            calculateCamarillaPivots(high, low, close) {
+                const range = high - low;
+                return {
+                    'R4': close + (range * 1.1 / 2),
+                    'R3': close + (range * 1.1 / 4),
+                    'R2': close + (range * 1.1 / 6),
+                    'R1': close + (range * 1.1 / 12),
+                    'PP': close,
+                    'S1': close - (range * 1.1 / 12),
+                    'S2': close - (range * 1.1 / 6),
+                    'S3': close - (range * 1.1 / 4),
+                    'S4': close - (range * 1.1 / 2)
+                };
+            }
+
+            calculateATR(candles, period = 14) {
+                if (candles.length < period + 1) return null;
+
+                const trueRanges = [];
+                for (let i = 1; i < candles.length; i++) {
+                    const current = candles[i];
+                    const previous = candles[i - 1];
+
+                    const tr1 = current.high - current.low;
+                    const tr2 = Math.abs(current.high - previous.close);
+                    const tr3 = Math.abs(current.low - previous.close);
+
+                    trueRanges.push(Math.max(tr1, tr2, tr3));
+                }
+
+                // Simple average for last period
+                const recentTRs = trueRanges.slice(-period);
+                return recentTRs.reduce((sum, tr) => sum + tr, 0) / recentTRs.length;
+            }
+
+            updatePivotDisplay(pivotLevels, atr) {
+                const tbody = document.getElementById('pivot-table-body');
+                const currentPrice = this.currentData.currentPrice;
+
+                document.getElementById('method-display').textContent =
+                    this.currentPivotType.charAt(0).toUpperCase() + this.currentPivotType.slice(1);
+                document.getElementById('atr-value').textContent = atr ? atr.toFixed(4) : '--';
+
+                tbody.innerHTML = '';
+
+                // Sort levels by price (highest to lowest)
+                const sortedLevels = Object.entries(pivotLevels).sort((a, b) => b[1] - a[1]);
+
+                sortedLevels.forEach(([label, price]) => {
+                    const distance = ((price - currentPrice) / currentPrice) * 100;
+                    const distanceClass = Math.abs(distance) < 0.5 ? 'at-price' : distance > 0 ? 'above' : 'below';
+
+                    let levelType = 'pivot';
+                    if (label.startsWith('R')) levelType = 'resistance';
+                    else if (label.startsWith('S')) levelType = 'support';
+
+                    const row = document.createElement('tr');
+                    row.innerHTML = `
+                        <td class="level-label ${levelType}">${label}</td>
+                        <td class="price-value">${price.toFixed(2)}</td>
+                        <td class="distance-value ${distanceClass}">
+                            ${distance >= 0 ? '+' : ''}${distance.toFixed(2)}%
+                        </td>
+                    `;
+                    tbody.appendChild(row);
+                });
+            }
+
+            updateAnalysis(data) {
+                // Simple analysis
+                const candles = data.candles.slice(-20);
+                const closes = candles.map(c => c.close);
+                const sma = closes.reduce((sum, close) => sum + close, 0) / closes.length;
+                const trend = data.currentPrice > sma ? 'Bullish' : 'Bearish';
+
+                // Volatility calculation
+                const returns = [];
+                for (let i = 1; i < closes.length; i++) {
+                    returns.push(Math.log(closes[i] / closes[i-1]));
+                }
+                const volatility = Math.sqrt(returns.reduce((sum, ret) => sum + ret * ret, 0) / returns.length) * Math.sqrt(252) * 100;
+
+                // Find nearest levels
+                if (this.currentPivotLevels) {
+                    const levels = Object.entries(this.currentPivotLevels);
+                    const resistanceLevels = levels.filter(([label, value]) => value > data.currentPrice).sort((a, b) => a[1] - b[1]);
+                    const supportLevels = levels.filter(([label, value]) => value < data.currentPrice).sort((a, b) => b[1] - a[1]);
+
+                    document.getElementById('nearest-resistance').textContent =
+                        resistanceLevels.length > 0 ? `${resistanceLevels[0][0]}: ${resistanceLevels[0][1].toFixed(2)}` : 'None';
+                    document.getElementById('nearest-support').textContent =
+                        supportLevels.length > 0 ? `${supportLevels[0][0]}: ${supportLevels[0][1].toFixed(2)}` : 'None';
+                }
+
+                document.getElementById('trend-value').textContent = trend;
+                document.getElementById('volatility-value').textContent = `${volatility.toFixed(1)}%`;
+                document.getElementById('data-points').textContent = data.candles.length;
+            }
+
+            initializeChart() {
+                if (!window.LightweightCharts) {
+                    console.error('LightweightCharts not loaded');
+                    return;
+                }
+
+                const container = document.getElementById('chartContainer');
+                this.chart = window.LightweightCharts.createChart(container, {
+                    width: container.clientWidth,
+                    height: container.clientHeight,
+                    layout: {
+                        background: { color: '#0c111b' },
+                        textColor: '#e6e6e6'
+                    },
+                    grid: {
+                        vertLines: { color: 'rgba(255,255,255,0.1)' },
+                        horzLines: { color: 'rgba(255,255,255,0.1)' }
+                    },
+                    timeScale: { timeVisible: true, secondsVisible: false }
+                });
+
+                this.candleSeries = this.chart.addCandlestickSeries({
+                    upColor: '#26a69a',
+                    downColor: '#ef5350',
+                    borderVisible: false,
+                    wickUpColor: '#26a69a',
+                    wickDownColor: '#ef5350'
+                });
+
+                // Load data if available
+                if (this.currentData) {
+                    this.candleSeries.setData(this.currentData.candles);
+                    this.updateChart();
+                }
+
+                // Handle resize
+                window.addEventListener('resize', () => {
+                    this.chart.applyOptions({
+                        width: container.clientWidth,
+                        height: container.clientHeight
+                    });
+                });
+            }
+
+            updateChart() {
+                if (!this.chart || !this.currentPivotLevels) return;
+
+                // Clear existing pivot lines
+                this.pivotLines.forEach(line => {
+                    try {
+                        this.chart.removeSeries(line);
+                    } catch (e) {
+                        console.warn('Could not remove line:', e);
+                    }
+                });
+                this.pivotLines = [];
+
+                // Add pivot lines
+                const currentTime = Math.floor(Date.now() / 1000);
+
+                Object.entries(this.currentPivotLevels).forEach(([label, price]) => {
+                    const lineColor = this.getPivotLineColor(label);
+
+                    const pivotLine = this.chart.addLineSeries({
+                        color: lineColor,
+                        lineWidth: label === 'PP' ? 2 : 1,
+                        priceLineVisible: true,
+                        lastValueVisible: true,
+                        title: `${label}: ${Number(price).toFixed(2)}`
+                    });
+
+                    pivotLine.setData([
+                        { time: currentTime - (24 * 3600), value: price },
+                        { time: currentTime + (6 * 3600), value: price }
+                    ]);
+
+                    this.pivotLines.push(pivotLine);
+                });
+            }
+
+            getPivotLineColor(label) {
+                const colors = {
+                    'R4': '#ef5350', 'R3': '#ef5350', 'R2': '#ef5350', 'R1': '#ef5350',
+                    'PP': '#fdd835',
+                    'S1': '#66bb6a', 'S2': '#66bb6a', 'S3': '#66bb6a', 'S4': '#66bb6a'
+                };
+                return colors[label] || '#b0bec5';
+            }
+
+            setStatus(type, message) {
+                const dot = document.getElementById('status-dot');
+                const text = document.getElementById('status-text');
+                dot.className = `status-dot ${type}`;
+                text.textContent = message;
+            }
+        }
+
+        // Initialize platform
+        document.addEventListener('DOMContentLoaded', () => {
+            window.fixedPivotPlatform = new FixedPivotPlatform();
+        });
+    </script>
+</body>
+</html>

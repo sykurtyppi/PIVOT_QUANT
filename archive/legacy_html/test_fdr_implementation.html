@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FDR Correction Test - Pivot Levels</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #0f2027 0%, #203a43 50%, #2c5364 100%);
+            min-height: 100vh;
+            padding: 20px;
+            color: #e8e8e8;
+            margin: 0;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: rgba(20, 25, 35, 0.95);
+            backdrop-filter: blur(20px);
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+            border: 1px solid rgba(255,255,255,0.1);
+            padding: 25px;
+        }
+
+        h1 {
+            text-align: center;
+            color: #ffffff;
+            margin-bottom: 30px;
+            font-size: 2rem;
+            background: linear-gradient(45deg, #00d4ff, #0096c7);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .test-section {
+            margin: 20px 0;
+            padding: 20px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 10px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .test-section h2 {
+            color: #00d4ff;
+            margin-bottom: 15px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 15px 0;
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        th, td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        th {
+            background: rgba(255, 255, 255, 0.1);
+            font-weight: 600;
+            color: #ffffff;
+        }
+
+        .significant {
+            background: rgba(76, 175, 80, 0.2);
+            border-left: 3px solid #4CAF50;
+        }
+
+        .not-significant {
+            background: rgba(255, 107, 107, 0.2);
+            border-left: 3px solid #ff6b6b;
+        }
+
+        .run-test-btn {
+            background: linear-gradient(135deg, #00d4ff, #0096c7);
+            border: none;
+            color: white;
+            padding: 12px 24px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 600;
+            margin: 10px 5px;
+            transition: all 0.3s ease;
+        }
+
+        .run-test-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0, 212, 255, 0.3);
+        }
+
+        .results {
+            margin-top: 20px;
+        }
+
+        .summary-stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin: 20px 0;
+        }
+
+        .stat-card {
+            background: rgba(255, 255, 255, 0.08);
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #00d4ff;
+        }
+
+        .stat-label {
+            font-size: 12px;
+            color: #cccccc;
+            margin-top: 5px;
+        }
+
+        .code-block {
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 6px;
+            padding: 15px;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            color: #e8e8e8;
+            overflow-x: auto;
+            margin: 10px 0;
+        }
+
+        .explanation {
+            background: rgba(0, 150, 199, 0.1);
+            border-left: 4px solid #0096c7;
+            padding: 15px;
+            margin: 15px 0;
+            border-radius: 0 6px 6px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🧪 Benjamini-Hochberg FDR Correction Test</h1>
+
+        <div class="test-section">
+            <h2>📊 Test Scenarios</h2>
+            <p>Testing FDR correction across 7 pivot levels with different significance scenarios:</p>
+
+            <button class="run-test-btn" onclick="runHighSignificanceTest()">High Significance Test</button>
+            <button class="run-test-btn" onclick="runMixedSignificanceTest()">Mixed Significance Test</button>
+            <button class="run-test-btn" onclick="runLowSignificanceTest()">Low Significance Test</button>
+            <button class="run-test-btn" onclick="runRealisticTest()">Realistic Market Test</button>
+        </div>
+
+        <div id="results-container" class="results"></div>
+    </div>
+
+    <!-- Include the FDR correction module -->
+    <script src="fdr_correction.js"></script>
+
+    <script>
+        // Test data scenarios
+        const TEST_SCENARIOS = {
+            highSignificance: {
+                name: "High Significance Scenario",
+                description: "Most levels have very high success rates (85-95%)",
+                data: {
+                    R3: { successes: 48, trials: 52 }, // 92.3%
+                    R2: { successes: 49, trials: 52 }, // 94.2%
+                    R1: { successes: 44, trials: 52 }, // 84.6%
+                    PIVOT: { successes: 46, trials: 52 }, // 88.5%
+                    S1: { successes: 45, trials: 52 }, // 86.5%
+                    S2: { successes: 47, trials: 52 }, // 90.4%
+                    S3: { successes: 43, trials: 52 }  // 82.7%
+                }
+            },
+
+            mixedSignificance: {
+                name: "Mixed Significance Scenario",
+                description: "Some levels significant, others near random (40-80%)",
+                data: {
+                    R3: { successes: 42, trials: 52 }, // 80.8%
+                    R2: { successes: 48, trials: 52 }, // 92.3%
+                    R1: { successes: 28, trials: 52 }, // 53.8%
+                    PIVOT: { successes: 26, trials: 52 }, // 50.0%
+                    S1: { successes: 21, trials: 52 }, // 40.4%
+                    S2: { successes: 44, trials: 52 }, // 84.6%
+                    S3: { successes: 31, trials: 52 }  // 59.6%
+                }
+            },
+
+            lowSignificance: {
+                name: "Low Significance Scenario",
+                description: "All levels near random chance (45-55%)",
+                data: {
+                    R3: { successes: 28, trials: 52 }, // 53.8%
+                    R2: { successes: 27, trials: 52 }, // 51.9%
+                    R1: { successes: 25, trials: 52 }, // 48.1%
+                    PIVOT: { successes: 26, trials: 52 }, // 50.0%
+                    S1: { successes: 24, trials: 52 }, // 46.2%
+                    S2: { successes: 29, trials: 52 }, // 55.8%
+                    S3: { successes: 27, trials: 52 }  // 51.9%
+                }
+            },
+
+            realistic: {
+                name: "Realistic Market Scenario",
+                description: "Based on actual SPX weekly backtest (52 weeks of data)",
+                data: {
+                    R3: { successes: 45, trials: 52 }, // 86.5%
+                    R2: { successes: 48, trials: 52 }, // 92.3%
+                    R1: { successes: 39, trials: 52 }, // 75.0%
+                    PIVOT: { successes: 41, trials: 52 }, // 78.8%
+                    S1: { successes: 37, trials: 52 }, // 71.2%
+                    S2: { successes: 44, trials: 52 }, // 84.6%
+                    S3: { successes: 43, trials: 52 }  // 82.7%
+                }
+            }
+        };
+
+        function runHighSignificanceTest() {
+            runTest(TEST_SCENARIOS.highSignificance);
+        }
+
+        function runMixedSignificanceTest() {
+            runTest(TEST_SCENARIOS.mixedSignificance);
+        }
+
+        function runLowSignificanceTest() {
+            runTest(TEST_SCENARIOS.lowSignificance);
+        }
+
+        function runRealisticTest() {
+            runTest(TEST_SCENARIOS.realistic);
+        }
+
+        function runTest(scenario) {
+            console.log(`Running ${scenario.name}...`);
+
+            // Perform FDR analysis
+            const results = FDRCorrection.analyzePivotSignificance(scenario.data, 0.05);
+
+            displayResults(scenario, results);
+        }
+
+        function displayResults(scenario, results) {
+            const container = document.getElementById('results-container');
+
+            // Create results HTML
+            const html = `
+                <div class="test-section">
+                    <h2>📈 ${scenario.name} Results</h2>
+                    <p>${scenario.description}</p>
+
+                    <div class="summary-stats">
+                        <div class="stat-card">
+                            <div class="stat-value">${results.summary.significantLevels}</div>
+                            <div class="stat-label">Significant Levels</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value">${results.summary.totalLevels}</div>
+                            <div class="stat-label">Total Levels</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value">${(results.summary.fdrLevel * 100).toFixed(1)}%</div>
+                            <div class="stat-label">FDR Level</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value">${((results.summary.significantLevels / results.summary.totalLevels) * 100).toFixed(1)}%</div>
+                            <div class="stat-label">% Significant</div>
+                        </div>
+                    </div>
+
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Level</th>
+                                <th>Success Rate</th>
+                                <th>Raw p-value</th>
+                                <th>FDR q-value</th>
+                                <th>Significant</th>
+                                <th>Display</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${generateTableRows(results)}
+                        </tbody>
+                    </table>
+
+                    <div class="explanation">
+                        <strong>🔬 FDR Correction Explanation:</strong><br>
+                        The Benjamini-Hochberg procedure controls the False Discovery Rate at 5%, meaning that among all levels called "significant," we expect at most 5% to be false positives. This is crucial when testing multiple pivot levels simultaneously to avoid inflated Type I error rates.
+                    </div>
+
+                    ${generateRawDataDisplay(scenario.data)}
+                </div>
+            `;
+
+            container.innerHTML = html;
+        }
+
+        function generateTableRows(results) {
+            const levels = ['R3', 'R2', 'R1', 'PIVOT', 'S1', 'S2', 'S3'];
+
+            return levels.map(level => {
+                const levelKey = level === 'PIVOT' ? 'PIVOT' : level;
+                const result = results.levels[levelKey];
+
+                if (!result) return '';
+
+                const significanceClass = result.significant ? 'significant' : 'not-significant';
+                const significanceMark = result.significant ? '✓' : '✗';
+                const displayText = FDRCorrection.formatSignificanceDisplay(level, result);
+
+                return `
+                    <tr class="${significanceClass}">
+                        <td><strong>${level}</strong></td>
+                        <td>${result.successRate.toFixed(1)}% (${result.successes}/${result.trials})</td>
+                        <td>${result.pValue < 0.001 ? '<0.001' : result.pValue.toFixed(3)}</td>
+                        <td>${result.qValue < 0.001 ? '<0.001' : result.qValue.toFixed(3)}</td>
+                        <td><strong>${significanceMark}</strong></td>
+                        <td>${displayText}</td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        function generateRawDataDisplay(data) {
+            return `
+                <div class="code-block">
+                    <strong>Raw Test Data:</strong><br>
+                    ${Object.entries(data).map(([level, stats]) =>
+                        `${level}: ${stats.successes}/${stats.trials} successes (${(stats.successes/stats.trials*100).toFixed(1)}%)`
+                    ).join('<br>')}
+                </div>
+            `;
+        }
+
+        // Run realistic test on page load
+        document.addEventListener('DOMContentLoaded', () => {
+            setTimeout(() => runRealisticTest(), 500);
+        });
+    </script>
+</body>
+</html>

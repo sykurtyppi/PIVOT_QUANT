@@ -1,0 +1,680 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>V3 Professional Pivot Calculator - Enhanced</title>
+    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #0f2027 0%, #203a43 50%, #2c5364 100%);
+            min-height: 100vh;
+            padding: 20px;
+            color: #e8e8e8;
+        }
+
+        .container {
+            max-width: 1800px;
+            margin: 0 auto;
+            background: rgba(20, 25, 35, 0.95);
+            backdrop-filter: blur(20px);
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+            border: 1px solid rgba(255,255,255,0.1);
+            overflow: hidden;
+            padding: 25px;
+        }
+
+        h1 {
+            text-align: center;
+            color: #ffffff;
+            margin: 10px 0 30px 0;
+            font-size: 2.5rem;
+            font-weight: 300;
+            text-shadow: 0 2px 15px rgba(0,0,0,0.5);
+            background: linear-gradient(45deg, #00d4ff, #00b4d8, #0096c7);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        /* Navigation Tabs */
+        .nav-tabs {
+            display: flex;
+            gap: 5px;
+            margin-bottom: 20px;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+        }
+
+        .nav-tab {
+            background: rgba(255, 255, 255, 0.1);
+            border: none;
+            color: #cccccc;
+            padding: 12px 20px;
+            border-radius: 8px 8px 0 0;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 600;
+            transition: all 0.3s ease;
+        }
+
+        .nav-tab.active {
+            background: linear-gradient(135deg, #00d4ff, #0096c7);
+            color: #ffffff;
+        }
+
+        .nav-tab:hover:not(.active) {
+            background: rgba(255, 255, 255, 0.15);
+        }
+
+        /* Tab Content */
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        /* Chart Container */
+        .chart-section {
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        #chartContainer {
+            height: 600px;
+            width: 100%;
+            border-radius: 8px;
+            background: rgba(0, 0, 0, 0.2);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        /* Calculator Layout */
+        .calculator-layout {
+            display: grid;
+            grid-template-columns: 350px 1fr;
+            gap: 25px;
+        }
+
+        .input-panel {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 12px;
+            padding: 20px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            height: fit-content;
+        }
+
+        .results-panel {
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: 12px;
+            padding: 20px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .input-group {
+            margin-bottom: 20px;
+        }
+
+        .input-group label {
+            display: block;
+            color: #ffffff;
+            margin-bottom: 8px;
+            font-weight: 600;
+            font-size: 14px;
+        }
+
+        .input-group input {
+            width: 100%;
+            padding: 12px 15px;
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 8px;
+            color: #ffffff;
+            font-size: 16px;
+            transition: all 0.3s ease;
+        }
+
+        .input-group input:focus {
+            outline: none;
+            border-color: #00d4ff;
+            box-shadow: 0 0 0 2px rgba(0, 212, 255, 0.2);
+        }
+
+        .calculate-btn {
+            width: 100%;
+            padding: 15px;
+            background: linear-gradient(135deg, #00d4ff, #0096c7);
+            border: none;
+            border-radius: 8px;
+            color: #ffffff;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            margin-bottom: 15px;
+        }
+
+        .calculate-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(0, 212, 255, 0.3);
+        }
+
+        .advanced-btn {
+            width: 100%;
+            padding: 12px;
+            background: linear-gradient(135deg, #673AB7, #512DA8);
+            border: none;
+            border-radius: 8px;
+            color: #ffffff;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .advanced-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(103, 58, 183, 0.3);
+        }
+
+        #tables-container {
+            min-height: 200px;
+        }
+
+        .version-badge {
+            display: inline-block;
+            background: linear-gradient(135deg, #00d4ff, #0096c7);
+            padding: 5px 15px;
+            border-radius: 20px;
+            color: #ffffff;
+            font-size: 12px;
+            font-weight: 600;
+            margin-left: 15px;
+        }
+
+        @media (max-width: 1200px) {
+            .calculator-layout {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>V3 Professional Pivot Calculator<span class="version-badge">Enhanced v2.0</span></h1>
+
+        <!-- Navigation Tabs -->
+        <div class="nav-tabs">
+            <button class="nav-tab active" onclick="switchTab('calculator')">📊 Calculator</button>
+            <button class="nav-tab" onclick="switchTab('chart')">📈 Chart View</button>
+            <button class="nav-tab" onclick="switchTab('advanced')">🎯 Advanced Analytics</button>
+        </div>
+
+        <!-- Calculator Tab -->
+        <div id="calculator-tab" class="tab-content active">
+            <div class="calculator-layout">
+                <div class="input-panel">
+                    <h3 style="color: #00d4ff; margin-bottom: 20px;">Market Data Input</h3>
+
+                    <div class="input-group">
+                        <label for="input-high">High</label>
+                        <input type="number" id="input-high" step="0.01" placeholder="Enter high price">
+                    </div>
+
+                    <div class="input-group">
+                        <label for="input-low">Low</label>
+                        <input type="number" id="input-low" step="0.01" placeholder="Enter low price">
+                    </div>
+
+                    <div class="input-group">
+                        <label for="input-close">Close</label>
+                        <input type="number" id="input-close" step="0.01" placeholder="Enter close price">
+                    </div>
+
+                    <div class="input-group">
+                        <label for="input-current">Current Price (Optional)</label>
+                        <input type="number" id="input-current" step="0.01" placeholder="Enter current price">
+                    </div>
+
+                    <button class="calculate-btn" onclick="calculatePivots()">Calculate Pivot Levels</button>
+                    <button class="advanced-btn" onclick="openAdvancedAnalytics()">🚀 Open Advanced Analytics</button>
+                </div>
+
+                <div class="results-panel">
+                    <h3 style="color: #00d4ff; margin-bottom: 20px;">Pivot Levels</h3>
+                    <div id="tables-container">
+                        <p style="text-align: center; color: #666; padding: 40px;">Enter market data to calculate pivot levels</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Chart Tab -->
+        <div id="chart-tab" class="tab-content">
+            <div class="chart-section">
+                <h3 style="color: #00d4ff; margin-bottom: 20px;">Live Chart with Pivot Levels</h3>
+                <div id="chartContainer"></div>
+            </div>
+            <div style="text-align: center; margin-top: 15px;">
+                <button onclick="loadMarketData()" style="padding: 10px 20px; background: linear-gradient(135deg, #4CAF50, #2E7D32); border: none; border-radius: 6px; color: white; cursor: pointer;">
+                    📡 Load Live SPX Data
+                </button>
+            </div>
+        </div>
+
+        <!-- Advanced Analytics Tab -->
+        <div id="advanced-tab" class="tab-content">
+            <div style="text-align: center; padding: 60px 20px;">
+                <h3 style="color: #673AB7; margin-bottom: 20px;">🎯 Advanced Pivot Analytics</h3>
+                <p style="color: #cccccc; margin-bottom: 30px; font-size: 16px;">
+                    Access regime-aware FDR correction, volatility analysis, walk-forward testing, and advanced alert systems.
+                </p>
+                <button onclick="openAdvancedAnalytics()" style="padding: 15px 30px; background: linear-gradient(135deg, #673AB7, #512DA8); border: none; border-radius: 8px; color: white; font-size: 16px; font-weight: 600; cursor: pointer;">
+                    🚀 Launch Advanced Analytics
+                </button>
+                <div style="margin-top: 30px; font-size: 14px; color: #aaa;">
+                    <p><strong>Features Include:</strong></p>
+                    <ul style="text-align: left; display: inline-block; margin-top: 10px;">
+                        <li>🧪 Benjamini-Hochberg FDR Correction</li>
+                        <li>📊 Regime-Aware Statistical Testing</li>
+                        <li>📈 Walk-Forward Analysis with Sparklines</li>
+                        <li>🌡️ Volatility × Regime Matrix</li>
+                        <li>🎯 Top Picks with Stability Badges</li>
+                        <li>🚨 Advanced Alert System</li>
+                        <li>📤 Export with Metadata Sidecars</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Include chart engine and advanced pivot engine -->
+    <script src="enhanced_chart_engine.js"></script>
+    <script src="advanced_pivot_engine.js"></script>
+
+    <script>
+        // Tab switching functionality
+        function switchTab(tabName) {
+            // Hide all tabs
+            document.querySelectorAll('.tab-content').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            document.querySelectorAll('.nav-tab').forEach(btn => {
+                btn.classList.remove('active');
+            });
+
+            // Show selected tab
+            document.getElementById(tabName + '-tab').classList.add('active');
+            event.target.classList.add('active');
+
+            // Initialize chart when chart tab is opened
+            if (tabName === 'chart') {
+                setTimeout(() => {
+                    if (!chart) {
+                        initializeChart();
+                        // Auto-load data after chart is created
+                        setTimeout(() => {
+                            loadMarketData();
+                        }, 300);
+                    }
+                }, 100);
+            }
+        }
+
+        // Basic pivot calculation (simplified version)
+        function calculatePivots() {
+            const high = parseFloat(document.getElementById('input-high').value);
+            const low = parseFloat(document.getElementById('input-low').value);
+            const close = parseFloat(document.getElementById('input-close').value);
+            const current = parseFloat(document.getElementById('input-current').value);
+
+            if (!high || !low || !close) {
+                alert('Please enter High, Low, and Close values');
+                return;
+            }
+
+            // Standard pivot calculation
+            const pivot = (high + low + close) / 3;
+            const r1 = 2 * pivot - low;
+            const r2 = pivot + (high - low);
+            const r3 = r2 + (high - low);
+            const s1 = 2 * pivot - high;
+            const s2 = pivot - (high - low);
+            const s3 = s2 - (high - low);
+
+            // Display results
+            displayPivotResults({
+                'R3': r3,
+                'R2': r2,
+                'R1': r1,
+                'Pivot': pivot,
+                'S1': s1,
+                'S2': s2,
+                'S3': s3
+            }, current);
+
+            // Update chart if initialized
+            if (window.chartInitialized && window.enhancedChartEngine) {
+                const zones = {
+                    'R3': { value: r3, high: r3 + 5, low: r3 - 5 },
+                    'R2': { value: r2, high: r2 + 5, low: r2 - 5 },
+                    'R1': { value: r1, high: r1 + 5, low: r1 - 5 },
+                    'PIVOT': { value: pivot, high: pivot + 5, low: pivot - 5 },
+                    'S1': { value: s1, high: s1 + 5, low: s1 - 5 },
+                    'S2': { value: s2, high: s2 + 5, low: s2 - 5 },
+                    'S3': { value: s3, high: s3 + 5, low: s3 - 5 }
+                };
+
+                window.enhancedChartEngine.updateChart(zones, {
+                    ema9: null,
+                    ema21: null
+                }, 'daily');
+            }
+        }
+
+        function displayPivotResults(levels, currentPrice) {
+            const container = document.getElementById('tables-container');
+            container.innerHTML = '';
+
+            const table = document.createElement('table');
+            table.style.width = '100%';
+            table.style.borderCollapse = 'collapse';
+            table.style.marginTop = '15px';
+
+            const thead = document.createElement('thead');
+            thead.innerHTML = `
+                <tr style="background: rgba(255,255,255,0.1);">
+                    <th style="padding: 12px; border: 1px solid rgba(255,255,255,0.1); text-align: left;">Level</th>
+                    <th style="padding: 12px; border: 1px solid rgba(255,255,255,0.1); text-align: right;">Price</th>
+                    <th style="padding: 12px; border: 1px solid rgba(255,255,255,0.1); text-align: right;">Distance</th>
+                </tr>
+            `;
+            table.appendChild(thead);
+
+            const tbody = document.createElement('tbody');
+
+            // Sort levels by value (descending)
+            const sortedLevels = Object.entries(levels).sort((a, b) => b[1] - a[1]);
+
+            sortedLevels.forEach(([label, value]) => {
+                const row = document.createElement('tr');
+
+                let levelColor = '#ffffff';
+                if (label.startsWith('R')) levelColor = '#ff6b6b';
+                else if (label.startsWith('S')) levelColor = '#4CAF50';
+                else if (label === 'Pivot') levelColor = '#FFC107';
+
+                let distance = '';
+                if (currentPrice) {
+                    const diff = value - currentPrice;
+                    const percent = ((diff / currentPrice) * 100).toFixed(2);
+                    distance = `${diff > 0 ? '+' : ''}${diff.toFixed(2)} (${percent}%)`;
+                }
+
+                row.innerHTML = `
+                    <td style="padding: 12px; border: 1px solid rgba(255,255,255,0.1); color: ${levelColor}; font-weight: bold;">${label}</td>
+                    <td style="padding: 12px; border: 1px solid rgba(255,255,255,0.1); text-align: right;">${value.toFixed(2)}</td>
+                    <td style="padding: 12px; border: 1px solid rgba(255,255,255,0.1); text-align: right; color: ${distance.startsWith('+') ? '#4CAF50' : distance.startsWith('-') ? '#ff6b6b' : '#cccccc'};">${distance}</td>
+                `;
+
+                tbody.appendChild(row);
+            });
+
+            table.appendChild(tbody);
+            container.appendChild(table);
+        }
+
+        // Chart variables
+        let chart = null;
+        let candleSeries = null;
+
+        function initializeChart() {
+            const container = document.getElementById('chartContainer');
+            if (!container || chart) return; // Already initialized
+
+            // Create chart directly with LightweightCharts
+            if (typeof window.LightweightCharts !== 'undefined') {
+                chart = window.LightweightCharts.createChart(container, {
+                    width: container.clientWidth || 1200,
+                    height: container.clientHeight || 600,
+                    layout: {
+                        background: { color: 'rgba(15, 32, 39, 0.95)' },
+                        textColor: '#e8e8e8'
+                    },
+                    grid: {
+                        vertLines: { color: 'rgba(255,255,255,0.1)' },
+                        horzLines: { color: 'rgba(255,255,255,0.1)' }
+                    },
+                    timeScale: {
+                        timeVisible: true,
+                        secondsVisible: false,
+                        borderColor: 'rgba(255,255,255,0.2)'
+                    },
+                    rightPriceScale: {
+                        autoScale: true,
+                        borderColor: 'rgba(255,255,255,0.2)'
+                    },
+                    crosshair: {
+                        mode: window.LightweightCharts.CrosshairMode.Normal,
+                        vertLine: { color: 'rgba(224, 227, 235, 0.3)' },
+                        horzLine: { color: 'rgba(224, 227, 235, 0.3)' }
+                    }
+                });
+
+                // Add candlestick series
+                candleSeries = chart.addCandlestickSeries({
+                    upColor: '#26a69a',
+                    downColor: '#ef5350',
+                    borderVisible: false,
+                    wickUpColor: '#26a69a',
+                    wickDownColor: '#ef5350',
+                    priceLineVisible: true
+                });
+
+                // Handle window resize
+                const resizeHandler = () => {
+                    if (chart) {
+                        chart.applyOptions({
+                            width: container.clientWidth,
+                            height: container.clientHeight
+                        });
+                    }
+                };
+                window.addEventListener('resize', resizeHandler);
+
+                console.log('Chart initialized successfully');
+                return true;
+            } else {
+                console.error('LightweightCharts library not loaded');
+                return false;
+            }
+        }
+
+        function loadMarketData() {
+            // Initialize chart first
+            if (!initializeChart()) {
+                alert('Chart library not loaded. Please refresh the page.');
+                return;
+            }
+
+            // Generate realistic mock SPY data for immediate display
+            const mockData = generateMockSPYData();
+
+            // Load data into chart
+            if (candleSeries) {
+                candleSeries.setData(mockData);
+                console.log('Mock SPY data loaded successfully');
+
+                // Add pivot lines after a short delay
+                setTimeout(() => {
+                    addPivotLinesToChart(mockData);
+                }, 500);
+            }
+        }
+
+        function generateMockSPYData() {
+            const currentTime = Math.floor(Date.now() / 1000);
+            const basePrice = 443.50; // Realistic SPY price
+            const mockData = [];
+
+            for (let i = -30; i <= 0; i++) {
+                const time = currentTime + (i * 86400); // Daily candles
+                const volatility = 0.015; // 1.5% daily volatility
+                const trend = i * 0.0008; // Slight upward trend
+
+                const open = basePrice + (Math.random() - 0.5) * basePrice * volatility + trend * basePrice;
+                const close = open + (Math.random() - 0.5) * basePrice * volatility * 0.8;
+                const high = Math.max(open, close) + Math.random() * basePrice * volatility * 0.4;
+                const low = Math.min(open, close) - Math.random() * basePrice * volatility * 0.4;
+
+                mockData.push({
+                    time: time,
+                    open: Number(open.toFixed(2)),
+                    high: Number(high.toFixed(2)),
+                    low: Number(low.toFixed(2)),
+                    close: Number(close.toFixed(2))
+                });
+            }
+
+            return mockData;
+        }
+
+        function addPivotLinesToChart(data) {
+            if (!chart || !data.length) return;
+
+            // Use advanced pivot engine for institutional-grade calculations
+            if (window.advancedPivotEngine) {
+                const advancedData = window.advancedPivotEngine.calculateAdvancedPivots(data, 'standard', 14);
+
+                if (advancedData && advancedData.pivotLevels) {
+                    const currentTime = Math.floor(Date.now() / 1000);
+                    const timeRange = {
+                        start: currentTime - (24 * 3600),
+                        end: currentTime + (6 * 3600)
+                    };
+
+                    // Add all pivot levels including gamma flip
+                    Object.entries(advancedData.pivotLevels).forEach(([label, value]) => {
+                        const color = getPivotColor(label);
+                        const lineWidth = (label === 'PIVOT' || label === 'GAMMA_FLIP') ? 2 : 1;
+                        const lineStyle = label.includes('3') ? 2 : 0; // Dashed for R3/S3
+
+                        const pivotLine = chart.addLineSeries({
+                            color: color,
+                            lineWidth: lineWidth,
+                            lineStyle: lineStyle,
+                            priceLineVisible: true,
+                            lastValueVisible: true,
+                            title: `${label}: ${Number(value).toFixed(2)}`
+                        });
+
+                        const lineData = [
+                            { time: timeRange.start, value: value },
+                            { time: timeRange.end, value: value }
+                        ];
+
+                        pivotLine.setData(lineData);
+                    });
+
+                    // Display advanced metrics
+                    console.log(`ATR: ${advancedData.atr} (${advancedData.atrPercent}%)`);
+                    console.log(`Gamma Flip: ${advancedData.gammaFlip}`);
+                    console.log(`Advanced pivot lines added to chart`);
+
+                    return;
+                }
+            }
+
+            // Fallback to standard pivots if advanced engine fails
+            const latest = data[data.length - 1];
+            const high = Math.max(...data.map(d => d.high));
+            const low = Math.min(...data.map(d => d.low));
+            const close = latest.close;
+
+            const pivot = (high + low + close) / 3;
+            const r1 = 2 * pivot - low;
+            const r2 = pivot + (high - low);
+            const r3 = 2 * pivot + (high - low);
+            const s1 = 2 * pivot - high;
+            const s2 = pivot - (high - low);
+            const s3 = 2 * pivot - (high - low);
+
+            const pivots = [
+                { label: 'R3', value: r3, color: 'rgba(239, 83, 80, 0.6)' },
+                { label: 'R2', value: r2, color: 'rgba(239, 83, 80, 0.8)' },
+                { label: 'R1', value: r1, color: 'rgba(239, 83, 80, 1.0)' },
+                { label: 'PIVOT', value: pivot, color: 'rgba(253, 216, 53, 1.0)' },
+                { label: 'S1', value: s1, color: 'rgba(102, 187, 106, 1.0)' },
+                { label: 'S2', value: s2, color: 'rgba(102, 187, 106, 0.8)' },
+                { label: 'S3', value: s3, color: 'rgba(102, 187, 106, 0.6)' }
+            ];
+
+            const currentTime = Math.floor(Date.now() / 1000);
+            const timeRange = {
+                start: currentTime - (24 * 3600),
+                end: currentTime + (6 * 3600)
+            };
+
+            pivots.forEach(({ label, value, color }) => {
+                const pivotLine = chart.addLineSeries({
+                    color: color,
+                    lineWidth: label === 'PIVOT' ? 2 : 1,
+                    lineStyle: label.includes('3') ? 2 : 0,
+                    priceLineVisible: true,
+                    lastValueVisible: true,
+                    title: `${label}: ${value.toFixed(2)}`
+                });
+
+                const lineData = [
+                    { time: timeRange.start, value: value },
+                    { time: timeRange.end, value: value }
+                ];
+
+                pivotLine.setData(lineData);
+            });
+
+            console.log('Standard pivot lines added to chart');
+        }
+
+        function getPivotColor(label) {
+            const colors = {
+                'R3': 'rgba(239, 83, 80, 0.6)',
+                'R2': 'rgba(239, 83, 80, 0.8)',
+                'R1': 'rgba(239, 83, 80, 1.0)',
+                'PIVOT': 'rgba(253, 216, 53, 1.0)',
+                'S1': 'rgba(102, 187, 106, 1.0)',
+                'S2': 'rgba(102, 187, 106, 0.8)',
+                'S3': 'rgba(102, 187, 106, 0.6)',
+                'GAMMA_FLIP': 'rgba(147, 51, 234, 1.0)'
+            };
+
+            // Handle Fibonacci and Camarilla levels
+            if (label.includes('R') && !colors[label]) return 'rgba(239, 83, 80, 0.7)';
+            if (label.includes('S') && !colors[label]) return 'rgba(102, 187, 106, 0.7)';
+
+            return colors[label] || 'rgba(180, 180, 180, 0.7)';
+        }
+
+        function openAdvancedAnalytics() {
+            // Open the advanced analytics in a new window/tab
+            window.open('test_complete_advanced_system.html', '_blank', 'width=1600,height=1000');
+        }
+
+        // Initialize on page load
+        document.addEventListener('DOMContentLoaded', () => {
+            console.log('Enhanced Pivot Calculator loaded');
+        });
+    </script>
+</body>
+</html>

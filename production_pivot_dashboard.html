@@ -1,0 +1,2757 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Institutional Pivot Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+    <style>
+        :root {
+            --bg: #0b0f1a;
+            --panel: #111827;
+            --panel-2: #0f172a;
+            --border: rgba(148, 163, 184, 0.12);
+            --text: #e2e8f0;
+            --muted: #94a3b8;
+            --accent: #60a5fa;
+            --accent-2: #22d3ee;
+            --success: #22c55e;
+            --danger: #ef4444;
+            --warning: #f59e0b;
+            --pivot: #fbbf24;
+            --support: #10b981;
+            --resistance: #f97316;
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            font-family: "Space Grotesk", system-ui, sans-serif;
+            background: radial-gradient(circle at top, rgba(59, 130, 246, 0.15), transparent 50%),
+                        radial-gradient(circle at 20% 80%, rgba(14, 165, 233, 0.18), transparent 45%),
+                        var(--bg);
+            color: var(--text);
+        }
+
+        .app {
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .app-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 20px 32px;
+            border-bottom: 1px solid var(--border);
+            background: rgba(15, 23, 42, 0.9);
+            backdrop-filter: blur(12px);
+        }
+
+        .title {
+            font-size: 20px;
+            font-weight: 700;
+            letter-spacing: 0.2px;
+        }
+
+        .subtitle {
+            color: var(--muted);
+            font-size: 12px;
+            margin-top: 4px;
+        }
+
+        .status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 12px;
+            color: var(--muted);
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 999px;
+            background: var(--muted);
+        }
+
+        .status-dot.loading { background: var(--warning); }
+        .status-dot.ready { background: var(--success); }
+        .status-dot.error { background: var(--danger); }
+
+        .controls {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 12px;
+            padding: 16px 32px;
+            border-bottom: 1px solid var(--border);
+            background: rgba(15, 23, 42, 0.65);
+        }
+
+        .control {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            font-size: 12px;
+            color: var(--muted);
+        }
+
+        select, button {
+            font-family: inherit;
+        }
+
+        .control select {
+            background: var(--panel);
+            color: var(--text);
+            border: 1px solid var(--border);
+            padding: 8px 10px;
+            border-radius: 8px;
+            font-size: 13px;
+        }
+
+        .control button {
+            background: linear-gradient(135deg, var(--accent), var(--accent-2));
+            border: none;
+            color: #0b1120;
+            font-weight: 600;
+            padding: 10px 12px;
+            border-radius: 10px;
+            cursor: pointer;
+        }
+
+        .export-actions {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .export-actions button {
+            flex: 1;
+            background: rgba(148, 163, 184, 0.15);
+            color: var(--text);
+            border: 1px solid rgba(148, 163, 184, 0.2);
+        }
+
+        .export-zone-input {
+            width: 64px;
+            background: var(--panel);
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 6px 8px;
+            font-size: 12px;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: 1.1fr 2fr 1.2fr;
+            gap: 16px;
+            padding: 20px 32px 32px;
+            flex: 1;
+        }
+
+        .panel.span-2 {
+            grid-column: 2 / 4;
+        }
+
+        .panel {
+            background: rgba(15, 23, 42, 0.9);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            min-height: 0;
+        }
+
+        .panel h3 {
+            margin: 0;
+            font-size: 14px;
+            letter-spacing: 0.3px;
+            text-transform: uppercase;
+            color: var(--muted);
+        }
+
+        .panel-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+
+        .stat-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }
+
+        .stat-grid-3 {
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        }
+
+        .stat {
+            padding: 10px;
+            background: var(--panel-2);
+            border-radius: 10px;
+            border: 1px solid rgba(148, 163, 184, 0.08);
+        }
+
+        .stat-label {
+            font-size: 11px;
+            color: var(--muted);
+        }
+
+        .stat-value {
+            font-size: 16px;
+            font-weight: 600;
+            margin-top: 4px;
+            font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+        }
+
+        .ml-controls {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+            font-size: 11px;
+            color: var(--muted);
+        }
+
+        .ml-toggle,
+        .ml-control {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .ml-control input {
+            width: 72px;
+            background: var(--panel);
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 4px 6px;
+            font-size: 12px;
+        }
+
+        .ml-horizon-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 10px;
+        }
+
+        .ml-horizon-card {
+            padding: 10px;
+            background: var(--panel-2);
+            border-radius: 10px;
+            border: 1px solid rgba(148, 163, 184, 0.08);
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            font-size: 12px;
+        }
+
+        .ml-horizon-title {
+            font-size: 12px;
+            font-weight: 600;
+            letter-spacing: 0.2px;
+            text-transform: uppercase;
+            color: var(--accent-2);
+        }
+
+        .ml-horizon-row {
+            display: flex;
+            justify-content: space-between;
+            color: var(--text);
+        }
+
+        .ml-metrics-note {
+            font-size: 11px;
+            color: var(--muted);
+        }
+
+        .ml-sparkline-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 10px;
+        }
+
+        .ml-sparkline-card {
+            background: var(--panel-2);
+            border-radius: 10px;
+            border: 1px solid rgba(148, 163, 184, 0.08);
+            padding: 8px 10px 10px;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .ml-sparkline-title {
+            font-size: 11px;
+            color: var(--muted);
+        }
+
+        .ml-sparkline-card svg {
+            width: 100%;
+            height: 32px;
+        }
+
+        .chart-panel {
+            position: relative;
+        }
+
+        #chartContainer {
+            flex: 1;
+            min-height: 480px;
+        }
+
+        .session-card {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            padding: 10px 12px;
+            border-radius: 10px;
+            background: rgba(30, 41, 59, 0.7);
+            border: 1px solid rgba(148, 163, 184, 0.1);
+        }
+
+        .session-line {
+            display: flex;
+            justify-content: space-between;
+            font-size: 12px;
+            color: var(--muted);
+        }
+
+        .session-line span {
+            color: var(--text);
+            font-weight: 500;
+        }
+
+        .levels-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 12px;
+        }
+
+        .levels-table th,
+        .levels-table td {
+            padding: 8px 6px;
+            text-align: right;
+            border-bottom: 1px solid rgba(148, 163, 184, 0.08);
+        }
+
+        .levels-table th:first-child,
+        .levels-table td:first-child {
+            text-align: left;
+        }
+
+        .tag {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 8px;
+            border-radius: 999px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+
+        .tag.support { background: rgba(16, 185, 129, 0.16); color: var(--support); }
+        .tag.resistance { background: rgba(249, 115, 22, 0.18); color: var(--resistance); }
+        .tag.pivot { background: rgba(251, 191, 36, 0.2); color: var(--pivot); }
+        .tag.gamma { background: rgba(147, 51, 234, 0.2); color: #a855f7; }
+
+        .strength {
+            padding: 4px 6px;
+            border-radius: 6px;
+            font-size: 11px;
+            font-weight: 600;
+            text-align: center;
+            background: rgba(59, 130, 246, 0.12);
+            color: var(--accent);
+        }
+
+        .alerts {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .signal-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+        }
+
+        .signal-item {
+            background: rgba(15, 23, 42, 0.7);
+            border: 1px solid rgba(148, 163, 184, 0.12);
+            border-radius: 10px;
+            padding: 10px 12px;
+            font-size: 12px;
+            color: var(--muted);
+        }
+
+        .signal-item strong {
+            display: block;
+            color: var(--text);
+            margin-bottom: 4px;
+        }
+
+        .alert {
+            background: rgba(2, 6, 23, 0.6);
+            border: 1px solid rgba(148, 163, 184, 0.1);
+            border-radius: 10px;
+            padding: 10px 12px;
+            font-size: 12px;
+            color: var(--muted);
+        }
+
+        .alert strong {
+            color: var(--text);
+        }
+
+        @media (max-width: 1200px) {
+            .grid {
+                grid-template-columns: 1fr;
+            }
+
+            .panel.span-2 {
+                grid-column: auto;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="app">
+        <header class="app-header">
+            <div>
+                <div class="title">Institutional Pivot Dashboard</div>
+                <div class="subtitle">Daily support and resistance from the prior completed session</div>
+            </div>
+            <div class="status">
+                <div id="status-dot" class="status-dot loading"></div>
+                <span id="status-text">Initializing</span>
+            </div>
+        </header>
+
+        <section class="controls">
+            <div class="control">
+                <label for="symbol-select">Instrument</label>
+                <select id="symbol-select">
+                    <option value="SPY" selected>SPY</option>
+                </select>
+            </div>
+            <div class="control">
+                <label for="range-select">History Range</label>
+                <select id="range-select">
+                    <option value="1mo">1 Month</option>
+                    <option value="3mo" selected>3 Months</option>
+                    <option value="6mo">6 Months</option>
+                    <option value="1y">1 Year</option>
+                </select>
+            </div>
+            <div class="control">
+                <label for="pivot-select">Pivot Model</label>
+                <select id="pivot-select">
+                    <option value="standard" selected>Standard (Classic)</option>
+                </select>
+            </div>
+            <div class="control">
+                <label for="interval-select">Candle Interval</label>
+                <select id="interval-select">
+                    <option value="1d" selected>Daily</option>
+                    <option value="1wk">Weekly</option>
+                    <option value="1mo">Monthly</option>
+                </select>
+            </div>
+            <div class="control">
+                <label for="gamma-expiry-select">Gamma Expiry</label>
+                <select id="gamma-expiry-select">
+                    <option value="front" selected>Front-Week</option>
+                    <option value="0dte">0DTE</option>
+                    <option value="monthly">Monthly</option>
+                    <option value="all">All (Weighted)</option>
+                </select>
+            </div>
+            <div class="control">
+                <label for="session-select">Trading Session</label>
+                <select id="session-select"></select>
+            </div>
+            <div class="control">
+                <label for="lookback-select">Strength Lookback</label>
+                <select id="lookback-select">
+                    <option value="10">10 Sessions</option>
+                    <option value="20" selected>20 Sessions</option>
+                    <option value="30">30 Sessions</option>
+                    <option value="60">60 Sessions</option>
+                </select>
+            </div>
+            <div class="control">
+                <label>Export</label>
+                <div class="export-actions">
+                    <button id="export-csv">CSV</button>
+                    <button id="export-json">JSON</button>
+                    <button id="export-txt">TXT</button>
+                    <button id="export-txt-zones">TXT Zones</button>
+                    <input id="export-zone-bps" class="export-zone-input" type="number" min="0.5" max="20" step="0.5" value="2" title="Zone band (bps)">
+                </div>
+            </div>
+            <div class="control">
+                <label>&nbsp;</label>
+                <button id="refresh-btn">Refresh Data</button>
+            </div>
+        </section>
+
+        <main class="grid">
+            <section class="panel">
+                <h3>Market Snapshot</h3>
+                <div class="stat-grid">
+                    <div class="stat">
+                        <div class="stat-label">Current Price</div>
+                        <div id="current-price" class="stat-value">--</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-label">Previous Close</div>
+                        <div id="previous-close" class="stat-value">--</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-label">Prev High</div>
+                        <div id="session-high" class="stat-value">--</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-label">Prev Low</div>
+                        <div id="session-low" class="stat-value">--</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-label">Prev Close</div>
+                        <div id="session-close" class="stat-value">--</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-label">ATR (14)</div>
+                        <div id="atr-value" class="stat-value">--</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-label">EMA 9</div>
+                        <div id="ema9-value" class="stat-value">--</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-label">EMA 21</div>
+                        <div id="ema21-value" class="stat-value">--</div>
+                    </div>
+                </div>
+                <div class="session-card">
+                    <div class="session-line">Trading Day: <span id="session-date">--</span></div>
+                    <div class="session-line">Levels From: <span id="levels-from-date">--</span></div>
+                <div class="session-line">Session Status: <span id="session-status">--</span></div>
+                <div class="session-line">Market State: <span id="market-state">--</span></div>
+                <div class="session-line">Data Source: <span id="data-source">--</span></div>
+                <div class="session-line">Source Note: <span id="source-note">--</span></div>
+                <div class="session-line">Lookback Window: <span id="lookback-window">--</span></div>
+                <div class="session-line">Last Update: <span id="last-updated">--</span></div>
+            </div>
+            </section>
+
+            <section class="panel chart-panel span-2">
+                <h3>Price With Pivot Ladder</h3>
+                <div id="chartContainer"></div>
+            </section>
+
+            <section class="panel span-2" id="ml-panel">
+                <div class="panel-header">
+                    <h3>ML Signal</h3>
+                    <div class="ml-controls">
+                        <label class="ml-toggle">
+                            <input type="checkbox" id="ml-preview-toggle" checked>
+                            <span>Preview mode</span>
+                        </label>
+                        <label class="ml-control">
+                            Preview bps
+                            <input type="number" id="ml-preview-bps" min="5" max="100" step="1" value="30">
+                        </label>
+                    </div>
+                </div>
+                <div class="stat-grid stat-grid-3">
+                    <div class="stat">
+                        <div class="stat-label">Status</div>
+                        <div id="ml-status" class="stat-value">Waiting for touch</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-label">Detail</div>
+                        <div id="ml-detail" class="stat-value">No ML score yet</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-label">Model</div>
+                        <div id="ml-model" class="stat-value">--</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-label">Trained End</div>
+                        <div id="ml-trained" class="stat-value">--</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-label">Calibration</div>
+                        <div id="ml-calibration" class="stat-value">--</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-label">Best Horizon</div>
+                        <div id="ml-best-horizon" class="stat-value">--</div>
+                    </div>
+                </div>
+                <div class="ml-horizon-grid">
+                    <div class="ml-horizon-card">
+                        <div class="ml-horizon-title">5m</div>
+                        <div class="ml-horizon-row">Reject: <span id="ml-reject-5m">--</span></div>
+                        <div class="ml-horizon-row">Break: <span id="ml-break-5m">--</span></div>
+                        <div class="ml-horizon-row">Exp MFE: <span id="ml-mfe-5m">--</span></div>
+                        <div class="ml-horizon-row">Exp MAE: <span id="ml-mae-5m">--</span></div>
+                    </div>
+                    <div class="ml-horizon-card">
+                        <div class="ml-horizon-title">15m</div>
+                        <div class="ml-horizon-row">Reject: <span id="ml-reject-15m">--</span></div>
+                        <div class="ml-horizon-row">Break: <span id="ml-break-15m">--</span></div>
+                        <div class="ml-horizon-row">Exp MFE: <span id="ml-mfe-15m">--</span></div>
+                        <div class="ml-horizon-row">Exp MAE: <span id="ml-mae-15m">--</span></div>
+                    </div>
+                    <div class="ml-horizon-card">
+                        <div class="ml-horizon-title">60m</div>
+                        <div class="ml-horizon-row">Reject: <span id="ml-reject-60m">--</span></div>
+                        <div class="ml-horizon-row">Break: <span id="ml-break-60m">--</span></div>
+                        <div class="ml-horizon-row">Exp MFE: <span id="ml-mfe-60m">--</span></div>
+                        <div class="ml-horizon-row">Exp MAE: <span id="ml-mae-60m">--</span></div>
+                    </div>
+                </div>
+                <div class="stat-grid stat-grid-3">
+                    <div class="stat">
+                        <div class="stat-label">Rolling AUC</div>
+                        <div id="ml-metric-auc" class="stat-value">--</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-label">Rolling Brier</div>
+                        <div id="ml-metric-brier" class="stat-value">--</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-label">Calib Drift (ECE)</div>
+                        <div id="ml-metric-ece" class="stat-value">--</div>
+                    </div>
+                </div>
+                <div class="ml-sparkline-grid">
+                    <div class="ml-sparkline-card">
+                        <div class="ml-sparkline-title">AUC Trend</div>
+                        <svg id="ml-spark-auc" viewBox="0 0 120 32" preserveAspectRatio="none"></svg>
+                    </div>
+                    <div class="ml-sparkline-card">
+                        <div class="ml-sparkline-title">Brier Trend</div>
+                        <svg id="ml-spark-brier" viewBox="0 0 120 32" preserveAspectRatio="none"></svg>
+                    </div>
+                    <div class="ml-sparkline-card">
+                        <div class="ml-sparkline-title">ECE Trend</div>
+                        <svg id="ml-spark-ece" viewBox="0 0 120 32" preserveAspectRatio="none"></svg>
+                    </div>
+                </div>
+                <div class="ml-metrics-note" id="ml-metric-note">Metrics: --</div>
+            </section>
+
+            <section class="panel">
+                <h3>Support / Resistance</h3>
+                <div class="alerts">
+                    <div class="alert" id="nearest-resistance">Nearest resistance: --</div>
+                    <div class="alert" id="nearest-support">Nearest support: --</div>
+                    <div class="alert" id="strongest-resistance">Strongest resistance: --</div>
+                    <div class="alert" id="strongest-support">Strongest support: --</div>
+                    <div class="alert" id="gamma-level">Gamma flip: --</div>
+                </div>
+                <h3>Gamma / Vol Signals</h3>
+                <div class="signal-grid">
+                    <div class="signal-item" id="gamma-mode"><strong>Gamma Mode</strong>--</div>
+                    <div class="signal-item" id="gamma-distance"><strong>Flip Distance</strong>--</div>
+                    <div class="signal-item" id="vol-regime"><strong>Vol Regime</strong>--</div>
+                    <div class="signal-item" id="iv-rv"><strong>IV vs RV</strong>--</div>
+                    <div class="signal-item" id="wall-call"><strong>Call Wall</strong>--</div>
+                    <div class="signal-item" id="wall-put"><strong>Put Wall</strong>--</div>
+                    <div class="signal-item" id="wall-pin"><strong>Pin Candidate</strong>--</div>
+                    <div class="signal-item" id="playbook"><strong>Playbook</strong>--</div>
+                    <div class="signal-item" id="gamma-confidence"><strong>Gamma Confidence</strong>--</div>
+                </div>
+                <h3>IV / OI Summary</h3>
+                <div class="signal-grid">
+                    <div class="signal-item" id="oi-total"><strong>Total OI</strong>--</div>
+                    <div class="signal-item" id="oi-concentration"><strong>OI Concentration</strong>--</div>
+                    <div class="signal-item" id="atm-iv"><strong>ATM IV</strong>--</div>
+                    <div class="signal-item" id="skew-25d"><strong>25Δ Skew</strong>--</div>
+                    <div class="signal-item" id="zero-dte-share"><strong>0DTE Share</strong>--</div>
+                    <div class="signal-item" id="data-quality"><strong>Data Quality</strong>--</div>
+                </div>
+                <div class="alerts" id="debug-panel" style="display: none;">
+                    <div class="alert" id="debug-status"><strong>Debug:</strong> --</div>
+                </div>
+                <h3>Pivot Levels</h3>
+                <div style="overflow: auto;">
+                    <table class="levels-table">
+                        <thead>
+                            <tr>
+                                <th>Level</th>
+                                <th>Price</th>
+                                <th>Dist</th>
+                                <th>Strength</th>
+                            </tr>
+                        </thead>
+                        <tbody id="pivot-table-body">
+                            <tr>
+                                <td colspan="4" style="text-align: center; color: var(--muted); padding: 20px;">Loading...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script>
+        const state = {
+            chart: null,
+            candleSeries: null,
+            pivotLines: [],
+            ema9Series: null,
+            ema21Series: null,
+            vwapSeries: null,
+            gammaLines: [],
+            candles: [],
+            intradayInterval: '1m',
+            intradayRange: '5d',
+            sessionCandle: null,
+            pivotHistory: [],
+            historyBySessionIndex: new Map(),
+            selectedSessionIndex: null,
+            lookbackSessions: 20,
+            timeZone: 'America/New_York',
+            pivotType: 'standard',
+            symbol: 'SPY',
+            range: '3mo',
+            interval: '1d',
+            marketState: 'UNKNOWN',
+            dataSource: 'Yahoo Finance',
+            referencePrice: null,
+            latestData: null,
+            lastLevels: [],
+            lastStrength: {},
+            lastSessionEntry: null,
+            lastAtr: null,
+            lastGamma: null,
+            lastWalls: null,
+            vixLevel: null,
+            gammaData: null,
+            lastEma9: null,
+            lastEma21: null,
+            lastVwap: null,
+            spotTimer: null,
+            intradayTimer: null,
+            intradaySyncInFlight: false,
+            lastTouchByLevel: new Map(),
+            lastBarSyncKey: null,
+            lastIntradaySyncKey: null,
+            lastMlScore: null,
+            mlCache: new Map(),
+            mlPreviewEnabled: true,
+            mlPreviewBps: 30,
+            mlMetrics: null,
+            mlMeta: null,
+            mlMetricsTimer: null,
+        };
+
+        const formatNumber = (value, digits = 2) => {
+            if (!Number.isFinite(value)) return '--';
+            return Number(value).toFixed(digits);
+        };
+
+        const formatPercent = (value, digits = 2) => {
+            if (!Number.isFinite(value)) return '--';
+            return `${value.toFixed(digits)}%`;
+        };
+
+        const formatDateTime = (epochMs) => {
+            if (!Number.isFinite(epochMs)) return '--';
+            const date = new Date(epochMs);
+            if (Number.isNaN(date.getTime())) return '--';
+            return date.toLocaleString('en-US', { timeZone: state.timeZone, hour12: false });
+        };
+
+        const loadScript = (src) => new Promise((resolve, reject) => {
+            const script = document.createElement('script');
+            script.src = src;
+            script.async = true;
+            script.onload = () => resolve(true);
+            script.onerror = () => reject(new Error(`Failed to load ${src}`));
+            document.head.appendChild(script);
+        });
+
+        const ensureChartLibrary = async () => {
+            if (window.LightweightCharts) return true;
+            const sources = [
+                '/static/lightweight-charts.js',
+                'https://cdn.jsdelivr.net/npm/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js',
+                'https://cdnjs.cloudflare.com/ajax/libs/lightweight-charts/4.1.0/lightweight-charts.standalone.production.js',
+            ];
+            for (const src of sources) {
+                try {
+                    await loadScript(src);
+                    if (window.LightweightCharts) return true;
+                } catch (error) {
+                    console.warn(error.message);
+                }
+            }
+            return false;
+        };
+
+        const saveMlPrefs = () => {
+            try {
+                localStorage.setItem('mlPreviewEnabled', state.mlPreviewEnabled ? '1' : '0');
+                localStorage.setItem('mlPreviewBps', String(state.mlPreviewBps));
+            } catch (error) {
+                console.warn('Unable to persist ML prefs', error);
+            }
+        };
+
+        const loadMlPrefs = () => {
+            try {
+                const enabled = localStorage.getItem('mlPreviewEnabled');
+                const bps = localStorage.getItem('mlPreviewBps');
+                if (enabled !== null) {
+                    state.mlPreviewEnabled = enabled === '1';
+                }
+                if (bps !== null && Number.isFinite(Number(bps))) {
+                    state.mlPreviewBps = Number(bps);
+                }
+            } catch (error) {
+                console.warn('Unable to load ML prefs', error);
+            }
+        };
+
+        const intervalToSeconds = (interval) => {
+            if (interval.endsWith('m')) {
+                return Number(interval.replace('m', '')) * 60;
+            }
+            if (interval.endsWith('h')) {
+                return Number(interval.replace('h', '')) * 3600;
+            }
+            if (interval === '1d') return 86400;
+            if (interval === '1wk') return 604800;
+            if (interval === '1mo') return 2592000;
+            return 60;
+        };
+
+        function setStatus(type, message) {
+            const dot = document.getElementById('status-dot');
+            const text = document.getElementById('status-text');
+            dot.className = `status-dot ${type}`;
+            text.textContent = message;
+        }
+
+        function initializeChart() {
+            const container = document.getElementById('chartContainer');
+            if (!window.LightweightCharts) {
+                container.innerHTML = '<div style="padding: 20px; color: var(--danger);">Chart library failed to load. Data will still load without the chart.</div>';
+                state.chart = null;
+                state.candleSeries = null;
+                return;
+            }
+
+            const addCandles = (chart, options) => {
+                if (typeof chart.addCandlestickSeries === 'function') {
+                    return chart.addCandlestickSeries(options);
+                }
+                if (typeof chart.addSeries === 'function' && window.LightweightCharts?.CandlestickSeries) {
+                    return chart.addSeries(window.LightweightCharts.CandlestickSeries, options);
+                }
+                throw new Error('Candlestick series API not available');
+            };
+
+            const addLine = (chart, options) => {
+                if (typeof chart.addLineSeries === 'function') {
+                    return chart.addLineSeries(options);
+                }
+                if (typeof chart.addSeries === 'function' && window.LightweightCharts?.LineSeries) {
+                    return chart.addSeries(window.LightweightCharts.LineSeries, options);
+                }
+                throw new Error('Line series API not available');
+            };
+
+            state._addLine = addLine;
+            state.chart = LightweightCharts.createChart(container, {
+                layout: {
+                    background: { color: '#0b0f1a' },
+                    textColor: '#e2e8f0',
+                },
+                grid: {
+                    vertLines: { color: 'rgba(148, 163, 184, 0.08)' },
+                    horzLines: { color: 'rgba(148, 163, 184, 0.08)' },
+                },
+                rightPriceScale: { autoScale: true },
+                timeScale: { timeVisible: true, secondsVisible: false },
+            });
+
+            state.candleSeries = addCandles(state.chart, {
+                upColor: '#22c55e',
+                downColor: '#ef4444',
+                borderVisible: false,
+                wickUpColor: '#22c55e',
+                wickDownColor: '#ef4444',
+            });
+
+            state.ema9Series = addLine(state.chart, {
+                color: '#60a5fa',
+                lineWidth: 2,
+                priceLineVisible: false,
+                lastValueVisible: true,
+                title: 'EMA 9',
+            });
+
+            state.ema21Series = addLine(state.chart, {
+                color: '#94a3b8',
+                lineWidth: 2,
+                priceLineVisible: false,
+                lastValueVisible: true,
+                title: 'EMA 21',
+            });
+
+            state.vwapSeries = addLine(state.chart, {
+                color: '#fbbf24',
+                lineWidth: 2,
+                priceLineVisible: false,
+                lastValueVisible: true,
+                title: 'VWAP',
+            });
+
+            window.addEventListener('resize', () => {
+                state.chart.applyOptions({
+                    width: container.clientWidth,
+                    height: container.clientHeight,
+                });
+            });
+        }
+
+        function clearPivotLines() {
+            state.pivotLines.forEach((line) => {
+                try {
+                    state.chart.removeSeries(line);
+                } catch (error) {
+                    console.warn('Failed to remove series', error);
+                }
+            });
+            state.pivotLines = [];
+        }
+
+        function clearGammaLines() {
+            state.gammaLines.forEach((line) => {
+                try {
+                    state.chart.removeSeries(line);
+                } catch (error) {
+                    console.warn('Failed to remove gamma series', error);
+                }
+            });
+            state.gammaLines = [];
+        }
+
+        function renderPivotLines(levels) {
+            if (!state.chart) return;
+            clearPivotLines();
+
+            const times = state.candles;
+            if (!times.length) return;
+            const startTime = times[0].time;
+            const endTime = times[times.length - 1].time;
+
+            levels.forEach((level) => {
+                const color = level.type === 'gamma'
+                    ? 'rgba(168, 85, 247, 0.9)'
+                    : level.type === 'pivot'
+                        ? 'rgba(251, 191, 36, 0.9)'
+                        : level.type === 'support'
+                            ? 'rgba(16, 185, 129, 0.8)'
+                            : 'rgba(249, 115, 22, 0.8)';
+
+                const addLine = state._addLine || ((chart, options) => chart.addLineSeries(options));
+                const line = addLine(state.chart, {
+                    color,
+                    lineWidth: level.label === 'PP' || level.label === 'PIVOT' ? 2 : 1,
+                    priceLineVisible: true,
+                    lastValueVisible: true,
+                    title: `${level.label}: ${formatNumber(level.value)}`,
+                });
+
+                line.setData([
+                    { time: startTime, value: level.value },
+                    { time: endTime, value: level.value },
+                ]);
+
+                state.pivotLines.push(line);
+            });
+        }
+
+        function renderGammaWalls(walls) {
+            if (!state.chart || !walls) return;
+            clearGammaLines();
+
+            const entries = [
+                walls.callWall ? { label: 'CALL WALL', data: walls.callWall } : null,
+                walls.putWall ? { label: 'PUT WALL', data: walls.putWall } : null,
+                walls.pin ? { label: 'PIN', data: walls.pin } : null,
+            ].filter(Boolean);
+
+            if (!entries.length) return;
+
+            const times = state.candles;
+            if (!times.length) return;
+            const startTime = times[0].time;
+            const endTime = times[times.length - 1].time;
+
+            entries.forEach((entry) => {
+                const line = (state._addLine || ((chart, options) => chart.addLineSeries(options)))(state.chart, {
+                    color: 'rgba(168, 85, 247, 0.8)',
+                    lineWidth: 2,
+                    priceLineVisible: true,
+                    lastValueVisible: true,
+                    title: `${entry.label}: ${formatNumber(entry.data.price)}`,
+                });
+
+                line.setData([
+                    { time: startTime, value: entry.data.price },
+                    { time: endTime, value: entry.data.price },
+                ]);
+
+                state.gammaLines.push(line);
+            });
+        }
+
+        function focusChartOnSession(sessionIndex) {
+            if (!state.chart || !state.candles.length) return;
+            const start = Math.max(0, sessionIndex - 3);
+            const end = Math.min(state.candles.length - 1, sessionIndex + 3);
+            const from = state.candles[start]?.time;
+            const to = state.candles[end]?.time;
+            if (!from || !to || !state.chart.timeScale) return;
+            try {
+                state.chart.timeScale().setVisibleRange({ from, to });
+            } catch (error) {
+                // Ignore if the API isn't available in the current chart version.
+            }
+        }
+
+        function calculateATR(candles, period = 14) {
+            if (candles.length < period + 1) return null;
+            const ranges = [];
+            for (let i = 1; i < candles.length; i += 1) {
+                const current = candles[i];
+                const previous = candles[i - 1];
+                const tr1 = current.high - current.low;
+                const tr2 = Math.abs(current.high - previous.close);
+                const tr3 = Math.abs(current.low - previous.close);
+                ranges.push(Math.max(tr1, tr2, tr3));
+            }
+            let atr = ranges.slice(0, period).reduce((sum, value) => sum + value, 0) / period;
+            for (let i = period; i < ranges.length; i += 1) {
+                atr = ((atr * (period - 1)) + ranges[i]) / period;
+            }
+            return atr;
+        }
+
+        function calculateEMA(candles, period = 9) {
+            if (!candles.length) return [];
+            const k = 2 / (period + 1);
+            const emaSeries = [];
+            let ema = null;
+
+            for (let i = 0; i < candles.length; i += 1) {
+                const close = candles[i].close;
+                if (!Number.isFinite(close)) continue;
+
+                if (ema === null) {
+                    if (i < period - 1) continue;
+                    const slice = candles.slice(i - period + 1, i + 1).map((c) => c.close);
+                    const sma = slice.reduce((sum, v) => sum + v, 0) / slice.length;
+                    ema = sma;
+                } else {
+                    ema = close * k + ema * (1 - k);
+                }
+
+                emaSeries.push({ time: candles[i].time, value: ema });
+            }
+
+            return emaSeries;
+        }
+
+        function calculateVWAP(candles, timeZone) {
+            const series = [];
+            let cumulativePV = 0;
+            let cumulativeVol = 0;
+            let lastDate = null;
+            let lastValue = null;
+
+            candles.forEach((candle) => {
+                if (timeZone) {
+                    const sessionDate = formatYmd(candle.time, timeZone);
+                    if (lastDate && sessionDate !== lastDate) {
+                        cumulativePV = 0;
+                        cumulativeVol = 0;
+                        lastValue = null;
+                    }
+                    lastDate = sessionDate;
+                }
+                const typical = (candle.high + candle.low + candle.close) / 3;
+                const volume = candle.volume || 0;
+                if (Number.isFinite(volume) && volume > 0) {
+                    cumulativePV += typical * volume;
+                    cumulativeVol += volume;
+                }
+                if (cumulativeVol > 0) {
+                    lastValue = cumulativePV / cumulativeVol;
+                    series.push({ time: candle.time, value: lastValue });
+                } else if (lastValue !== null) {
+                    series.push({ time: candle.time, value: lastValue });
+                }
+            });
+
+            return series;
+        }
+
+        function calculateRealizedVol(candles, window = 20) {
+            if (candles.length < window + 1) return null;
+            const returns = [];
+            for (let i = candles.length - window; i < candles.length; i += 1) {
+                const prev = candles[i - 1]?.close;
+                const curr = candles[i]?.close;
+                if (!Number.isFinite(prev) || !Number.isFinite(curr)) continue;
+                returns.push(Math.log(curr / prev));
+            }
+            if (!returns.length) return null;
+            const mean = returns.reduce((sum, r) => sum + r, 0) / returns.length;
+            const variance = returns.reduce((sum, r) => sum + Math.pow(r - mean, 2), 0) / returns.length;
+            return Math.sqrt(variance) * Math.sqrt(252) * 100;
+        }
+
+        function classifyVolRegime(candles, window = 20, history = 60) {
+            if (candles.length < window + 2) return { label: 'Unknown', value: null };
+            const vols = [];
+            for (let i = window + 1; i <= Math.min(candles.length, window + history); i += 1) {
+                const slice = candles.slice(candles.length - i, candles.length - i + window + 1);
+                const rv = calculateRealizedVol(slice, window);
+                if (Number.isFinite(rv)) vols.push(rv);
+            }
+            const current = calculateRealizedVol(candles, window);
+            if (!Number.isFinite(current) || !vols.length) return { label: 'Unknown', value: current };
+            const sorted = vols.slice().sort((a, b) => a - b);
+            const low = sorted[Math.floor(sorted.length * 0.33)];
+            const high = sorted[Math.floor(sorted.length * 0.66)];
+            if (current <= low) return { label: 'Low', value: current };
+            if (current >= high) return { label: 'High', value: current };
+            return { label: 'Normal', value: current };
+        }
+
+        function computeWallsProxy(candles, referencePrice, bins = 24) {
+            if (!candles.length) return null;
+            const prices = candles.map((c) => c.close);
+            const min = Math.min(...prices);
+            const max = Math.max(...prices);
+            const range = max - min || 1;
+            const step = range / bins;
+            const volumeBins = Array.from({ length: bins }, () => 0);
+
+            candles.forEach((c) => {
+                const typical = (c.high + c.low + c.close) / 3;
+                const index = Math.min(bins - 1, Math.max(0, Math.floor((typical - min) / step)));
+                volumeBins[index] += c.volume || 0;
+            });
+
+            const binCenters = volumeBins.map((_, idx) => min + step * (idx + 0.5));
+            const maxVolume = Math.max(...volumeBins) || 1;
+
+            const walls = binCenters.map((price, idx) => ({
+                price,
+                strength: Math.round((volumeBins[idx] / maxVolume) * 100),
+                volume: volumeBins[idx],
+            }));
+
+            const above = walls.filter((w) => w.price > referencePrice).sort((a, b) => b.volume - a.volume);
+            const below = walls.filter((w) => w.price < referencePrice).sort((a, b) => b.volume - a.volume);
+            const nearest = walls
+                .slice()
+                .sort((a, b) => Math.abs(a.price - referencePrice) - Math.abs(b.price - referencePrice))[0];
+
+            return {
+                callWall: above[0] || null,
+                putWall: below[0] || null,
+                pin: nearest || null,
+            };
+        }
+        function calculateGammaFlip(candles, lookback = 20) {
+            if (!candles.length) return null;
+            const window = candles.slice(-lookback);
+            const totalVolume = window.reduce((sum, c) => sum + (c.volume || 0), 0);
+
+            if (totalVolume > 0) {
+                let vwap = 0;
+                window.forEach((candle) => {
+                    const typical = (candle.high + candle.low + candle.close) / 3;
+                    vwap += typical * (candle.volume || 0);
+                });
+                return vwap / totalVolume;
+            }
+
+            const highs = window.map((c) => c.high);
+            const lows = window.map((c) => c.low);
+            if (!highs.length || !lows.length) return null;
+            return (Math.max(...highs) + Math.min(...lows)) / 2;
+        }
+
+        function calculatePivotLevels(type, high, low, close) {
+            const pivot = (high + low + close) / 3;
+
+            if (type === 'fibonacci') {
+                const range = high - low;
+                return {
+                    R3: pivot + range,
+                    R2: pivot + range * 0.618,
+                    R1: pivot + range * 0.382,
+                    PP: pivot,
+                    S1: pivot - range * 0.382,
+                    S2: pivot - range * 0.618,
+                    S3: pivot - range,
+                };
+            }
+
+            if (type === 'camarilla') {
+                const range = high - low;
+                return {
+                    R4: close + (range * 1.1 / 2),
+                    R3: close + (range * 1.1 / 4),
+                    R2: close + (range * 1.1 / 6),
+                    R1: close + (range * 1.1 / 12),
+                    PP: close,
+                    S1: close - (range * 1.1 / 12),
+                    S2: close - (range * 1.1 / 6),
+                    S3: close - (range * 1.1 / 4),
+                    S4: close - (range * 1.1 / 2),
+                };
+            }
+
+            const r1 = 2 * pivot - low;
+            const s1 = 2 * pivot - high;
+            const r2 = pivot + (high - low);
+            const s2 = pivot - (high - low);
+            const r3 = high + 2 * (pivot - low);
+            const s3 = low - 2 * (high - pivot);
+
+            const m1 = (s1 + pivot) / 2;
+            const m2 = (pivot + r1) / 2;
+            const m3 = (s2 + s1) / 2;
+            const m4 = (r1 + r2) / 2;
+
+            return {
+                R3: r3,
+                R2: r2,
+                R1: r1,
+                M4: m4,
+                M2: m2,
+                PP: pivot,
+                M1: m1,
+                M3: m3,
+                S1: s1,
+                S2: s2,
+                S3: s3,
+            };
+        }
+
+
+        function analyzeStrength(levels, candles, referencePrice, atr) {
+            const windowCandles = candles;
+            const atrValue = Number.isFinite(atr) ? atr : referencePrice * 0.01;
+            const volRatio = atrValue / referencePrice;
+            const volWeight = 1 / (1 + volRatio * 8);
+            const tolerance = Math.max(atrValue * 0.2, referencePrice * 0.0015);
+
+            const volumes = windowCandles.map((c) => c.volume || 0).filter((v) => v > 0);
+            const avgVolume = volumes.length ? volumes.reduce((sum, v) => sum + v, 0) / volumes.length : 0;
+
+            const analysis = {};
+            Object.entries(levels).forEach(([label, value]) => {
+                let touches = 0;
+                let bounces = 0;
+                let breaks = 0;
+                let weightedScore = 0;
+
+                windowCandles.forEach((candle, index) => {
+                    const nearest = Math.min(
+                        Math.abs(candle.high - value),
+                        Math.abs(candle.low - value),
+                        Math.abs(candle.close - value)
+                    );
+
+                    if (nearest <= tolerance) {
+                        touches += 1;
+                        const proximity = Math.max(0, 1 - nearest / tolerance);
+                        const volumeWeight = avgVolume
+                            ? Math.min(2, Math.max(0.5, (candle.volume || 0) / avgVolume))
+                            : 1;
+                        const touchScore = (1 + proximity) * volumeWeight * volWeight;
+                        weightedScore += touchScore;
+
+                        if (index < windowCandles.length - 2) {
+                            const nextBars = windowCandles.slice(index + 1, index + 3);
+                            const wasAbove = candle.close >= value;
+                            const bounced = nextBars.some((bar) =>
+                                wasAbove ? bar.close < value - tolerance * 0.3 : bar.close > value + tolerance * 0.3
+                            );
+                            if (bounced) {
+                                bounces += 1;
+                                weightedScore += touchScore * 0.75;
+                            } else {
+                                breaks += 1;
+                            }
+                        }
+                    }
+                });
+
+                const strength = Math.round(100 * (1 - Math.exp(-weightedScore / 6)));
+
+                analysis[label] = {
+                    touches,
+                    bounces,
+                    breaks,
+                    strength,
+                };
+            });
+
+            return analysis;
+        }
+
+        function buildLevelsArray(levels, currentPrice, strength) {
+            return Object.entries(levels)
+                .map(([label, value]) => {
+                    let type = 'pivot';
+                    if (label.startsWith('R')) type = 'resistance';
+                    if (label.startsWith('S')) type = 'support';
+                    if (label === 'GAMMA') type = 'gamma';
+                    if (label.startsWith('M')) type = 'pivot';
+                    const stats = strength[label] || {};
+                    const distanceBps = ((value - currentPrice) / currentPrice) * 1e4;
+                    return {
+                        label,
+                        value,
+                        type,
+                        distance: ((value - currentPrice) / currentPrice) * 100,
+                        distanceBps,
+                        strength: stats.strength ?? 0,
+                        touches: stats.touches ?? 0,
+                        bounces: stats.bounces ?? 0,
+                        breaks: stats.breaks ?? 0,
+                    };
+                })
+                .sort((a, b) => b.value - a.value);
+        }
+
+        function updatePivotTable(levels) {
+            const tbody = document.getElementById('pivot-table-body');
+            tbody.innerHTML = '';
+
+            levels.forEach((level) => {
+                const row = document.createElement('tr');
+                row.innerHTML = `
+                    <td>
+                        <span class="tag ${level.type}">${level.label}</span>
+                    </td>
+                    <td>${formatNumber(level.value)}</td>
+                    <td>${formatPercent(level.distance)}</td>
+                    <td><div class="strength">${level.strength}</div></td>
+                `;
+                tbody.appendChild(row);
+            });
+        }
+
+        function updateKeyLevels(levels, currentPrice) {
+            const filtered = levels.filter((l) => l.label.startsWith('R') || l.label.startsWith('S'));
+            const resistances = filtered.filter((l) => l.value > currentPrice);
+            const supports = filtered.filter((l) => l.value < currentPrice);
+
+            const nearestResistance = resistances.sort((a, b) => a.value - b.value)[0];
+            const nearestSupport = supports.sort((a, b) => b.value - a.value)[0];
+
+            const strongestResistance = resistances.sort((a, b) => b.strength - a.strength)[0];
+            const strongestSupport = supports.sort((a, b) => b.strength - a.strength)[0];
+
+            document.getElementById('nearest-resistance').innerHTML = nearestResistance
+                ? `<strong>Nearest resistance:</strong> ${nearestResistance.label} ${formatNumber(nearestResistance.value)} (${formatPercent(nearestResistance.distance)})`
+                : '<strong>Nearest resistance:</strong> --';
+
+            document.getElementById('nearest-support').innerHTML = nearestSupport
+                ? `<strong>Nearest support:</strong> ${nearestSupport.label} ${formatNumber(nearestSupport.value)} (${formatPercent(nearestSupport.distance)})`
+                : '<strong>Nearest support:</strong> --';
+
+            document.getElementById('strongest-resistance').innerHTML = strongestResistance
+                ? `<strong>Strongest resistance:</strong> ${strongestResistance.label} ${formatNumber(strongestResistance.value)} (${strongestResistance.strength})`
+                : '<strong>Strongest resistance:</strong> --';
+
+            document.getElementById('strongest-support').innerHTML = strongestSupport
+                ? `<strong>Strongest support:</strong> ${strongestSupport.label} ${formatNumber(strongestSupport.value)} (${strongestSupport.strength})`
+                : '<strong>Strongest support:</strong> --';
+        }
+
+        function updateMarketSnapshot(data, sessionEntry, atr) {
+            const sessionCandle = sessionEntry?.baseCandle;
+            state.sessionCandle = sessionCandle;
+
+            document.getElementById('current-price').textContent = formatNumber(data.currentPrice);
+            document.getElementById('previous-close').textContent = formatNumber(data.previousClose);
+            document.getElementById('session-high').textContent = formatNumber(sessionCandle?.high);
+            document.getElementById('session-low').textContent = formatNumber(sessionCandle?.low);
+            document.getElementById('session-close').textContent = formatNumber(sessionCandle?.close);
+            document.getElementById('atr-value').textContent = atr ? formatNumber(atr) : '--';
+
+            document.getElementById('session-date').textContent = sessionEntry?.sessionDate || '--';
+            document.getElementById('levels-from-date').textContent = sessionEntry?.baseDate || '--';
+            document.getElementById('session-status').textContent = sessionEntry?.sessionStatus || 'Unknown';
+            document.getElementById('market-state').textContent = data.marketState || 'UNKNOWN';
+            document.getElementById('data-source').textContent = data.dataSource || 'Yahoo Finance';
+            const sourceNote = data.sourceSymbol && data.sourceSymbol !== data.symbol
+                ? `Fallback: ${data.sourceSymbol}`
+                : 'Primary';
+            document.getElementById('source-note').textContent = sourceNote;
+            document.getElementById('lookback-window').textContent = `${state.lookbackSessions} sessions`;
+            document.getElementById('last-updated').textContent = data.asOf ? new Date(data.asOf).toLocaleString() : '--';
+        }
+
+        function buildPivotHistory(candles, timeZone) {
+            const history = [];
+            for (let i = 1; i < candles.length; i += 1) {
+                const baseCandle = candles[i - 1];
+                history.push({
+                    sessionIndex: i,
+                    sessionDate: formatYmd(candles[i].time, timeZone),
+                    baseIndex: i - 1,
+                    baseDate: formatYmd(baseCandle.time, timeZone),
+                    baseCandle,
+                });
+            }
+            return history;
+        }
+
+        function populateSessionSelect(history, defaultSessionIndex) {
+            const select = document.getElementById('session-select');
+            select.innerHTML = '';
+
+            history.forEach((entry) => {
+                const option = document.createElement('option');
+                option.value = entry.sessionIndex;
+                option.textContent = `${entry.sessionDate} (from ${entry.baseDate})`;
+                select.appendChild(option);
+            });
+
+            select.value = String(defaultSessionIndex);
+        }
+
+        function renderForSession(data, sessionIndex) {
+            const entry = state.historyBySessionIndex.get(Number(sessionIndex));
+            if (!entry) return;
+
+            state.selectedSessionIndex = entry.sessionIndex;
+            const lastIndex = state.candles.length - 1;
+            const isLatest = entry.sessionIndex === lastIndex;
+            const isIncomplete = data.session?.isLastSessionComplete === false;
+            entry.sessionStatus = isLatest && isIncomplete ? 'In progress (levels from prior day)' : 'Completed';
+
+            const startIndex = Math.max(0, entry.baseIndex - state.lookbackSessions + 1);
+            const windowCandles = state.candles.slice(startIndex, entry.baseIndex + 1);
+            const atr = calculateATR(windowCandles, 14);
+
+            const rawLevels = calculatePivotLevels('standard', entry.baseCandle.high, entry.baseCandle.low, entry.baseCandle.close);
+            const proxyGamma = calculateGammaFlip(windowCandles, 20);
+            const gammaData = state.gammaData;
+            const gammaLevel = Number.isFinite(gammaData?.gammaFlip) ? gammaData.gammaFlip : proxyGamma;
+            if (Number.isFinite(gammaLevel)) {
+                rawLevels.GAMMA = gammaLevel;
+            }
+            const walls = gammaData?.walls || computeWallsProxy(windowCandles, state.referencePrice, 24);
+            state.lastWalls = walls;
+            const strength = analyzeStrength(rawLevels, windowCandles, state.referencePrice, atr);
+            const levels = buildLevelsArray(rawLevels, state.referencePrice, strength);
+
+            updateMarketSnapshot(data, entry, atr);
+            updatePivotTable(levels);
+            updateKeyLevels(levels, state.referencePrice);
+            renderPivotLines(levels);
+
+            focusChartOnSession(entry.sessionIndex);
+
+            state.lastLevels = levels;
+            state.lastStrength = strength;
+            state.lastSessionEntry = entry;
+            state.lastAtr = atr;
+            state.lastGamma = gammaLevel;
+
+            const gammaSource = state.gammaData?.source || 'Proxy';
+            const gammaLabel = Number.isFinite(gammaLevel)
+                ? `${formatNumber(gammaLevel)} (${gammaSource})`
+                : '--';
+            document.getElementById('gamma-level').innerHTML = `<strong>Gamma flip:</strong> ${gammaLabel}`;
+
+            updateGammaPanel(windowCandles, gammaLevel, state.referencePrice, gammaSource);
+            renderGammaWalls(state.lastWalls);
+
+            maybeLogTouches(levels, state.referencePrice);
+        }
+
+        function refreshSpotPrice(symbol) {
+            if (state.spotTimer) {
+                clearInterval(state.spotTimer);
+            }
+
+            state.spotTimer = setInterval(async () => {
+                const spotData = await fetchIbkrSpot(symbol);
+                if (!spotData?.spot) return;
+
+                state.referencePrice = spotData.spot;
+                document.getElementById('current-price').textContent = formatNumber(state.referencePrice);
+
+                if (state.latestData && state.selectedSessionIndex) {
+                    renderForSession(state.latestData, state.selectedSessionIndex);
+                }
+            }, 5000);
+        }
+
+        function updateGammaPanel(windowCandles, gammaLevel, referencePrice, gammaSource) {
+            const volInfo = classifyVolRegime(windowCandles, 20, 60);
+            const rv = volInfo.value;
+            const vix = state.vixLevel;
+
+            let ivRv = 'Unavailable';
+            if (Number.isFinite(vix) && Number.isFinite(rv)) {
+                const ratio = vix / rv;
+                if (ratio >= 1.1) ivRv = 'Rich';
+                else if (ratio <= 0.9) ivRv = 'Cheap';
+                else ivRv = 'Fair';
+            }
+
+            let gammaMode = 'Unknown';
+            let playbook = '--';
+            let flipDistance = '--';
+            if (Number.isFinite(gammaLevel)) {
+                const diff = ((referencePrice - gammaLevel) / referencePrice) * 100;
+                flipDistance = `${diff >= 0 ? '+' : ''}${formatNumber(diff, 2)}%`;
+                if (Math.abs(diff) < 0.15) {
+                    gammaMode = 'Mixed';
+                    playbook = 'Chop / Balanced';
+                } else if (diff >= 0) {
+                    gammaMode = 'Positive';
+                    playbook = 'Pin / Fade';
+                } else {
+                    gammaMode = 'Negative';
+                    playbook = 'Trend / Speed';
+                }
+            }
+
+            const rvLabel = Number.isFinite(rv) ? `${volInfo.label} (${formatNumber(rv, 2)}%)` : volInfo.label;
+            const ivLabel = Number.isFinite(vix) ? `${ivRv} (VIX ${formatNumber(vix, 2)})` : ivRv;
+
+            const sourceLabel = gammaSource === 'IBKR' ? 'IBKR' : 'Proxy';
+
+            document.getElementById('gamma-mode').innerHTML = `<strong>Gamma Mode</strong>${gammaMode} (${sourceLabel})`;
+            document.getElementById('gamma-distance').innerHTML = `<strong>Flip Distance</strong>${flipDistance}`;
+            document.getElementById('vol-regime').innerHTML = `<strong>Vol Regime</strong>${rvLabel}`;
+            document.getElementById('iv-rv').innerHTML = `<strong>IV vs RV</strong>${ivLabel}`;
+
+            const walls = state.lastWalls;
+            document.getElementById('wall-call').innerHTML = `<strong>Call Wall</strong>${walls?.callWall ? `${formatNumber(walls.callWall.price)} (${walls.callWall.strength})` : '--'}`;
+            document.getElementById('wall-put').innerHTML = `<strong>Put Wall</strong>${walls?.putWall ? `${formatNumber(walls.putWall.price)} (${walls.putWall.strength})` : '--'}`;
+            document.getElementById('wall-pin').innerHTML = `<strong>Pin Candidate</strong>${walls?.pin ? `${formatNumber(walls.pin.price)} (${walls.pin.strength})` : '--'}`;
+            document.getElementById('playbook').innerHTML = `<strong>Playbook</strong>${playbook}`;
+
+            const stats = state.gammaData?.stats;
+            if (stats) {
+                const oiCall = stats.oiCall ? formatNumber(stats.oiCall, 0) : '--';
+                const oiPut = stats.oiPut ? formatNumber(stats.oiPut, 0) : '--';
+                document.getElementById('oi-total').innerHTML = `<strong>Total OI</strong>C ${oiCall} | P ${oiPut}`;
+
+                const concentration = Number.isFinite(stats.oiConcentration)
+                    ? `${formatNumber(stats.oiConcentration, 2)}%`
+                    : '--';
+                document.getElementById('oi-concentration').innerHTML = `<strong>OI Concentration</strong>${concentration}`;
+
+                const atmIv = Number.isFinite(stats.atmIV) ? `${formatNumber(stats.atmIV * 100, 2)}%` : '--';
+                document.getElementById('atm-iv').innerHTML = `<strong>ATM IV</strong>${atmIv}`;
+
+                const skew = Number.isFinite(stats.skew25d) ? `${formatNumber(stats.skew25d * 100, 2)}%` : '--';
+                document.getElementById('skew-25d').innerHTML = `<strong>25Δ Skew</strong>${skew}`;
+
+                const zeroDte = Number.isFinite(stats.zeroDteShare) ? `${formatNumber(stats.zeroDteShare, 2)}%` : '--';
+                document.getElementById('zero-dte-share').innerHTML = `<strong>0DTE Share</strong>${zeroDte}`;
+
+                const coverage = stats.totalContracts
+                    ? Math.round((stats.withGreeks / stats.totalContracts) * 100)
+                    : 0;
+                const qualityLabel = coverage >= 80 ? 'Fresh' : coverage >= 50 ? 'Partial' : 'Stale';
+                document.getElementById('data-quality').innerHTML = `<strong>Data Quality</strong>${qualityLabel} (${coverage}%)`;
+
+                // Gamma Confidence Score (0-100) with quality cap
+                const clamp = (v, min = 0, max = 1) => Math.min(max, Math.max(min, v));
+                const oiContrib = clamp((stats.oiConcentration || 0) / 40);
+                const dteContrib = clamp((stats.zeroDteShare || 0) / 40);
+                const rvContrib = volInfo.label === 'High' ? 1 : volInfo.label === 'Normal' ? 0.5 : 0;
+                const ivContrib = ivRv === 'Rich' ? 1 : ivRv === 'Fair' ? 0.5 : 0;
+
+                let flipContrib = 0;
+                if (Number.isFinite(gammaLevel)) {
+                    const diff = Math.abs((referencePrice - gammaLevel) / referencePrice) * 100;
+                    flipContrib = clamp(1 - diff / 0.8);
+                }
+
+                const qualityContrib = clamp(coverage / 80);
+
+                let score =
+                    100 *
+                    (0.25 * oiContrib +
+                        0.2 * dteContrib +
+                        0.2 * rvContrib +
+                        0.1 * ivContrib +
+                        0.15 * flipContrib +
+                        0.1 * qualityContrib);
+
+                if (qualityContrib < 0.5) {
+                    score = Math.min(score, 40);
+                }
+
+                let scoreLabel = 'Low';
+                if (score >= 70) scoreLabel = 'High';
+                else if (score >= 45) scoreLabel = 'Medium';
+
+                const drivers = [];
+                if (oiContrib >= 0.7) drivers.push('OI concentration');
+                if (dteContrib >= 0.7) drivers.push('0DTE share');
+                if (rvContrib === 1) drivers.push('high RV');
+                if (ivContrib === 1) drivers.push('IV rich');
+                if (flipContrib >= 0.7) drivers.push('near flip');
+                if (!drivers.length) drivers.push('mixed signals');
+
+                const driverText = drivers.slice(0, 3).join(', ');
+                document.getElementById('gamma-confidence').innerHTML = `<strong>Gamma Confidence</strong>${Math.round(score)} (${scoreLabel})<br><span style="color: var(--muted); font-size: 11px;">Drivers: ${driverText}</span>`;
+            } else {
+                document.getElementById('oi-total').innerHTML = `<strong>Total OI</strong>--`;
+                document.getElementById('oi-concentration').innerHTML = `<strong>OI Concentration</strong>--`;
+                document.getElementById('atm-iv').innerHTML = `<strong>ATM IV</strong>--`;
+                document.getElementById('skew-25d').innerHTML = `<strong>25Δ Skew</strong>--`;
+                document.getElementById('zero-dte-share').innerHTML = `<strong>0DTE Share</strong>--`;
+                document.getElementById('data-quality').innerHTML = `<strong>Data Quality</strong>--`;
+                document.getElementById('gamma-confidence').innerHTML = `<strong>Gamma Confidence</strong>--`;
+            }
+        }
+
+        function buildReportPayload() {
+            if (!state.latestData || !state.lastSessionEntry) return null;
+
+            return {
+                generatedAt: new Date().toISOString(),
+                symbol: state.symbol,
+                pivotType: state.pivotType,
+                interval: state.interval,
+                lookbackSessions: state.lookbackSessions,
+                tradingDay: state.lastSessionEntry.sessionDate,
+                levelsFrom: state.lastSessionEntry.baseDate,
+                referencePrice: state.referencePrice,
+                dataSource: state.latestData.dataSource || state.dataSource,
+                sourceSymbol: state.latestData.sourceSymbol || state.symbol,
+                marketState: state.latestData.marketState || state.marketState,
+                atr: state.lastAtr,
+                ema9: Number(document.getElementById('ema9-value').textContent) || null,
+                ema21: Number(document.getElementById('ema21-value').textContent) || null,
+                gammaFlip: state.lastGamma,
+                gammaSource: state.gammaData?.source || 'Proxy',
+                gammaUsedOpenInterest: state.gammaData?.usedOpenInterest || false,
+                vix: state.vixLevel,
+                walls: state.lastWalls,
+                levels: state.lastLevels,
+            };
+        }
+
+        function downloadBlob(filename, content, type) {
+            const blob = new Blob([content], { type });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = filename;
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            URL.revokeObjectURL(url);
+        }
+
+        function exportCsv() {
+            const report = buildReportPayload();
+            if (!report) {
+                setDebug('Export failed: no report data');
+                return;
+            }
+
+            const header = [
+                'label',
+                'type',
+                'value',
+                'distance_pct',
+                'strength',
+                'touches',
+                'bounces',
+                'breaks',
+            ];
+
+            const rows = report.levels.map((level) => [
+                level.label,
+                level.type,
+                formatNumber(level.value, 4),
+                formatNumber(level.distance, 4),
+                level.strength,
+                level.touches,
+                level.bounces,
+                level.breaks,
+            ]);
+
+            const meta = [
+                `# symbol=${report.symbol}`,
+                `# pivotType=${report.pivotType}`,
+                `# interval=${report.interval}`,
+                `# tradingDay=${report.tradingDay}`,
+                `# levelsFrom=${report.levelsFrom}`,
+                `# lookbackSessions=${report.lookbackSessions}`,
+                `# ema9=${report.ema9}`,
+                `# ema21=${report.ema21}`,
+                `# gammaFlip=${report.gammaFlip}`,
+                `# gammaSource=${report.gammaSource}`,
+                `# gammaUsedOpenInterest=${report.gammaUsedOpenInterest}`,
+                `# vix=${report.vix}`,
+                `# dataSource=${report.dataSource}`,
+                `# generatedAt=${report.generatedAt}`,
+            ];
+
+            const csv = [
+                ...meta,
+                header.join(','),
+                ...rows.map((row) => row.join(',')),
+            ].join('\n');
+
+            downloadBlob(`pivot_levels_${report.symbol}_${report.tradingDay}.csv`, csv, 'text/csv');
+        }
+
+        function exportJson() {
+            const report = buildReportPayload();
+            if (!report) {
+                setDebug('Export failed: no report data');
+                return;
+            }
+            const json = JSON.stringify(report, null, 2);
+            downloadBlob(`pivot_levels_${report.symbol}_${report.tradingDay}.json`, json, 'application/json');
+        }
+
+        function exportTxt() {
+            const report = buildReportPayload();
+            if (!report) {
+                setDebug('Export failed: no report data');
+                return;
+            }
+            const lines = report.levels
+                .filter((level) => Number.isFinite(level.value))
+                .map((level) => {
+                    const price = formatNumber(level.value, 2);
+                    const label = level.label ? `: ${level.label}` : '';
+                    return `${price}${label}`;
+                });
+            const content = lines.join('\n').trim();
+            downloadBlob(`pivot_levels_${report.symbol}_${report.tradingDay}.txt`, content, 'text/plain');
+        }
+
+        function exportTxtZones() {
+            const report = buildReportPayload();
+            if (!report) {
+                setDebug('Export failed: no report data');
+                return;
+            }
+
+            const zoneInput = document.getElementById('export-zone-bps');
+            const rawZoneBps = zoneInput ? Number(zoneInput.value) : 2;
+            const zoneBps = Number.isFinite(rawZoneBps) ? Math.max(0, rawZoneBps) : 2;
+
+            const lineRows = [];
+            const supportZones = [];
+            const resistanceZones = [];
+
+            report.levels.forEach((level) => {
+                if (!Number.isFinite(level.value)) return;
+                const price = formatNumber(level.value, 2);
+                const label = level.label ? `: ${level.label}` : '';
+                lineRows.push(`${price}${label}`);
+
+                const band = (level.value * zoneBps) / 1e4;
+                const low = formatNumber(level.value - band, 2);
+                const high = formatNumber(level.value + band, 2);
+                const zoneLine = `${low}-${high}${label}`;
+
+                if (level.label?.startsWith('S')) {
+                    supportZones.push(zoneLine);
+                } else if (level.label?.startsWith('R')) {
+                    resistanceZones.push(zoneLine);
+                }
+            });
+
+            const content = [
+                lineRows.join('\n'),
+                '---',
+                supportZones.join('\n'),
+                '---',
+                resistanceZones.join('\n'),
+            ].join('\n').trim();
+
+            downloadBlob(
+                `pivot_levels_${report.symbol}_${report.tradingDay}_zones.txt`,
+                content,
+                'text/plain'
+            );
+        }
+
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+        function normalizeRangeForInterval(range, interval) {
+            if (interval === '1wk') {
+                if (range === '1mo') return '3mo';
+                if (range === '3mo') return '6mo';
+            }
+            if (interval === '1mo') {
+                if (range === '1mo' || range === '3mo' || range === '6mo') return '1y';
+            }
+            return range;
+        }
+
+        async function fetchJson(url, timeoutMs = 10000) {
+            const supportsAbort = typeof AbortController !== 'undefined';
+            const controller = supportsAbort ? new AbortController() : null;
+            const timeoutId = setTimeout(() => {
+                if (controller) controller.abort();
+            }, timeoutMs);
+            try {
+                if (typeof fetch === 'function') {
+                    const response = await fetch(url, controller ? { signal: controller.signal } : undefined);
+                    if (!response.ok) {
+                        const error = new Error(`HTTP ${response.status}`);
+                        error.status = response.status;
+                        throw error;
+                    }
+                    return await response.json();
+                }
+
+                return await new Promise((resolve, reject) => {
+                    const xhr = new XMLHttpRequest();
+                    xhr.open('GET', url, true);
+                    xhr.timeout = timeoutMs;
+                    xhr.onreadystatechange = () => {
+                        if (xhr.readyState === XMLHttpRequest.DONE) {
+                            if (xhr.status >= 200 && xhr.status < 300) {
+                                try {
+                                    resolve(JSON.parse(xhr.responseText));
+                                } catch (error) {
+                                    reject(new Error('Invalid JSON'));
+                                }
+                            } else {
+                                const error = new Error(`HTTP ${xhr.status}`);
+                                error.status = xhr.status;
+                                reject(error);
+                            }
+                        }
+                    };
+                    xhr.onerror = () => reject(new Error('Network error'));
+                    xhr.ontimeout = () => reject(new Error('Request timeout'));
+                    xhr.send();
+                });
+            } finally {
+                clearTimeout(timeoutId);
+            }
+        }
+
+        function formatYmd(epochSeconds, timeZone) {
+            const date = new Date(epochSeconds * 1000);
+            const formatter = new Intl.DateTimeFormat('en-CA', {
+                timeZone,
+                year: 'numeric',
+                month: '2-digit',
+                day: '2-digit',
+            });
+            const parts = Object.fromEntries(formatter.formatToParts(date).map((p) => [p.type, p.value]));
+            return `${parts.year}-${parts.month}-${parts.day}`;
+        }
+
+        function normalizeYahooPayload(payload, requestedSymbol, yahooSymbol) {
+            const result = payload?.chart?.result?.[0];
+            if (!result) throw new Error('Invalid Yahoo response');
+
+            const meta = result.meta || {};
+            const timestamps = result.timestamp || [];
+            const quote = result.indicators?.quote?.[0] || {};
+            const candles = [];
+
+            for (let i = 0; i < timestamps.length; i += 1) {
+                const open = quote.open?.[i];
+                const high = quote.high?.[i];
+                const low = quote.low?.[i];
+                const close = quote.close?.[i];
+                const volume = quote.volume?.[i];
+
+                if (
+                    Number.isFinite(open) &&
+                    Number.isFinite(high) &&
+                    Number.isFinite(low) &&
+                    Number.isFinite(close)
+                ) {
+                    candles.push({
+                        time: timestamps[i],
+                        open: Number(open),
+                        high: Number(high),
+                        low: Number(low),
+                        close: Number(close),
+                        volume: Number.isFinite(volume) ? volume : 0,
+                    });
+                }
+            }
+
+            if (!candles.length) throw new Error('No valid candles from Yahoo');
+
+            const timeZone = meta.exchangeTimezoneName || 'America/New_York';
+            const now = Math.floor(Date.now() / 1000);
+            const regularEnd = meta.currentTradingPeriod?.regular?.end;
+            let isLastSessionComplete = (meta.marketState || '').toUpperCase() === 'CLOSED';
+
+            if (Number.isFinite(regularEnd)) {
+                isLastSessionComplete = now >= regularEnd;
+            }
+
+            const lastIndex = candles.length - 1;
+            let usedIndex = lastIndex;
+            const lastDate = formatYmd(candles[lastIndex].time, timeZone);
+            const todayDate = formatYmd(now, timeZone);
+
+            if (!isLastSessionComplete && lastIndex > 0 && lastDate === todayDate) {
+                usedIndex = lastIndex - 1;
+            }
+
+            return {
+                symbol: requestedSymbol,
+                yahooSymbol,
+                currency: meta.currency || 'USD',
+                exchangeName: meta.exchangeName || 'UNKNOWN',
+                marketState: meta.marketState || 'UNKNOWN',
+                currentPrice: meta.regularMarketPrice || candles[lastIndex].close,
+                previousClose: meta.previousClose || candles[Math.max(0, lastIndex - 1)].close,
+                candles,
+                session: {
+                    usedIndex,
+                    usedDate: formatYmd(candles[usedIndex].time, timeZone),
+                    isLastSessionComplete,
+                    timeZone,
+                },
+                dataSource: 'Yahoo Finance (fallback)',
+                asOf: new Date().toISOString(),
+            };
+        }
+
+        async function fetchYahooWithBackoff(symbol, range, interval, maxRetries = 4) {
+            const yahooSymbol = symbol === 'SPX' ? '^GSPC' : symbol;
+            const hosts = ['query1.finance.yahoo.com', 'query2.finance.yahoo.com'];
+
+            let attempt = 0;
+            let lastError = null;
+
+            while (attempt <= maxRetries) {
+                attempt += 1;
+                try {
+                    let payload = null;
+                    for (const host of hosts) {
+                        const yahooUrl = `https://${host}/v8/finance/chart/${encodeURIComponent(yahooSymbol)}?range=${encodeURIComponent(range)}&interval=${encodeURIComponent(interval)}`;
+                        const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(yahooUrl)}`;
+                        const wrapped = await fetchJson(proxyUrl, 12000);
+                        if (!wrapped?.contents) continue;
+                        payload = JSON.parse(wrapped.contents);
+                        if (payload?.chart?.result?.[0]) break;
+                    }
+
+                    if (!payload) {
+                        throw new Error('Yahoo proxy returned no data');
+                    }
+
+                    const normalized = normalizeYahooPayload(payload, symbol, yahooSymbol);
+                    normalized.fetch = { fromCache: false, attempts: attempt };
+                    return normalized;
+                } catch (error) {
+                    lastError = error;
+                    const status = error?.status || 0;
+                    const retryable = [0, 429, 500, 502, 503, 504].includes(status);
+                    if (!retryable || attempt > maxRetries) {
+                        throw error;
+                    }
+                    const delay = Math.min(8000, 800 * Math.pow(2, attempt - 1));
+                    await sleep(delay * (0.7 + Math.random() * 0.6));
+                }
+            }
+
+            throw lastError || new Error('Yahoo fallback failed');
+        }
+
+        async function fetchVixLevel(interval, range) {
+            try {
+                const vixInterval = interval === '1d' ? '1d' : '1d';
+                const vixRange = range === '1y' ? '6mo' : '1mo';
+                const query = `symbol=${encodeURIComponent('^VIX')}&range=${encodeURIComponent(vixRange)}&interval=${encodeURIComponent(vixInterval)}`;
+                const rawOrigin = window.location.origin;
+                const origin = !rawOrigin || rawOrigin === 'null' ? 'http://127.0.0.1:3000' : rawOrigin;
+                const apiUrl = `${origin}/api/market?${query}`;
+                const data = await fetchJson(apiUrl, 6000);
+                if (Number.isFinite(data?.currentPrice)) {
+                    return data.currentPrice;
+                }
+            } catch (error) {
+                console.warn('VIX fetch failed', error);
+            }
+            return null;
+        }
+
+        async function fetchGammaData(symbol) {
+            try {
+                const expiryMode = document.getElementById('gamma-expiry-select')?.value || 'front';
+                const rawOrigin = window.location.origin;
+                const origin = !rawOrigin || rawOrigin === 'null' ? 'http://127.0.0.1:3000' : rawOrigin;
+                const apiUrl = `${origin}/api/gamma?symbol=${encodeURIComponent(symbol)}&expiry=${encodeURIComponent(expiryMode)}&limit=60`;
+                const data = await fetchJson(apiUrl, 6000);
+                if (data?.gammaFlip) {
+                    return {
+                        source: data.source || 'IBKR',
+                        gammaFlip: data.gammaFlip,
+                        walls: {
+                            callWall: data.callWall,
+                            putWall: data.putWall,
+                            pin: data.pin,
+                        },
+                        usedOpenInterest: data.usedOpenInterest,
+                        stats: data.stats || null,
+                        expiryMode: data.expiryMode || expiryMode,
+                    };
+                }
+            } catch (error) {
+                console.warn('Gamma fetch failed', error);
+            }
+            return null;
+        }
+
+        async function fetchIbkrMarket(symbol, interval, range) {
+            try {
+                const rawOrigin = window.location.origin;
+                const origin = !rawOrigin || rawOrigin === 'null' ? 'http://127.0.0.1:3000' : rawOrigin;
+                const apiUrl = `${origin}/api/ib/market?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}&range=${encodeURIComponent(range)}`;
+                return await fetchJson(apiUrl, 6000);
+            } catch (error) {
+                console.warn('IBKR market fetch failed', error);
+                return null;
+            }
+        }
+
+        async function fetchIbkrSpot(symbol) {
+            try {
+                const rawOrigin = window.location.origin;
+                const origin = !rawOrigin || rawOrigin === 'null' ? 'http://127.0.0.1:3000' : rawOrigin;
+                const apiUrl = `${origin}/api/ib/spot?symbol=${encodeURIComponent(symbol)}`;
+                return await fetchJson(apiUrl, 4000);
+            } catch (error) {
+                console.warn('IBKR spot fetch failed', error);
+                return null;
+            }
+        }
+
+        async function postBars(bars, symbol, intervalSec) {
+            if (!bars?.length) return;
+            const barInterval = Number.isFinite(intervalSec) ? intervalSec : intervalToSeconds(state.intradayInterval);
+            const rawOrigin = window.location.origin;
+            const origin = !rawOrigin || rawOrigin === 'null' ? 'http://127.0.0.1:3000' : rawOrigin;
+            const apiUrl = `${origin}/api/bars`;
+            const payload = {
+                bars: bars.map((bar) => ({
+                    symbol,
+                    ts: bar.time * 1000,
+                    open: bar.open,
+                    high: bar.high,
+                    low: bar.low,
+                    close: bar.close,
+                    volume: bar.volume || 0,
+                    bar_interval_sec: barInterval,
+                })),
+            };
+            try {
+                await fetch(apiUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
+            } catch (error) {
+                console.warn('Bar sync failed', error);
+            }
+        }
+
+        async function syncIntradayBars(symbol) {
+            if (state.intradaySyncInFlight) return;
+            state.intradaySyncInFlight = true;
+            const interval = state.intradayInterval;
+            const range = state.intradayRange;
+            try {
+                let data = null;
+                try {
+                    data = await fetchIbkrMarket(symbol, interval, range);
+                    if (!data?.candles?.length) {
+                        throw new Error('IBKR intraday data unavailable');
+                    }
+                } catch (error) {
+                    console.warn('IBKR intraday failed, falling back to Yahoo proxy', error);
+                    data = await fetchYahooWithBackoff(symbol, range, interval);
+                }
+
+                if (!data?.candles?.length) return;
+                const intradayEma9 = calculateEMA(data.candles, 9);
+                const intradayEma21 = calculateEMA(data.candles, 21);
+                const intradayVwap = calculateVWAP(data.candles, data.session?.timeZone || state.timeZone);
+                state.lastEma9 = intradayEma9.length ? intradayEma9[intradayEma9.length - 1].value : state.lastEma9;
+                state.lastEma21 = intradayEma21.length ? intradayEma21[intradayEma21.length - 1].value : state.lastEma21;
+                state.lastVwap = intradayVwap.length ? intradayVwap[intradayVwap.length - 1].value : state.lastVwap;
+                const barSyncKey = `${symbol}_${interval}_${data.candles.length}`;
+                if (state.lastIntradaySyncKey === barSyncKey) return;
+                state.lastIntradaySyncKey = barSyncKey;
+                await postBars(data.candles, symbol, intervalToSeconds(interval));
+            } catch (error) {
+                console.warn('Intraday sync failed', error);
+            } finally {
+                state.intradaySyncInFlight = false;
+            }
+        }
+
+        function startIntradaySync(symbol) {
+            if (state.intradayTimer) {
+                clearInterval(state.intradayTimer);
+            }
+            state.intradayTimer = setInterval(() => {
+                startIntradaySync(symbol);
+            }, 60000);
+            syncIntradayBars(symbol);
+        }
+
+        async function postTouchEvents(events) {
+            if (!events?.length) return;
+            const rawOrigin = window.location.origin;
+            const origin = !rawOrigin || rawOrigin === 'null' ? 'http://127.0.0.1:3000' : rawOrigin;
+            const apiUrl = `${origin}/api/events`;
+            try {
+                await fetch(apiUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ events }),
+                });
+            } catch (error) {
+                console.warn('Event sync failed', error);
+            }
+        }
+
+        async function scoreTouchEvents(events) {
+            if (!events?.length) return;
+            const rawOrigin = window.location.origin;
+            const origin = !rawOrigin || rawOrigin === 'null' ? 'http://127.0.0.1:5003' : 'http://127.0.0.1:5003';
+            const apiUrl = `${origin}/score`;
+            const event = events[0];
+            const cacheKey = `${event.symbol}_${event.level_type}_${Math.floor(event.ts_event / 60000)}`;
+            const cached = state.mlCache.get(cacheKey);
+            if (cached && Date.now() - cached.ts < 60000) {
+                updateMlPanel(cached.payload);
+                return;
+            }
+            const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+            const timeoutId = setTimeout(() => controller?.abort(), 250);
+            try {
+                const response = await fetch(apiUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ event }),
+                    signal: controller ? controller.signal : undefined,
+                });
+                if (!response.ok) return;
+                const payload = await response.json();
+                payload.preview = Boolean(event.preview);
+                payload.preview_level = event.level_type;
+                payload.preview_distance_bps = event.distance_bps;
+                state.mlCache.set(cacheKey, { ts: Date.now(), payload });
+                state.lastMlScore = payload;
+                updateMlPanel(payload);
+            } catch (error) {
+                console.warn('ML score failed', error);
+            } finally {
+                clearTimeout(timeoutId);
+            }
+        }
+
+        function computeConfluence(levels, currentLevel, thresholdBps = 10) {
+            const nearby = levels.filter((lvl) => lvl.label !== currentLevel.label)
+                .filter((lvl) => Math.abs(lvl.distanceBps) <= thresholdBps);
+            return {
+                count: nearby.length,
+                types: nearby.map((lvl) => lvl.label),
+            };
+        }
+
+        function maybeLogTouches(levels, referencePrice) {
+            const now = Date.now();
+            const thresholdBps = 10;
+            const previewBps = Number.isFinite(state.mlPreviewBps) ? state.mlPreviewBps : 30;
+            const cooldownMs = 10 * 60 * 1000;
+            const events = [];
+            let nearest = null;
+            const barIntervalSec = intervalToSeconds(state.intradayInterval);
+            const ema9Value = state.lastEma9;
+            const ema21Value = state.lastEma21;
+            const emaState = Number.isFinite(ema9Value) && Number.isFinite(ema21Value)
+                ? (ema9Value > ema21Value ? 1 : ema9Value < ema21Value ? -1 : 0)
+                : null;
+            const vwapValue = state.lastVwap;
+            const vwapDistBps = Number.isFinite(vwapValue)
+                ? ((referencePrice - vwapValue) / vwapValue) * 1e4
+                : null;
+
+            levels.forEach((level) => {
+                const absDist = Math.abs((referencePrice - level.value) / level.value) * 1e4;
+                if (!nearest || absDist < nearest.distance) {
+                    nearest = { level, distance: absDist };
+                }
+                if (absDist > thresholdBps) return;
+
+                const key = `${state.symbol}_${level.label}`;
+                const last = state.lastTouchByLevel.get(key);
+                if (last && now - last < cooldownMs) return;
+
+                const confluence = computeConfluence(levels, level, thresholdBps);
+                const touchSide = referencePrice >= level.value ? 1 : -1;
+                const gammaFlipDist = state.lastGamma
+                    ? ((referencePrice - state.lastGamma) / state.lastGamma) * 1e4
+                    : null;
+
+                const gammaMode = state.gammaData?.gammaFlip
+                    ? (referencePrice >= state.gammaData.gammaFlip ? 1 : -1)
+                    : 0;
+
+                const event = {
+                    event_id: crypto.randomUUID(),
+                    symbol: state.symbol,
+                    ts_event: now,
+                    session: 'RTH',
+                    level_type: level.label,
+                    level_price: level.value,
+                    touch_price: referencePrice,
+                    touch_side: touchSide,
+                    distance_bps: absDist,
+                    is_first_touch_today: 0,
+                    touch_count_today: 1,
+                    confluence_count: confluence.count,
+                    confluence_types: JSON.stringify(confluence.types),
+                    ema9: Number.isFinite(ema9Value) ? ema9Value : null,
+                    ema21: Number.isFinite(ema21Value) ? ema21Value : null,
+                    ema_state: emaState,
+                    vwap: Number.isFinite(vwapValue) ? vwapValue : null,
+                    vwap_dist_bps: Number.isFinite(vwapDistBps) ? vwapDistBps : null,
+                    atr: state.lastAtr,
+                    rv_30: null,
+                    rv_regime: null,
+                    iv_rv_state: null,
+                    gamma_mode: gammaMode,
+                    gamma_flip: state.lastGamma,
+                    gamma_flip_dist_bps: gammaFlipDist,
+                    gamma_confidence: null,
+                    oi_concentration_top5: state.gammaData?.stats?.oiConcentration || null,
+                    zero_dte_share: state.gammaData?.stats?.zeroDteShare || null,
+                    data_quality: state.gammaData?.stats?.totalContracts
+                        ? state.gammaData.stats.withGreeks / state.gammaData.stats.totalContracts
+                        : null,
+                    bar_interval_sec: barIntervalSec,
+                    source: state.dataSource,
+                    created_at: now,
+                };
+
+                events.push(event);
+                state.lastTouchByLevel.set(key, now);
+            });
+
+            if (events.length) {
+                postTouchEvents(events);
+                scoreTouchEvents(events);
+                return;
+            }
+
+            if (state.mlPreviewEnabled && nearest && nearest.distance <= previewBps) {
+                const level = nearest.level;
+                const absDist = nearest.distance;
+                const confluence = computeConfluence(levels, level, thresholdBps);
+                const touchSide = referencePrice >= level.value ? 1 : -1;
+                const gammaFlipDist = state.lastGamma
+                    ? ((referencePrice - state.lastGamma) / state.lastGamma) * 1e4
+                    : null;
+                const gammaMode = state.gammaData?.gammaFlip
+                    ? (referencePrice >= state.gammaData.gammaFlip ? 1 : -1)
+                    : 0;
+
+                const previewEvent = {
+                    event_id: crypto.randomUUID(),
+                    symbol: state.symbol,
+                    ts_event: now,
+                    session: 'RTH',
+                    level_type: level.label,
+                    level_price: level.value,
+                    touch_price: referencePrice,
+                    touch_side: touchSide,
+                    distance_bps: absDist,
+                    is_first_touch_today: 0,
+                    touch_count_today: 0,
+                    confluence_count: confluence.count,
+                    confluence_types: JSON.stringify(confluence.types),
+                    ema9: Number.isFinite(ema9Value) ? ema9Value : null,
+                    ema21: Number.isFinite(ema21Value) ? ema21Value : null,
+                    ema_state: emaState,
+                    vwap: Number.isFinite(vwapValue) ? vwapValue : null,
+                    vwap_dist_bps: Number.isFinite(vwapDistBps) ? vwapDistBps : null,
+                    atr: state.lastAtr,
+                    rv_30: null,
+                    rv_regime: null,
+                    iv_rv_state: null,
+                    gamma_mode: gammaMode,
+                    gamma_flip: state.lastGamma,
+                    gamma_flip_dist_bps: gammaFlipDist,
+                    gamma_confidence: null,
+                    oi_concentration_top5: state.gammaData?.stats?.oiConcentration || null,
+                    zero_dte_share: state.gammaData?.stats?.zeroDteShare || null,
+                    data_quality: state.gammaData?.stats?.totalContracts
+                        ? state.gammaData.stats.withGreeks / state.gammaData.stats.totalContracts
+                        : null,
+                    bar_interval_sec: barIntervalSec,
+                    source: state.dataSource,
+                    created_at: now,
+                    preview: true,
+                };
+                scoreTouchEvents([previewEvent]);
+            }
+        }
+
+        function setDebug(message) {
+            const panel = document.getElementById('debug-panel');
+            const status = document.getElementById('debug-status');
+            panel.style.display = 'block';
+            status.innerHTML = `<strong>Debug:</strong> ${message}`;
+        }
+
+        function setMlText(id, value) {
+            const el = document.getElementById(id);
+            if (el) {
+                el.textContent = value;
+            }
+        }
+
+        function formatCalibrationLabel(calibration, horizon = 15) {
+            if (!calibration) return '--';
+            const key = String(horizon);
+            const reject = calibration?.reject?.[key];
+            const brk = calibration?.break?.[key];
+            if (!reject && !brk) return '--';
+            const rejectLabel = reject || '--';
+            const breakLabel = brk || '--';
+            return `r${horizon}:${rejectLabel} b${horizon}:${breakLabel}`;
+        }
+
+        function updateMlMetaFields(metaSource) {
+            if (!metaSource) return;
+            const modelVersion = metaSource.model_version || metaSource.version || '--';
+            const trainedEnd = metaSource.trained_end_ts;
+            const trainedLabel = Number.isFinite(trainedEnd) ? formatDateTime(trainedEnd) : '--';
+            const calibrationLabel = formatCalibrationLabel(
+                metaSource.calibration,
+                metaSource.best_horizon || 15
+            );
+            setMlText('ml-model', modelVersion);
+            setMlText('ml-trained', trainedLabel);
+            setMlText('ml-calibration', calibrationLabel);
+        }
+
+        function updateMlPanel(payload) {
+            const panel = document.getElementById('ml-panel');
+            const status = document.getElementById('ml-status');
+            const detail = document.getElementById('ml-detail');
+            if (!panel || !status || !detail) return;
+
+            updateMlMetaFields(payload || state.mlMeta);
+
+            if (!payload || !payload.scores) {
+                return;
+            }
+
+            const scores = payload.scores || {};
+            const best = payload.best_horizon ? `${payload.best_horizon}m` : '--';
+            setMlText('ml-best-horizon', best);
+
+            const flags = payload.quality_flags && payload.quality_flags.length
+                ? ` | Flags: ${payload.quality_flags.join(', ')}`
+                : '';
+            const previewTag = payload.preview
+                ? `Preview ${payload.preview_level} (${formatNumber(payload.preview_distance_bps)} bps)`
+                : `Best horizon: ${best}`;
+            const statusLabel = payload.status === 'degraded'
+                ? `${previewTag} (degraded)`
+                : previewTag;
+            status.textContent = statusLabel;
+            const horizons = [5, 15, 60];
+            const missingBreak = horizons.some((h) => {
+                const r = scores[`prob_reject_${h}m`];
+                const b = scores[`prob_break_${h}m`];
+                return r != null && b == null;
+            });
+            detail.textContent = missingBreak
+                ? `Break model unavailable; showing reject only${flags}`
+                : `Reject/Break/MFE/MAE shown by horizon${flags}`;
+
+            horizons.forEach((h) => {
+                const reject = scores[`prob_reject_${h}m`];
+                const brk = scores[`prob_break_${h}m`];
+                const mfe = scores[`exp_mfe_bps_${h}m`];
+                const mae = scores[`exp_mae_bps_${h}m`];
+                setMlText(`ml-reject-${h}m`, reject == null ? '--' : formatPercent(reject * 100));
+                setMlText(`ml-break-${h}m`, brk == null ? '--' : formatPercent(brk * 100));
+                setMlText(`ml-mfe-${h}m`, mfe == null ? '--' : `${formatNumber(mfe)} bps`);
+                setMlText(`ml-mae-${h}m`, mae == null ? '--' : `${formatNumber(mae)} bps`);
+            });
+        }
+
+        function updateMlMetrics(metrics) {
+            const auc = metrics?.rolling?.roc_auc;
+            const brier = metrics?.rolling?.brier;
+            const ece = metrics?.calibration?.rolling_ece;
+            setMlText('ml-metric-auc', auc == null ? '--' : formatNumber(auc, 3));
+            setMlText('ml-metric-brier', brier == null ? '--' : formatNumber(brier, 3));
+            setMlText('ml-metric-ece', ece == null ? '--' : formatNumber(ece, 3));
+
+            const note = document.getElementById('ml-metric-note');
+            if (!note) return;
+            if (!metrics || metrics.status !== 'ok') {
+                note.textContent = 'Metrics: --';
+                return;
+            }
+            const latest = metrics.latest;
+            const latestLabel = latest
+                ? `Latest fold ${latest.fold} (${latest.test_start} -> ${latest.test_end})`
+                : 'Latest fold --';
+            note.textContent = `${latestLabel} · Updated ${metrics.updated_at}`;
+
+            updateMlSparklines(metrics.series || {});
+        }
+
+        function updateMlSparklines(series) {
+            renderSparkline('ml-spark-auc', series?.roc_auc || [], '#60a5fa');
+            renderSparkline('ml-spark-brier', series?.brier || [], '#f59e0b');
+            renderSparkline('ml-spark-ece', series?.ece || [], '#ef4444');
+        }
+
+        function renderSparkline(elementId, dataPoints, stroke) {
+            const svg = document.getElementById(elementId);
+            if (!svg) return;
+            svg.innerHTML = '';
+            if (!Array.isArray(dataPoints) || dataPoints.length === 0) {
+                return;
+            }
+            const values = dataPoints.map((pt) => pt.value).filter((val) => Number.isFinite(val));
+            if (values.length === 0) return;
+            const min = Math.min(...values);
+            const max = Math.max(...values);
+            const range = max - min || 1;
+            const width = 120;
+            const height = 32;
+            if (values.length === 1) {
+                const y = height - ((values[0] - min) / range) * (height - 4) - 2;
+                const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+                circle.setAttribute('cx', String(width / 2));
+                circle.setAttribute('cy', String(y));
+                circle.setAttribute('r', '3');
+                circle.setAttribute('fill', stroke);
+                svg.appendChild(circle);
+                return;
+            }
+            const step = width / (values.length - 1);
+            const points = values
+                .map((val, idx) => {
+                    const x = idx * step;
+                    const y = height - ((val - min) / range) * (height - 4) - 2;
+                    return `${x},${y}`;
+                })
+                .join(' ');
+            const polyline = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+            polyline.setAttribute('points', points);
+            polyline.setAttribute('fill', 'none');
+            polyline.setAttribute('stroke', stroke);
+            polyline.setAttribute('stroke-width', '2');
+            polyline.setAttribute('stroke-linecap', 'round');
+            polyline.setAttribute('stroke-linejoin', 'round');
+            svg.appendChild(polyline);
+        }
+
+        async function loadMlMetrics() {
+            const rawOrigin = window.location.origin;
+            const origin = !rawOrigin || rawOrigin === 'null' ? 'http://127.0.0.1:3000' : rawOrigin;
+            const apiUrl = `${origin}/api/ml/metrics`;
+            try {
+                const response = await fetch(apiUrl);
+                if (!response.ok) {
+                    updateMlMetrics(null);
+                    return;
+                }
+                const payload = await response.json();
+                state.mlMetrics = payload;
+                updateMlMetrics(payload);
+            } catch (error) {
+                console.warn('ML metrics fetch failed', error);
+            }
+        }
+
+        async function loadMlHealth() {
+            const apiUrl = 'http://127.0.0.1:5003/health';
+            try {
+                const response = await fetch(apiUrl);
+                if (!response.ok) return;
+                const payload = await response.json();
+                state.mlMeta = payload?.manifest || null;
+                updateMlMetaFields(state.mlMeta);
+            } catch (error) {
+                console.warn('ML health fetch failed', error);
+            }
+        }
+
+        async function loadMarketData() {
+            const symbol = document.getElementById('symbol-select').value;
+            let range = document.getElementById('range-select').value;
+            const pivotType = document.getElementById('pivot-select').value;
+            const interval = document.getElementById('interval-select').value;
+            const lookback = Number(document.getElementById('lookback-select').value) || 20;
+            const effectiveRange = normalizeRangeForInterval(range, interval);
+            if (effectiveRange !== range) {
+                range = effectiveRange;
+                document.getElementById('range-select').value = effectiveRange;
+            }
+
+            state.symbol = symbol;
+            state.range = range;
+            state.pivotType = pivotType;
+            state.interval = interval;
+            state.lookbackSessions = lookback;
+            setStatus('loading', 'Fetching market data');
+
+            try {
+                let data = null;
+                try {
+                    data = await fetchIbkrMarket(symbol, interval, range);
+                    if (!data?.candles?.length) {
+                        throw new Error('IBKR market data unavailable');
+                    }
+                    data.dataSource = 'IBKR';
+                } catch (error) {
+                    console.warn('IBKR market data failed, falling back to Yahoo proxy', error);
+                    setDebug(`IBKR market data failed (${error.message}). Falling back to Yahoo proxy.`);
+                    data = await fetchYahooWithBackoff(symbol, range, interval);
+                }
+
+                state.candles = data.candles || [];
+                if (!state.candles.length) throw new Error('No candle data received');
+
+                state.marketState = data.marketState || 'UNKNOWN';
+                state.dataSource = data.dataSource || 'Yahoo Finance';
+                state.referencePrice = data.currentPrice || state.candles[state.candles.length - 1].close;
+                state.timeZone = data.session?.timeZone || 'America/New_York';
+
+                state.vixLevel = await fetchVixLevel(interval, range);
+                state.gammaData = await fetchGammaData(symbol);
+
+                if (state.candleSeries) {
+                    state.candleSeries.setData(state.candles);
+                    state.chart.timeScale().fitContent();
+                }
+
+                const ema9Series = calculateEMA(state.candles, 9);
+                const ema21Series = calculateEMA(state.candles, 21);
+                if (state.ema9Series) {
+                    state.ema9Series.setData(ema9Series);
+                }
+                if (state.ema21Series) {
+                    state.ema21Series.setData(ema21Series);
+                }
+
+                const vwapSeries = calculateVWAP(state.candles, state.timeZone);
+                if (state.vwapSeries) {
+                    state.vwapSeries.setData(vwapSeries);
+                }
+
+                const ema9Value = ema9Series.length ? ema9Series[ema9Series.length - 1].value : null;
+                const ema21Value = ema21Series.length ? ema21Series[ema21Series.length - 1].value : null;
+                const vwapValue = vwapSeries.length ? vwapSeries[vwapSeries.length - 1].value : null;
+                document.getElementById('ema9-value').textContent = formatNumber(ema9Value);
+                document.getElementById('ema21-value').textContent = formatNumber(ema21Value);
+                state.lastEma9 = ema9Value;
+                state.lastEma21 = ema21Value;
+                state.lastVwap = vwapValue;
+
+                const barSyncKey = `${symbol}_${interval}_${state.candles.length}`;
+                if (state.lastBarSyncKey !== barSyncKey) {
+                    state.lastBarSyncKey = barSyncKey;
+                    // Keep bar_data dedicated to intraday bars for ML labeling.
+                }
+
+                syncIntradayBars(symbol);
+
+                state.latestData = data;
+                refreshSpotPrice(symbol);
+                state.pivotHistory = buildPivotHistory(state.candles, state.timeZone);
+                if (!state.pivotHistory.length) {
+                    throw new Error('Not enough sessions to build pivot history');
+                }
+                state.historyBySessionIndex = new Map(state.pivotHistory.map((entry) => [entry.sessionIndex, entry]));
+
+                const lastIndex = state.candles.length - 1;
+                let defaultSessionIndex = lastIndex;
+                if (data.session?.isLastSessionComplete === false) {
+                    defaultSessionIndex = Math.max(1, lastIndex - 1);
+                }
+                if (!state.historyBySessionIndex.has(defaultSessionIndex)) {
+                    defaultSessionIndex = state.pivotHistory[state.pivotHistory.length - 1]?.sessionIndex;
+                }
+
+                populateSessionSelect(state.pivotHistory, defaultSessionIndex);
+                renderForSession(data, defaultSessionIndex);
+
+                const fetchInfo = data.fetch
+                    ? (data.fetch.fromCache ? 'cache' : `attempts ${data.fetch?.attempts || 1}`)
+                    : (data.dataSource || 'live');
+                setStatus('ready', `Live data loaded (${fetchInfo})`);
+                setDebug(`Loaded ${state.candles.length} candles. Session ${data.session?.usedDate || '--'}.`);
+            } catch (error) {
+                console.error(error);
+                setStatus('error', 'Data fetch failed');
+                const tbody = document.getElementById('pivot-table-body');
+                tbody.innerHTML = `<tr><td colspan="4" style="text-align: center; color: var(--danger); padding: 20px;">${error.message}</td></tr>`;
+                document.getElementById('nearest-resistance').innerHTML = `<strong>Nearest resistance:</strong> ${error.message}`;
+                document.getElementById('nearest-support').innerHTML = `<strong>Nearest support:</strong> ${error.message}`;
+                document.getElementById('strongest-resistance').innerHTML = `<strong>Strongest resistance:</strong> ${error.message}`;
+                document.getElementById('strongest-support').innerHTML = `<strong>Strongest support:</strong> ${error.message}`;
+                document.getElementById('gamma-level').innerHTML = `<strong>Gamma flip:</strong> ${error.message}`;
+                setDebug(`Error: ${error.message}`);
+            }
+        }
+
+        function attachEventListeners() {
+            document.getElementById('refresh-btn').addEventListener('click', loadMarketData);
+            document.getElementById('pivot-select').addEventListener('change', (event) => {
+                state.pivotType = event.target.value;
+                if (state.candles.length) {
+                    state.pivotHistory = buildPivotHistory(state.candles, state.timeZone);
+                    state.historyBySessionIndex = new Map(state.pivotHistory.map((entry) => [entry.sessionIndex, entry]));
+                    const currentSession = state.selectedSessionIndex || state.pivotHistory[state.pivotHistory.length - 1]?.sessionIndex;
+                    populateSessionSelect(state.pivotHistory, currentSession);
+                    if (state.latestData) {
+                        renderForSession(state.latestData, currentSession);
+                    }
+                } else {
+                    loadMarketData();
+                }
+            });
+            document.getElementById('symbol-select').addEventListener('change', loadMarketData);
+            document.getElementById('range-select').addEventListener('change', loadMarketData);
+            document.getElementById('interval-select').addEventListener('change', loadMarketData);
+            document.getElementById('gamma-expiry-select').addEventListener('change', async () => {
+                state.gammaData = await fetchGammaData(state.symbol);
+                if (state.latestData && state.selectedSessionIndex) {
+                    renderForSession(state.latestData, state.selectedSessionIndex);
+                }
+            });
+            document.getElementById('session-select').addEventListener('change', (event) => {
+                if (state.latestData) {
+                    renderForSession(state.latestData, Number(event.target.value));
+                }
+            });
+            document.getElementById('lookback-select').addEventListener('change', (event) => {
+                state.lookbackSessions = Number(event.target.value);
+                if (state.latestData && state.selectedSessionIndex) {
+                    renderForSession(state.latestData, state.selectedSessionIndex);
+                }
+            });
+            document.getElementById('export-csv').addEventListener('click', exportCsv);
+            document.getElementById('export-json').addEventListener('click', exportJson);
+            document.getElementById('export-txt').addEventListener('click', exportTxt);
+            document.getElementById('export-txt-zones').addEventListener('click', exportTxtZones);
+
+            const previewToggle = document.getElementById('ml-preview-toggle');
+            if (previewToggle) {
+                previewToggle.checked = state.mlPreviewEnabled;
+                state.mlPreviewEnabled = Boolean(previewToggle.checked);
+                previewToggle.addEventListener('change', (event) => {
+                    state.mlPreviewEnabled = Boolean(event.target.checked);
+                    saveMlPrefs();
+                });
+            }
+
+            const previewInput = document.getElementById('ml-preview-bps');
+            if (previewInput) {
+                previewInput.value = String(state.mlPreviewBps);
+                const initialValue = Number(previewInput.value);
+                if (Number.isFinite(initialValue)) {
+                    state.mlPreviewBps = initialValue;
+                }
+                previewInput.addEventListener('change', (event) => {
+                    const value = Number(event.target.value);
+                    if (Number.isFinite(value)) {
+                        state.mlPreviewBps = Math.min(100, Math.max(5, value));
+                        previewInput.value = String(state.mlPreviewBps);
+                        saveMlPrefs();
+                    }
+                });
+            }
+        }
+
+        async function boot() {
+            loadMlPrefs();
+            await ensureChartLibrary();
+            initializeChart();
+            attachEventListeners();
+            loadMlHealth();
+            loadMlMetrics();
+            if (state.mlMetricsTimer) {
+                clearInterval(state.mlMetricsTimer);
+            }
+            state.mlMetricsTimer = setInterval(loadMlMetrics, 300000);
+            loadMarketData();
+        }
+
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', boot);
+        } else {
+            boot();
+        }
+
+        window.addEventListener('error', (event) => {
+            setDebug(`Runtime error: ${event.message}`);
+        });
+
+        window.addEventListener('unhandledrejection', (event) => {
+            setDebug(`Unhandled rejection: ${event.reason?.message || event.reason}`);
+        });
+
+        setDebug('Boot sequence initialized.');
+    </script>
+</body>
+</html>

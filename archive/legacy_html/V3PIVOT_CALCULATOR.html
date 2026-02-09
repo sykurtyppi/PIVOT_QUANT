@@ -1,0 +1,903 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>V3 Institutional Pivot Calculator - Professional Trading Tool</title>
+    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #0f2027 0%, #203a43 50%, #2c5364 100%);
+            min-height: 100vh;
+            color: #e8e8e8;
+            overflow-x: hidden;
+        }
+
+        .header {
+            text-align: center;
+            padding: 20px;
+            background: rgba(0, 0, 0, 0.3);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        h1 {
+            font-size: 2.5rem;
+            font-weight: 300;
+            background: linear-gradient(45deg, #00d4ff, #0096c7);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin-bottom: 10px;
+        }
+
+        .subtitle {
+            color: #b0bec5;
+            font-size: 1rem;
+            font-weight: 300;
+        }
+
+        .main-layout {
+            display: grid;
+            grid-template-columns: 400px 1fr;
+            gap: 20px;
+            padding: 20px;
+            max-width: 1800px;
+            margin: 0 auto;
+            height: calc(100vh - 120px);
+        }
+
+        .control-panel {
+            background: rgba(20, 25, 35, 0.95);
+            border-radius: 15px;
+            padding: 25px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(20px);
+            height: fit-content;
+        }
+
+        .chart-panel {
+            background: rgba(20, 25, 35, 0.95);
+            border-radius: 15px;
+            padding: 25px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(20px);
+            display: flex;
+            flex-direction: column;
+        }
+
+        .section {
+            margin-bottom: 25px;
+        }
+
+        .section h3 {
+            color: #00d4ff;
+            margin-bottom: 15px;
+            font-size: 1.2rem;
+            font-weight: 500;
+            border-bottom: 1px solid rgba(0, 212, 255, 0.2);
+            padding-bottom: 8px;
+        }
+
+        .input-group {
+            margin-bottom: 15px;
+        }
+
+        .input-group label {
+            display: block;
+            color: #b0bec5;
+            margin-bottom: 5px;
+            font-size: 0.9rem;
+        }
+
+        .input-group input, .input-group select {
+            width: 100%;
+            padding: 10px;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 8px;
+            color: #fff;
+            font-size: 14px;
+        }
+
+        .input-group input:focus, .input-group select:focus {
+            outline: none;
+            border-color: #00d4ff;
+            box-shadow: 0 0 0 2px rgba(0, 212, 255, 0.1);
+        }
+
+        .btn {
+            width: 100%;
+            padding: 12px;
+            background: linear-gradient(135deg, #00d4ff, #0096c7);
+            border: none;
+            border-radius: 8px;
+            color: white;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            margin-bottom: 10px;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(0, 212, 255, 0.3);
+        }
+
+        .btn.secondary {
+            background: linear-gradient(135deg, #4CAF50, #2E7D32);
+        }
+
+        .toggle-group {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+
+        .toggle-btn {
+            flex: 1;
+            padding: 8px 12px;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 6px;
+            color: #b0bec5;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .toggle-btn.active {
+            background: rgba(0, 212, 255, 0.2);
+            border-color: #00d4ff;
+            color: #00d4ff;
+        }
+
+        #chartContainer {
+            flex: 1;
+            width: 100%;
+            height: 500px;
+            min-height: 500px;
+            border-radius: 10px;
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            position: relative;
+        }
+
+        .metrics-display {
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 20px;
+        }
+
+        .metric-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+            font-size: 13px;
+        }
+
+        .metric-label {
+            color: #b0bec5;
+        }
+
+        .metric-value {
+            color: #00d4ff;
+            font-weight: 600;
+        }
+
+        .pivot-table {
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 8px;
+            padding: 10px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .pivot-table table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 12px;
+        }
+
+        .pivot-table th {
+            color: #00d4ff;
+            padding: 8px 4px;
+            text-align: left;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .pivot-table td {
+            padding: 6px 4px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .resistance {
+            color: #ef5350;
+        }
+
+        .support {
+            color: #66bb6a;
+        }
+
+        .pivot {
+            color: #fdd835;
+        }
+
+        .gamma {
+            color: #9333ea;
+        }
+
+        .status-bar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 20px;
+            background: rgba(0, 0, 0, 0.3);
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+            font-size: 13px;
+        }
+
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #4CAF50;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>V3 Institutional Pivot Calculator</h1>
+        <p class="subtitle">Professional ATR & Gamma Flip Analysis • Real-Time Market Data</p>
+    </div>
+
+    <div class="main-layout">
+        <!-- Control Panel -->
+        <div class="control-panel">
+            <!-- Market Data Input -->
+            <div class="section">
+                <h3>📊 Market Data</h3>
+                <div class="input-group">
+                    <label>Symbol</label>
+                    <input type="text" id="symbolInput" value="SPY" placeholder="Enter symbol">
+                </div>
+                <div class="input-group">
+                    <label>High</label>
+                    <input type="number" id="highInput" step="0.01" placeholder="Enter high price">
+                </div>
+                <div class="input-group">
+                    <label>Low</label>
+                    <input type="number" id="lowInput" step="0.01" placeholder="Enter low price">
+                </div>
+                <div class="input-group">
+                    <label>Close</label>
+                    <input type="number" id="closeInput" step="0.01" placeholder="Enter close price">
+                </div>
+                <button class="btn secondary" onclick="loadLiveData()">📡 Load Live Data</button>
+                <button class="btn" onclick="calculatePivots()">⚡ Calculate Pivots</button>
+            </div>
+
+            <!-- Pivot Configuration -->
+            <div class="section">
+                <h3>⚙️ Configuration</h3>
+                <div class="input-group">
+                    <label>Pivot Type</label>
+                    <select id="pivotType" onchange="updatePivotType()">
+                        <option value="standard">Standard</option>
+                        <option value="fibonacci">Fibonacci</option>
+                        <option value="camarilla">Camarilla</option>
+                    </select>
+                </div>
+                <div class="input-group">
+                    <label>ATR Period</label>
+                    <input type="number" id="atrPeriod" value="14" min="5" max="50">
+                </div>
+                <div class="toggle-group">
+                    <div class="toggle-btn active" id="atrToggle" onclick="toggleATR()">ATR Zones</div>
+                    <div class="toggle-btn active" id="gammaToggle" onclick="toggleGamma()">Gamma Flip</div>
+                </div>
+            </div>
+
+            <!-- Live Metrics -->
+            <div class="section">
+                <h3>📈 Live Metrics</h3>
+                <div class="metrics-display">
+                    <div class="metric-row">
+                        <span class="metric-label">Current Price:</span>
+                        <span class="metric-value" id="currentPrice">--</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-label">ATR:</span>
+                        <span class="metric-value" id="atrValue">--</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-label">ATR %:</span>
+                        <span class="metric-value" id="atrPercent">--</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-label">Gamma Flip:</span>
+                        <span class="metric-value gamma" id="gammaFlip">--</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-label">Volatility:</span>
+                        <span class="metric-value" id="volatility">--</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Pivot Levels Table -->
+            <div class="section">
+                <h3>🎯 Pivot Levels</h3>
+                <div class="pivot-table">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Level</th>
+                                <th>Price</th>
+                                <th>Dist %</th>
+                            </tr>
+                        </thead>
+                        <tbody id="pivotTableBody">
+                            <tr>
+                                <td colspan="3" style="text-align: center; color: #666; padding: 20px;">
+                                    Load data to see pivot levels
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- Chart Panel -->
+        <div class="chart-panel">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                <h3 style="color: #00d4ff; margin: 0;">📈 Live Chart with Pivot Analysis</h3>
+                <button class="btn" style="width: auto; padding: 8px 16px; margin: 0;" onclick="refreshChart()">🔄 Refresh</button>
+            </div>
+            <div id="chartContainer">
+                <div id="chartPlaceholder" style="display: flex; align-items: center; justify-content: center; height: 500px; color: #00d4ff; font-size: 18px; flex-direction: column; gap: 15px;">
+                    <div>📊 Professional Trading Chart</div>
+                    <div style="font-size: 14px; color: #b0bec5;">Loading market visualization...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="status-bar">
+        <div class="status-indicator">
+            <div class="status-dot" id="statusDot"></div>
+            <span id="statusText">Initializing...</span>
+        </div>
+        <div>
+            <span>Data Points: <span id="dataPoints">--</span></span>
+            <span style="margin-left: 20px;">Last Update: <span id="lastUpdate">--</span></span>
+        </div>
+    </div>
+
+    <!-- Include advanced pivot engine -->
+    <script src="advanced_pivot_engine.js"></script>
+
+    <script>
+        // Global variables
+        let chart = null;
+        let candleSeries = null;
+        let pivotLines = [];
+        let currentData = null;
+        let currentPivotType = 'standard';
+        let showATRZones = true;
+        let showGammaFlip = true;
+
+        // Wait for LightweightCharts to load
+        function waitForLightweightCharts() {
+            return new Promise((resolve) => {
+                if (typeof window.LightweightCharts !== 'undefined') {
+                    resolve();
+                } else {
+                    setTimeout(() => waitForLightweightCharts().then(resolve), 100);
+                }
+            });
+        }
+
+        // Initialize application
+        document.addEventListener('DOMContentLoaded', async () => {
+            console.log('DOM loaded, waiting for LightweightCharts...');
+            setStatus('loading', 'Loading chart library...');
+
+            try {
+                await waitForLightweightCharts();
+                console.log('LightweightCharts loaded successfully');
+                setStatus('loading', 'Initializing chart...');
+
+                await new Promise(resolve => setTimeout(resolve, 500));
+                initializeChart();
+
+                await new Promise(resolve => setTimeout(resolve, 500));
+                loadMockData();
+
+                setStatus('ready', 'Ready - Chart loaded with mock data');
+            } catch (error) {
+                console.error('Failed to initialize:', error);
+                setStatus('error', 'Failed to load chart library');
+            }
+        });
+
+        function initializeChart() {
+            console.log('initializeChart called');
+            const container = document.getElementById('chartContainer');
+            console.log('Chart container found:', !!container);
+            console.log('Container dimensions:', container?.clientWidth, 'x', container?.clientHeight);
+
+            if (!container) {
+                console.error('Chart container not found!');
+                setStatus('error', 'Chart container not found');
+                return;
+            }
+
+            // Clear the placeholder
+            const placeholder = document.getElementById('chartPlaceholder');
+            if (placeholder) {
+                placeholder.remove();
+            }
+
+            // Create chart with professional settings
+            console.log('LightweightCharts type:', typeof window.LightweightCharts);
+            if (typeof window.LightweightCharts !== 'undefined') {
+                console.log('Creating LightweightCharts...');
+
+                // Ensure container has proper dimensions
+                container.style.position = 'relative';
+                container.style.width = '100%';
+                container.style.height = '500px';
+
+                const width = container.clientWidth || 800;
+                const height = 500;
+                console.log('Using dimensions:', width, 'x', height);
+
+                try {
+                    chart = window.LightweightCharts.createChart(container, {
+                        width: width,
+                        height: height,
+                        layout: {
+                            background: { color: 'rgba(15, 32, 39, 0.95)' },
+                            textColor: '#e8e8e8'
+                        },
+                        grid: {
+                            vertLines: { color: 'rgba(255,255,255,0.05)' },
+                            horzLines: { color: 'rgba(255,255,255,0.05)' }
+                        },
+                        timeScale: {
+                            timeVisible: true,
+                            secondsVisible: false,
+                            borderColor: 'rgba(255,255,255,0.1)'
+                        },
+                        rightPriceScale: {
+                            autoScale: true,
+                            borderColor: 'rgba(255,255,255,0.1)'
+                        },
+                        crosshair: {
+                            mode: window.LightweightCharts.CrosshairMode.Normal,
+                            vertLine: { color: 'rgba(0, 212, 255, 0.3)' },
+                            horzLine: { color: 'rgba(0, 212, 255, 0.3)' }
+                        }
+                    });
+
+                    if (!chart) {
+                        throw new Error('Chart creation returned null');
+                    }
+                } catch (error) {
+                    console.error('Error creating chart:', error);
+                    container.innerHTML = '<div style="display: flex; align-items: center; justify-content: center; height: 500px; color: #f44336;">Chart initialization failed. Please refresh the page.</div>';
+                    setStatus('error', 'Chart creation failed');
+                    return;
+                }
+
+                // Add candlestick series
+                try {
+                    candleSeries = chart.addCandlestickSeries({
+                        upColor: '#26a69a',
+                        downColor: '#ef5350',
+                        borderVisible: false,
+                        wickUpColor: '#26a69a',
+                        wickDownColor: '#ef5350',
+                        priceLineVisible: false
+                    });
+
+                    if (!candleSeries) {
+                        throw new Error('Candlestick series creation failed');
+                    }
+                } catch (error) {
+                    console.error('Error creating candlestick series:', error);
+                    setStatus('error', 'Chart series creation failed');
+                    return;
+                }
+
+                // Handle window resize
+                const resizeObserver = new ResizeObserver(() => {
+                    if (chart) {
+                        chart.applyOptions({
+                            width: container.clientWidth,
+                            height: container.clientHeight
+                        });
+                    }
+                });
+                resizeObserver.observe(container);
+
+                console.log('Chart initialized successfully');
+                console.log('Chart object:', !!chart);
+                console.log('CandleSeries object:', !!candleSeries);
+            } else {
+                console.error('LightweightCharts library not loaded');
+                setStatus('error', 'Chart library failed to load');
+            }
+        }
+
+        function loadMockData() {
+            setStatus('loading', 'Generating mock SPY data...');
+
+            const mockData = generateRealisticSPYData();
+            currentData = {
+                symbol: 'SPY',
+                candles: mockData,
+                currentPrice: mockData[mockData.length - 1].close,
+                high: Math.max(...mockData.map(d => d.high)),
+                low: Math.min(...mockData.map(d => d.low)),
+                close: mockData[mockData.length - 1].close
+            };
+
+            // Update inputs
+            document.getElementById('highInput').value = currentData.high.toFixed(2);
+            document.getElementById('lowInput').value = currentData.low.toFixed(2);
+            document.getElementById('closeInput').value = currentData.close.toFixed(2);
+
+            // Load data into chart
+            console.log('Loading mock data into chart...');
+            console.log('CandleSeries available:', !!candleSeries);
+            console.log('Mock data length:', mockData.length);
+            console.log('Sample data:', mockData.slice(0, 2));
+
+            if (candleSeries) {
+                try {
+                    candleSeries.setData(mockData);
+                    console.log('Mock data loaded successfully into chart');
+                } catch (error) {
+                    console.error('Error loading data into chart:', error);
+                    setStatus('error', 'Failed to load data into chart');
+                }
+            } else {
+                console.error('CandleSeries not available');
+                setStatus('error', 'Chart series not initialized');
+            }
+
+            // Calculate and display pivots
+            calculatePivots();
+
+            setStatus('ready', 'Mock data loaded successfully');
+            updateMetrics();
+        }
+
+        function generateRealisticSPYData() {
+            const currentTime = Math.floor(Date.now() / 1000);
+            const basePrice = 443.50;
+            const mockData = [];
+
+            for (let i = -30; i <= 0; i++) {
+                const time = currentTime + (i * 86400);
+                const volatility = 0.015;
+                const trend = i * 0.0005;
+
+                const open = basePrice + (Math.random() - 0.5) * basePrice * volatility + trend * basePrice;
+                const close = open + (Math.random() - 0.5) * basePrice * volatility * 0.8;
+                const high = Math.max(open, close) + Math.random() * basePrice * volatility * 0.4;
+                const low = Math.min(open, close) - Math.random() * basePrice * volatility * 0.4;
+
+                mockData.push({
+                    time: time,
+                    open: Number(open.toFixed(2)),
+                    high: Number(high.toFixed(2)),
+                    low: Number(low.toFixed(2)),
+                    close: Number(close.toFixed(2))
+                });
+            }
+
+            return mockData;
+        }
+
+        function calculatePivots() {
+            if (!currentData || !window.advancedPivotEngine) {
+                setStatus('error', 'No data or advanced engine not available');
+                return;
+            }
+
+            setStatus('loading', 'Calculating advanced pivots...');
+
+            const atrPeriod = parseInt(document.getElementById('atrPeriod').value) || 14;
+            const advancedData = window.advancedPivotEngine.calculateAdvancedPivots(
+                currentData.candles,
+                currentPivotType,
+                atrPeriod
+            );
+
+            if (advancedData) {
+                displayPivotLevels(advancedData);
+                updateChartWithPivots(advancedData);
+                updateAdvancedMetrics(advancedData);
+                setStatus('ready', 'Pivot levels calculated');
+            } else {
+                setStatus('error', 'Failed to calculate pivots');
+            }
+        }
+
+        function displayPivotLevels(advancedData) {
+            const tbody = document.getElementById('pivotTableBody');
+            tbody.innerHTML = '';
+
+            const formatted = window.advancedPivotEngine.formatPivotData(advancedData);
+            if (!formatted) return;
+
+            formatted.forEach(level => {
+                const row = document.createElement('tr');
+                const distance = Number(level.distance);
+                const distanceColor = distance > 0 ? '#ef5350' : '#66bb6a';
+
+                row.innerHTML = `
+                    <td class="${level.type}">${level.label}</td>
+                    <td>${level.price}</td>
+                    <td style="color: ${distanceColor}">${Math.abs(distance).toFixed(2)}%</td>
+                `;
+                tbody.appendChild(row);
+            });
+        }
+
+        function updateChartWithPivots(advancedData) {
+            if (!chart) return;
+
+            // Clear existing pivot lines
+            pivotLines.forEach(line => {
+                try {
+                    chart.removeSeries(line);
+                } catch (e) {}
+            });
+            pivotLines = [];
+
+            const currentTime = Math.floor(Date.now() / 1000);
+            const timeRange = {
+                start: currentTime - (24 * 3600),
+                end: currentTime + (6 * 3600)
+            };
+
+            // Add pivot lines
+            Object.entries(advancedData.pivotLevels).forEach(([label, value]) => {
+                const color = getPivotColor(label);
+                const lineWidth = (label === 'PIVOT' || label === 'GAMMA_FLIP') ? 2 : 1;
+                const lineStyle = label.includes('3') ? 2 : 0;
+
+                const pivotLine = chart.addLineSeries({
+                    color: color,
+                    lineWidth: lineWidth,
+                    lineStyle: lineStyle,
+                    priceLineVisible: true,
+                    lastValueVisible: true,
+                    title: `${label}: ${Number(value).toFixed(2)}`
+                });
+
+                const lineData = [
+                    { time: timeRange.start, value: value },
+                    { time: timeRange.end, value: value }
+                ];
+
+                pivotLine.setData(lineData);
+                pivotLines.push(pivotLine);
+            });
+
+            // Add ATR zones if enabled
+            if (showATRZones && advancedData.atrZones) {
+                addATRZones(advancedData.atrZones, timeRange);
+            }
+        }
+
+        function addATRZones(atrZones, timeRange) {
+            Object.entries(atrZones).forEach(([label, zones]) => {
+                if (!zones.zones || !zones.zones.normal) return;
+
+                const zone = zones.zones.normal;
+                const color = getPivotColor(label);
+
+                // Create semi-transparent zone
+                const zoneSeries = chart.addAreaSeries({
+                    lineColor: 'transparent',
+                    topColor: color.replace('1.0)', '0.1)').replace('0.8)', '0.08)').replace('0.6)', '0.06)'),
+                    bottomColor: 'transparent',
+                    lineWidth: 0,
+                    priceLineVisible: false,
+                    lastValueVisible: false
+                });
+
+                const zoneData = [
+                    { time: timeRange.start, value: zone.high },
+                    { time: timeRange.end, value: zone.high }
+                ];
+
+                zoneSeries.setData(zoneData);
+                pivotLines.push(zoneSeries);
+            });
+        }
+
+        function getPivotColor(label) {
+            const colors = {
+                'R3': 'rgba(239, 83, 80, 0.6)',
+                'R2': 'rgba(239, 83, 80, 0.8)',
+                'R1': 'rgba(239, 83, 80, 1.0)',
+                'PIVOT': 'rgba(253, 216, 53, 1.0)',
+                'S1': 'rgba(102, 187, 106, 1.0)',
+                'S2': 'rgba(102, 187, 106, 0.8)',
+                'S3': 'rgba(102, 187, 106, 0.6)',
+                'GAMMA_FLIP': 'rgba(147, 51, 234, 1.0)'
+            };
+
+            if (label.includes('R') && !colors[label]) return 'rgba(239, 83, 80, 0.7)';
+            if (label.includes('S') && !colors[label]) return 'rgba(102, 187, 106, 0.7)';
+
+            return colors[label] || 'rgba(180, 180, 180, 0.7)';
+        }
+
+        function updateAdvancedMetrics(advancedData) {
+            document.getElementById('atrValue').textContent = advancedData.atr || '--';
+            document.getElementById('atrPercent').textContent = advancedData.atrPercent ? `${advancedData.atrPercent}%` : '--';
+            document.getElementById('gammaFlip').textContent = advancedData.gammaFlip || '--';
+
+            // Calculate volatility from ATR
+            const volatility = advancedData.atrPercent ? `${(Number(advancedData.atrPercent) * 2).toFixed(1)}%` : '--';
+            document.getElementById('volatility').textContent = volatility;
+        }
+
+        function updateMetrics() {
+            if (currentData) {
+                document.getElementById('currentPrice').textContent = currentData.currentPrice.toFixed(2);
+                document.getElementById('dataPoints').textContent = currentData.candles ? currentData.candles.length : '--';
+                document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
+            }
+        }
+
+        async function loadLiveData() {
+            const symbol = document.getElementById('symbolInput').value.toUpperCase() || 'SPY';
+            setStatus('loading', `Loading live ${symbol} data...`);
+
+            try {
+                const data = await fetchMarketData(symbol);
+                currentData = data;
+
+                // Update inputs
+                document.getElementById('highInput').value = data.high.toFixed(2);
+                document.getElementById('lowInput').value = data.low.toFixed(2);
+                document.getElementById('closeInput').value = data.close.toFixed(2);
+
+                // Load into chart
+                if (candleSeries) {
+                    candleSeries.setData(data.candles);
+                }
+
+                calculatePivots();
+                updateMetrics();
+                setStatus('ready', 'Live data loaded successfully');
+            } catch (error) {
+                console.error('Failed to load live data:', error);
+                setStatus('error', 'Failed to load live data - using mock data');
+                loadMockData(); // Fallback to mock data
+            }
+        }
+
+        async function fetchMarketData(symbol) {
+            const corsUrls = [
+                `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?range=1mo&interval=1d`,
+                `https://api.allorigins.win/raw?url=${encodeURIComponent(`https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?range=1mo&interval=1d`)}`
+            ];
+
+            for (const url of corsUrls) {
+                try {
+                    const response = await fetch(url);
+                    const data = await response.json();
+
+                    if (data.chart?.result?.[0]) {
+                        return processMarketData(data.chart.result[0], symbol);
+                    }
+                } catch (e) {
+                    console.warn('URL failed:', url);
+                }
+            }
+
+            throw new Error('All data sources failed');
+        }
+
+        function processMarketData(result, symbol) {
+            const timestamps = result.timestamp;
+            const ohlc = result.indicators.quote[0];
+
+            const candles = timestamps.map((time, i) => ({
+                time: time,
+                open: ohlc.open[i],
+                high: ohlc.high[i],
+                low: ohlc.low[i],
+                close: ohlc.close[i]
+            })).filter(candle =>
+                Number.isFinite(candle.open) &&
+                Number.isFinite(candle.high) &&
+                Number.isFinite(candle.low) &&
+                Number.isFinite(candle.close)
+            );
+
+            const latest = candles[candles.length - 1];
+
+            return {
+                symbol: symbol,
+                candles: candles,
+                currentPrice: latest.close,
+                high: Math.max(...candles.slice(-1).map(d => d.high)),
+                low: Math.min(...candles.slice(-1).map(d => d.low)),
+                close: latest.close
+            };
+        }
+
+        function updatePivotType() {
+            currentPivotType = document.getElementById('pivotType').value;
+            if (currentData) {
+                calculatePivots();
+            }
+        }
+
+        function toggleATR() {
+            showATRZones = !showATRZones;
+            document.getElementById('atrToggle').classList.toggle('active', showATRZones);
+            if (currentData) {
+                calculatePivots();
+            }
+        }
+
+        function toggleGamma() {
+            showGammaFlip = !showGammaFlip;
+            document.getElementById('gammaToggle').classList.toggle('active', showGammaFlip);
+            if (currentData) {
+                calculatePivots();
+            }
+        }
+
+        function refreshChart() {
+            if (currentData) {
+                calculatePivots();
+                updateMetrics();
+            } else {
+                loadMockData();
+            }
+        }
+
+        function setStatus(type, message) {
+            const dot = document.getElementById('statusDot');
+            const text = document.getElementById('statusText');
+
+            dot.style.background = type === 'loading' ? '#ff9800' :
+                                 type === 'error' ? '#f44336' : '#4CAF50';
+            text.textContent = message;
+        }
+    </script>
+</body>
+</html>
