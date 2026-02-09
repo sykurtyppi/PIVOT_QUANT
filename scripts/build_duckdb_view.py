@@ -70,7 +70,18 @@ def main() -> None:
                 try_cast(data_quality AS DOUBLE) AS data_quality,
                 try_cast(bar_interval_sec AS INTEGER) AS bar_interval_sec,
                 source,
-                try_cast(created_at AS BIGINT) AS created_at
+                try_cast(created_at AS BIGINT) AS created_at,
+                try_cast(vpoc AS DOUBLE) AS vpoc,
+                try_cast(vpoc_dist_bps AS DOUBLE) AS vpoc_dist_bps,
+                try_cast(volume_at_level AS DOUBLE) AS volume_at_level,
+                try_cast(mtf_confluence AS INTEGER) AS mtf_confluence,
+                mtf_confluence_types,
+                try_cast(weekly_pivot AS DOUBLE) AS weekly_pivot,
+                try_cast(monthly_pivot AS DOUBLE) AS monthly_pivot,
+                try_cast(level_age_days AS INTEGER) AS level_age_days,
+                try_cast(hist_reject_rate AS DOUBLE) AS hist_reject_rate,
+                try_cast(hist_break_rate AS DOUBLE) AS hist_break_rate,
+                try_cast(hist_sample_size AS INTEGER) AS hist_sample_size
             FROM {('read_parquet' if use_parquet else 'read_csv_auto')}('{touch_parquet if use_parquet else touch_csv}')
         ),
         labels AS (
@@ -138,7 +149,33 @@ def main() -> None:
                 WHEN timed.gamma_flip_dist_bps IS NOT NULL THEN timed.gamma_flip_dist_bps
                 WHEN timed.gamma_flip IS NULL THEN NULL
                 ELSE (timed.touch_price - timed.gamma_flip) / timed.gamma_flip * 1e4
-            END AS gamma_flip_dist_bps_calc
+            END AS gamma_flip_dist_bps_calc,
+            CASE
+                WHEN timed.vpoc_dist_bps IS NOT NULL THEN timed.vpoc_dist_bps
+                WHEN timed.vpoc IS NULL THEN NULL
+                ELSE (timed.touch_price - timed.vpoc) / timed.vpoc * 1e4
+            END AS vpoc_dist_bps_calc,
+            timed.volume_at_level,
+            COALESCE(timed.mtf_confluence, 0) AS mtf_confluence_calc,
+            CASE
+                WHEN timed.weekly_pivot IS NULL THEN NULL
+                ELSE (timed.touch_price - timed.weekly_pivot) / timed.weekly_pivot * 1e4
+            END AS weekly_pivot_dist_bps,
+            CASE
+                WHEN timed.monthly_pivot IS NULL THEN NULL
+                ELSE (timed.touch_price - timed.monthly_pivot) / timed.monthly_pivot * 1e4
+            END AS monthly_pivot_dist_bps,
+            COALESCE(timed.level_age_days, 0) AS level_age_days_calc,
+            CASE WHEN COALESCE(timed.level_age_days, 0) >= 3 THEN 1 ELSE 0 END AS is_persistent_level,
+            timed.hist_reject_rate,
+            timed.hist_break_rate,
+            COALESCE(timed.hist_sample_size, 0) AS hist_sample_size_calc,
+            CASE WHEN COALESCE(timed.hist_sample_size, 0) >= 10 THEN 1 ELSE 0 END AS has_history,
+            CASE
+                WHEN timed.hist_reject_rate IS NOT NULL AND COALESCE(timed.hist_sample_size, 0) >= 10
+                THEN timed.hist_reject_rate - COALESCE(timed.hist_break_rate, 0)
+                ELSE NULL
+            END AS hist_edge_score
         FROM timed
         """
     )

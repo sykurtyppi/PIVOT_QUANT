@@ -8,7 +8,7 @@ try:
 except ImportError:  # pragma: no cover
     ZoneInfo = None  # type: ignore
 
-FEATURE_VERSION = "v1"
+FEATURE_VERSION = "v2"
 NY_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone.utc
 
 
@@ -75,6 +75,66 @@ def build_feature_row(event: dict[str, Any]) -> dict[str, Any]:
         row["gamma_flip_dist_bps_calc"] = (touch_price - gamma_flip) / gamma_flip * 1e4
     else:
         row["gamma_flip_dist_bps_calc"] = None
+
+    # --- Week 2 Features: Volume Profile ---
+    vpoc = event.get("vpoc")
+    if event.get("vpoc_dist_bps") is not None:
+        row["vpoc_dist_bps_calc"] = event.get("vpoc_dist_bps")
+    elif vpoc and touch_price:
+        row["vpoc_dist_bps_calc"] = (touch_price - vpoc) / vpoc * 1e4
+    else:
+        row["vpoc_dist_bps_calc"] = None
+
+    row["volume_at_level"] = event.get("volume_at_level")
+
+    # Relative volume: volume_at_level as % of session total (if available)
+    # This normalizes across different days/symbols
+    vol_at = event.get("volume_at_level")
+    row["volume_at_level_relative"] = None  # Computed downstream if total available
+
+    # --- Week 2 Features: Multi-Timeframe Confluence ---
+    row["mtf_confluence"] = event.get("mtf_confluence", 0) or 0
+    row["has_weekly_confluence"] = 0
+    row["has_monthly_confluence"] = 0
+    mtf_types = event.get("mtf_confluence_types")
+    if mtf_types:
+        try:
+            import json
+            types_list = json.loads(mtf_types) if isinstance(mtf_types, str) else mtf_types
+            row["has_weekly_confluence"] = 1 if any("weekly" in t for t in types_list) else 0
+            row["has_monthly_confluence"] = 1 if any("monthly" in t for t in types_list) else 0
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    # Distance to weekly/monthly pivot PP
+    weekly_pivot = event.get("weekly_pivot")
+    monthly_pivot = event.get("monthly_pivot")
+    if weekly_pivot and touch_price:
+        row["weekly_pivot_dist_bps"] = (touch_price - weekly_pivot) / weekly_pivot * 1e4
+    else:
+        row["weekly_pivot_dist_bps"] = None
+
+    if monthly_pivot and touch_price:
+        row["monthly_pivot_dist_bps"] = (touch_price - monthly_pivot) / monthly_pivot * 1e4
+    else:
+        row["monthly_pivot_dist_bps"] = None
+
+    # --- Week 2 Features: Level Aging ---
+    row["level_age_days"] = event.get("level_age_days", 0) or 0
+    row["is_persistent_level"] = 1 if row["level_age_days"] >= 3 else 0
+
+    # --- Week 2 Features: Historical Accuracy ---
+    row["hist_reject_rate"] = event.get("hist_reject_rate")
+    row["hist_break_rate"] = event.get("hist_break_rate")
+    row["hist_sample_size"] = event.get("hist_sample_size", 0) or 0
+    row["has_history"] = 1 if row["hist_sample_size"] >= 10 else 0
+
+    # Composite edge score: higher = more likely to reject
+    # Only computed when we have sufficient history
+    if row["hist_reject_rate"] is not None and row["hist_sample_size"] >= 10:
+        row["hist_edge_score"] = row["hist_reject_rate"] - (row["hist_break_rate"] or 0)
+    else:
+        row["hist_edge_score"] = None
 
     return row
 

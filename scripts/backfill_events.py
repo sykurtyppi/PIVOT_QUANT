@@ -33,6 +33,29 @@ def ensure_bar_schema(conn: sqlite3.Connection) -> None:
         conn.commit()
 
 
+def ensure_new_columns(conn: sqlite3.Connection) -> None:
+    """Add Week 2 columns to existing touch_events table if missing."""
+    cur = conn.execute("PRAGMA table_info(touch_events)")
+    cols = {row[1] for row in cur.fetchall()}
+    new_cols = {
+        "vpoc": "REAL",
+        "vpoc_dist_bps": "REAL",
+        "volume_at_level": "REAL",
+        "mtf_confluence": "INTEGER DEFAULT 0",
+        "mtf_confluence_types": "TEXT",
+        "weekly_pivot": "REAL",
+        "monthly_pivot": "REAL",
+        "level_age_days": "INTEGER DEFAULT 0",
+        "hist_reject_rate": "REAL",
+        "hist_break_rate": "REAL",
+        "hist_sample_size": "INTEGER DEFAULT 0",
+    }
+    for col_name, col_type in new_cols.items():
+        if col_name not in cols:
+            conn.execute(f"ALTER TABLE touch_events ADD COLUMN {col_name} {col_type}")
+    conn.commit()
+
+
 def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
@@ -68,7 +91,18 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             data_quality REAL,
             bar_interval_sec INTEGER,
             source TEXT,
-            created_at INTEGER NOT NULL
+            created_at INTEGER NOT NULL,
+            vpoc REAL,
+            vpoc_dist_bps REAL,
+            volume_at_level REAL,
+            mtf_confluence INTEGER DEFAULT 0,
+            mtf_confluence_types TEXT,
+            weekly_pivot REAL,
+            monthly_pivot REAL,
+            level_age_days INTEGER DEFAULT 0,
+            hist_reject_rate REAL,
+            hist_break_rate REAL,
+            hist_sample_size INTEGER DEFAULT 0
         );
         """
     )
@@ -221,6 +255,232 @@ def compute_atr(sessions: list[dict], window: int) -> dict:
     return atr_by_date
 
 
+def compute_volume_profile(bars: list[dict], num_bins: int = 50) -> dict:
+    """Build a volume-at-price profile from intraday bars.
+
+    Returns dict with:
+      vpoc: price level with highest volume (Volume Point of Control)
+      profile: list of (price_mid, volume) tuples
+      value_area_high: upper bound of 70% value area
+      value_area_low: lower bound of 70% value area
+    """
+    if not bars:
+        return {"vpoc": None, "profile": [], "value_area_high": None, "value_area_low": None}
+
+    prices_with_vol = []
+    for bar in bars:
+        vol = bar.get("volume", 0) or 0
+        if vol <= 0:
+            continue
+        typical = (bar["high"] + bar["low"] + bar["close"]) / 3
+        prices_with_vol.append((typical, vol))
+
+    if not prices_with_vol:
+        return {"vpoc": None, "profile": [], "value_area_high": None, "value_area_low": None}
+
+    all_prices = [p for p, _ in prices_with_vol]
+    price_min = min(all_prices)
+    price_max = max(all_prices)
+    price_range = price_max - price_min
+
+    if price_range < 1e-8:
+        return {
+            "vpoc": price_min,
+            "profile": [(price_min, sum(v for _, v in prices_with_vol))],
+            "value_area_high": price_min,
+            "value_area_low": price_min,
+        }
+
+    bin_size = price_range / num_bins
+    bins = [0.0] * num_bins
+    bin_mids = [price_min + (i + 0.5) * bin_size for i in range(num_bins)]
+
+    for price, vol in prices_with_vol:
+        idx = min(int((price - price_min) / bin_size), num_bins - 1)
+        bins[idx] += vol
+
+    max_vol_idx = max(range(num_bins), key=lambda i: bins[i])
+    vpoc = bin_mids[max_vol_idx]
+
+    # Value Area: 70% of total volume centered on VPOC
+    total_vol = sum(bins)
+    target_vol = total_vol * 0.70
+    va_vol = bins[max_vol_idx]
+    lo_idx = max_vol_idx
+    hi_idx = max_vol_idx
+
+    while va_vol < target_vol and (lo_idx > 0 or hi_idx < num_bins - 1):
+        expand_lo = bins[lo_idx - 1] if lo_idx > 0 else -1
+        expand_hi = bins[hi_idx + 1] if hi_idx < num_bins - 1 else -1
+        if expand_lo >= expand_hi:
+            lo_idx -= 1
+            va_vol += bins[lo_idx]
+        else:
+            hi_idx += 1
+            va_vol += bins[hi_idx]
+
+    profile = [(bin_mids[i], bins[i]) for i in range(num_bins) if bins[i] > 0]
+
+    return {
+        "vpoc": vpoc,
+        "profile": profile,
+        "value_area_high": bin_mids[hi_idx] + bin_size / 2,
+        "value_area_low": bin_mids[lo_idx] - bin_size / 2,
+    }
+
+
+def volume_at_price(bars: list[dict], price: float, tolerance_bps: float = 10) -> float:
+    """Sum volume within tolerance_bps of a given price level."""
+    total = 0.0
+    for bar in bars:
+        vol = bar.get("volume", 0) or 0
+        if vol <= 0:
+            continue
+        typical = (bar["high"] + bar["low"] + bar["close"]) / 3
+        dist = abs((typical - price) / price * 1e4)
+        if dist <= tolerance_bps:
+            total += vol
+    return total
+
+
+def build_weekly_sessions(sessions: list[dict]) -> list[dict]:
+    """Aggregate daily sessions into weekly OHLC."""
+    weekly = []
+    current_week = None
+    week_sessions = []
+
+    for session in sessions:
+        iso_cal = session["date"].isocalendar()
+        week_key = (iso_cal[0], iso_cal[1])  # (year, week_number)
+        if current_week != week_key:
+            if week_sessions:
+                weekly.append({
+                    "date": week_sessions[-1]["date"],
+                    "open": week_sessions[0]["open"],
+                    "high": max(s["high"] for s in week_sessions),
+                    "low": min(s["low"] for s in week_sessions),
+                    "close": week_sessions[-1]["close"],
+                })
+            current_week = week_key
+            week_sessions = [session]
+        else:
+            week_sessions.append(session)
+
+    if week_sessions:
+        weekly.append({
+            "date": week_sessions[-1]["date"],
+            "open": week_sessions[0]["open"],
+            "high": max(s["high"] for s in week_sessions),
+            "low": min(s["low"] for s in week_sessions),
+            "close": week_sessions[-1]["close"],
+        })
+
+    return weekly
+
+
+def build_monthly_sessions(sessions: list[dict]) -> list[dict]:
+    """Aggregate daily sessions into monthly OHLC."""
+    monthly = []
+    current_month = None
+    month_sessions = []
+
+    for session in sessions:
+        month_key = (session["date"].year, session["date"].month)
+        if current_month != month_key:
+            if month_sessions:
+                monthly.append({
+                    "date": month_sessions[-1]["date"],
+                    "open": month_sessions[0]["open"],
+                    "high": max(s["high"] for s in month_sessions),
+                    "low": min(s["low"] for s in month_sessions),
+                    "close": month_sessions[-1]["close"],
+                })
+            current_month = month_key
+            month_sessions = [session]
+        else:
+            month_sessions.append(session)
+
+    if month_sessions:
+        monthly.append({
+            "date": month_sessions[-1]["date"],
+            "open": month_sessions[0]["open"],
+            "high": max(s["high"] for s in month_sessions),
+            "low": min(s["low"] for s in month_sessions),
+            "close": month_sessions[-1]["close"],
+        })
+
+    return monthly
+
+
+def find_mtf_pivot_for_date(higher_tf_sessions: list[dict], target_date, calc_fn=None):
+    """Given a list of higher-TF OHLC sessions, return the pivot set whose
+    period ended before target_date (i.e., the 'prior completed' bar)."""
+    if calc_fn is None:
+        calc_fn = calculate_pivots
+    candidate = None
+    for session in higher_tf_sessions:
+        if session["date"] < target_date:
+            candidate = session
+        else:
+            break
+    if candidate is None:
+        return None
+    return calc_fn(candidate["high"], candidate["low"], candidate["close"])
+
+
+def compute_level_age(
+    prior_sessions: list[dict],
+    level_type: str,
+    level_price: float,
+    tolerance_bps: float = 15,
+) -> int:
+    """Count how many consecutive prior sessions had a pivot of the same type
+    within tolerance_bps of the current level_price. This measures 'persistence'."""
+    age = 0
+    for session in reversed(prior_sessions):
+        session_pivots = calculate_pivots(session["high"], session["low"], session["close"])
+        if level_type in session_pivots:
+            dist = abs((session_pivots[level_type] - level_price) / level_price * 1e4)
+            if dist <= tolerance_bps:
+                age += 1
+            else:
+                break
+        else:
+            break
+    return age
+
+
+def compute_historical_accuracy(
+    conn: sqlite3.Connection,
+    symbol: str,
+    level_type: str,
+    before_ts: int,
+    horizon: int = 15,
+) -> tuple[float | None, float | None, int]:
+    """Look back at past labeled events for this level_type to compute
+    historical reject/break rates. Returns (reject_rate, break_rate, sample_size)."""
+    cur = conn.execute(
+        """
+        SELECT el.reject, el.break
+        FROM touch_events te
+        JOIN event_labels el ON te.event_id = el.event_id
+        WHERE te.symbol = ? AND te.level_type = ? AND te.ts_event < ?
+          AND el.horizon_min = ?
+        ORDER BY te.ts_event DESC
+        LIMIT 100
+        """,
+        (symbol, level_type, before_ts, horizon),
+    )
+    rows = cur.fetchall()
+    if not rows:
+        return None, None, 0
+
+    sample_size = len(rows)
+    reject_count = sum(1 for r in rows if r[0] == 1)
+    break_count = sum(1 for r in rows if r[1] == 1)
+    return reject_count / sample_size, break_count / sample_size, sample_size
+
+
 def calculate_pivots(high: float, low: float, close: float) -> dict:
     pivot = (high + low + close) / 3
     r1 = 2 * pivot - low
@@ -317,6 +577,17 @@ def insert_events(conn: sqlite3.Connection, events: list[dict]) -> int:
         "bar_interval_sec",
         "source",
         "created_at",
+        "vpoc",
+        "vpoc_dist_bps",
+        "volume_at_level",
+        "mtf_confluence",
+        "mtf_confluence_types",
+        "weekly_pivot",
+        "monthly_pivot",
+        "level_age_days",
+        "hist_reject_rate",
+        "hist_break_rate",
+        "hist_sample_size",
     ]
     placeholders = ", ".join(["?"] * len(columns))
     sql = f"INSERT OR IGNORE INTO touch_events ({', '.join(columns)}) VALUES ({placeholders})"
@@ -335,12 +606,17 @@ def build_events(
     cooldown_min: int,
     source: str,
     atr_by_date: dict,
+    conn: sqlite3.Connection | None = None,
 ):
     events = []
     ema9 = None
     ema21 = None
     ema_bar_count = 0  # Track how many bars have fed the EMA
     cooldown_ms = cooldown_min * 60 * 1000
+
+    # Build higher-timeframe OHLC for multi-TF confluence
+    weekly_sessions = build_weekly_sessions(sessions)
+    monthly_sessions = build_monthly_sessions(sessions)
 
     # Warm up EMAs using the first session's bars (don't generate events for it)
     if sessions:
@@ -359,11 +635,19 @@ def build_events(
         cumulative_vol = 0.0
         cumulative_vwap = 0.0
 
+        # Volume profile for the current session (computed incrementally)
+        session_bars_so_far = []
+
+        # Get higher-TF pivots for this session date
+        weekly_pivots = find_mtf_pivot_for_date(weekly_sessions, session["date"])
+        monthly_pivots = find_mtf_pivot_for_date(monthly_sessions, session["date"])
+
         for bar in session["bars"]:
             close = bar["close"]
             ema9 = ema_update(ema9, close, 9)
             ema21 = ema_update(ema21, close, 21)
             ema_bar_count += 1
+            session_bars_so_far.append(bar)
 
             typical = (bar["high"] + bar["low"] + bar["close"]) / 3
             vol = bar.get("volume", 0) or 0
@@ -397,6 +681,41 @@ def build_events(
                 vwap_dist_bps = (
                     (close - vwap) / vwap * 1e4 if vwap is not None and vwap != 0 else None
                 )
+
+                # --- VPOC & Volume at Level ---
+                vol_profile = compute_volume_profile(session_bars_so_far)
+                vpoc = vol_profile["vpoc"]
+                vpoc_dist_bps = None
+                if vpoc is not None and vpoc != 0:
+                    vpoc_dist_bps = (close - vpoc) / vpoc * 1e4
+                vol_at_level = volume_at_price(session_bars_so_far, level_price, threshold_bps)
+
+                # --- Multi-Timeframe Confluence ---
+                mtf_matches = []
+                for tf_name, tf_pivots in [("weekly", weekly_pivots), ("monthly", monthly_pivots)]:
+                    if tf_pivots is None:
+                        continue
+                    for tf_label, tf_price in tf_pivots.items():
+                        tf_dist = abs((level_price - tf_price) / tf_price * 1e4)
+                        if tf_dist <= threshold_bps * 2:  # wider tolerance for HTF
+                            mtf_matches.append(f"{tf_name}_{tf_label}")
+
+                # Weekly/monthly pivot PP for reference
+                wp = weekly_pivots.get("PP") if weekly_pivots else None
+                mp = monthly_pivots.get("PP") if monthly_pivots else None
+
+                # --- Level Age (persistence across sessions) ---
+                prior_sessions = sessions[max(0, idx - 30):idx]
+                level_age = compute_level_age(prior_sessions, label, level_price)
+
+                # --- Historical Accuracy ---
+                hist_reject_rate = None
+                hist_break_rate = None
+                hist_sample_size = 0
+                if conn is not None:
+                    hist_reject_rate, hist_break_rate, hist_sample_size = (
+                        compute_historical_accuracy(conn, symbol, label, ts_event)
+                    )
 
                 touch_counts[label] += 1
                 event = {
@@ -432,6 +751,17 @@ def build_events(
                     "bar_interval_sec": interval_sec,
                     "source": source,
                     "created_at": ts_event,
+                    "vpoc": vpoc,
+                    "vpoc_dist_bps": vpoc_dist_bps,
+                    "volume_at_level": vol_at_level,
+                    "mtf_confluence": len(mtf_matches),
+                    "mtf_confluence_types": json.dumps(mtf_matches) if mtf_matches else None,
+                    "weekly_pivot": wp,
+                    "monthly_pivot": mp,
+                    "level_age_days": level_age,
+                    "hist_reject_rate": hist_reject_rate,
+                    "hist_break_rate": hist_break_rate,
+                    "hist_sample_size": hist_sample_size,
                 }
                 events.append(event)
                 last_touch_ts[label] = ts_event
@@ -472,6 +802,7 @@ def main() -> None:
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     ensure_schema(conn)
+    ensure_new_columns(conn)
 
     total_bars = 0
     total_events = 0
@@ -497,6 +828,7 @@ def main() -> None:
             cooldown_min=args.cooldown_min,
             source=source,
             atr_by_date=atr_by_date,
+            conn=conn,
         )
 
         if args.write_events and events:

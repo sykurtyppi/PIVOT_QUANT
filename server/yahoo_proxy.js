@@ -25,6 +25,7 @@ const LOCAL_CHART_PATH = path.join(
 const EXPORT_DIR = path.join(ROOT_DIR, 'data', 'exports');
 const METRICS_FILE = path.join(EXPORT_DIR, 'rf_walkforward_metrics.json');
 const CALIB_FILE = path.join(EXPORT_DIR, 'rf_calibration_curve.json');
+const SQLITE_DB = path.join(ROOT_DIR, 'data', 'pivot_events.sqlite');
 
 const symbolMap = new Map([
   ['SPX', '^GSPC'],
@@ -459,6 +460,147 @@ function summarizeMlMetrics(metrics, calibRows) {
   };
 }
 
+/**
+ * Query level statistics from SQLite, including Week 2 features:
+ * VPOC, multi-TF confluence, level aging, and historical accuracy.
+ */
+async function queryLevelStats(symbol, limit) {
+  // Use dynamic import for better-sqlite3 (optional dependency)
+  let Database;
+  try {
+    const mod = await import('better-sqlite3');
+    Database = mod.default;
+  } catch (_err) {
+    // Fallback: return data from the latest export files
+    return queryLevelStatsFromExports(symbol, limit);
+  }
+
+  if (!fs.existsSync(SQLITE_DB)) {
+    return { error: 'Database not found', levels: [] };
+  }
+
+  const db = new Database(SQLITE_DB, { readonly: true });
+
+  try {
+    const rows = db.prepare(`
+      SELECT
+        te.level_type,
+        te.level_price,
+        te.touch_price,
+        te.distance_bps,
+        te.confluence_count,
+        te.ema_state,
+        te.vwap_dist_bps,
+        te.atr,
+        te.vpoc,
+        te.vpoc_dist_bps,
+        te.volume_at_level,
+        te.mtf_confluence,
+        te.mtf_confluence_types,
+        te.weekly_pivot,
+        te.monthly_pivot,
+        te.level_age_days,
+        te.hist_reject_rate,
+        te.hist_break_rate,
+        te.hist_sample_size,
+        te.ts_event,
+        el5.reject AS reject_5m,
+        el5.break AS break_5m,
+        el15.reject AS reject_15m,
+        el15.break AS break_15m,
+        el60.reject AS reject_60m,
+        el60.break AS break_60m
+      FROM touch_events te
+      LEFT JOIN event_labels el5
+        ON te.event_id = el5.event_id AND el5.horizon_min = 5
+      LEFT JOIN event_labels el15
+        ON te.event_id = el15.event_id AND el15.horizon_min = 15
+      LEFT JOIN event_labels el60
+        ON te.event_id = el60.event_id AND el60.horizon_min = 60
+      WHERE te.symbol = ?
+      ORDER BY te.ts_event DESC
+      LIMIT ?
+    `).all(symbol, limit);
+
+    // Aggregate by level_type for summary stats
+    const byType = {};
+    for (const row of rows) {
+      const lt = row.level_type;
+      if (!byType[lt]) {
+        byType[lt] = {
+          level_type: lt,
+          events: [],
+          avg_vpoc_dist_bps: null,
+          avg_mtf_confluence: 0,
+          avg_level_age: 0,
+          avg_hist_reject_rate: null,
+          avg_hist_break_rate: null,
+          total_volume_at_level: 0,
+        };
+      }
+      byType[lt].events.push(row);
+    }
+
+    const summary = Object.values(byType).map((group) => {
+      const events = group.events;
+      const n = events.length;
+      const vpocDists = events.map((e) => e.vpoc_dist_bps).filter(Number.isFinite);
+      const mtfConfs = events.map((e) => e.mtf_confluence || 0);
+      const ages = events.map((e) => e.level_age_days || 0);
+      const rejectRates = events.map((e) => e.hist_reject_rate).filter(Number.isFinite);
+      const breakRates = events.map((e) => e.hist_break_rate).filter(Number.isFinite);
+      const volumes = events.map((e) => e.volume_at_level || 0);
+
+      return {
+        level_type: group.level_type,
+        event_count: n,
+        latest_price: events[0]?.level_price,
+        avg_vpoc_dist_bps: vpocDists.length
+          ? vpocDists.reduce((a, b) => a + b, 0) / vpocDists.length
+          : null,
+        avg_mtf_confluence: mtfConfs.reduce((a, b) => a + b, 0) / n,
+        avg_level_age: ages.reduce((a, b) => a + b, 0) / n,
+        avg_hist_reject_rate: rejectRates.length
+          ? rejectRates.reduce((a, b) => a + b, 0) / rejectRates.length
+          : null,
+        avg_hist_break_rate: breakRates.length
+          ? breakRates.reduce((a, b) => a + b, 0) / breakRates.length
+          : null,
+        total_volume_at_level: volumes.reduce((a, b) => a + b, 0),
+        reject_rate_5m: average(events.map((e) => e.reject_5m).filter((v) => v !== null)),
+        break_rate_5m: average(events.map((e) => e.break_5m).filter((v) => v !== null)),
+        reject_rate_15m: average(events.map((e) => e.reject_15m).filter((v) => v !== null)),
+        break_rate_15m: average(events.map((e) => e.break_15m).filter((v) => v !== null)),
+        reject_rate_60m: average(events.map((e) => e.reject_60m).filter((v) => v !== null)),
+        break_rate_60m: average(events.map((e) => e.break_60m).filter((v) => v !== null)),
+      };
+    });
+
+    return {
+      symbol,
+      updated_at: new Date().toISOString(),
+      total_events: rows.length,
+      level_summary: summary,
+      recent_events: rows.slice(0, 20),
+    };
+  } finally {
+    db.close();
+  }
+}
+
+function queryLevelStatsFromExports(symbol, _limit) {
+  // Fallback when better-sqlite3 isn't available: read from CSV exports
+  const eventsPath = path.join(EXPORT_DIR, 'touch_events.csv');
+  if (!fs.existsSync(eventsPath)) {
+    return { symbol, error: 'No export data available', level_summary: [] };
+  }
+  return {
+    symbol,
+    note: 'Install better-sqlite3 for live DB queries. Showing static export data.',
+    level_summary: [],
+  };
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || '/', `http://${req.headers.host}`);
 
@@ -609,6 +751,21 @@ const server = http.createServer(async (req, res) => {
     } catch (error) {
       sendJson(res, 502, {
         error: 'Bar writer unavailable',
+        message: error?.message || String(error),
+      });
+    }
+    return;
+  }
+
+  if (url.pathname === '/api/levels') {
+    try {
+      const symbol = url.searchParams.get('symbol') || 'SPX';
+      const limit = Math.min(Number(url.searchParams.get('limit') || 50), 200);
+      const levelStats = await queryLevelStats(symbol, limit);
+      sendJson(res, 200, levelStats);
+    } catch (error) {
+      sendJson(res, 500, {
+        error: 'Level stats query failed',
         message: error?.message || String(error),
       });
     }
