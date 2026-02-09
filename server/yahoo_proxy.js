@@ -7,9 +7,11 @@ import { fileURLToPath } from 'url';
 const HOST = process.env.HOST || '127.0.0.1';
 const PORT = Number(process.env.PORT || 3000);
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 15000);
+const CACHE_MAX_SIZE = Number(process.env.CACHE_MAX_SIZE || 50);
 const MAX_RETRIES = Number(process.env.MAX_RETRIES || 5);
 const BASE_DELAY_MS = Number(process.env.BASE_DELAY_MS || 800);
 const MAX_DELAY_MS = Number(process.env.MAX_DELAY_MS || 8000);
+const MAX_BODY_BYTES = Number(process.env.MAX_BODY_BYTES || 1048576); // 1 MB
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -33,6 +35,24 @@ const symbolMap = new Map([
 ]);
 
 const cache = new Map();
+
+/**
+ * LRU cache eviction: remove expired entries first, then oldest if over limit.
+ */
+function evictCache() {
+  const now = Date.now();
+  // Phase 1: remove expired entries
+  for (const [key, entry] of cache.entries()) {
+    if (now - entry.timestamp >= CACHE_TTL_MS) {
+      cache.delete(key);
+    }
+  }
+  // Phase 2: if still over limit, remove oldest entries (LRU)
+  while (cache.size > CACHE_MAX_SIZE) {
+    const oldestKey = cache.keys().next().value;
+    cache.delete(oldestKey);
+  }
+}
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -327,6 +347,7 @@ async function getYahooData({ symbol, range = '3mo', interval = '1d' }) {
   };
 
   cache.set(cacheKey, { timestamp: Date.now(), data: response });
+  evictCache();
   return response;
 }
 
@@ -364,6 +385,27 @@ function sendJs(res, filePath) {
       'Access-Control-Allow-Origin': '*',
     });
     res.end(data);
+  });
+}
+
+/**
+ * Read request body with a size limit to prevent memory abuse.
+ */
+function readBody(req, maxBytes = MAX_BODY_BYTES) {
+  return new Promise((resolve, reject) => {
+    let data = '';
+    let bytes = 0;
+    req.on('data', (chunk) => {
+      bytes += chunk.length;
+      if (bytes > maxBytes) {
+        req.destroy(new Error('Request body too large'));
+        reject(new Error(`Request body exceeds ${maxBytes} bytes`));
+        return;
+      }
+      data += chunk;
+    });
+    req.on('end', () => resolve(data));
+    req.on('error', reject);
   });
 }
 
@@ -713,14 +755,7 @@ const server = http.createServer(async (req, res) => {
 
   if (url.pathname === '/api/events') {
     try {
-      const body = await new Promise((resolve, reject) => {
-        let data = '';
-        req.on('data', (chunk) => {
-          data += chunk;
-        });
-        req.on('end', () => resolve(data));
-        req.on('error', reject);
-      });
+      const body = await readBody(req);
       const payload = body ? JSON.parse(body) : {};
       const writerUrl = 'http://127.0.0.1:5002/events';
       const data = await fetchLocalJsonPost(writerUrl, payload);
@@ -736,14 +771,7 @@ const server = http.createServer(async (req, res) => {
 
   if (url.pathname === '/api/bars') {
     try {
-      const body = await new Promise((resolve, reject) => {
-        let data = '';
-        req.on('data', (chunk) => {
-          data += chunk;
-        });
-        req.on('end', () => resolve(data));
-        req.on('error', reject);
-      });
+      const body = await readBody(req);
       const payload = body ? JSON.parse(body) : {};
       const writerUrl = 'http://127.0.0.1:5002/bars';
       const data = await fetchLocalJsonPost(writerUrl, payload);
@@ -795,3 +823,30 @@ server.listen(PORT, HOST, () => {
   /* eslint-disable-next-line no-console */
   console.log(`Pivot dashboard server running at http://${HOST}:${PORT}`);
 });
+
+// --- Graceful shutdown & crash guards ---
+
+process.on('uncaughtException', (err) => {
+  console.error('[FATAL] Uncaught exception:', err);
+  server.close(() => process.exit(1));
+  setTimeout(() => process.exit(1), 3000);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[WARN] Unhandled rejection:', reason);
+});
+
+function shutdown(signal) {
+  console.log(`\n[${signal}] Shutting down gracefully...`);
+  server.close(() => {
+    console.log('Server closed.');
+    process.exit(0);
+  });
+  setTimeout(() => {
+    console.error('Forced shutdown after timeout.');
+    process.exit(1);
+  }, 5000);
+}
+
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));

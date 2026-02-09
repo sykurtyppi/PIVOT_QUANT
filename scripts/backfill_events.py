@@ -1,16 +1,25 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import logging
 import math
 import os
 import sqlite3
 import sys
 import time
+import traceback
 import uuid
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Iterable
 from urllib.request import Request, urlopen
+
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+log = logging.getLogger("backfill")
 
 try:
     from zoneinfo import ZoneInfo
@@ -143,11 +152,22 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def fetch_json(url: str, timeout: int = 12) -> dict:
+def fetch_json(url: str, timeout: int = 12, retries: int = 2) -> dict:
     req = Request(url, headers={"User-Agent": "PivotQuantBackfill/1.0"})
-    with urlopen(req, timeout=timeout) as resp:
-        raw = resp.read()
-    return json.loads(raw.decode("utf-8"))
+    last_err = None
+    for attempt in range(1, retries + 2):
+        try:
+            with urlopen(req, timeout=timeout) as resp:
+                raw = resp.read()
+            return json.loads(raw.decode("utf-8"))
+        except Exception as exc:
+            last_err = exc
+            if attempt <= retries:
+                wait = min(2 ** attempt, 8)
+                log.warning("fetch_json attempt %d/%d failed (%s), retrying in %ds...", attempt, retries + 1, exc, wait)
+                time.sleep(wait)
+            else:
+                raise ConnectionError(f"fetch_json failed after {retries + 1} attempts: {url}") from last_err
 
 
 def fetch_market(symbol: str, interval: str, range_str: str, source: str) -> tuple[dict, str]:
@@ -178,7 +198,7 @@ def normalize_range_for_source(interval: str, range_str: str, source: str) -> st
     if source not in ("yahoo", "auto"):
         return range_str
     if interval == "1m" and range_str not in ("1d", "5d", "7d"):
-        print("Yahoo 1m data limited to ~7d. Clamping range to 7d.")
+        log.warning("Yahoo 1m data limited to ~7d. Clamping range to 7d.")
         return "7d"
     return range_str
 
@@ -253,6 +273,74 @@ def compute_atr(sessions: list[dict], window: int) -> dict:
             atr = sum(trs[-window:]) / window
             atr_by_date[session["date"]] = atr
     return atr_by_date
+
+
+def compute_realized_volatility(sessions: list[dict], window: int = 30) -> dict:
+    """Compute annualized realized volatility using close-to-close log returns.
+
+    Returns dict mapping session date -> RV value.
+    Also classifies into regime: 1=low, 2=normal, 3=high.
+    """
+    rv_by_date = {}
+    rv_regime_by_date = {}
+
+    if len(sessions) < 2:
+        return rv_by_date, rv_regime_by_date
+
+    log_returns = []
+    for i in range(1, len(sessions)):
+        prev_close = sessions[i - 1]["close"]
+        curr_close = sessions[i]["close"]
+        if prev_close > 0 and curr_close > 0:
+            lr = math.log(curr_close / prev_close)
+            log_returns.append((sessions[i]["date"], lr))
+
+    for i, (dt, _) in enumerate(log_returns):
+        if i + 1 < window:
+            continue
+        returns_window = [r for _, r in log_returns[i + 1 - window:i + 1]]
+        n = len(returns_window)
+        if n < 2:
+            continue
+        mean = sum(returns_window) / n
+        variance = sum((r - mean) ** 2 for r in returns_window) / (n - 1)
+        rv = math.sqrt(variance * 252) * 100  # annualized, in %
+        rv_by_date[dt] = rv
+
+        # Regime classification based on historical percentiles
+        # Low < 12%, Normal 12-22%, High > 22% (approximate SPX ranges)
+        if rv < 12:
+            rv_regime_by_date[dt] = 1  # low vol
+        elif rv < 22:
+            rv_regime_by_date[dt] = 2  # normal
+        else:
+            rv_regime_by_date[dt] = 3  # high vol
+
+    return rv_by_date, rv_regime_by_date
+
+
+def compute_data_quality(event: dict) -> float:
+    """Score data quality 0-1 based on how many key fields are populated.
+
+    Core fields (weighted higher):
+      touch_price, level_price, distance_bps, ema_state, vwap, atr
+    Enhanced fields (weighted lower):
+      vpoc, mtf_confluence, hist_reject_rate, volume_at_level
+    """
+    core_fields = ["touch_price", "level_price", "distance_bps", "ema_state", "vwap", "atr"]
+    enhanced_fields = ["vpoc", "mtf_confluence", "hist_reject_rate", "volume_at_level",
+                       "gamma_flip", "rv_30"]
+
+    core_weight = 0.7
+    enhanced_weight = 0.3
+
+    core_present = sum(1 for f in core_fields if event.get(f) is not None)
+    enhanced_present = sum(1 for f in enhanced_fields if event.get(f) is not None)
+
+    core_score = core_present / len(core_fields) if core_fields else 1.0
+    enhanced_score = enhanced_present / len(enhanced_fields) if enhanced_fields else 1.0
+
+    return round(core_score * core_weight + enhanced_score * enhanced_weight, 3)
 
 
 def compute_volume_profile(bars: list[dict], num_bins: int = 50) -> dict:
@@ -607,6 +695,8 @@ def build_events(
     source: str,
     atr_by_date: dict,
     conn: sqlite3.Connection | None = None,
+    rv_by_date: dict | None = None,
+    rv_regime_by_date: dict | None = None,
 ):
     events = []
     ema9 = None
@@ -738,8 +828,8 @@ def build_events(
                     "vwap": vwap,
                     "vwap_dist_bps": vwap_dist_bps,
                     "atr": atr_by_date.get(base["date"]),
-                    "rv_30": None,
-                    "rv_regime": None,
+                    "rv_30": rv_by_date.get(session["date"]) if rv_by_date else None,
+                    "rv_regime": rv_regime_by_date.get(session["date"]) if rv_regime_by_date else None,
                     "iv_rv_state": None,
                     "gamma_mode": None,
                     "gamma_flip": None,
@@ -747,7 +837,7 @@ def build_events(
                     "gamma_confidence": None,
                     "oi_concentration_top5": None,
                     "zero_dte_share": None,
-                    "data_quality": None,
+                    "data_quality": None,  # computed after event dict is built
                     "bar_interval_sec": interval_sec,
                     "source": source,
                     "created_at": ts_event,
@@ -763,6 +853,7 @@ def build_events(
                     "hist_break_rate": hist_break_rate,
                     "hist_sample_size": hist_sample_size,
                 }
+                event["data_quality"] = compute_data_quality(event)
                 events.append(event)
                 last_touch_ts[label] = ts_event
 
@@ -808,41 +899,67 @@ def main() -> None:
     total_events = 0
 
     range_str = normalize_range_for_source(args.interval, args.range_str, args.source)
+    failed_symbols = []
+
     for symbol in symbols:
-        payload, source = fetch_market(symbol, args.interval, range_str, args.source)
-        candles = parse_candles(payload)
-        if not candles:
-            print(f"No candles for {symbol}. Skipping.")
+        try:
+            log.info("Processing %s (interval=%s, range=%s)", symbol, args.interval, range_str)
+            payload, source = fetch_market(symbol, args.interval, range_str, args.source)
+            candles = parse_candles(payload)
+            if not candles:
+                log.warning("No candles for %s. Skipping.", symbol)
+                continue
+
+            if args.write_bars:
+                n_bars = insert_bars(conn, symbol, candles, interval_sec)
+                total_bars += n_bars
+                log.info("%s: inserted %d bars", symbol, n_bars)
+
+            sessions = build_daily_bars(candles)
+            atr_by_date = compute_atr(sessions, args.atr_window)
+            rv_by_date, rv_regime_by_date = compute_realized_volatility(sessions, window=30)
+            events = build_events(
+                symbol=symbol,
+                sessions=sessions,
+                interval_sec=interval_sec,
+                threshold_bps=args.threshold_bps,
+                cooldown_min=args.cooldown_min,
+                source=source,
+                atr_by_date=atr_by_date,
+                conn=conn,
+                rv_by_date=rv_by_date,
+                rv_regime_by_date=rv_regime_by_date,
+            )
+
+            if args.write_events and events:
+                n_events = insert_events(conn, events)
+                total_events += n_events
+                log.info("%s: inserted %d events", symbol, n_events)
+
+            # Commit per symbol so partial progress is preserved
+            conn.commit()
+
+        except Exception:
+            log.error("Failed processing %s:\n%s", symbol, traceback.format_exc())
+            failed_symbols.append(symbol)
+            # Rollback any uncommitted changes for this symbol
+            conn.rollback()
             continue
 
-        if args.write_bars:
-            total_bars += insert_bars(conn, symbol, candles, interval_sec)
-
-        sessions = build_daily_bars(candles)
-        atr_by_date = compute_atr(sessions, args.atr_window)
-        events = build_events(
-            symbol=symbol,
-            sessions=sessions,
-            interval_sec=interval_sec,
-            threshold_bps=args.threshold_bps,
-            cooldown_min=args.cooldown_min,
-            source=source,
-            atr_by_date=atr_by_date,
-            conn=conn,
-        )
-
-        if args.write_events and events:
-            total_events += insert_events(conn, events)
-
-    conn.commit()
     conn.close()
 
-    print(f"Inserted bars: {total_bars}")
-    print(f"Inserted events: {total_events}")
+    log.info("Inserted bars: %d", total_bars)
+    log.info("Inserted events: %d", total_events)
+
+    if failed_symbols:
+        log.warning("Failed symbols: %s", ", ".join(failed_symbols))
 
     if args.label:
         horizons = [int(h) for h in args.label_horizons.split(",") if h.strip().isdigit()]
         run_build_labels(args.db, horizons)
+
+    if failed_symbols:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

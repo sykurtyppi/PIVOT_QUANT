@@ -116,67 +116,122 @@ def main() -> None:
                 to_timestamp(joined.ts_event / 1000) AS event_ts_utc,
                 timezone('America/New_York', to_timestamp(joined.ts_event / 1000)) AS event_ts_et
             FROM joined
+        ),
+        enriched AS (
+            SELECT
+                -- base columns from timed
+                timed.event_id,
+                timed.symbol,
+                timed.ts_event,
+                timed.session,
+                timed.level_type,
+                timed.level_price,
+                timed.touch_price,
+                timed.touch_side,
+                timed.distance_bps,
+                timed.is_first_touch_today,
+                timed.touch_count_today,
+                timed.confluence_count,
+                timed.confluence_types,
+                timed.ema9,
+                timed.ema21,
+                timed.ema_state,
+                timed.vwap,
+                timed.vwap_dist_bps,
+                timed.atr,
+                timed.rv_30,
+                timed.rv_regime,
+                timed.iv_rv_state,
+                timed.gamma_mode,
+                timed.gamma_flip,
+                timed.gamma_flip_dist_bps,
+                timed.gamma_confidence,
+                timed.oi_concentration_top5,
+                timed.zero_dte_share,
+                timed.data_quality,
+                timed.bar_interval_sec,
+                timed.source,
+                timed.created_at,
+                timed.vpoc,
+                timed.vpoc_dist_bps,
+                timed.volume_at_level,
+                timed.mtf_confluence,
+                timed.mtf_confluence_types,
+                timed.weekly_pivot,
+                timed.monthly_pivot,
+                timed.level_age_days,
+                timed.hist_reject_rate,
+                timed.hist_break_rate,
+                timed.hist_sample_size,
+                -- label columns
+                timed.horizon_min,
+                timed.return_bps,
+                timed.mfe_bps,
+                timed.mae_bps,
+                timed.reject,
+                timed.break,
+                timed.resolution_min,
+                -- timestamp columns
+                timed.event_ts_utc,
+                timed.event_ts_et,
+                -- computed columns
+                CAST(strftime(timed.event_ts_et, '%Y-%m-%d') AS DATE) AS event_date_et,
+                EXTRACT('hour' FROM timed.event_ts_et) AS event_hour_et,
+                CASE
+                    WHEN EXTRACT('hour' FROM timed.event_ts_et) < 10 THEN 'open'
+                    WHEN EXTRACT('hour' FROM timed.event_ts_et) < 14 THEN 'mid'
+                    WHEN EXTRACT('hour' FROM timed.event_ts_et) < 16 THEN 'power'
+                    ELSE 'overnight'
+                END AS tod_bucket,
+                CASE
+                    WHEN starts_with(timed.level_type, 'R') THEN 'resistance'
+                    WHEN starts_with(timed.level_type, 'S') THEN 'support'
+                    WHEN timed.level_type = 'GAMMA' THEN 'gamma'
+                    ELSE 'pivot'
+                END AS level_family,
+                CASE
+                    WHEN timed.ema_state IS NOT NULL THEN timed.ema_state
+                    WHEN timed.ema9 IS NULL OR timed.ema21 IS NULL THEN NULL
+                    WHEN timed.ema9 > timed.ema21 THEN 1
+                    WHEN timed.ema9 < timed.ema21 THEN -1
+                    ELSE 0
+                END AS ema_state_calc,
+                CASE
+                    WHEN timed.vwap_dist_bps IS NOT NULL THEN timed.vwap_dist_bps
+                    WHEN timed.vwap IS NULL THEN NULL
+                    ELSE (timed.touch_price - timed.vwap) / timed.vwap * 1e4
+                END AS vwap_dist_bps_calc,
+                CASE
+                    WHEN timed.gamma_flip_dist_bps IS NOT NULL THEN timed.gamma_flip_dist_bps
+                    WHEN timed.gamma_flip IS NULL THEN NULL
+                    ELSE (timed.touch_price - timed.gamma_flip) / timed.gamma_flip * 1e4
+                END AS gamma_flip_dist_bps_calc,
+                CASE
+                    WHEN timed.vpoc_dist_bps IS NOT NULL THEN timed.vpoc_dist_bps
+                    WHEN timed.vpoc IS NULL THEN NULL
+                    ELSE (timed.touch_price - timed.vpoc) / timed.vpoc * 1e4
+                END AS vpoc_dist_bps_calc,
+                COALESCE(timed.mtf_confluence, 0) AS mtf_confluence_calc,
+                CASE
+                    WHEN timed.weekly_pivot IS NULL THEN NULL
+                    ELSE (timed.touch_price - timed.weekly_pivot) / timed.weekly_pivot * 1e4
+                END AS weekly_pivot_dist_bps,
+                CASE
+                    WHEN timed.monthly_pivot IS NULL THEN NULL
+                    ELSE (timed.touch_price - timed.monthly_pivot) / timed.monthly_pivot * 1e4
+                END AS monthly_pivot_dist_bps,
+                COALESCE(timed.level_age_days, 0) AS level_age_days_calc,
+                CASE WHEN COALESCE(timed.level_age_days, 0) >= 3 THEN 1 ELSE 0 END AS is_persistent_level,
+                COALESCE(timed.hist_sample_size, 0) AS hist_sample_size_calc,
+                CASE WHEN COALESCE(timed.hist_sample_size, 0) >= 10 THEN 1 ELSE 0 END AS has_history,
+                CASE
+                    WHEN timed.hist_reject_rate IS NOT NULL AND COALESCE(timed.hist_sample_size, 0) >= 10
+                    THEN timed.hist_reject_rate - COALESCE(timed.hist_break_rate, 0)
+                    ELSE NULL
+                END AS hist_edge_score
+            FROM timed
         )
-        SELECT
-            timed.*,
-            CAST(strftime(timed.event_ts_et, '%Y-%m-%d') AS DATE) AS event_date_et,
-            EXTRACT('hour' FROM timed.event_ts_et) AS event_hour_et,
-            CASE
-                WHEN EXTRACT('hour' FROM timed.event_ts_et) < 10 THEN 'open'
-                WHEN EXTRACT('hour' FROM timed.event_ts_et) < 14 THEN 'mid'
-                WHEN EXTRACT('hour' FROM timed.event_ts_et) < 16 THEN 'power'
-                ELSE 'overnight'
-            END AS tod_bucket,
-            CASE
-                WHEN starts_with(timed.level_type, 'R') THEN 'resistance'
-                WHEN starts_with(timed.level_type, 'S') THEN 'support'
-                WHEN timed.level_type = 'GAMMA' THEN 'gamma'
-                ELSE 'pivot'
-            END AS level_family,
-            CASE
-                WHEN timed.ema_state IS NOT NULL THEN timed.ema_state
-                WHEN timed.ema9 IS NULL OR timed.ema21 IS NULL THEN NULL
-                WHEN timed.ema9 > timed.ema21 THEN 1
-                WHEN timed.ema9 < timed.ema21 THEN -1
-                ELSE 0
-            END AS ema_state_calc,
-            CASE
-                WHEN timed.vwap_dist_bps IS NOT NULL THEN timed.vwap_dist_bps
-                WHEN timed.vwap IS NULL THEN NULL
-                ELSE (timed.touch_price - timed.vwap) / timed.vwap * 1e4
-            END AS vwap_dist_bps_calc,
-            CASE
-                WHEN timed.gamma_flip_dist_bps IS NOT NULL THEN timed.gamma_flip_dist_bps
-                WHEN timed.gamma_flip IS NULL THEN NULL
-                ELSE (timed.touch_price - timed.gamma_flip) / timed.gamma_flip * 1e4
-            END AS gamma_flip_dist_bps_calc,
-            CASE
-                WHEN timed.vpoc_dist_bps IS NOT NULL THEN timed.vpoc_dist_bps
-                WHEN timed.vpoc IS NULL THEN NULL
-                ELSE (timed.touch_price - timed.vpoc) / timed.vpoc * 1e4
-            END AS vpoc_dist_bps_calc,
-            timed.volume_at_level,
-            COALESCE(timed.mtf_confluence, 0) AS mtf_confluence_calc,
-            CASE
-                WHEN timed.weekly_pivot IS NULL THEN NULL
-                ELSE (timed.touch_price - timed.weekly_pivot) / timed.weekly_pivot * 1e4
-            END AS weekly_pivot_dist_bps,
-            CASE
-                WHEN timed.monthly_pivot IS NULL THEN NULL
-                ELSE (timed.touch_price - timed.monthly_pivot) / timed.monthly_pivot * 1e4
-            END AS monthly_pivot_dist_bps,
-            COALESCE(timed.level_age_days, 0) AS level_age_days_calc,
-            CASE WHEN COALESCE(timed.level_age_days, 0) >= 3 THEN 1 ELSE 0 END AS is_persistent_level,
-            timed.hist_reject_rate,
-            timed.hist_break_rate,
-            COALESCE(timed.hist_sample_size, 0) AS hist_sample_size_calc,
-            CASE WHEN COALESCE(timed.hist_sample_size, 0) >= 10 THEN 1 ELSE 0 END AS has_history,
-            CASE
-                WHEN timed.hist_reject_rate IS NOT NULL AND COALESCE(timed.hist_sample_size, 0) >= 10
-                THEN timed.hist_reject_rate - COALESCE(timed.hist_break_rate, 0)
-                ELSE NULL
-            END AS hist_edge_score
-        FROM timed
+        SELECT * FROM enriched
         """
     )
     con.close()
