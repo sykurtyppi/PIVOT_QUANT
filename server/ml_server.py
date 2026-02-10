@@ -44,6 +44,7 @@ class ModelRegistry:
     def __init__(self):
         self.manifest = None
         self.models = {"reject": {}, "break": {}}
+        self.thresholds = {"reject": {}, "break": {}}
 
     def load(self):
         manifest_path = MODEL_DIR / "manifest_latest.json"
@@ -53,6 +54,14 @@ class ModelRegistry:
             self.manifest = json.load(handle)
 
         self.models = {"reject": {}, "break": {}}
+        self.thresholds = {"reject": {}, "break": {}}
+
+        # Load thresholds from manifest first
+        manifest_thresholds = self.manifest.get("thresholds", {})
+        for target in ("reject", "break"):
+            for horizon_str, threshold in manifest_thresholds.get(target, {}).items():
+                self.thresholds[target][int(horizon_str)] = float(threshold)
+
         for target, horizons in self.manifest.get("models", {}).items():
             for horizon, filename in horizons.items():
                 path = MODEL_DIR / filename
@@ -60,6 +69,18 @@ class ModelRegistry:
                     continue
                 payload = joblib.load(path)
                 self.models[target][int(horizon)] = payload
+
+                # Fall back to pickle-embedded threshold if manifest didn't have it
+                h_int = int(horizon)
+                if h_int not in self.thresholds.get(target, {}):
+                    pkl_thresh = payload.get("optimal_threshold")
+                    if pkl_thresh is not None:
+                        self.thresholds.setdefault(target, {})[h_int] = float(pkl_thresh)
+
+    def get_threshold(self, target: str, horizon: int) -> float:
+        """Get optimal decision threshold for a target/horizon pair.
+        Falls back to 0.5 if not available."""
+        return self.thresholds.get(target, {}).get(horizon, 0.5)
 
     def available(self):
         return {
@@ -115,6 +136,8 @@ def _score_event(event: dict):
             return 1.0 if int(classes[0]) == 1 else 0.0
         return None
 
+    thresholds_used = {}
+
     for target in ("reject", "break"):
         for horizon, payload in registry.models.get(target, {}).items():
             feature_cols = payload.get("feature_columns", [])
@@ -128,15 +151,45 @@ def _score_event(event: dict):
             prob = extract_prob(model, df)
             scores[f"prob_{target}_{horizon}m"] = prob
 
+            # Store the threshold used for this model
+            threshold = registry.get_threshold(target, horizon)
+            thresholds_used[f"threshold_{target}_{horizon}m"] = threshold
+
             horizon_stats = stats.get(str(horizon), {}).get(target, {})
             for metric in ("mfe_bps", "mae_bps"):
                 if f"{metric}_{target}" in horizon_stats:
                     scores[f"{metric}_{target}_{horizon}m"] = horizon_stats.get(f"{metric}_{target}")
 
+    # ── Signal classification per horizon ──
+    # Uses optimal thresholds instead of hardcoded 0.5
+    signals = {}
+    all_horizons = sorted(
+        set(registry.models.get("reject", {}).keys())
+        .union(registry.models.get("break", {}).keys())
+    )
+
+    for horizon in all_horizons:
+        pr = scores.get(f"prob_reject_{horizon}m")
+        pb = scores.get(f"prob_break_{horizon}m")
+        if pr is None and pb is None:
+            continue
+
+        reject_thresh = registry.get_threshold("reject", horizon)
+        break_thresh = registry.get_threshold("break", horizon)
+
+        pr = pr if pr is not None else 0.0
+        pb = pb if pb is not None else 0.0
+
+        # Determine signal: break wins if both fire (it's the more dangerous outcome)
+        if pb >= break_thresh:
+            signals[f"signal_{horizon}m"] = "break"
+        elif pr >= reject_thresh:
+            signals[f"signal_{horizon}m"] = "reject"
+        else:
+            signals[f"signal_{horizon}m"] = "no_edge"
+
     # Expected MFE/MAE using simple weighted mix if both outputs available.
-    for horizon in sorted(
-        set(registry.models.get("reject", {}).keys()).union(registry.models.get("break", {}).keys())
-    ):
+    for horizon in all_horizons:
         pr = scores.get(f"prob_reject_{horizon}m")
         pb = scores.get(f"prob_break_{horizon}m")
         if pr is None and pb is None:
@@ -161,11 +214,10 @@ def _score_event(event: dict):
         scores[f"exp_mfe_bps_{horizon}m"] = float(mfe)
         scores[f"exp_mae_bps_{horizon}m"] = float(mae)
 
+    # ── Best horizon selection (using threshold-aware edge) ──
     best_horizon = None
     best_score = None
-    for horizon in sorted(
-        set(registry.models.get("reject", {}).keys()).union(registry.models.get("break", {}).keys())
-    ):
+    for horizon in all_horizons:
         pr = scores.get(f"prob_reject_{horizon}m")
         pb = scores.get(f"prob_break_{horizon}m")
         if pr is None and pb is None:
@@ -177,9 +229,15 @@ def _score_event(event: dict):
             best_score = edge
             best_horizon = horizon
 
+    # ── Abstain flag: true when no horizon has a directional signal ──
+    has_signal = any(v in ("reject", "break") for v in signals.values())
+
     return {
         "status": "degraded" if missing else "ok",
         "scores": scores,
+        "signals": signals,
+        "thresholds": thresholds_used,
+        "abstain": not has_signal,
         "best_horizon": best_horizon,
         "model_version": registry.manifest.get("version") if registry.manifest else None,
         "feature_version": FEATURE_VERSION,
