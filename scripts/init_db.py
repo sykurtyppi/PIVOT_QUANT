@@ -52,7 +52,30 @@ def init_db(db_path: str) -> None:
             data_quality REAL,
             bar_interval_sec INTEGER,
             source TEXT,
-            created_at INTEGER NOT NULL
+            created_at INTEGER NOT NULL,
+            vpoc REAL,
+            vpoc_dist_bps REAL,
+            volume_at_level REAL,
+            mtf_confluence INTEGER DEFAULT 0,
+            mtf_confluence_types TEXT,
+            weekly_pivot REAL,
+            monthly_pivot REAL,
+            level_age_days INTEGER DEFAULT 0,
+            hist_reject_rate REAL,
+            hist_break_rate REAL,
+            hist_sample_size INTEGER DEFAULT 0,
+            regime_type INTEGER,
+            overnight_gap_atr REAL,
+            or_high REAL,
+            or_low REAL,
+            or_size_atr REAL,
+            or_breakout INTEGER,
+            or_high_dist_bps REAL,
+            or_low_dist_bps REAL,
+            session_std REAL,
+            sigma_band_position REAL,
+            distance_to_upper_sigma_bps REAL,
+            distance_to_lower_sigma_bps REAL
         );
         """
     )

@@ -43,7 +43,7 @@ def ensure_bar_schema(conn: sqlite3.Connection) -> None:
 
 
 def ensure_new_columns(conn: sqlite3.Connection) -> None:
-    """Add Week 2 columns to existing touch_events table if missing."""
+    """Add new columns to existing touch_events table if missing."""
     cur = conn.execute("PRAGMA table_info(touch_events)")
     cols = {row[1] for row in cur.fetchall()}
     new_cols = {
@@ -58,6 +58,19 @@ def ensure_new_columns(conn: sqlite3.Connection) -> None:
         "hist_reject_rate": "REAL",
         "hist_break_rate": "REAL",
         "hist_sample_size": "INTEGER DEFAULT 0",
+        # v3 features: regime, opening range, σ-bands
+        "regime_type": "INTEGER",
+        "overnight_gap_atr": "REAL",
+        "or_high": "REAL",
+        "or_low": "REAL",
+        "or_size_atr": "REAL",
+        "or_breakout": "INTEGER",
+        "or_high_dist_bps": "REAL",
+        "or_low_dist_bps": "REAL",
+        "session_std": "REAL",
+        "sigma_band_position": "REAL",
+        "distance_to_upper_sigma_bps": "REAL",
+        "distance_to_lower_sigma_bps": "REAL",
     }
     for col_name, col_type in new_cols.items():
         if col_name not in cols:
@@ -111,7 +124,19 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             level_age_days INTEGER DEFAULT 0,
             hist_reject_rate REAL,
             hist_break_rate REAL,
-            hist_sample_size INTEGER DEFAULT 0
+            hist_sample_size INTEGER DEFAULT 0,
+            regime_type INTEGER,
+            overnight_gap_atr REAL,
+            or_high REAL,
+            or_low REAL,
+            or_size_atr REAL,
+            or_breakout INTEGER,
+            or_high_dist_bps REAL,
+            or_low_dist_bps REAL,
+            session_std REAL,
+            sigma_band_position REAL,
+            distance_to_upper_sigma_bps REAL,
+            distance_to_lower_sigma_bps REAL
         );
         """
     )
@@ -260,6 +285,8 @@ def compute_atr(sessions: list[dict], window: int) -> dict:
     atr_by_date = {}
     trs = []
     prev_close = None
+    # Use adaptive window: at least 2 TRs, up to requested window
+    min_window = min(2, window)
     for session in sessions:
         high = session["high"]
         low = session["low"]
@@ -269,8 +296,9 @@ def compute_atr(sessions: list[dict], window: int) -> dict:
             tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
         trs.append(tr)
         prev_close = session["close"]
-        if len(trs) >= window:
-            atr = sum(trs[-window:]) / window
+        effective_window = min(len(trs), window)
+        if effective_window >= min_window:
+            atr = sum(trs[-effective_window:]) / effective_window
             atr_by_date[session["date"]] = atr
     return atr_by_date
 
@@ -280,12 +308,15 @@ def compute_realized_volatility(sessions: list[dict], window: int = 30) -> dict:
 
     Returns dict mapping session date -> RV value.
     Also classifies into regime: 1=low, 2=normal, 3=high.
+    Uses adaptive window: minimum 3 returns, up to requested window.
     """
     rv_by_date = {}
     rv_regime_by_date = {}
 
     if len(sessions) < 2:
         return rv_by_date, rv_regime_by_date
+
+    min_returns = min(3, window)  # Need at least 3 returns for meaningful RV
 
     log_returns = []
     for i in range(1, len(sessions)):
@@ -296,9 +327,11 @@ def compute_realized_volatility(sessions: list[dict], window: int = 30) -> dict:
             log_returns.append((sessions[i]["date"], lr))
 
     for i, (dt, _) in enumerate(log_returns):
-        if i + 1 < window:
+        available = i + 1
+        if available < min_returns:
             continue
-        returns_window = [r for _, r in log_returns[i + 1 - window:i + 1]]
+        effective_window = min(available, window)
+        returns_window = [r for _, r in log_returns[i + 1 - effective_window:i + 1]]
         n = len(returns_window)
         if n < 2:
             continue
@@ -676,6 +709,19 @@ def insert_events(conn: sqlite3.Connection, events: list[dict]) -> int:
         "hist_reject_rate",
         "hist_break_rate",
         "hist_sample_size",
+        # v3 features
+        "regime_type",
+        "overnight_gap_atr",
+        "or_high",
+        "or_low",
+        "or_size_atr",
+        "or_breakout",
+        "or_high_dist_bps",
+        "or_low_dist_bps",
+        "session_std",
+        "sigma_band_position",
+        "distance_to_upper_sigma_bps",
+        "distance_to_lower_sigma_bps",
     ]
     placeholders = ", ".join(["?"] * len(columns))
     sql = f"INSERT OR IGNORE INTO touch_events ({', '.join(columns)}) VALUES ({placeholders})"
@@ -684,6 +730,138 @@ def insert_events(conn: sqlite3.Connection, events: list[dict]) -> int:
         values.append([ev.get(col) for col in columns])
     conn.executemany(sql, values)
     return conn.total_changes
+
+
+def compute_opening_range(bars: list[dict], or_minutes: int = 30) -> dict:
+    """Compute Opening Range High/Low from first N minutes of session bars.
+
+    Returns dict with or_high, or_low, or_size.
+    The first bar's timestamp is used as session open reference.
+    """
+    if not bars:
+        return {"or_high": None, "or_low": None, "or_size": None}
+
+    open_ts = bars[0]["time"]
+    cutoff_ts = open_ts + or_minutes * 60
+
+    or_bars = [b for b in bars if b["time"] < cutoff_ts]
+    if not or_bars:
+        return {"or_high": None, "or_low": None, "or_size": None}
+
+    or_high = max(b["high"] for b in or_bars)
+    or_low = min(b["low"] for b in or_bars)
+    return {"or_high": or_high, "or_low": or_low, "or_size": or_high - or_low}
+
+
+def classify_regime(
+    session: dict,
+    prior_session: dict | None,
+    atr: float | None,
+    ema9: float | None,
+    ema21: float | None,
+    or_data: dict,
+) -> tuple[int, float | None, float | None]:
+    """Classify the trading day regime using rule-based signals.
+
+    Returns (regime_type, overnight_gap_atr, or_size_atr):
+      regime_type: 1=trend_up, 2=trend_down, 3=range, 4=vol_expansion
+      overnight_gap_atr: gap / ATR ratio (signed)
+      or_size_atr: opening range / ATR ratio
+    """
+    # Default: range (3)
+    regime = 3
+    overnight_gap_atr = None
+    or_size_atr = None
+
+    if atr is None or atr <= 0:
+        return regime, overnight_gap_atr, or_size_atr
+
+    # Overnight gap signal
+    if prior_session is not None:
+        gap = session["open"] - prior_session["close"]
+        overnight_gap_atr = gap / atr
+    else:
+        overnight_gap_atr = 0.0
+
+    # Opening range signal
+    or_size = or_data.get("or_size")
+    if or_size is not None and or_size > 0:
+        or_size_atr = or_size / atr
+    else:
+        or_size_atr = None
+
+    # EMA trend signal
+    ema_bullish = ema9 is not None and ema21 is not None and ema9 > ema21
+    ema_bearish = ema9 is not None and ema21 is not None and ema9 < ema21
+
+    # Scoring: combine signals for regime classification
+    # Large gap (>0.5 ATR) + wide OR (>0.4 ATR) + EMA alignment → trend
+    # Large OR (>0.7 ATR) alone → vol expansion
+    # Small gap + narrow OR → range
+
+    large_gap = abs(overnight_gap_atr or 0) > 0.5
+    wide_or = (or_size_atr or 0) > 0.4
+    very_wide_or = (or_size_atr or 0) > 0.7
+
+    if very_wide_or and large_gap:
+        regime = 4  # vol_expansion
+    elif large_gap and wide_or and ema_bullish and (overnight_gap_atr or 0) > 0:
+        regime = 1  # trend_up
+    elif large_gap and wide_or and ema_bearish and (overnight_gap_atr or 0) < 0:
+        regime = 2  # trend_down
+    elif wide_or and ema_bullish:
+        regime = 1  # trend_up (weaker signal)
+    elif wide_or and ema_bearish:
+        regime = 2  # trend_down (weaker signal)
+    else:
+        regime = 3  # range
+
+    return regime, overnight_gap_atr, or_size_atr
+
+
+def compute_session_std(bars: list[dict]) -> float | None:
+    """Compute standard deviation of close prices within the session.
+
+    Used for VWAP z-score normalization.
+    """
+    if len(bars) < 2:
+        return None
+    closes = [b["close"] for b in bars]
+    n = len(closes)
+    mean = sum(closes) / n
+    variance = sum((c - mean) ** 2 for c in closes) / (n - 1)
+    return math.sqrt(variance) if variance > 0 else None
+
+
+def compute_sigma_bands(prior_close: float, atr: float | None, rv_daily: float | None) -> dict:
+    """Compute expected daily range σ-bands.
+
+    Uses RV if available, falls back to ATR-based estimate.
+    Returns dict with upper_1sigma, lower_1sigma, upper_2sigma, lower_2sigma.
+    """
+    if prior_close <= 0:
+        return {"upper_1sigma": None, "lower_1sigma": None,
+                "upper_2sigma": None, "lower_2sigma": None}
+
+    # Use RV (annualized %) to get daily σ
+    daily_sigma = None
+    if rv_daily is not None and rv_daily > 0:
+        # rv_daily is annualized %, convert to daily dollar move
+        daily_sigma = prior_close * (rv_daily / 100) / math.sqrt(252)
+    elif atr is not None and atr > 0:
+        # ATR approximates ~1.2σ of daily range
+        daily_sigma = atr / 1.2
+
+    if daily_sigma is None or daily_sigma <= 0:
+        return {"upper_1sigma": None, "lower_1sigma": None,
+                "upper_2sigma": None, "lower_2sigma": None}
+
+    return {
+        "upper_1sigma": prior_close + daily_sigma,
+        "lower_1sigma": prior_close - daily_sigma,
+        "upper_2sigma": prior_close + 2 * daily_sigma,
+        "lower_2sigma": prior_close - 2 * daily_sigma,
+    }
 
 
 def compute_daily_emas(sessions: list[dict]) -> dict:
@@ -749,6 +927,37 @@ def build_events(
         ema9_daily, ema21_daily = daily_emas.get(base["date"], (None, None))
         # Require at least 2 sessions so EMA has seen multiple closes
         ema_ready = ema9_daily is not None and ema21_daily is not None and idx >= 2
+
+        # ── Opening Range (first 30 minutes) ──
+        or_data = compute_opening_range(session["bars"], or_minutes=30)
+        or_high = or_data["or_high"]
+        or_low = or_data["or_low"]
+
+        # ── ATR for this session (from prior day) ──
+        session_atr = atr_by_date.get(base["date"])
+
+        # ── OR size / ATR ratio ──
+        or_size_atr_val = None
+        if or_data["or_size"] is not None and session_atr and session_atr > 0:
+            or_size_atr_val = or_data["or_size"] / session_atr
+
+        # ── Regime classification ──
+        prior_for_regime = sessions[idx - 2] if idx >= 2 else None
+        regime_type, overnight_gap_atr, _ = classify_regime(
+            session=session,
+            prior_session=base,
+            atr=session_atr,
+            ema9=ema9_daily if ema_ready else None,
+            ema21=ema21_daily if ema_ready else None,
+            or_data=or_data,
+        )
+
+        # ── Session std for VWAP z-score ──
+        session_std = compute_session_std(session["bars"])
+
+        # ── σ-bands from RV ──
+        rv_for_session = rv_by_date.get(session["date"]) if rv_by_date else None
+        sigma_bands = compute_sigma_bands(base["close"], session_atr, rv_for_session)
 
         for bar in session["bars"]:
             close = bar["close"]
@@ -823,6 +1032,37 @@ def build_events(
                     )
 
                 touch_counts[label] += 1
+
+                # ── Opening Range features for this bar ──
+                or_breakout_val = 0
+                or_high_dist = None
+                or_low_dist = None
+                if or_high is not None and or_low is not None:
+                    if close > or_high:
+                        or_breakout_val = 1
+                    elif close < or_low:
+                        or_breakout_val = -1
+                    if or_high != 0:
+                        or_high_dist = (close - or_high) / or_high * 1e4
+                    if or_low != 0:
+                        or_low_dist = (close - or_low) / or_low * 1e4
+
+                # ── σ-band position for this bar ──
+                sigma_pos = None
+                dist_upper_sigma = None
+                dist_lower_sigma = None
+                upper_1s = sigma_bands.get("upper_1sigma")
+                lower_1s = sigma_bands.get("lower_1sigma")
+                if upper_1s is not None and lower_1s is not None:
+                    band_width = upper_1s - lower_1s
+                    if band_width > 0:
+                        midpoint = (upper_1s + lower_1s) / 2
+                        sigma_pos = (close - midpoint) / (band_width / 2)
+                    if upper_1s != 0:
+                        dist_upper_sigma = (close - upper_1s) / upper_1s * 1e4
+                    if lower_1s != 0:
+                        dist_lower_sigma = (close - lower_1s) / lower_1s * 1e4
+
                 event = {
                     "event_id": str(uuid.uuid4()),
                     "symbol": symbol,
@@ -867,6 +1107,19 @@ def build_events(
                     "hist_reject_rate": hist_reject_rate,
                     "hist_break_rate": hist_break_rate,
                     "hist_sample_size": hist_sample_size,
+                    # v3 features
+                    "regime_type": regime_type,
+                    "overnight_gap_atr": overnight_gap_atr,
+                    "or_high": or_high,
+                    "or_low": or_low,
+                    "or_size_atr": or_size_atr_val,
+                    "or_breakout": or_breakout_val,
+                    "or_high_dist_bps": or_high_dist,
+                    "or_low_dist_bps": or_low_dist,
+                    "session_std": session_std,
+                    "sigma_band_position": sigma_pos,
+                    "distance_to_upper_sigma_bps": dist_upper_sigma,
+                    "distance_to_lower_sigma_bps": dist_lower_sigma,
                 }
                 event["data_quality"] = compute_data_quality(event)
                 events.append(event)

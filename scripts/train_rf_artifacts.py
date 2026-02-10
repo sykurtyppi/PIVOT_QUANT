@@ -10,7 +10,7 @@ if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
 from ml.calibration import ProbabilityCalibrator
-from ml.features import FEATURE_VERSION, build_feature_row
+from ml.features import FEATURE_VERSION, build_feature_row, drop_features
 
 DEFAULT_DUCKDB = os.getenv("DUCKDB_PATH", "data/pivot_training.duckdb")
 DEFAULT_VIEW = os.getenv("DUCKDB_VIEW", "training_events_v1")
@@ -180,7 +180,7 @@ def main() -> None:
         df = df.sort_values("ts_event")
         manifest["trained_end_ts"] = int(df["ts_event"].max()) if not df.empty else None
 
-        drop_cols = {
+        label_cols = {
             "event_id",
             "ts_event",
             "created_at",
@@ -195,9 +195,14 @@ def main() -> None:
             "reject",
             "break",
             "resolution_min",
+            "or_high",
+            "or_low",
         }
+        feature_drops = drop_features()
+        all_drops = label_cols | feature_drops
+
         feature_df = build_feature_dataframe(df)
-        feature_df = feature_df.drop(columns=[c for c in drop_cols if c in feature_df.columns], errors="ignore")
+        feature_df = feature_df.drop(columns=[c for c in all_drops if c in feature_df.columns], errors="ignore")
         feature_df = feature_df.loc[:, feature_df.notna().any()]
 
         dates = sorted({d for d in df["event_date_et"].tolist() if d is not None})
@@ -237,6 +242,33 @@ def main() -> None:
                     calib_method = choose_calibration(args.calibration, len(X_calib))
                     calibrator = ProbabilityCalibrator(pipeline, calib_method).fit(X_calib, y_calib)
 
+            # Compute optimal decision threshold on calibration set
+            import numpy as np
+            optimal_threshold = 0.5
+            model_obj = calibrator if calibrator is not None else pipeline
+            if hasattr(model_obj, "predict_proba"):
+                X_calib_for_thresh = X.loc[calib_mask] if len(X.loc[calib_mask]) >= 20 else X
+                y_calib_for_thresh = y.loc[X_calib_for_thresh.index]
+                try:
+                    probs_calib = model_obj.predict_proba(X_calib_for_thresh)
+                    if probs_calib.shape[1] == 2:
+                        y_prob_calib = probs_calib[:, 1]
+                        from sklearn.metrics import precision_recall_curve, f1_score as f1_fn
+                        precisions, recalls, thresholds = precision_recall_curve(
+                            y_calib_for_thresh, y_prob_calib
+                        )
+                        best_f1 = 0.0
+                        for i, thresh in enumerate(thresholds):
+                            if precisions[i] < 0.3:
+                                continue
+                            y_pred_t = (np.asarray(y_prob_calib) >= thresh).astype(int)
+                            f1_val = float(f1_fn(y_calib_for_thresh, y_pred_t, zero_division=0))
+                            if f1_val > best_f1:
+                                best_f1 = f1_val
+                                optimal_threshold = float(thresh)
+                except Exception:
+                    optimal_threshold = 0.5
+
             model_name = f"rf_{target}_{horizon}m_{version}.pkl"
             model_path = out_dir / model_name
             joblib.dump(
@@ -244,6 +276,7 @@ def main() -> None:
                     "pipeline": pipeline,
                     "calibrator": calibrator,
                     "calibration": calib_method or "none",
+                    "optimal_threshold": optimal_threshold,
                     "feature_columns": list(X.columns),
                     "numeric_columns": numeric_cols,
                     "categorical_columns": categorical_cols,
@@ -253,6 +286,8 @@ def main() -> None:
 
             manifest["models"].setdefault(target, {})[str(horizon)] = model_name
             manifest["calibration"].setdefault(target, {})[str(horizon)] = calib_method or "none"
+            manifest["thresholds"] = manifest.get("thresholds", {})
+            manifest["thresholds"].setdefault(target, {})[str(horizon)] = optimal_threshold
             manifest["stats"].setdefault(str(horizon), {})[target] = compute_horizon_stats(df, target, horizon)
 
             latest_name = f"latest_{target}_{horizon}m.pkl"

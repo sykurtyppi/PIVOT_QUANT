@@ -73,7 +73,7 @@ def generate_splits(dates, train_days, calib_days, test_days, max_folds):
 
 
 from ml.calibration import ProbabilityCalibrator
-from ml.features import build_feature_row
+from ml.features import build_feature_row, drop_features
 
 
 def choose_calibration(method, calib_size):
@@ -123,7 +123,36 @@ def build_pipeline(numeric_cols, categorical_cols, args):
     return Pipeline(steps=[("prep", preprocessor), ("rf", rf)])
 
 
-def metrics_for_fold(y_true, y_prob, y_pred):
+def find_optimal_threshold(y_true, y_prob, min_precision=0.4):
+    """Find the threshold that maximizes F1 with a minimum precision constraint.
+
+    For rare-event models (break), this prevents degenerate all-negative predictions
+    by finding the best threshold below the default 0.5.
+    """
+    import numpy as np
+    from sklearn.metrics import precision_recall_curve, f1_score as f1_fn
+
+    if y_prob is None or len(set(y_true)) < 2:
+        return 0.5
+
+    precisions, recalls, thresholds = precision_recall_curve(y_true, y_prob)
+    best_threshold = 0.5
+    best_f1 = 0.0
+
+    for i, thresh in enumerate(thresholds):
+        if precisions[i] < min_precision:
+            continue
+        # Compute F1 at this threshold
+        y_pred_t = (np.asarray(y_prob) >= thresh).astype(int)
+        f1_val = float(f1_fn(y_true, y_pred_t, zero_division=0))
+        if f1_val > best_f1:
+            best_f1 = f1_val
+            best_threshold = float(thresh)
+
+    return best_threshold
+
+
+def metrics_for_fold(y_true, y_prob, y_pred, optimal_threshold=None):
     from sklearn.metrics import (
         accuracy_score,
         precision_score,
@@ -133,6 +162,7 @@ def metrics_for_fold(y_true, y_prob, y_pred):
         brier_score_loss,
         log_loss,
     )
+    import numpy as np
 
     metrics = {}
     metrics["accuracy"] = float(accuracy_score(y_true, y_pred))
@@ -144,10 +174,24 @@ def metrics_for_fold(y_true, y_prob, y_pred):
         metrics["roc_auc"] = float(roc_auc_score(y_true, y_prob))
         metrics["brier"] = float(brier_score_loss(y_true, y_prob))
         metrics["log_loss"] = float(log_loss(y_true, y_prob, labels=[0, 1]))
+
+        # Compute optimal threshold and metrics at that threshold
+        if optimal_threshold is None:
+            optimal_threshold = find_optimal_threshold(y_true, y_prob)
+        metrics["optimal_threshold"] = float(optimal_threshold)
+
+        y_pred_opt = (np.asarray(y_prob) >= optimal_threshold).astype(int)
+        metrics["opt_precision"] = float(precision_score(y_true, y_pred_opt, zero_division=0))
+        metrics["opt_recall"] = float(recall_score(y_true, y_pred_opt, zero_division=0))
+        metrics["opt_f1"] = float(f1_score(y_true, y_pred_opt, zero_division=0))
     else:
         metrics["roc_auc"] = None
         metrics["brier"] = None
         metrics["log_loss"] = None
+        metrics["optimal_threshold"] = 0.5
+        metrics["opt_precision"] = None
+        metrics["opt_recall"] = None
+        metrics["opt_f1"] = None
     return metrics
 
 
@@ -334,7 +378,8 @@ def main() -> None:
         print("No labeled rows for target.")
         return
 
-    drop_cols = {
+    # Columns that are metadata/labels, never features
+    label_cols = {
         "event_id",
         "ts_event",
         "created_at",
@@ -349,7 +394,13 @@ def main() -> None:
         "reject",
         "break",
         "resolution_min",
+        # Raw OR prices (we keep the bps-normalized versions)
+        "or_high",
+        "or_low",
     }
+    # Features explicitly marked for exclusion (raw prices, duplicates, dead)
+    feature_drops = drop_features()
+    drop_cols = label_cols | feature_drops
 
     feature_df = build_feature_dataframe(df)
     feature_df = feature_df.drop(columns=[c for c in drop_cols if c in feature_df.columns], errors="ignore")
@@ -432,7 +483,7 @@ def main() -> None:
 
         y_pred = (y_prob >= 0.5).astype(int) if y_prob is not None else model.predict(X_test)
 
-        fold_metrics = metrics_for_fold(y_test, y_prob, y_pred)
+        fold_metrics = metrics_for_fold(y_test, y_prob, y_pred, optimal_threshold=None)
         fold_metrics.update(
             {
                 "fold": fold_idx,

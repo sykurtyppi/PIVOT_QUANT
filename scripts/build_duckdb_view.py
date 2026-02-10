@@ -81,7 +81,19 @@ def main() -> None:
                 try_cast(level_age_days AS INTEGER) AS level_age_days,
                 try_cast(hist_reject_rate AS DOUBLE) AS hist_reject_rate,
                 try_cast(hist_break_rate AS DOUBLE) AS hist_break_rate,
-                try_cast(hist_sample_size AS INTEGER) AS hist_sample_size
+                try_cast(hist_sample_size AS INTEGER) AS hist_sample_size,
+                try_cast(regime_type AS INTEGER) AS regime_type,
+                try_cast(overnight_gap_atr AS DOUBLE) AS overnight_gap_atr,
+                try_cast(or_high AS DOUBLE) AS or_high,
+                try_cast(or_low AS DOUBLE) AS or_low,
+                try_cast(or_size_atr AS DOUBLE) AS or_size_atr,
+                try_cast(or_breakout AS INTEGER) AS or_breakout,
+                try_cast(or_high_dist_bps AS DOUBLE) AS or_high_dist_bps,
+                try_cast(or_low_dist_bps AS DOUBLE) AS or_low_dist_bps,
+                try_cast(session_std AS DOUBLE) AS session_std,
+                try_cast(sigma_band_position AS DOUBLE) AS sigma_band_position,
+                try_cast(distance_to_upper_sigma_bps AS DOUBLE) AS distance_to_upper_sigma_bps,
+                try_cast(distance_to_lower_sigma_bps AS DOUBLE) AS distance_to_lower_sigma_bps
             FROM {('read_parquet' if use_parquet else 'read_csv_auto')}('{touch_parquet if use_parquet else touch_csv}')
         ),
         labels AS (
@@ -163,6 +175,19 @@ def main() -> None:
                 timed.hist_reject_rate,
                 timed.hist_break_rate,
                 timed.hist_sample_size,
+                -- v3 features
+                timed.regime_type,
+                timed.overnight_gap_atr,
+                timed.or_high,
+                timed.or_low,
+                timed.or_size_atr,
+                timed.or_breakout,
+                timed.or_high_dist_bps,
+                timed.or_low_dist_bps,
+                timed.session_std,
+                timed.sigma_band_position,
+                timed.distance_to_upper_sigma_bps,
+                timed.distance_to_lower_sigma_bps,
                 -- label columns
                 timed.horizon_min,
                 timed.return_bps,
