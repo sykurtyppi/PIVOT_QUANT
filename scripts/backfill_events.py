@@ -686,6 +686,26 @@ def insert_events(conn: sqlite3.Connection, events: list[dict]) -> int:
     return conn.total_changes
 
 
+def compute_daily_emas(sessions: list[dict]) -> dict:
+    """Compute daily EMA9 and EMA21 from session close prices.
+
+    Returns dict mapping session date -> (ema9, ema21, ema_state).
+    Uses prior session's close as the EMA input, matching the dashboard's
+    daily chart overlay behavior (9-day and 21-day EMAs, not 9-bar intraday).
+    """
+    ema9 = None
+    ema21 = None
+    result = {}
+
+    for session in sessions:
+        close = session["close"]
+        ema9 = ema_update(ema9, close, 9)
+        ema21 = ema_update(ema21, close, 21)
+        result[session["date"]] = (ema9, ema21)
+
+    return result
+
+
 def build_events(
     symbol: str,
     sessions: list[dict],
@@ -699,21 +719,14 @@ def build_events(
     rv_regime_by_date: dict | None = None,
 ):
     events = []
-    ema9 = None
-    ema21 = None
-    ema_bar_count = 0  # Track how many bars have fed the EMA
     cooldown_ms = cooldown_min * 60 * 1000
 
     # Build higher-timeframe OHLC for multi-TF confluence
     weekly_sessions = build_weekly_sessions(sessions)
     monthly_sessions = build_monthly_sessions(sessions)
 
-    # Warm up EMAs using the first session's bars (don't generate events for it)
-    if sessions:
-        for bar in sessions[0]["bars"]:
-            ema9 = ema_update(ema9, bar["close"], 9)
-            ema21 = ema_update(ema21, bar["close"], 21)
-            ema_bar_count += 1
+    # Compute daily EMAs from session closes (matches dashboard daily chart)
+    daily_emas = compute_daily_emas(sessions)
 
     for idx in range(1, len(sessions)):
         base = sessions[idx - 1]
@@ -732,11 +745,13 @@ def build_events(
         weekly_pivots = find_mtf_pivot_for_date(weekly_sessions, session["date"])
         monthly_pivots = find_mtf_pivot_for_date(monthly_sessions, session["date"])
 
+        # Daily EMAs: use prior session's close-based EMA (available before today opens)
+        ema9_daily, ema21_daily = daily_emas.get(base["date"], (None, None))
+        # Require at least 2 sessions so EMA has seen multiple closes
+        ema_ready = ema9_daily is not None and ema21_daily is not None and idx >= 2
+
         for bar in session["bars"]:
             close = bar["close"]
-            ema9 = ema_update(ema9, close, 9)
-            ema21 = ema_update(ema21, close, 21)
-            ema_bar_count += 1
             session_bars_so_far.append(bar)
 
             typical = (bar["high"] + bar["low"] + bar["close"]) / 3
@@ -763,8 +778,8 @@ def build_events(
                 ]
 
                 ema_state = None
-                ema9_out = ema9 if ema_bar_count >= 21 else None
-                ema21_out = ema21 if ema_bar_count >= 21 else None
+                ema9_out = ema9_daily if ema_ready else None
+                ema21_out = ema21_daily if ema_ready else None
                 if ema9_out is not None and ema21_out is not None:
                     ema_state = 1 if ema9_out > ema21_out else -1 if ema9_out < ema21_out else 0
 
