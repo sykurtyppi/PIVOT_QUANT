@@ -448,9 +448,52 @@
             background: linear-gradient(135deg, rgba(239, 68, 68, 0.08), var(--panel-2));
         }
 
+        .ml-horizon-card[data-signal="no_edge"] {
+            border-color: rgba(251, 191, 36, 0.25);
+            background: linear-gradient(135deg, rgba(251, 191, 36, 0.05), var(--panel-2));
+            opacity: 0.7;
+        }
+
         .ml-horizon-card[data-signal="neutral"] {
             border-color: rgba(148, 163, 184, 0.15);
         }
+
+        .ml-signal-label {
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.4px;
+            text-transform: uppercase;
+            padding: 2px 6px;
+            border-radius: 4px;
+            text-align: center;
+        }
+        .ml-signal-label[data-signal="reject"] { color: #22c55e; background: rgba(34, 197, 94, 0.12); }
+        .ml-signal-label[data-signal="break"]  { color: #ef4444; background: rgba(239, 68, 68, 0.12); }
+        .ml-signal-label[data-signal="no_edge"] { color: #fbbf24; background: rgba(251, 191, 36, 0.10); }
+
+        .ml-threshold-row {
+            font-size: 10px;
+            color: var(--muted);
+            display: flex;
+            justify-content: space-between;
+            border-top: 1px solid rgba(148, 163, 184, 0.06);
+            padding-top: 4px;
+            margin-top: 2px;
+        }
+
+        .ml-abstain-banner {
+            display: none;
+            padding: 8px 12px;
+            border-radius: 8px;
+            background: rgba(251, 191, 36, 0.08);
+            border: 1px solid rgba(251, 191, 36, 0.25);
+            color: #fbbf24;
+            font-size: 12px;
+            font-weight: 500;
+            text-align: center;
+            margin-bottom: 6px;
+        }
+        .ml-abstain-banner.visible { display: block; }
 
         .alerts {
             display: flex;
@@ -680,27 +723,45 @@
                         <div id="ml-best-horizon" class="stat-value">--</div>
                     </div>
                 </div>
+                <div class="ml-abstain-banner" id="ml-abstain-banner">
+                    ⚠ NO EDGE — Models below threshold at all horizons. Consider sitting out.
+                </div>
                 <div class="ml-horizon-grid">
                     <div class="ml-horizon-card">
                         <div class="ml-horizon-title">5m</div>
+                        <div class="ml-signal-label" id="ml-signal-5m">--</div>
                         <div class="ml-horizon-row">Reject: <span id="ml-reject-5m">--</span></div>
                         <div class="ml-horizon-row">Break: <span id="ml-break-5m">--</span></div>
                         <div class="ml-horizon-row">Exp MFE: <span id="ml-mfe-5m">--</span></div>
                         <div class="ml-horizon-row">Exp MAE: <span id="ml-mae-5m">--</span></div>
+                        <div class="ml-threshold-row">
+                            <span>Thr R: <span id="ml-thr-reject-5m">--</span></span>
+                            <span>Thr B: <span id="ml-thr-break-5m">--</span></span>
+                        </div>
                     </div>
                     <div class="ml-horizon-card">
                         <div class="ml-horizon-title">15m</div>
+                        <div class="ml-signal-label" id="ml-signal-15m">--</div>
                         <div class="ml-horizon-row">Reject: <span id="ml-reject-15m">--</span></div>
                         <div class="ml-horizon-row">Break: <span id="ml-break-15m">--</span></div>
                         <div class="ml-horizon-row">Exp MFE: <span id="ml-mfe-15m">--</span></div>
                         <div class="ml-horizon-row">Exp MAE: <span id="ml-mae-15m">--</span></div>
+                        <div class="ml-threshold-row">
+                            <span>Thr R: <span id="ml-thr-reject-15m">--</span></span>
+                            <span>Thr B: <span id="ml-thr-break-15m">--</span></span>
+                        </div>
                     </div>
                     <div class="ml-horizon-card">
                         <div class="ml-horizon-title">60m</div>
+                        <div class="ml-signal-label" id="ml-signal-60m">--</div>
                         <div class="ml-horizon-row">Reject: <span id="ml-reject-60m">--</span></div>
                         <div class="ml-horizon-row">Break: <span id="ml-break-60m">--</span></div>
                         <div class="ml-horizon-row">Exp MFE: <span id="ml-mfe-60m">--</span></div>
                         <div class="ml-horizon-row">Exp MAE: <span id="ml-mae-60m">--</span></div>
+                        <div class="ml-threshold-row">
+                            <span>Thr R: <span id="ml-thr-reject-60m">--</span></span>
+                            <span>Thr B: <span id="ml-thr-break-60m">--</span></span>
+                        </div>
                     </div>
                 </div>
                 <div class="stat-grid stat-grid-3">
@@ -2450,24 +2511,34 @@
             const panel = document.getElementById('ml-panel');
             const status = document.getElementById('ml-status');
             const detail = document.getElementById('ml-detail');
+            const abstainBanner = document.getElementById('ml-abstain-banner');
             if (!panel || !status || !detail) return;
 
             updateMlMetaFields(payload || state.mlMeta);
 
             if (!payload || !payload.scores) {
+                if (abstainBanner) abstainBanner.classList.remove('visible');
                 return;
             }
 
             const scores = payload.scores || {};
+            const signals = payload.signals || {};
+            const thresholds = payload.thresholds || {};
+            const isAbstain = !!payload.abstain;
             const best = payload.best_horizon ? `${payload.best_horizon}m` : '--';
             setMlText('ml-best-horizon', best);
+
+            // ── Abstain banner ──
+            if (abstainBanner) {
+                abstainBanner.classList.toggle('visible', isAbstain);
+            }
 
             const flags = payload.quality_flags && payload.quality_flags.length
                 ? ` | Flags: ${payload.quality_flags.join(', ')}`
                 : '';
             const previewTag = payload.preview
                 ? `Preview ${payload.preview_level} (${formatNumber(payload.preview_distance_bps)} bps)`
-                : `Best horizon: ${best}`;
+                : isAbstain ? 'No Edge (abstain)' : `Best horizon: ${best}`;
             const statusLabel = payload.status === 'degraded'
                 ? `${previewTag} (degraded)`
                 : previewTag;
@@ -2492,13 +2563,30 @@
                 setMlText(`ml-mfe-${h}m`, mfe == null ? '--' : `${formatNumber(mfe)} bps`);
                 setMlText(`ml-mae-${h}m`, mae == null ? '--' : `${formatNumber(mae)} bps`);
 
+                // ── Use server-side signal (optimal thresholds) ──
+                const serverSignal = signals[`signal_${h}m`];
                 const card = document.querySelectorAll('.ml-horizon-card')[idx];
                 if (card) {
-                    const signal = (reject != null && reject > 0.7) ? 'reject'
-                        : (brk != null && brk > 0.5) ? 'break'
-                        : 'neutral';
-                    card.setAttribute('data-signal', signal);
+                    const cardSignal = serverSignal || 'neutral';
+                    card.setAttribute('data-signal', cardSignal);
                 }
+
+                // ── Signal label chip ──
+                const signalEl = document.getElementById(`ml-signal-${h}m`);
+                if (signalEl) {
+                    const label = serverSignal === 'reject' ? 'REJECT'
+                        : serverSignal === 'break' ? 'BREAK'
+                        : serverSignal === 'no_edge' ? 'NO EDGE'
+                        : '--';
+                    signalEl.textContent = label;
+                    signalEl.setAttribute('data-signal', serverSignal || '');
+                }
+
+                // ── Threshold display ──
+                const thrR = thresholds[`threshold_reject_${h}m`];
+                const thrB = thresholds[`threshold_break_${h}m`];
+                setMlText(`ml-thr-reject-${h}m`, thrR != null ? formatPercent(thrR * 100) : '--');
+                setMlText(`ml-thr-break-${h}m`, thrB != null ? formatPercent(thrB * 100) : '--');
             });
         }
 
