@@ -462,6 +462,8 @@
                 <label for="pivot-select">Pivot Model</label>
                 <select id="pivot-select">
                     <option value="standard" selected>Standard (Classic)</option>
+                    <option value="fibonacci">Fibonacci</option>
+                    <option value="camarilla">Camarilla</option>
                 </select>
             </div>
             <div class="control">
@@ -550,13 +552,13 @@
                 <div class="session-card">
                     <div class="session-line">Trading Day: <span id="session-date">--</span></div>
                     <div class="session-line">Levels From: <span id="levels-from-date">--</span></div>
-                <div class="session-line">Session Status: <span id="session-status">--</span></div>
-                <div class="session-line">Market State: <span id="market-state">--</span></div>
-                <div class="session-line">Data Source: <span id="data-source">--</span></div>
-                <div class="session-line">Source Note: <span id="source-note">--</span></div>
-                <div class="session-line">Lookback Window: <span id="lookback-window">--</span></div>
-                <div class="session-line">Last Update: <span id="last-updated">--</span></div>
-            </div>
+                    <div class="session-line">Session Status: <span id="session-status">--</span></div>
+                    <div class="session-line">Market State: <span id="market-state">--</span></div>
+                    <div class="session-line">Data Source: <span id="data-source">--</span></div>
+                    <div class="session-line">Source Note: <span id="source-note">--</span></div>
+                    <div class="session-line">Lookback Window: <span id="lookback-window">--</span></div>
+                    <div class="session-line">Last Update: <span id="last-updated">--</span></div>
+                </div>
             </section>
 
             <section class="panel chart-panel span-2">
@@ -1129,9 +1131,9 @@
                 if (!Number.isFinite(prev) || !Number.isFinite(curr)) continue;
                 returns.push(Math.log(curr / prev));
             }
-            if (!returns.length) return null;
+            if (returns.length < 2) return null;
             const mean = returns.reduce((sum, r) => sum + r, 0) / returns.length;
-            const variance = returns.reduce((sum, r) => sum + Math.pow(r - mean, 2), 0) / returns.length;
+            const variance = returns.reduce((sum, r) => sum + Math.pow(r - mean, 2), 0) / (returns.length - 1);
             return Math.sqrt(variance) * Math.sqrt(252) * 100;
         }
 
@@ -1304,14 +1306,14 @@
                         if (index < windowCandles.length - 2) {
                             const nextBars = windowCandles.slice(index + 1, index + 3);
                             const wasAbove = candle.close >= value;
-                            const bounced = nextBars.some((bar) =>
+                            const brokeThrough = nextBars.some((bar) =>
                                 wasAbove ? bar.close < value - tolerance * 0.3 : bar.close > value + tolerance * 0.3
                             );
-                            if (bounced) {
+                            if (brokeThrough) {
+                                breaks += 1;
+                            } else {
                                 bounces += 1;
                                 weightedScore += touchScore * 0.75;
-                            } else {
-                                breaks += 1;
                             }
                         }
                     }
@@ -1468,7 +1470,7 @@
             const windowCandles = state.candles.slice(startIndex, entry.baseIndex + 1);
             const atr = calculateATR(windowCandles, 14);
 
-            const rawLevels = calculatePivotLevels('standard', entry.baseCandle.high, entry.baseCandle.low, entry.baseCandle.close);
+            const rawLevels = calculatePivotLevels(state.pivotType || 'standard', entry.baseCandle.high, entry.baseCandle.low, entry.baseCandle.close);
             const proxyGamma = calculateGammaFlip(windowCandles, 20);
             const gammaData = state.gammaData;
             const gammaLevel = Number.isFinite(gammaData?.gammaFlip) ? gammaData.gammaFlip : proxyGamma;
@@ -2005,7 +2007,7 @@
 
         async function fetchVixLevel(interval, range) {
             try {
-                const vixInterval = interval === '1d' ? '1d' : '1d';
+                const vixInterval = '1d';
                 const vixRange = range === '1y' ? '6mo' : '1mo';
                 const query = `symbol=${encodeURIComponent('^VIX')}&range=${encodeURIComponent(vixRange)}&interval=${encodeURIComponent(vixInterval)}`;
                 const rawOrigin = window.location.origin;
@@ -2140,10 +2142,10 @@
             if (state.intradayTimer) {
                 clearInterval(state.intradayTimer);
             }
-            state.intradayTimer = setInterval(() => {
-                startIntradaySync(symbol);
-            }, 60000);
             syncIntradayBars(symbol);
+            state.intradayTimer = setInterval(() => {
+                syncIntradayBars(symbol);
+            }, 60000);
         }
 
         async function postTouchEvents(events) {
@@ -2165,7 +2167,7 @@
         async function scoreTouchEvents(events) {
             if (!events?.length) return;
             const rawOrigin = window.location.origin;
-            const origin = !rawOrigin || rawOrigin === 'null' ? 'http://127.0.0.1:5003' : 'http://127.0.0.1:5003';
+            const origin = !rawOrigin || rawOrigin === 'null' ? 'http://127.0.0.1:5003' : rawOrigin.replace(/:\d+$/, '') + ':5003';
             const apiUrl = `${origin}/score`;
             const event = events[0];
             const cacheKey = `${event.symbol}_${event.level_type}_${Math.floor(event.ts_event / 60000)}`;
@@ -2175,7 +2177,7 @@
                 return;
             }
             const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-            const timeoutId = setTimeout(() => controller?.abort(), 250);
+            const timeoutId = setTimeout(() => controller?.abort(), 2500);
             try {
                 const response = await fetch(apiUrl, {
                     method: 'POST',
