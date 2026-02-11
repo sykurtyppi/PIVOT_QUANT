@@ -785,6 +785,24 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (url.pathname === '/api/daily-candles') {
+    try {
+      const symbol = url.searchParams.get('symbol') || 'SPY';
+      const limit = Math.min(Number(url.searchParams.get('limit') || 200), 500);
+      const writerUrl = `http://127.0.0.1:5002/daily-candles?symbol=${encodeURIComponent(
+        symbol
+      )}&limit=${limit}`;
+      const data = await fetchLocalJson(writerUrl);
+      sendJson(res, 200, data);
+    } catch (error) {
+      sendJson(res, 502, {
+        error: 'Daily candle aggregation unavailable',
+        message: error?.message || String(error),
+      });
+    }
+    return;
+  }
+
   if (url.pathname === '/api/levels') {
     try {
       const symbol = url.searchParams.get('symbol') || 'SPX';

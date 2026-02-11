@@ -2234,6 +2234,34 @@
             }
         }
 
+        async function fetchPersistedDailyCandles(symbol) {
+            try {
+                const apiUrl = `${getApiOrigin()}/api/daily-candles?symbol=${encodeURIComponent(symbol)}&limit=200`;
+                const data = await fetchJson(apiUrl, 6000);
+                return data?.candles || [];
+            } catch (error) {
+                console.warn('Persisted daily candles fetch failed', error);
+                return [];
+            }
+        }
+
+        function mergeDailyCandles(liveCandles, persistedCandles, timeZone) {
+            const byDate = new Map();
+            // Persisted candles first (lower priority)
+            for (const candle of persistedCandles) {
+                const dateKey = formatYmd(candle.time, timeZone);
+                byDate.set(dateKey, candle);
+            }
+            // Live candles overwrite persisted for same date (higher priority)
+            for (const candle of liveCandles) {
+                const dateKey = formatYmd(candle.time, timeZone);
+                byDate.set(dateKey, candle);
+            }
+            const merged = Array.from(byDate.values());
+            merged.sort((a, b) => a.time - b.time);
+            return merged;
+        }
+
         async function postBars(bars, symbol, intervalSec) {
             if (!bars?.length) return;
             const barInterval = Number.isFinite(intervalSec) ? intervalSec : intervalToSeconds(state.intradayInterval);
@@ -2731,6 +2759,18 @@
                 state.dataSource = data.dataSource || 'Yahoo Finance';
                 state.referencePrice = data.currentPrice || state.candles[state.candles.length - 1].close;
                 state.timeZone = data.session?.timeZone || 'America/New_York';
+
+                // Merge persisted daily candles from bar_data to fill session gaps
+                if (interval === '1d' || interval === 'daily') {
+                    const persistedCandles = await fetchPersistedDailyCandles(symbol);
+                    if (persistedCandles.length) {
+                        const liveCandleCount = state.candles.length;
+                        state.candles = mergeDailyCandles(state.candles, persistedCandles, state.timeZone);
+                        if (state.candles.length > liveCandleCount) {
+                            setDebug(`Merged ${persistedCandles.length} persisted daily candles → ${state.candles.length} total (was ${liveCandleCount} live)`);
+                        }
+                    }
+                }
 
                 state.vixLevel = await fetchVixLevel(interval, range);
                 state.gammaData = await fetchGammaData(symbol);

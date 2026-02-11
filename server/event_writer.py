@@ -2,7 +2,7 @@ import json
 import os
 import sqlite3
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 
 DB_PATH = os.getenv("PIVOT_DB", "data/pivot_events.sqlite")
 HOST = os.getenv("EVENT_WRITER_BIND", "127.0.0.1")
@@ -116,17 +116,95 @@ def insert_bars(conn, bars, max_interval_sec=3600):
     return conn.total_changes
 
 
+def aggregate_daily_candles(conn, symbol, limit=200):
+    """Aggregate 1-minute (or 5-minute) bars into daily OHLCV candles.
+
+    Only uses RTH bars: 14:30-21:00 UTC (9:30 AM - 4:00 PM ET).
+    Returns list of dicts with keys: time (epoch seconds), open, high, low,
+    close, volume — matching the dashboard candle format.
+    """
+    rows = conn.execute(
+        """
+        WITH ranked AS (
+            SELECT
+                date(ts / 1000, 'unixepoch') AS trade_date,
+                ts, open, high, low, close, volume,
+                ROW_NUMBER() OVER (
+                    PARTITION BY date(ts / 1000, 'unixepoch') ORDER BY ts ASC
+                ) AS rn_first,
+                ROW_NUMBER() OVER (
+                    PARTITION BY date(ts / 1000, 'unixepoch') ORDER BY ts DESC
+                ) AS rn_last
+            FROM bar_data
+            WHERE symbol = ?
+              AND bar_interval_sec <= 300
+              AND time(ts / 1000, 'unixepoch') >= '14:30:00'
+              AND time(ts / 1000, 'unixepoch') < '21:00:00'
+        )
+        SELECT
+            trade_date,
+            MIN(CASE WHEN rn_first = 1 THEN ts END) / 1000 AS time_sec,
+            MIN(CASE WHEN rn_first = 1 THEN open END)       AS day_open,
+            MAX(high)                                        AS day_high,
+            MIN(low)                                         AS day_low,
+            MAX(CASE WHEN rn_last = 1 THEN close END)       AS day_close,
+            CAST(SUM(volume) AS INTEGER)                     AS day_volume
+        FROM ranked
+        GROUP BY trade_date
+        HAVING day_open IS NOT NULL AND day_close IS NOT NULL
+        ORDER BY trade_date ASC
+        LIMIT ?
+        """,
+        (symbol.upper(), limit),
+    ).fetchall()
+
+    candles = []
+    for row in rows:
+        candles.append(
+            {
+                "time": row[1],
+                "open": round(row[2], 2),
+                "high": round(row[3], 2),
+                "low": round(row[4], 2),
+                "close": round(row[5], 2),
+                "volume": row[6] or 0,
+            }
+        )
+    return {
+        "symbol": symbol.upper(),
+        "candles": candles,
+        "source": "persisted_bars",
+        "days": len(candles),
+    }
+
+
 class WriterHandler(BaseHTTPRequestHandler):
+    def _send_json(self, status_code, payload):
+        response = json.dumps(payload).encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(response)
+
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path in ("/", "/health"):
-            payload = {"status": "ok", "service": "event_writer", "db": DB_PATH}
-            response = json.dumps(payload).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            self.wfile.write(response)
+            self._send_json(200, {"status": "ok", "service": "event_writer", "db": DB_PATH})
+            return
+
+        if parsed.path == "/daily-candles":
+            params = parse_qs(parsed.query)
+            symbol = params.get("symbol", ["SPY"])[0]
+            limit = min(int(params.get("limit", ["200"])[0]), 500)
+            conn = connect()
+            try:
+                result = aggregate_daily_candles(conn, symbol, limit)
+                self._send_json(200, result)
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
+            finally:
+                conn.close()
             return
 
         self.send_response(404)
@@ -151,24 +229,14 @@ class WriterHandler(BaseHTTPRequestHandler):
                 events = payload.get("events", [])
                 inserted = insert_events(conn, events)
                 conn.commit()
-                response = json.dumps({"inserted": inserted}).encode("utf-8")
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Access-Control-Allow-Origin", "*")
-                self.end_headers()
-                self.wfile.write(response)
+                self._send_json(200, {"inserted": inserted})
                 return
 
             if parsed.path == "/bars":
                 bars = payload.get("bars", [])
                 inserted = insert_bars(conn, bars)
                 conn.commit()
-                response = json.dumps({"inserted": inserted}).encode("utf-8")
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Access-Control-Allow-Origin", "*")
-                self.end_headers()
-                self.wfile.write(response)
+                self._send_json(200, {"inserted": inserted})
                 return
         finally:
             conn.close()

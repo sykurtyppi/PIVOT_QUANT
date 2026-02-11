@@ -1,7 +1,7 @@
 import json
 import os
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -601,6 +601,11 @@ def fetch_ibkr_market(symbol, interval, range_str):
         if _is_finite(es_spot):
             spot = es_spot
 
+    # Determine if last session is complete: after 4 PM ET (21:00 UTC during
+    # EST, conservative — during EDT this triggers 1 hour late, safe direction)
+    now_utc = datetime.now(timezone.utc)
+    is_last_complete = now_utc.hour >= 21 or now_utc.weekday() >= 5
+
     return {
         "symbol": symbol.upper(),
         "sourceSymbol": source_symbol,
@@ -613,11 +618,11 @@ def fetch_ibkr_market(symbol, interval, range_str):
         "session": {
             "usedIndex": len(candles) - 1,
             "usedDate": datetime.utcfromtimestamp(last["time"]).strftime("%Y-%m-%d"),
-            "isLastSessionComplete": True,
+            "isLastSessionComplete": is_last_complete,
             "timeZone": "America/New_York",
         },
         "dataSource": source_note,
-        "asOf": datetime.utcnow().isoformat() + "Z",
+        "asOf": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
 
 
