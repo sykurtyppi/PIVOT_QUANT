@@ -2678,7 +2678,7 @@
         }
 
         async function loadMlHealth() {
-            const apiUrl = 'http://127.0.0.1:5003/health';
+            const apiUrl = `${getApiOrigin(5003)}/health`;
             try {
                 const response = await fetch(apiUrl);
                 if (!response.ok) return;
