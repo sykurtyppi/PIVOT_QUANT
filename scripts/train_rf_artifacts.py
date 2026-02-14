@@ -242,16 +242,17 @@ def main() -> None:
                     calib_method = choose_calibration(args.calibration, len(X_calib))
                     calibrator = ProbabilityCalibrator(pipeline, calib_method).fit(X_calib, y_calib)
 
-            # Compute optimal decision threshold on calibration set
+            # Compute optimal decision threshold on calibration set only.
+            # Never fall back to the training set — that causes optimistic bias.
             import numpy as np
             optimal_threshold = 0.5
             model_obj = calibrator if calibrator is not None else pipeline
-            if hasattr(model_obj, "predict_proba"):
-                X_calib_for_thresh = X.loc[calib_mask] if len(X.loc[calib_mask]) >= 20 else X
-                y_calib_for_thresh = y.loc[X_calib_for_thresh.index]
+            X_calib_set = X.loc[calib_mask]
+            if hasattr(model_obj, "predict_proba") and len(X_calib_set) >= 20:
+                y_calib_for_thresh = y.loc[X_calib_set.index]
                 try:
-                    probs_calib = model_obj.predict_proba(X_calib_for_thresh)
-                    if probs_calib.shape[1] == 2:
+                    probs_calib = model_obj.predict_proba(X_calib_set)
+                    if probs_calib.shape[1] == 2 and len(set(y_calib_for_thresh)) == 2:
                         y_prob_calib = probs_calib[:, 1]
                         from sklearn.metrics import precision_recall_curve, f1_score as f1_fn
                         precisions, recalls, thresholds = precision_recall_curve(

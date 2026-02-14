@@ -2792,7 +2792,7 @@
             const origin = getApiOrigin(5003);
             const apiUrl = `${origin}/score`;
             const event = events[0];
-            const cacheKey = `${event.symbol}_${event.level_type}_${Math.floor(event.ts_event / 60000)}`;
+            const cacheKey = `${event.symbol}_${event.level_type}_${event.level_price}_${Math.floor(event.ts_event / 60000)}`;
             const cached = state.mlCache.get(cacheKey);
             if (cached && Date.now() - cached.ts < 60000) {
                 updateMlPanel(cached.payload);

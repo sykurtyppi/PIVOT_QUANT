@@ -197,33 +197,35 @@ def _score_event(event: dict):
         else:
             signals[f"signal_{horizon}m"] = "no_edge"
 
-    # Expected MFE/MAE using simple weighted mix if both outputs available.
+    # ── Expected MFE/MAE: signal-conditional ──
+    # Reject and break are independent binary classifiers (not mutually exclusive),
+    # so we use the classified signal to select the appropriate conditional stats
+    # rather than a weighted mix that incorrectly assumes a shared probability space.
     for horizon in all_horizons:
-        pr = scores.get(f"prob_reject_{horizon}m")
-        pb = scores.get(f"prob_break_{horizon}m")
-        if pr is None and pb is None:
+        signal = signals.get(f"signal_{horizon}m")
+        if signal is None:
             continue
-        pr = pr if pr is not None else 0.0
-        pb = pb if pb is not None else 0.0
-        po = max(0.0, 1.0 - pr - pb)
-        stats_reject = stats.get(str(horizon), {}).get("reject", {})
-        stats_break = stats.get(str(horizon), {}).get("break", {})
-        mfe_break = stats_break.get("mfe_bps_break") or 0.0
-        mae_break = stats_break.get("mae_bps_break") or 0.0
-        mfe = (
-            pr * (stats_reject.get("mfe_bps_reject") or 0)
-            + pb * mfe_break
-            + po * (stats_reject.get("mfe_bps_other") or 0)
-        )
-        mae = (
-            pr * (stats_reject.get("mae_bps_reject") or 0)
-            + pb * mae_break
-            + po * (stats_reject.get("mae_bps_other") or 0)
-        )
+        stats_h = stats.get(str(horizon), {})
+        stats_reject = stats_h.get("reject", {})
+        stats_break = stats_h.get("break", {})
+
+        if signal == "break":
+            mfe = stats_break.get("mfe_bps_break") or 0.0
+            mae = stats_break.get("mae_bps_break") or 0.0
+        elif signal == "reject":
+            mfe = stats_reject.get("mfe_bps_reject") or 0.0
+            mae = stats_reject.get("mae_bps_reject") or 0.0
+        else:
+            # no_edge: use "other" (non-reject) stats as baseline
+            mfe = stats_reject.get("mfe_bps_other") or 0.0
+            mae = stats_reject.get("mae_bps_other") or 0.0
+
         scores[f"exp_mfe_bps_{horizon}m"] = float(mfe)
         scores[f"exp_mae_bps_{horizon}m"] = float(mae)
 
-    # ── Best horizon selection (using threshold-aware edge) ──
+    # ── Best horizon selection (threshold-aware) ──
+    # Prefer horizons that have a directional signal, ranked by excess
+    # confidence above their threshold. Fall back to raw edge if no signal.
     best_horizon = None
     best_score = None
     for horizon in all_horizons:
@@ -233,7 +235,21 @@ def _score_event(event: dict):
             continue
         pr = pr if pr is not None else 0.0
         pb = pb if pb is not None else 0.0
-        edge = pr - pb
+
+        signal = signals.get(f"signal_{horizon}m")
+        reject_thresh = registry.get_threshold("reject", horizon)
+        break_thresh = registry.get_threshold("break", horizon)
+
+        if signal == "reject":
+            # Excess confidence above reject threshold
+            edge = (pr - reject_thresh) + 1.0  # +1.0 to rank above no_edge
+        elif signal == "break":
+            # Break signal — negative edge (warns against the trade)
+            edge = -(pb - break_thresh) - 1.0
+        else:
+            # No signal — use raw reject-break spread as tiebreaker
+            edge = pr - pb
+
         if best_score is None or edge > best_score:
             best_score = edge
             best_horizon = horizon
