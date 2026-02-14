@@ -116,6 +116,7 @@ def init_db(db_path: str) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_touch_symbol_ts ON touch_events(symbol, ts_event);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_touch_level_ts ON touch_events(level_type, ts_event);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_bar_symbol_ts ON bar_data(symbol, ts);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_bar_symbol_interval ON bar_data(symbol, bar_interval_sec, ts);")
 
     conn.commit()
     conn.close()

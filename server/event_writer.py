@@ -25,7 +25,8 @@ def ensure_bar_schema(conn):
     cols = {row[1] for row in cur.fetchall()}
     if "bar_interval_sec" not in cols:
         conn.execute("ALTER TABLE bar_data ADD COLUMN bar_interval_sec INTEGER")
-        conn.commit()
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_bar_symbol_interval ON bar_data(symbol, bar_interval_sec, ts);")
+    conn.commit()
 
 
 def insert_events(conn, events):
@@ -64,6 +65,30 @@ def insert_events(conn, events):
         "bar_interval_sec",
         "source",
         "created_at",
+        "vpoc",
+        "vpoc_dist_bps",
+        "volume_at_level",
+        "mtf_confluence",
+        "mtf_confluence_types",
+        "weekly_pivot",
+        "monthly_pivot",
+        "level_age_days",
+        "hist_reject_rate",
+        "hist_break_rate",
+        "hist_sample_size",
+        # v3 features
+        "regime_type",
+        "overnight_gap_atr",
+        "or_high",
+        "or_low",
+        "or_size_atr",
+        "or_breakout",
+        "or_high_dist_bps",
+        "or_low_dist_bps",
+        "session_std",
+        "sigma_band_position",
+        "distance_to_upper_sigma_bps",
+        "distance_to_lower_sigma_bps",
     ]
     placeholders = ", ".join(["?"] * len(columns))
     sql = f"INSERT OR IGNORE INTO touch_events ({', '.join(columns)}) VALUES ({placeholders})"

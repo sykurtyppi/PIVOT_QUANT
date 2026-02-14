@@ -151,7 +151,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             close REAL NOT NULL,
             volume REAL,
             bar_interval_sec INTEGER,
-            PRIMARY KEY (symbol, ts)
+            PRIMARY KEY (symbol, ts, bar_interval_sec)
         );
         """
     )
@@ -174,6 +174,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_touch_symbol_ts ON touch_events(symbol, ts_event);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_touch_level_ts ON touch_events(level_type, ts_event);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_bar_symbol_ts ON bar_data(symbol, ts);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_bar_symbol_interval ON bar_data(symbol, bar_interval_sec, ts);")
     conn.commit()
 
 

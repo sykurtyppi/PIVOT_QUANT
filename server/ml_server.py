@@ -89,24 +89,33 @@ class ModelRegistry:
 
 
 registry = ModelRegistry()
+_startup_error: str | None = None
 
 
 @app.on_event("startup")
 def startup_event():
+    global _startup_error
     try:
         registry.load()
+        _startup_error = None
     except Exception as exc:
+        _startup_error = str(exc)
         print(f"ML server startup warning: {exc}")
 
 
 @app.get("/health")
 def health():
-    return {
-        "status": "ok",
+    has_models = any(horizons for horizons in registry.available().values())
+    status = "ok" if has_models and _startup_error is None else "degraded"
+    result = {
+        "status": status,
         "feature_version": FEATURE_VERSION,
         "manifest": registry.manifest,
         "models": registry.available(),
     }
+    if _startup_error is not None:
+        result["startup_error"] = _startup_error
+    return result
 
 
 def _score_event(event: dict):

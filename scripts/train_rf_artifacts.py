@@ -259,7 +259,7 @@ def main() -> None:
                         )
                         best_f1 = 0.0
                         for i, thresh in enumerate(thresholds):
-                            if precisions[i] < 0.3:
+                            if precisions[i] < 0.4:
                                 continue
                             y_pred_t = (np.asarray(y_prob_calib) >= thresh).astype(int)
                             f1_val = float(f1_fn(y_calib_for_thresh, y_pred_t, zero_division=0))
