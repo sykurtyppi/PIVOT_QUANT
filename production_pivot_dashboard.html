@@ -13,6 +13,7 @@
             --bg: #0b0f1a;
             --panel: #111827;
             --panel-2: #0f172a;
+            --panel-3: #0b1222;
             --border: rgba(148, 163, 184, 0.12);
             --text: #e2e8f0;
             --muted: #94a3b8;
@@ -35,6 +36,7 @@
                         radial-gradient(circle at 20% 80%, rgba(14, 165, 233, 0.18), transparent 45%),
                         var(--bg);
             color: var(--text);
+            line-height: 1.35;
         }
 
         .app {
@@ -47,10 +49,15 @@
             display: flex;
             align-items: center;
             justify-content: space-between;
+            gap: 12px;
+            flex-wrap: wrap;
             padding: 20px 32px;
             border-bottom: 1px solid var(--border);
             background: rgba(15, 23, 42, 0.9);
             backdrop-filter: blur(12px);
+            position: sticky;
+            top: 0;
+            z-index: 30;
         }
 
         .title {
@@ -71,6 +78,7 @@
             gap: 8px;
             font-size: 12px;
             color: var(--muted);
+            flex-wrap: wrap;
         }
 
         .status-dot {
@@ -84,13 +92,40 @@
         .status-dot.ready { background: var(--success); }
         .status-dot.error { background: var(--danger); }
 
+        .ghost-btn {
+            border: 1px solid rgba(148, 163, 184, 0.28);
+            background: rgba(15, 23, 42, 0.6);
+            color: var(--muted);
+            border-radius: 999px;
+            padding: 5px 10px;
+            font-size: 11px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: border-color 0.2s, color 0.2s, background 0.2s;
+        }
+
+        .ghost-btn:hover {
+            border-color: rgba(96, 165, 250, 0.6);
+            color: var(--text);
+        }
+
+        .ghost-btn.active {
+            color: var(--accent-2);
+            border-color: rgba(34, 211, 238, 0.55);
+            background: rgba(34, 211, 238, 0.08);
+        }
+
         .controls {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
             gap: 12px;
             padding: 16px 32px;
             border-bottom: 1px solid var(--border);
-            background: rgba(15, 23, 42, 0.65);
+            background: rgba(15, 23, 42, 0.78);
+            backdrop-filter: blur(10px);
+            position: sticky;
+            top: var(--header-height, 83px);
+            z-index: 20;
         }
 
         .control {
@@ -99,6 +134,13 @@
             gap: 6px;
             font-size: 12px;
             color: var(--muted);
+        }
+
+        .control label {
+            font-size: 11px;
+            letter-spacing: 0.25px;
+            text-transform: uppercase;
+            font-weight: 600;
         }
 
         select, button {
@@ -129,6 +171,38 @@
             gap: 8px;
             flex-wrap: wrap;
             align-items: center;
+        }
+
+        .export-menu {
+            border: 1px solid rgba(148, 163, 184, 0.2);
+            border-radius: 10px;
+            background: rgba(2, 6, 23, 0.35);
+            padding: 6px 8px;
+        }
+
+        .export-menu summary {
+            cursor: pointer;
+            font-size: 11px;
+            color: var(--muted);
+            list-style: none;
+            user-select: none;
+            padding: 2px 0 6px;
+        }
+
+        .export-menu summary::-webkit-details-marker {
+            display: none;
+        }
+
+        .export-menu summary::before {
+            content: '▸';
+            margin-right: 6px;
+            color: var(--accent);
+            transition: transform 0.18s ease;
+            display: inline-block;
+        }
+
+        .export-menu[open] summary::before {
+            transform: rotate(90deg);
         }
 
         .export-actions button {
@@ -165,6 +239,7 @@
             gap: 16px;
             padding: 20px 32px 32px;
             flex: 1;
+            align-items: start;
         }
 
         .panel.span-2 {
@@ -196,6 +271,72 @@
             justify-content: space-between;
             gap: 12px;
             flex-wrap: wrap;
+        }
+
+        .insights-panel {
+            gap: 10px;
+        }
+
+        .tablist {
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+            background: rgba(2, 6, 23, 0.45);
+            border: 1px solid rgba(148, 163, 184, 0.12);
+            padding: 4px;
+            border-radius: 10px;
+        }
+
+        .tab-btn {
+            background: transparent;
+            color: var(--muted);
+            border: 1px solid transparent;
+            border-radius: 8px;
+            padding: 6px 10px;
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.3px;
+            text-transform: uppercase;
+            cursor: pointer;
+            transition: color 0.15s, border-color 0.15s, background 0.15s;
+        }
+
+        .tab-btn:hover {
+            color: var(--text);
+            border-color: rgba(148, 163, 184, 0.35);
+        }
+
+        .tab-btn.is-active {
+            color: #081226;
+            border-color: transparent;
+            background: linear-gradient(135deg, var(--accent), var(--accent-2));
+        }
+
+        .tab-panel {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            min-height: 0;
+        }
+
+        .tab-panel[hidden] {
+            display: none !important;
+        }
+
+        .subsection-title {
+            margin: 2px 0 0;
+            font-size: 12px;
+            letter-spacing: 0.35px;
+            text-transform: uppercase;
+            color: var(--muted);
+        }
+
+        .table-wrap {
+            overflow: auto;
+            max-height: 360px;
+            border-radius: 10px;
+            border: 1px solid rgba(148, 163, 184, 0.1);
+            background: rgba(2, 6, 23, 0.35);
         }
 
         .stat-grid {
@@ -535,6 +676,25 @@
             color: var(--text);
         }
 
+        button:focus-visible,
+        select:focus-visible,
+        input:focus-visible,
+        summary:focus-visible,
+        .tab-btn:focus-visible {
+            outline: 2px solid var(--accent-2);
+            outline-offset: 2px;
+        }
+
+        @media (max-width: 1500px) {
+            .grid {
+                grid-template-columns: 1fr 1.6fr;
+            }
+
+            .panel.span-2 {
+                grid-column: 1 / -1;
+            }
+        }
+
         @media (max-width: 1200px) {
             .grid {
                 grid-template-columns: 1fr;
@@ -542,6 +702,53 @@
 
             .panel.span-2 {
                 grid-column: auto;
+            }
+        }
+
+        @media (max-width: 900px) {
+            .app-header {
+                padding: 14px 16px;
+            }
+
+            .controls {
+                padding: 12px 16px;
+            }
+
+            .grid {
+                padding: 14px 16px 20px;
+            }
+
+            #chartContainer {
+                min-height: 360px;
+            }
+
+            .signal-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .tablist {
+                width: 100%;
+                overflow-x: auto;
+                flex-wrap: nowrap;
+                -webkit-overflow-scrolling: touch;
+            }
+        }
+
+        @media (max-width: 600px) {
+            .title {
+                font-size: 18px;
+            }
+
+            .subtitle {
+                font-size: 11px;
+            }
+
+            #chartContainer {
+                min-height: 300px;
+            }
+
+            .stat-grid {
+                grid-template-columns: 1fr;
             }
         }
     </style>
@@ -554,8 +761,9 @@
                 <div class="subtitle">Daily support and resistance from the prior completed session</div>
             </div>
             <div class="status">
-                <div id="status-dot" class="status-dot loading"></div>
-                <span id="status-text">Initializing</span>
+                <div id="status-dot" class="status-dot loading" aria-hidden="true"></div>
+                <span id="status-text" role="status" aria-live="polite">Initializing</span>
+                <button id="debug-toggle" class="ghost-btn" type="button" aria-pressed="false">Debug Off</button>
             </div>
         </header>
 
@@ -615,17 +823,20 @@
             </div>
             <div class="control">
                 <label>Export</label>
-                <div class="export-actions">
-                    <button id="export-csv">CSV</button>
-                    <button id="export-json">JSON</button>
-                    <button id="export-txt">TXT</button>
-                    <button id="export-txt-zones">TXT Zones</button>
-                    <input id="export-zone-bps" class="export-zone-input" type="number" min="0.5" max="20" step="0.5" value="2" title="Zone band (bps)">
-                </div>
+                <details class="export-menu">
+                    <summary>Open Export Options</summary>
+                    <div class="export-actions">
+                        <button id="export-csv" type="button">CSV</button>
+                        <button id="export-json" type="button">JSON</button>
+                        <button id="export-txt" type="button">TXT</button>
+                        <button id="export-txt-zones" type="button">TXT Zones</button>
+                        <input id="export-zone-bps" class="export-zone-input" type="number" min="0.5" max="20" step="0.5" value="2" title="Zone band (bps)">
+                    </div>
+                </details>
             </div>
             <div class="control">
                 <label>&nbsp;</label>
-                <button id="refresh-btn">Refresh Data</button>
+                <button id="refresh-btn" type="button">Refresh Data</button>
             </div>
         </section>
 
@@ -795,57 +1006,80 @@
                 <div class="ml-metrics-note" id="ml-metric-note">Metrics: --</div>
             </section>
 
-            <section class="panel">
-                <h3>Support / Resistance</h3>
-                <div class="alerts">
-                    <div class="alert" id="nearest-resistance">Nearest resistance: --</div>
-                    <div class="alert" id="nearest-support">Nearest support: --</div>
-                    <div class="alert" id="strongest-resistance">Strongest resistance: --</div>
-                    <div class="alert" id="strongest-support">Strongest support: --</div>
-                    <div class="alert" id="gamma-level">Gamma flip: --</div>
+            <section class="panel insights-panel">
+                <div class="panel-header">
+                    <h3>Execution Insights</h3>
+                    <div class="tablist" id="insight-tabs" role="tablist" aria-label="Execution insight sections">
+                        <button class="tab-btn is-active" id="tab-levels" data-tab="levels" role="tab" aria-controls="panel-levels" aria-selected="true" type="button">Levels</button>
+                        <button class="tab-btn" id="tab-gamma" data-tab="gamma" role="tab" aria-controls="panel-gamma" aria-selected="false" tabindex="-1" type="button">Gamma / Vol</button>
+                        <button class="tab-btn" id="tab-ivoi" data-tab="ivoi" role="tab" aria-controls="panel-ivoi" aria-selected="false" tabindex="-1" type="button">IV / OI</button>
+                        <button class="tab-btn" id="tab-debug" data-tab="debug" role="tab" aria-controls="panel-debug" aria-selected="false" tabindex="-1" type="button">Debug</button>
+                    </div>
                 </div>
-                <h3>Gamma / Vol Signals</h3>
-                <div class="signal-grid">
-                    <div class="signal-item" id="gamma-mode"><strong>Gamma Mode</strong>--</div>
-                    <div class="signal-item" id="gamma-distance"><strong>Flip Distance</strong>--</div>
-                    <div class="signal-item" id="vol-regime"><strong>Vol Regime</strong>--</div>
-                    <div class="signal-item" id="iv-rv"><strong>IV vs RV</strong>--</div>
-                    <div class="signal-item" id="wall-call"><strong>Call Wall</strong>--</div>
-                    <div class="signal-item" id="wall-put"><strong>Put Wall</strong>--</div>
-                    <div class="signal-item" id="wall-pin"><strong>Pin Candidate</strong>--</div>
-                    <div class="signal-item" id="playbook"><strong>Playbook</strong>--</div>
-                    <div class="signal-item" id="gamma-confidence"><strong>Gamma Confidence</strong>--</div>
-                </div>
-                <h3>IV / OI Summary</h3>
-                <div class="signal-grid">
-                    <div class="signal-item" id="oi-total"><strong>Total OI</strong>--</div>
-                    <div class="signal-item" id="oi-concentration"><strong>OI Concentration</strong>--</div>
-                    <div class="signal-item" id="atm-iv"><strong>ATM IV</strong>--</div>
-                    <div class="signal-item" id="skew-25d"><strong>25Δ Skew</strong>--</div>
-                    <div class="signal-item" id="zero-dte-share"><strong>0DTE Share</strong>--</div>
-                    <div class="signal-item" id="data-quality"><strong>Data Quality</strong>--</div>
-                </div>
-                <div class="alerts" id="debug-panel" style="display: none;">
-                    <div class="alert" id="debug-status"><strong>Debug:</strong> --</div>
-                </div>
-                <h3>Pivot Levels</h3>
-                <div style="overflow: auto;">
-                    <table class="levels-table">
-                        <thead>
-                            <tr>
-                                <th>Level</th>
-                                <th>Price</th>
-                                <th>Dist</th>
-                                <th>Strength</th>
-                            </tr>
-                        </thead>
-                        <tbody id="pivot-table-body">
-                            <tr>
-                                <td colspan="4" style="text-align: center; color: var(--muted); padding: 20px;">Loading...</td>
-                            </tr>
-                        </tbody>
-                    </table>
-                </div>
+
+                <section class="tab-panel is-active" id="panel-levels" data-tab-panel="levels" role="tabpanel" aria-labelledby="tab-levels">
+                    <h4 class="subsection-title">Support / Resistance</h4>
+                    <div class="alerts">
+                        <div class="alert" id="nearest-resistance">Nearest resistance: --</div>
+                        <div class="alert" id="nearest-support">Nearest support: --</div>
+                        <div class="alert" id="strongest-resistance">Strongest resistance: --</div>
+                        <div class="alert" id="strongest-support">Strongest support: --</div>
+                        <div class="alert" id="gamma-level">Gamma flip: --</div>
+                    </div>
+                    <h4 class="subsection-title">Pivot Levels</h4>
+                    <div class="table-wrap">
+                        <table class="levels-table">
+                            <thead>
+                                <tr>
+                                    <th>Level</th>
+                                    <th>Price</th>
+                                    <th>Dist</th>
+                                    <th>Strength</th>
+                                </tr>
+                            </thead>
+                            <tbody id="pivot-table-body">
+                                <tr>
+                                    <td colspan="4" style="text-align: center; color: var(--muted); padding: 20px;">Loading...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+
+                <section class="tab-panel" id="panel-gamma" data-tab-panel="gamma" role="tabpanel" aria-labelledby="tab-gamma" hidden>
+                    <h4 class="subsection-title">Gamma / Vol Signals</h4>
+                    <div class="signal-grid">
+                        <div class="signal-item" id="gamma-mode"><strong>Gamma Mode</strong>--</div>
+                        <div class="signal-item" id="gamma-distance"><strong>Flip Distance</strong>--</div>
+                        <div class="signal-item" id="vol-regime"><strong>Vol Regime</strong>--</div>
+                        <div class="signal-item" id="iv-rv"><strong>IV vs RV</strong>--</div>
+                        <div class="signal-item" id="wall-call"><strong>Call Wall</strong>--</div>
+                        <div class="signal-item" id="wall-put"><strong>Put Wall</strong>--</div>
+                        <div class="signal-item" id="wall-pin"><strong>Pin Candidate</strong>--</div>
+                        <div class="signal-item" id="playbook"><strong>Playbook</strong>--</div>
+                        <div class="signal-item" id="gamma-confidence"><strong>Gamma Confidence</strong>--</div>
+                    </div>
+                </section>
+
+                <section class="tab-panel" id="panel-ivoi" data-tab-panel="ivoi" role="tabpanel" aria-labelledby="tab-ivoi" hidden>
+                    <h4 class="subsection-title">IV / OI Summary</h4>
+                    <div class="signal-grid">
+                        <div class="signal-item" id="oi-total"><strong>Total OI</strong>--</div>
+                        <div class="signal-item" id="oi-concentration"><strong>OI Concentration</strong>--</div>
+                        <div class="signal-item" id="atm-iv"><strong>ATM IV</strong>--</div>
+                        <div class="signal-item" id="skew-25d"><strong>25Δ Skew</strong>--</div>
+                        <div class="signal-item" id="zero-dte-share"><strong>0DTE Share</strong>--</div>
+                        <div class="signal-item" id="data-quality"><strong>Data Quality</strong>--</div>
+                    </div>
+                </section>
+
+                <section class="tab-panel" id="panel-debug" data-tab-panel="debug" role="tabpanel" aria-labelledby="tab-debug" hidden>
+                    <h4 class="subsection-title">Diagnostics</h4>
+                    <div class="alert" id="debug-hint">Debug mode is off. Toggle "Debug Off" in the header to view diagnostics.</div>
+                    <div class="alerts" id="debug-panel" hidden>
+                        <div class="alert" id="debug-status">Debug: --</div>
+                    </div>
+                </section>
             </section>
         </main>
     </div>
@@ -862,6 +1096,7 @@
             candles: [],
             intradayInterval: '1m',
             intradayRange: '5d',
+            intradayBars: [],
             sessionCandle: null,
             pivotHistory: [],
             historyBySessionIndex: new Map(),
@@ -891,6 +1126,10 @@
             intradayTimer: null,
             intradaySyncInFlight: false,
             lastTouchByLevel: new Map(),
+            touchCountByDay: {},
+            touchCountDate: null,
+            v3Features: null,
+            lastRv30: null,
             lastBarSyncKey: null,
             lastIntradaySyncKey: null,
             lastMlScore: null,
@@ -900,6 +1139,9 @@
             mlMetrics: null,
             mlMeta: null,
             mlMetricsTimer: null,
+            debugEnabled: false,
+            debugMessage: '',
+            activeInsightTab: 'levels',
         };
 
         const formatNumber = (value, digits = 2) => {
@@ -979,6 +1221,98 @@
             }
         };
 
+        const saveUiPrefs = () => {
+            try {
+                localStorage.setItem('debugMode', state.debugEnabled ? '1' : '0');
+            } catch (error) {
+                console.warn('Unable to persist UI prefs', error);
+            }
+        };
+
+        const loadUiPrefs = () => {
+            try {
+                const debugMode = localStorage.getItem('debugMode');
+                if (debugMode !== null) {
+                    state.debugEnabled = debugMode === '1';
+                }
+            } catch (error) {
+                console.warn('Unable to load UI prefs', error);
+            }
+
+            const query = new URLSearchParams(window.location.search);
+            if (query.get('debug') === '1') {
+                state.debugEnabled = true;
+            }
+        };
+
+        function updateDebugUI() {
+            const toggle = document.getElementById('debug-toggle');
+            const panel = document.getElementById('debug-panel');
+            const hint = document.getElementById('debug-hint');
+
+            if (toggle) {
+                toggle.classList.toggle('active', state.debugEnabled);
+                toggle.setAttribute('aria-pressed', state.debugEnabled ? 'true' : 'false');
+                toggle.textContent = state.debugEnabled ? 'Debug On' : 'Debug Off';
+            }
+
+            if (panel) {
+                panel.hidden = !state.debugEnabled;
+            }
+
+            if (hint) {
+                hint.hidden = state.debugEnabled;
+            }
+        }
+
+        function initializeInsightTabs() {
+            const tabList = document.getElementById('insight-tabs');
+            if (!tabList) return;
+
+            const tabs = Array.from(tabList.querySelectorAll('.tab-btn'));
+            const panels = Array.from(document.querySelectorAll('[data-tab-panel]'));
+            if (!tabs.length || !panels.length) return;
+
+            const activateTab = (tabName, shouldFocus = false) => {
+                state.activeInsightTab = tabName;
+                tabs.forEach((tab) => {
+                    const active = tab.dataset.tab === tabName;
+                    tab.classList.toggle('is-active', active);
+                    tab.setAttribute('aria-selected', active ? 'true' : 'false');
+                    tab.tabIndex = active ? 0 : -1;
+                    if (active && shouldFocus) {
+                        tab.focus();
+                    }
+                });
+
+                panels.forEach((panel) => {
+                    const active = panel.dataset.tabPanel === tabName;
+                    panel.hidden = !active;
+                });
+            };
+
+            tabs.forEach((tab, index) => {
+                tab.addEventListener('click', () => {
+                    activateTab(tab.dataset.tab);
+                });
+
+                tab.addEventListener('keydown', (event) => {
+                    let targetIndex = null;
+                    if (event.key === 'ArrowRight') targetIndex = (index + 1) % tabs.length;
+                    if (event.key === 'ArrowLeft') targetIndex = (index - 1 + tabs.length) % tabs.length;
+                    if (event.key === 'Home') targetIndex = 0;
+                    if (event.key === 'End') targetIndex = tabs.length - 1;
+
+                    if (targetIndex !== null) {
+                        event.preventDefault();
+                        activateTab(tabs[targetIndex].dataset.tab, true);
+                    }
+                });
+            });
+
+            activateTab(state.activeInsightTab || tabs[0].dataset.tab);
+        }
+
         const intervalToSeconds = (interval) => {
             if (interval.endsWith('m')) {
                 return Number(interval.replace('m', '')) * 60;
@@ -1009,6 +1343,12 @@
                     el.classList.remove('panel-loading');
                 }
             });
+        }
+
+        function syncStickyOffsets() {
+            const header = document.querySelector('.app-header');
+            if (!header) return;
+            document.documentElement.style.setProperty('--header-height', `${header.offsetHeight}px`);
         }
 
         function initializeChart() {
@@ -1313,6 +1653,93 @@
             if (current <= low) return { label: 'Low', value: current };
             if (current >= high) return { label: 'High', value: current };
             return { label: 'Normal', value: current };
+        }
+
+        // ── v3 ML Feature Computation (matches backfill_events.py logic) ──
+
+        function computeOpeningRange(bars, orMinutes = 30) {
+            if (!bars?.length) return null;
+            const openTs = bars[0].time;
+            const cutoffTs = openTs + orMinutes * 60;
+            const orBars = bars.filter((b) => b.time < cutoffTs);
+            if (!orBars.length) return null;
+            const orHigh = Math.max(...orBars.map((b) => b.high));
+            const orLow = Math.min(...orBars.map((b) => b.low));
+            return { orHigh, orLow, orSize: orHigh - orLow };
+        }
+
+        function computeSessionStd(bars) {
+            if (!bars || bars.length < 2) return null;
+            const closes = bars.map((b) => b.close);
+            const n = closes.length;
+            const mean = closes.reduce((s, c) => s + c, 0) / n;
+            const variance = closes.reduce((s, c) => s + Math.pow(c - mean, 2), 0) / (n - 1);
+            return variance > 0 ? Math.sqrt(variance) : null;
+        }
+
+        function computeSigmaBands(priorClose, atr, rvAnnualized) {
+            if (!priorClose || priorClose <= 0) return null;
+            let dailySigma;
+            if (Number.isFinite(rvAnnualized) && rvAnnualized > 0) {
+                dailySigma = priorClose * (rvAnnualized / 100) / Math.sqrt(252);
+            } else if (Number.isFinite(atr) && atr > 0) {
+                dailySigma = atr / 1.2;
+            } else {
+                return null;
+            }
+            return {
+                upper1s: priorClose + dailySigma,
+                lower1s: priorClose - dailySigma,
+            };
+        }
+
+        function classifyRegime(sessionOpen, sessionClose, priorClose, atr, ema9, ema21, orData) {
+            if (!Number.isFinite(atr) || atr <= 0) return { regime: 3, overnightGapAtr: null, orSizeAtr: null };
+
+            const overnightGapAtr = Number.isFinite(priorClose) && priorClose > 0
+                ? (sessionOpen - priorClose) / atr
+                : 0;
+            const orSizeAtr = orData ? orData.orSize / atr : null;
+            const largeGap = Math.abs(overnightGapAtr) > 0.5;
+            const wideOr = Number.isFinite(orSizeAtr) && orSizeAtr > 0.4;
+            const emaBullish = Number.isFinite(ema9) && Number.isFinite(ema21) && ema9 > ema21;
+            const emaBearish = Number.isFinite(ema9) && Number.isFinite(ema21) && ema9 < ema21;
+
+            // Vol expansion: very wide OR + large gap
+            if (Number.isFinite(orSizeAtr) && orSizeAtr > 0.7 && largeGap) {
+                return { regime: 4, overnightGapAtr, orSizeAtr };
+            }
+            // Trend up: bullish EMA + (large gap up OR wide OR)
+            if (emaBullish && (largeGap && overnightGapAtr > 0 || wideOr)) {
+                return { regime: 1, overnightGapAtr, orSizeAtr };
+            }
+            // Trend down: bearish EMA + (large gap down OR wide OR)
+            if (emaBearish && (largeGap && overnightGapAtr < 0 || wideOr)) {
+                return { regime: 2, overnightGapAtr, orSizeAtr };
+            }
+            // Range: default
+            return { regime: 3, overnightGapAtr, orSizeAtr };
+        }
+
+        function computeV3Features(intradayBars, priorClose, sessionOpen, atr, rv, ema9, ema21) {
+            const orData = computeOpeningRange(intradayBars);
+            const sessionStd = computeSessionStd(intradayBars);
+            const sigmaBands = computeSigmaBands(priorClose, atr, rv);
+            const { regime, overnightGapAtr, orSizeAtr } = classifyRegime(
+                sessionOpen, intradayBars?.length ? intradayBars[intradayBars.length - 1].close : null,
+                priorClose, atr, ema9, ema21, orData
+            );
+
+            return {
+                regimeType: regime,
+                overnightGapAtr: Number.isFinite(overnightGapAtr) ? overnightGapAtr : null,
+                orHigh: orData?.orHigh ?? null,
+                orLow: orData?.orLow ?? null,
+                orSizeAtr: Number.isFinite(orSizeAtr) ? orSizeAtr : null,
+                sessionStd,
+                sigmaUpper: sigmaBands?.upper1s ?? null,
+                sigmaLower: sigmaBands?.lower1s ?? null,
+            };
         }
 
         function computeWallsProxy(candles, referencePrice, bins = 24) {
@@ -1663,6 +2090,16 @@
             state.lastAtr = atr;
             state.lastGamma = gammaLevel;
 
+            // ── Compute v3 ML features from intraday bars ──
+            const priorClose = entry.baseCandle.close;
+            const sessionOpen = state.candles[entry.sessionIndex]?.open ?? null;
+            if (state.intradayBars.length) {
+                state.v3Features = computeV3Features(
+                    state.intradayBars, priorClose, sessionOpen, atr,
+                    state.lastRv30, state.lastEma9, state.lastEma21
+                );
+            }
+
             const gammaSource = state.gammaData?.source || 'Proxy';
             const gammaLabel = Number.isFinite(gammaLevel)
                 ? `${formatNumber(gammaLevel)} (${gammaSource})`
@@ -1696,6 +2133,7 @@
         function updateGammaPanel(windowCandles, gammaLevel, referencePrice, gammaSource) {
             const volInfo = classifyVolRegime(windowCandles, 20, 60);
             const rv = volInfo.value;
+            state.lastRv30 = rv;
             const vix = state.vixLevel;
 
             let ivRv = 'Unavailable';
@@ -2307,6 +2745,7 @@
                 }
 
                 if (!data?.candles?.length) return;
+                state.intradayBars = data.candles;
                 const intradayEma9 = calculateEMA(data.candles, 9);
                 const intradayEma21 = calculateEMA(data.candles, 21);
                 const intradayVwap = calculateVWAP(data.candles, data.session?.timeZone || state.timeZone);
@@ -2396,7 +2835,7 @@
             };
         }
 
-        function buildTouchEvent({ level, referencePrice, absDist, confluence, now, emaState, ema9Value, ema21Value, vwapValue, vwapDistBps, barIntervalSec, overrides }) {
+        function buildTouchEvent({ level, referencePrice, absDist, confluence, now, emaState, ema9Value, ema21Value, vwapValue, vwapDistBps, barIntervalSec, touchCountToday, overrides }) {
             const touchSide = referencePrice >= level.value ? 1 : -1;
             const gammaFlipDist = state.lastGamma
                 ? ((referencePrice - state.lastGamma) / state.lastGamma) * 1e4
@@ -2404,6 +2843,29 @@
             const gammaMode = state.gammaData?.gammaFlip
                 ? (referencePrice >= state.gammaData.gammaFlip ? 1 : -1)
                 : 0;
+
+            // ── v3 per-bar features (depend on referencePrice) ──
+            const v3 = state.v3Features;
+            const orHigh = v3?.orHigh;
+            const orLow = v3?.orLow;
+            const sigmaUpper = v3?.sigmaUpper;
+            const sigmaLower = v3?.sigmaLower;
+
+            // Opening range per-bar features
+            let orBreakout = null, orHighDistBps = null, orLowDistBps = null;
+            if (Number.isFinite(orHigh) && Number.isFinite(orLow)) {
+                orBreakout = referencePrice > orHigh ? 1 : referencePrice < orLow ? -1 : 0;
+                orHighDistBps = (referencePrice - orHigh) / orHigh * 1e4;
+                orLowDistBps = (referencePrice - orLow) / orLow * 1e4;
+            }
+
+            // Sigma band per-bar features
+            let sigmaBandPosition = null, distUpperSigmaBps = null, distLowerSigmaBps = null;
+            if (Number.isFinite(sigmaUpper) && Number.isFinite(sigmaLower) && sigmaUpper !== sigmaLower) {
+                sigmaBandPosition = (referencePrice - sigmaLower) / (sigmaUpper - sigmaLower);
+                distUpperSigmaBps = (referencePrice - sigmaUpper) / sigmaUpper * 1e4;
+                distLowerSigmaBps = (referencePrice - sigmaLower) / sigmaLower * 1e4;
+            }
 
             return {
                 event_id: crypto.randomUUID(),
@@ -2415,8 +2877,8 @@
                 touch_price: referencePrice,
                 touch_side: touchSide,
                 distance_bps: absDist,
-                is_first_touch_today: 0,
-                touch_count_today: 1,
+                is_first_touch_today: touchCountToday === 1 ? 1 : 0,
+                touch_count_today: touchCountToday ?? 1,
                 confluence_count: confluence.count,
                 confluence_types: JSON.stringify(confluence.types),
                 ema9: Number.isFinite(ema9Value) ? ema9Value : null,
@@ -2425,8 +2887,10 @@
                 vwap: Number.isFinite(vwapValue) ? vwapValue : null,
                 vwap_dist_bps: Number.isFinite(vwapDistBps) ? vwapDistBps : null,
                 atr: state.lastAtr,
-                rv_30: null,
-                rv_regime: null,
+                rv_30: state.lastRv30 ?? null,
+                rv_regime: state.lastRv30 != null
+                    ? (state.lastRv30 < 12 ? 1 : state.lastRv30 < 22 ? 2 : 3)
+                    : null,
                 iv_rv_state: null,
                 gamma_mode: gammaMode,
                 gamma_flip: state.lastGamma,
@@ -2440,6 +2904,19 @@
                 bar_interval_sec: barIntervalSec,
                 source: state.dataSource,
                 created_at: now,
+                // ── v3 features ──
+                regime_type: v3?.regimeType ?? null,
+                overnight_gap_atr: v3?.overnightGapAtr ?? null,
+                or_high: orHigh ?? null,
+                or_low: orLow ?? null,
+                or_size_atr: v3?.orSizeAtr ?? null,
+                or_breakout: orBreakout,
+                or_high_dist_bps: orHighDistBps,
+                or_low_dist_bps: orLowDistBps,
+                session_std: v3?.sessionStd ?? null,
+                sigma_band_position: sigmaBandPosition,
+                distance_to_upper_sigma_bps: distUpperSigmaBps,
+                distance_to_lower_sigma_bps: distLowerSigmaBps,
                 ...overrides,
             };
         }
@@ -2463,6 +2940,13 @@
                 : null;
             const shared = { referencePrice, now, emaState, ema9Value, ema21Value, vwapValue, vwapDistBps, barIntervalSec };
 
+            // ── Per-day touch counter reset ──
+            const todayKey = formatYmd(now / 1000, state.timeZone);
+            if (state.touchCountDate !== todayKey) {
+                state.touchCountByDay = {};
+                state.touchCountDate = todayKey;
+            }
+
             levels.forEach((level) => {
                 const absDist = Math.abs((referencePrice - level.value) / level.value) * 1e4;
                 if (!nearest || absDist < nearest.distance) {
@@ -2474,8 +2958,10 @@
                 const last = state.lastTouchByLevel.get(key);
                 if (last && now - last < cooldownMs) return;
 
+                state.touchCountByDay[key] = (state.touchCountByDay[key] || 0) + 1;
+                const touchCountToday = state.touchCountByDay[key];
                 const confluence = computeConfluence(levels, level, thresholdBps);
-                events.push(buildTouchEvent({ ...shared, level, absDist, confluence }));
+                events.push(buildTouchEvent({ ...shared, level, absDist, confluence, touchCountToday }));
                 state.lastTouchByLevel.set(key, now);
             });
 
@@ -2497,10 +2983,12 @@
         }
 
         function setDebug(message) {
-            const panel = document.getElementById('debug-panel');
             const status = document.getElementById('debug-status');
-            panel.style.display = 'block';
-            status.innerHTML = `<strong>Debug:</strong> ${message}`;
+            state.debugMessage = message;
+            if (status) {
+                status.textContent = `Debug: ${message}`;
+            }
+            updateDebugUI();
         }
 
         function setMlText(id, value) {
@@ -2893,6 +3381,21 @@
             document.getElementById('export-txt').addEventListener('click', exportTxt);
             document.getElementById('export-txt-zones').addEventListener('click', exportTxtZones);
 
+            const debugToggle = document.getElementById('debug-toggle');
+            if (debugToggle) {
+                debugToggle.addEventListener('click', () => {
+                    state.debugEnabled = !state.debugEnabled;
+                    saveUiPrefs();
+                    updateDebugUI();
+                    if (state.debugEnabled && state.activeInsightTab !== 'debug') {
+                        const debugTab = document.getElementById('tab-debug');
+                        if (debugTab) {
+                            debugTab.click();
+                        }
+                    }
+                });
+            }
+
             const previewToggle = document.getElementById('ml-preview-toggle');
             if (previewToggle) {
                 previewToggle.checked = state.mlPreviewEnabled;
@@ -2922,10 +3425,15 @@
         }
 
         async function boot() {
+            loadUiPrefs();
             loadMlPrefs();
             await ensureChartLibrary();
             initializeChart();
+            syncStickyOffsets();
+            window.addEventListener('resize', syncStickyOffsets);
+            initializeInsightTabs();
             attachEventListeners();
+            updateDebugUI();
             loadMlHealth();
             loadMlMetrics();
             if (state.mlMetricsTimer) {
