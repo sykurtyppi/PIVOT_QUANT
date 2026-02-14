@@ -304,7 +304,14 @@ export class QuantPivotEngine {
      * @private
      */
     _generateCacheKey(ohlcData, options) {
-        const dataHash = this._hashData(ohlcData.slice(-5)); // Last 5 bars for uniqueness
+        // Include length, first bar, and last 5 bars to avoid collisions
+        // when different-length histories share the same tail
+        const cacheInput = {
+            len: ohlcData.length,
+            first: ohlcData[0],
+            tail: ohlcData.slice(-5)
+        };
+        const dataHash = this._hashData(cacheInput);
         const optionsHash = this._hashData(options);
         return `${dataHash}_${optionsHash}`;
     }

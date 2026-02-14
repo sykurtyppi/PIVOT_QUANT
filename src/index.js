@@ -490,13 +490,13 @@ export {
 export const createQuantPivot = (_config, environment) => new QuantPivot(_config, environment);
 
 export const createDevelopmentInstance = (config = {}) =>
-    new QuantPivot(_config, 'development');
+    new QuantPivot(config, 'development');
 
 export const createProductionInstance = (config = {}) =>
-    new QuantPivot(_config, 'production');
+    new QuantPivot(config, 'production');
 
 export const createHFTInstance = (config = {}) =>
-    new QuantPivot(_config, 'hft');
+    new QuantPivot(config, 'hft');
 
 // Default export for convenience
 export default QuantPivot;

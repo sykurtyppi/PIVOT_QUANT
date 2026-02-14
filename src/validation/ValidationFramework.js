@@ -11,7 +11,7 @@
 export class ValidationFramework {
     constructor(config = {}) {
         this.config = {
-            strictMode: config.strictMode || true,
+            strictMode: config.strictMode ?? true,
             toleranceLevel: config.toleranceLevel || 1e-8,
             maxDataPoints: config.maxDataPoints || 10000,
             minDataPoints: config.minDataPoints || 2,
@@ -542,8 +542,6 @@ export class ValidationFramework {
         const errors = [];
 
         Object.entries(levels).forEach(([method, methodLevels]) => {
-            if (methodLevels.metadata) return;
-
             const levelValues = Object.entries(methodLevels)
                 .filter(([name]) => name !== 'metadata')
                 .map(([name, value]) => ({ name, value }));

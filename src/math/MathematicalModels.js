@@ -15,7 +15,7 @@ export class MathematicalModels {
             precision: config.precision || 8,
             maxIterations: config.maxIterations || 1000,
             convergenceThreshold: config.convergenceThreshold || 1e-10,
-            numericalStability: config.numericalStability || true,
+            numericalStability: config.numericalStability ?? true,
             ...config
         };
 
@@ -45,7 +45,7 @@ export class MathematicalModels {
     }
 
     updateConfig(newConfig) {
-        this.config = { ...this._config, ...newConfig };
+        this.config = { ...this.config, ...newConfig };
     }
 
     // =================================================================================
@@ -1012,6 +1012,80 @@ export class MathematicalModels {
                 camarilla: 0.68
             }
         };
+    }
+
+    /**
+     * Calculate Information Ratio (excess return / tracking error)
+     */
+    calculateInformationRatio(ohlcData, benchmarkReturns = null) {
+        const returns = this._calculateReturns(ohlcData);
+        if (!benchmarkReturns) {
+            // Without benchmark, approximate as Sharpe-like ratio
+            return this.calculateSharpeRatio(ohlcData);
+        }
+        const excessReturns = returns.map((r, i) => r - (benchmarkReturns[i] || 0));
+        const trackingErr = Math.sqrt(this._calculateVariance(excessReturns));
+        if (trackingErr === 0) return 0;
+        const meanExcess = this._calculateMean(excessReturns);
+        return this._roundToPrecision(
+            (meanExcess / trackingErr) * Math.sqrt(this.constants.TRADING_DAYS_PER_YEAR), 4
+        );
+    }
+
+    /**
+     * Calculate Treynor Ratio (excess return / beta)
+     */
+    calculateTreynorRatio(ohlcData, riskFreeRate = this.constants.RISK_FREE_RATE) {
+        const returns = this._calculateReturns(ohlcData);
+        const meanReturn = this._calculateMean(returns) * this.constants.TRADING_DAYS_PER_YEAR;
+        const beta = this.calculateBeta(ohlcData);
+        if (beta === 0) return 0;
+        return this._roundToPrecision((meanReturn - riskFreeRate) / beta, 4);
+    }
+
+    /**
+     * Calculate Tracking Error (std of excess returns vs benchmark)
+     */
+    calculateTrackingError(ohlcData, benchmarkReturns = null) {
+        const returns = this._calculateReturns(ohlcData);
+        if (!benchmarkReturns) {
+            // Without benchmark, return daily volatility as proxy
+            return this._roundToPrecision(
+                Math.sqrt(this._calculateVariance(returns) * this.constants.TRADING_DAYS_PER_YEAR), 6
+            );
+        }
+        const excessReturns = returns.map((r, i) => r - (benchmarkReturns[i] || 0));
+        return this._roundToPrecision(
+            Math.sqrt(this._calculateVariance(excessReturns) * this.constants.TRADING_DAYS_PER_YEAR), 6
+        );
+    }
+
+    /**
+     * Calculate Alpha (Jensen's alpha: actual return - CAPM expected return)
+     */
+    calculateAlpha(ohlcData, riskFreeRate = this.constants.RISK_FREE_RATE) {
+        const returns = this._calculateReturns(ohlcData);
+        const annualizedReturn = this._calculateMean(returns) * this.constants.TRADING_DAYS_PER_YEAR;
+        const beta = this.calculateBeta(ohlcData);
+        // Assume market return ≈ risk-free + 6% equity premium
+        const marketReturn = riskFreeRate + 0.06;
+        const expectedReturn = riskFreeRate + beta * (marketReturn - riskFreeRate);
+        return this._roundToPrecision(annualizedReturn - expectedReturn, 4);
+    }
+
+    /**
+     * Calculate Beta (covariance with market proxy / market variance)
+     * Without actual market data, estimates from price autocorrelation
+     */
+    calculateBeta(ohlcData) {
+        const returns = this._calculateReturns(ohlcData);
+        if (returns.length < 5) return 1.0;
+        // Without real market data, estimate beta from return characteristics
+        // Higher vol relative to typical SPX vol (~16% annual) = higher beta
+        const annualizedVol = Math.sqrt(this._calculateVariance(returns) * this.constants.TRADING_DAYS_PER_YEAR);
+        const typicalMarketVol = 0.16;
+        const betaEstimate = annualizedVol / typicalMarketVol;
+        return this._roundToPrecision(Math.min(Math.max(betaEstimate, 0.1), 3.0), 4);
     }
 
     // Placeholder methods for complex calculations (would be fully implemented)
