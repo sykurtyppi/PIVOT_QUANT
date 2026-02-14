@@ -483,19 +483,22 @@ export class MathematicalModels {
         }
 
         const percentiles = this._calculatePercentiles(historicalVols, [25, 50, 75]);
+        // percentiles is an array [p25, p50, p75] — index by position, not value
+        const p25 = percentiles[0];
+        const p75 = percentiles[2];
 
         let regime;
-        if (vol.annualized <= percentiles[25]) regime = 'LOW';
-        else if (vol.annualized <= percentiles[75]) regime = 'NORMAL';
+        if (vol.annualized <= p25) regime = 'LOW';
+        else if (vol.annualized <= p75) regime = 'NORMAL';
         else regime = 'HIGH';
 
         return {
             regime,
             currentVol: vol.annualized,
             percentiles: {
-                p25: percentiles[25],
-                p50: percentiles[50],
-                p75: percentiles[75]
+                p25,
+                p50: percentiles[1],
+                p75
             },
             confidence: this._calculateRegimeConfidence(vol.annualized, percentiles)
         };

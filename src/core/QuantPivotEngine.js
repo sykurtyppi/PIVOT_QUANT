@@ -269,7 +269,11 @@ export class QuantPivotEngine {
         for (const [method, methodLevels] of Object.entries(levels)) {
             scores[method] = {};
 
-            for (const [levelName, levelValue] of Object.entries(methodLevels)) {
+            // Filter out non-numeric entries (e.g. metadata) to avoid NaN propagation
+            const numericLevels = Object.entries(methodLevels)
+                .filter(([, value]) => typeof value === 'number');
+
+            for (const [levelName, levelValue] of numericLevels) {
                 scores[method][levelName] = {
                     reliability: this.mathModels.calculateReliabilityScore(
                         levelValue, ohlcData, _atrData
@@ -466,5 +470,11 @@ export class QuantPivotEngine {
     }
 }
 
-// Export singleton instance for institutional use
-export const quantPivotEngine = new QuantPivotEngine();
+// Lazy singleton — avoids side-effects (background intervals) on import
+let _singletonInstance = null;
+export function getQuantPivotEngine(config) {
+    if (!_singletonInstance) {
+        _singletonInstance = new QuantPivotEngine(config);
+    }
+    return _singletonInstance;
+}
