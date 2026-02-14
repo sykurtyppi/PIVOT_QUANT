@@ -37,5 +37,7 @@ class ProbabilityCalibrator:
             p1c = self.calibrator.predict_proba(p1.reshape(-1, 1))[:, 1]
         return np.vstack([1 - p1c, p1c]).T
 
-    def predict(self, X):
-        return (self.predict_proba(X)[:, 1] >= 0.5).astype(int)
+    def predict(self, X, threshold: float = 0.5):
+        import numpy as np
+
+        return (self.predict_proba(X)[:, 1] >= threshold).astype(int)

@@ -118,6 +118,30 @@ def health():
     return result
 
 
+def _check_feature_drift(features: dict, payload: dict) -> list[str]:
+    """Check if live feature values fall outside training-set p1/p99 bounds.
+
+    Returns list of feature names that are out-of-range. An empty list
+    means no drift detected. Only checks numeric features that have
+    bounds stored in the model pickle.
+    """
+    bounds = payload.get("feature_bounds", {})
+    if not bounds:
+        return []
+    drifted = []
+    for col, limits in bounds.items():
+        value = features.get(col)
+        if value is None or not isinstance(value, (int, float)):
+            continue
+        p1 = limits.get("p1")
+        p99 = limits.get("p99")
+        if p1 is not None and value < p1:
+            drifted.append(col)
+        elif p99 is not None and value > p99:
+            drifted.append(col)
+    return drifted
+
+
 def _score_event(event: dict):
     missing = collect_missing(event)
     features = build_feature_row(event)
@@ -168,6 +192,21 @@ def _score_event(event: dict):
             for metric in ("mfe_bps", "mae_bps"):
                 if f"{metric}_{target}" in horizon_stats:
                     scores[f"{metric}_{target}_{horizon}m"] = horizon_stats.get(f"{metric}_{target}")
+
+            # ── Feature drift detection (#7) ──
+            drifted = _check_feature_drift(features, payload)
+            if drifted:
+                flag = f"FEATURE_DRIFT_{target}_{horizon}m"
+                if flag not in quality_flags:
+                    quality_flags.append(flag)
+                scores[f"drifted_features_{target}_{horizon}m"] = drifted
+
+            # ── Uncalibrated model flag (#8) ──
+            calib_method = payload.get("calibration", "none")
+            if calib_method == "none":
+                flag = f"UNCALIBRATED_{target}_{horizon}m"
+                if flag not in quality_flags:
+                    quality_flags.append(flag)
 
     # ── Signal classification per horizon ──
     # Uses optimal thresholds instead of hardcoded 0.5

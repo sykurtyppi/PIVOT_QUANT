@@ -270,6 +270,20 @@ def main() -> None:
                 except Exception:
                     optimal_threshold = 0.5
 
+            # Compute per-feature quantile bounds for drift detection at inference.
+            # Uses the full training set (not calib) since we want the broadest
+            # representative range. p1/p99 gives room for natural variance while
+            # catching genuine distribution shifts.
+            feature_bounds = {}
+            for col in numeric_cols:
+                series = X_train[col].dropna()
+                if len(series) >= 10:
+                    feature_bounds[col] = {
+                        "p1": float(series.quantile(0.01)),
+                        "p99": float(series.quantile(0.99)),
+                        "median": float(series.median()),
+                    }
+
             model_name = f"rf_{target}_{horizon}m_{version}.pkl"
             model_path = out_dir / model_name
             joblib.dump(
@@ -281,6 +295,7 @@ def main() -> None:
                     "feature_columns": list(X.columns),
                     "numeric_columns": numeric_cols,
                     "categorical_columns": categorical_cols,
+                    "feature_bounds": feature_bounds,
                 },
                 model_path,
             )
