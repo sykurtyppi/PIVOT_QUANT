@@ -242,6 +242,66 @@
             align-items: start;
         }
 
+        .decision-strip {
+            display: grid;
+            grid-template-columns: repeat(6, minmax(140px, 1fr));
+            gap: 10px;
+            padding: 12px 32px;
+            border-bottom: 1px solid var(--border);
+            background: linear-gradient(180deg, rgba(2, 6, 23, 0.3), rgba(2, 6, 23, 0.1));
+        }
+
+        .decision-card {
+            background: rgba(15, 23, 42, 0.72);
+            border: 1px solid rgba(148, 163, 184, 0.14);
+            border-radius: 12px;
+            padding: 8px 10px;
+            min-width: 0;
+        }
+
+        .decision-card-wide {
+            grid-column: span 3;
+        }
+
+        .decision-card-wide .decision-value {
+            white-space: normal;
+            overflow: visible;
+            text-overflow: unset;
+        }
+
+        .decision-label {
+            font-size: 10px;
+            letter-spacing: 0.35px;
+            text-transform: uppercase;
+            color: var(--muted);
+            margin-bottom: 4px;
+        }
+
+        .decision-value {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .decision-value.mono {
+            font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+        }
+
+        .decision-value.good {
+            color: var(--success);
+        }
+
+        .decision-value.caution {
+            color: var(--warning);
+        }
+
+        .decision-value.risk {
+            color: var(--danger);
+        }
+
         .panel.span-2 {
             grid-column: 2 / 4;
         }
@@ -271,6 +331,38 @@
             justify-content: space-between;
             gap: 12px;
             flex-wrap: wrap;
+        }
+
+        .chart-toolbar {
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .chip-toggle {
+            border: 1px solid rgba(148, 163, 184, 0.3);
+            background: rgba(2, 6, 23, 0.5);
+            color: var(--muted);
+            border-radius: 999px;
+            padding: 5px 9px;
+            font-size: 10px;
+            letter-spacing: 0.3px;
+            text-transform: uppercase;
+            font-weight: 700;
+            cursor: pointer;
+            transition: border-color 0.15s, color 0.15s, background 0.15s;
+        }
+
+        .chip-toggle:hover {
+            color: var(--text);
+            border-color: rgba(148, 163, 184, 0.5);
+        }
+
+        .chip-toggle.is-on {
+            color: #082033;
+            border-color: transparent;
+            background: linear-gradient(135deg, #7dd3fc, #22d3ee);
         }
 
         .insights-panel {
@@ -339,6 +431,34 @@
             background: rgba(2, 6, 23, 0.35);
         }
 
+        .explain-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 8px;
+        }
+
+        .explain-card {
+            background: rgba(2, 6, 23, 0.48);
+            border: 1px solid rgba(148, 163, 184, 0.11);
+            border-radius: 10px;
+            padding: 8px 10px;
+            min-height: 76px;
+        }
+
+        .explain-title {
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.35px;
+            color: var(--muted);
+            margin-bottom: 5px;
+        }
+
+        .explain-body {
+            font-size: 12px;
+            color: var(--text);
+            line-height: 1.3;
+        }
+
         .stat-grid {
             display: grid;
             grid-template-columns: 1fr 1fr;
@@ -375,6 +495,53 @@
             flex-wrap: wrap;
             font-size: 11px;
             color: var(--muted);
+        }
+
+        .ml-service-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            border-radius: 999px;
+            border: 1px solid rgba(148, 163, 184, 0.22);
+            background: rgba(15, 23, 42, 0.55);
+            color: var(--muted);
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.3px;
+            text-transform: uppercase;
+        }
+
+        .ml-service-pill::before {
+            content: '';
+            width: 7px;
+            height: 7px;
+            border-radius: 999px;
+            background: rgba(148, 163, 184, 0.9);
+        }
+
+        .ml-service-pill[data-state="online"] {
+            color: #86efac;
+            border-color: rgba(34, 197, 94, 0.35);
+            background: rgba(22, 101, 52, 0.2);
+        }
+
+        .ml-service-pill[data-state="online"]::before {
+            background: #22c55e;
+        }
+
+        .ml-service-pill[data-state="offline"] {
+            color: #fca5a5;
+            border-color: rgba(239, 68, 68, 0.4);
+            background: rgba(127, 29, 29, 0.2);
+        }
+
+        .ml-service-pill[data-state="offline"]::before {
+            background: #ef4444;
+        }
+
+        .ml-service-pill[data-state="checking"]::before {
+            background: #fbbf24;
         }
 
         .ml-toggle,
@@ -693,6 +860,10 @@
             .panel.span-2 {
                 grid-column: 1 / -1;
             }
+
+            .decision-strip {
+                grid-template-columns: repeat(3, minmax(160px, 1fr));
+            }
         }
 
         @media (max-width: 1200px) {
@@ -702,6 +873,14 @@
 
             .panel.span-2 {
                 grid-column: auto;
+            }
+
+            .decision-strip {
+                padding: 12px 16px;
+            }
+
+            .decision-card-wide {
+                grid-column: span 3;
             }
         }
 
@@ -720,6 +899,14 @@
 
             #chartContainer {
                 min-height: 360px;
+            }
+
+            .decision-strip {
+                grid-template-columns: repeat(2, minmax(140px, 1fr));
+            }
+
+            .decision-card-wide {
+                grid-column: span 2;
             }
 
             .signal-grid {
@@ -748,6 +935,10 @@
             }
 
             .stat-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .explain-grid {
                 grid-template-columns: 1fr;
             }
         }
@@ -840,6 +1031,37 @@
             </div>
         </section>
 
+        <section class="decision-strip" aria-label="Decision summary">
+            <div class="decision-card">
+                <div class="decision-label">Session Bias</div>
+                <div class="decision-value" id="decision-bias">--</div>
+            </div>
+            <div class="decision-card">
+                <div class="decision-label">Nearest Level</div>
+                <div class="decision-value mono" id="decision-nearest">--</div>
+            </div>
+            <div class="decision-card">
+                <div class="decision-label">Gamma Mode</div>
+                <div class="decision-value" id="decision-gamma">--</div>
+            </div>
+            <div class="decision-card">
+                <div class="decision-label">Vol Regime</div>
+                <div class="decision-value" id="decision-vol">--</div>
+            </div>
+            <div class="decision-card">
+                <div class="decision-label">Confidence</div>
+                <div class="decision-value" id="decision-confidence">--</div>
+            </div>
+            <div class="decision-card">
+                <div class="decision-label">Data Quality</div>
+                <div class="decision-value" id="decision-data">--</div>
+            </div>
+            <div class="decision-card decision-card-wide">
+                <div class="decision-label">Primary Rationale</div>
+                <div class="decision-value" id="decision-rationale">--</div>
+            </div>
+        </section>
+
         <main class="grid">
             <section class="panel">
                 <h3>Market Snapshot</h3>
@@ -890,7 +1112,17 @@
             </section>
 
             <section class="panel chart-panel span-2">
-                <h3>Price With Pivot Ladder</h3>
+                <div class="panel-header">
+                    <h3>Price With Pivot Ladder</h3>
+                    <div class="chart-toolbar" role="group" aria-label="Chart layers">
+                        <button class="chip-toggle is-on" id="toggle-pivots" type="button">Pivots</button>
+                        <button class="chip-toggle is-on" id="toggle-gamma-walls" type="button">Gamma</button>
+                        <button class="chip-toggle is-on" id="toggle-ema9" type="button">EMA 9</button>
+                        <button class="chip-toggle is-on" id="toggle-ema21" type="button">EMA 21</button>
+                        <button class="chip-toggle is-on" id="toggle-vwap" type="button">VWAP</button>
+                        <button class="chip-toggle" id="fit-chart" type="button">Fit</button>
+                    </div>
+                </div>
                 <div id="chartContainer"></div>
             </section>
 
@@ -898,6 +1130,7 @@
                 <div class="panel-header">
                     <h3>ML Signal</h3>
                     <div class="ml-controls">
+                        <div class="ml-service-pill" id="ml-service-pill" data-state="checking" title="Checking ML service">ML Checking</div>
                         <label class="ml-toggle">
                             <input type="checkbox" id="ml-preview-toggle" checked>
                             <span>Preview mode</span>
@@ -1044,6 +1277,21 @@
                             </tbody>
                         </table>
                     </div>
+                    <h4 class="subsection-title">Explainability</h4>
+                    <div class="explain-grid">
+                        <div class="explain-card">
+                            <div class="explain-title">Signal Thesis</div>
+                            <div class="explain-body" id="explain-rationale">--</div>
+                        </div>
+                        <div class="explain-card">
+                            <div class="explain-title">Market Structure</div>
+                            <div class="explain-body" id="explain-structure">--</div>
+                        </div>
+                        <div class="explain-card">
+                            <div class="explain-title">Risk Context</div>
+                            <div class="explain-body" id="explain-risk">--</div>
+                        </div>
+                    </div>
                 </section>
 
                 <section class="tab-panel" id="panel-gamma" data-tab-panel="gamma" role="tabpanel" aria-labelledby="tab-gamma" hidden>
@@ -1139,9 +1387,28 @@
             mlMetrics: null,
             mlMeta: null,
             mlMetricsTimer: null,
+            mlServiceStatus: 'checking',
+            mlServiceMessage: 'Checking ML service health.',
             debugEnabled: false,
             debugMessage: '',
             activeInsightTab: 'levels',
+            uiVisibility: {
+                pivots: true,
+                gammaWalls: true,
+                ema9: true,
+                ema21: true,
+                vwap: true,
+            },
+            lastGammaMode: '--',
+            lastPlaybook: '--',
+            lastVolRegime: '--',
+            lastIvRv: '--',
+            lastFlipDistance: '--',
+            lastGammaScore: null,
+            lastGammaScoreLabel: '--',
+            lastGammaDrivers: '--',
+            lastDataQualityLabel: '--',
+            lastDataCoverage: null,
         };
 
         const formatNumber = (value, digits = 2) => {
@@ -1161,7 +1428,68 @@
             return date.toLocaleString('en-US', { timeZone: state.timeZone, hour12: false });
         };
 
+        function getCryptoApi() {
+            if (typeof globalThis !== 'undefined' && globalThis.crypto) {
+                return globalThis.crypto;
+            }
+            if (typeof window !== 'undefined' && window.crypto) {
+                return window.crypto;
+            }
+            return null;
+        }
+
+        function formatUuid(bytes) {
+            const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+            return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+        }
+
+        function generateUuidV4Fallback() {
+            const bytes = new Uint8Array(16);
+            const cryptoApi = getCryptoApi();
+            if (cryptoApi && typeof cryptoApi.getRandomValues === 'function') {
+                cryptoApi.getRandomValues(bytes);
+            } else {
+                for (let i = 0; i < bytes.length; i += 1) {
+                    bytes[i] = Math.floor(Math.random() * 256);
+                }
+            }
+            bytes[6] = (bytes[6] & 0x0f) | 0x40;
+            bytes[8] = (bytes[8] & 0x3f) | 0x80;
+            return formatUuid(bytes);
+        }
+
+        function installRandomUuidPolyfill() {
+            const cryptoApi = getCryptoApi();
+            if (!cryptoApi || typeof cryptoApi.randomUUID === 'function') {
+                return;
+            }
+            const polyfill = () => generateUuidV4Fallback();
+            try {
+                Object.defineProperty(cryptoApi, 'randomUUID', {
+                    value: polyfill,
+                    configurable: true,
+                    writable: true,
+                });
+            } catch (error) {
+                try {
+                    cryptoApi.randomUUID = polyfill;
+                } catch (assignError) {
+                    console.warn('Unable to polyfill crypto.randomUUID', assignError);
+                }
+            }
+        }
+
+        function generateEventId() {
+            try {
+                return generateUuidV4Fallback();
+            } catch (error) {
+                const entropy = `${Date.now()}_${Math.random().toString(16).slice(2, 14)}`;
+                return `evt_${entropy}`;
+            }
+        }
+
         const ML_CACHE_MAX = 200;
+        installRandomUuidPolyfill();
 
         function getApiOrigin(port = 3000) {
             const raw = window.location.origin;
@@ -1311,6 +1639,157 @@
             });
 
             activateTab(state.activeInsightTab || tabs[0].dataset.tab);
+        }
+
+        function setSeriesVisible(series, visible) {
+            if (!series || typeof series.applyOptions !== 'function') return;
+            try {
+                series.applyOptions({ visible });
+            } catch (error) {
+                // Ignore if current chart version does not support visible option.
+            }
+        }
+
+        function syncToggleButton(id, enabled) {
+            const button = document.getElementById(id);
+            if (!button) return;
+            button.classList.toggle('is-on', enabled);
+            button.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+        }
+
+        function applyChartVisibility() {
+            setSeriesVisible(state.ema9Series, state.uiVisibility.ema9);
+            setSeriesVisible(state.ema21Series, state.uiVisibility.ema21);
+            setSeriesVisible(state.vwapSeries, state.uiVisibility.vwap);
+
+            state.pivotLines.forEach((line) => setSeriesVisible(line, state.uiVisibility.pivots));
+            state.gammaLines.forEach((line) => setSeriesVisible(line, state.uiVisibility.gammaWalls));
+        }
+
+        function initializeChartToolbar() {
+            const mappings = [
+                { id: 'toggle-pivots', key: 'pivots' },
+                { id: 'toggle-gamma-walls', key: 'gammaWalls' },
+                { id: 'toggle-ema9', key: 'ema9' },
+                { id: 'toggle-ema21', key: 'ema21' },
+                { id: 'toggle-vwap', key: 'vwap' },
+            ];
+
+            mappings.forEach(({ id, key }) => {
+                syncToggleButton(id, state.uiVisibility[key]);
+                const button = document.getElementById(id);
+                if (!button) return;
+                button.addEventListener('click', () => {
+                    state.uiVisibility[key] = !state.uiVisibility[key];
+                    syncToggleButton(id, state.uiVisibility[key]);
+                    applyChartVisibility();
+                });
+            });
+
+            const fitBtn = document.getElementById('fit-chart');
+            if (fitBtn) {
+                fitBtn.addEventListener('click', () => {
+                    try {
+                        state.chart?.timeScale()?.fitContent();
+                    } catch (error) {
+                        // Ignore fit failures on unsupported API versions.
+                    }
+                });
+            }
+        }
+
+        function updateDecisionStrip() {
+            const levels = Array.isArray(state.lastLevels) ? state.lastLevels : [];
+            const price = state.referencePrice;
+
+            const setText = (id, text) => {
+                const el = document.getElementById(id);
+                if (el) el.textContent = text;
+            };
+            const setClass = (id, className) => {
+                const el = document.getElementById(id);
+                if (!el) return;
+                el.classList.remove('good', 'caution', 'risk');
+                if (className) el.classList.add(className);
+            };
+
+            const nearest = levels
+                .filter((level) => Number.isFinite(level?.value) && Number.isFinite(price))
+                .map((level) => ({
+                    ...level,
+                    absDistance: Math.abs(level.distance),
+                }))
+                .sort((a, b) => a.absDistance - b.absDistance)[0] || null;
+
+            const pivot = levels.find((level) => level.label === 'PP' || level.label === 'PIVOT');
+            const ema9 = state.lastEma9;
+            const ema21 = state.lastEma21;
+            let bias = '--';
+            let biasClass = '';
+            if (Number.isFinite(price) && Number.isFinite(pivot?.value) && Number.isFinite(ema9) && Number.isFinite(ema21)) {
+                const abovePivot = price >= pivot.value;
+                if (abovePivot && ema9 >= ema21) {
+                    bias = 'Bullish';
+                    biasClass = 'good';
+                } else if (!abovePivot && ema9 <= ema21) {
+                    bias = 'Bearish';
+                    biasClass = 'risk';
+                } else {
+                    bias = 'Mixed';
+                    biasClass = 'caution';
+                }
+            }
+
+            const nearestText = nearest
+                ? `${nearest.label} ${formatNumber(nearest.value)} (${formatPercent(nearest.distance)})`
+                : '--';
+
+            const confidenceText = Number.isFinite(state.lastGammaScore)
+                ? `${Math.round(state.lastGammaScore)} (${state.lastGammaScoreLabel})`
+                : '--';
+
+            const asOf = state.latestData?.asOf ? new Date(state.latestData.asOf).toLocaleTimeString() : null;
+            const qualityCore = state.lastDataQualityLabel !== '--'
+                ? `${state.lastDataQualityLabel}${Number.isFinite(state.lastDataCoverage) ? ` (${state.lastDataCoverage}%)` : ''}`
+                : (state.dataSource || '--');
+            const qualityText = asOf ? `${qualityCore} · ${asOf}` : qualityCore;
+
+            const rationaleParts = [];
+            if (bias !== '--') rationaleParts.push(`${bias} structure`);
+            if (state.lastPlaybook && state.lastPlaybook !== '--') rationaleParts.push(state.lastPlaybook);
+            if (nearest) rationaleParts.push(`nearest ${nearest.label} ${formatPercent(nearest.distance)}`);
+            if (state.lastGammaDrivers && state.lastGammaDrivers !== '--') rationaleParts.push(state.lastGammaDrivers);
+            const rationale = rationaleParts.length ? rationaleParts.join(' · ') : '--';
+
+            const supports = levels.filter((level) => level.type === 'support').sort((a, b) => b.strength - a.strength);
+            const resistances = levels.filter((level) => level.type === 'resistance').sort((a, b) => b.strength - a.strength);
+            const strongestSupport = supports[0];
+            const strongestResistance = resistances[0];
+
+            const structureText = strongestSupport || strongestResistance
+                ? `${strongestSupport ? `S ${strongestSupport.label} ${formatNumber(strongestSupport.value)}` : ''}${strongestSupport && strongestResistance ? ' | ' : ''}${strongestResistance ? `R ${strongestResistance.label} ${formatNumber(strongestResistance.value)}` : ''}`
+                : '--';
+
+            const riskTextParts = [];
+            if (state.lastFlipDistance && state.lastFlipDistance !== '--') riskTextParts.push(`Flip ${state.lastFlipDistance}`);
+            if (Number.isFinite(state.lastAtr)) riskTextParts.push(`ATR ${formatNumber(state.lastAtr)}`);
+            if (state.lastVolRegime && state.lastVolRegime !== '--') riskTextParts.push(`Vol ${state.lastVolRegime}`);
+            const riskText = riskTextParts.length ? riskTextParts.join(' · ') : '--';
+
+            setText('decision-bias', bias);
+            setClass('decision-bias', biasClass);
+            setText('decision-nearest', nearestText);
+            setText('decision-gamma', state.lastGammaMode || '--');
+            setText('decision-vol', state.lastVolRegime || '--');
+            setText('decision-confidence', confidenceText);
+            setText('decision-data', qualityText);
+            setText('decision-rationale', rationale);
+
+            setText('explain-rationale', state.lastPlaybook && state.lastPlaybook !== '--'
+                ? `${state.lastPlaybook}. IV/RV: ${state.lastIvRv || '--'}. Drivers: ${state.lastGammaDrivers || 'mixed signals'}.`
+                : '--');
+            setText('explain-structure', structureText);
+            setText('explain-risk', riskText);
         }
 
         const intervalToSeconds = (interval) => {
@@ -1492,6 +1971,7 @@
                     { time: endTime, value: level.value },
                 ]);
 
+                setSeriesVisible(line, state.uiVisibility.pivots);
                 state.pivotLines.push(line);
             });
         }
@@ -1527,6 +2007,7 @@
                     { time: endTime, value: entry.data.price },
                 ]);
 
+                setSeriesVisible(line, state.uiVisibility.gammaWalls);
                 state.gammaLines.push(line);
             });
         }
@@ -2076,6 +2557,11 @@
             state.lastWalls = walls;
             const strength = analyzeStrength(rawLevels, windowCandles, state.referencePrice, atr);
             const levels = buildLevelsArray(rawLevels, state.referencePrice, strength);
+            state.lastLevels = levels;
+            state.lastStrength = strength;
+            state.lastSessionEntry = entry;
+            state.lastAtr = atr;
+            state.lastGamma = gammaLevel;
 
             updateMarketSnapshot(data, entry, atr);
             updatePivotTable(levels);
@@ -2083,12 +2569,6 @@
             renderPivotLines(levels);
 
             focusChartOnSession(entry.sessionIndex);
-
-            state.lastLevels = levels;
-            state.lastStrength = strength;
-            state.lastSessionEntry = entry;
-            state.lastAtr = atr;
-            state.lastGamma = gammaLevel;
 
             // ── Compute v3 ML features from intraday bars ──
             const priorClose = entry.baseCandle.close;
@@ -2108,6 +2588,8 @@
 
             updateGammaPanel(windowCandles, gammaLevel, state.referencePrice, gammaSource);
             renderGammaWalls(state.lastWalls);
+            applyChartVisibility();
+            updateDecisionStrip();
 
             maybeLogTouches(levels, state.referencePrice);
         }
@@ -2166,6 +2648,11 @@
             const ivLabel = Number.isFinite(vix) ? `${ivRv} (VIX ${formatNumber(vix, 2)})` : ivRv;
 
             const sourceLabel = gammaSource === 'IBKR' ? 'IBKR' : 'Proxy';
+            state.lastGammaMode = `${gammaMode} (${sourceLabel})`;
+            state.lastPlaybook = playbook;
+            state.lastVolRegime = rvLabel;
+            state.lastIvRv = ivLabel;
+            state.lastFlipDistance = flipDistance;
 
             document.getElementById('gamma-mode').innerHTML = `<strong>Gamma Mode</strong>${gammaMode} (${sourceLabel})`;
             document.getElementById('gamma-distance').innerHTML = `<strong>Flip Distance</strong>${flipDistance}`;
@@ -2202,6 +2689,8 @@
                     ? Math.round((stats.withGreeks / stats.totalContracts) * 100)
                     : 0;
                 const qualityLabel = coverage >= 80 ? 'Fresh' : coverage >= 50 ? 'Partial' : 'Stale';
+                state.lastDataQualityLabel = qualityLabel;
+                state.lastDataCoverage = coverage;
                 document.getElementById('data-quality').innerHTML = `<strong>Data Quality</strong>${qualityLabel} (${coverage}%)`;
 
                 // Gamma Confidence Score (0-100) with quality cap
@@ -2245,6 +2734,9 @@
                 if (!drivers.length) drivers.push('mixed signals');
 
                 const driverText = drivers.slice(0, 3).join(', ');
+                state.lastGammaScore = score;
+                state.lastGammaScoreLabel = scoreLabel;
+                state.lastGammaDrivers = driverText;
                 document.getElementById('gamma-confidence').innerHTML = `<strong>Gamma Confidence</strong>${Math.round(score)} (${scoreLabel})<br><span style="color: var(--muted); font-size: 11px;">Drivers: ${driverText}</span>`;
             } else {
                 document.getElementById('oi-total').innerHTML = `<strong>Total OI</strong>--`;
@@ -2254,6 +2746,11 @@
                 document.getElementById('zero-dte-share').innerHTML = `<strong>0DTE Share</strong>--`;
                 document.getElementById('data-quality').innerHTML = `<strong>Data Quality</strong>--`;
                 document.getElementById('gamma-confidence').innerHTML = `<strong>Gamma Confidence</strong>--`;
+                state.lastGammaScore = null;
+                state.lastGammaScoreLabel = '--';
+                state.lastGammaDrivers = '--';
+                state.lastDataQualityLabel = '--';
+                state.lastDataCoverage = null;
             }
         }
 
@@ -2662,6 +3159,17 @@
             }
         }
 
+        async function fetchDashboardMarket(symbol, interval, range) {
+            try {
+                const query = `symbol=${encodeURIComponent(symbol)}&range=${encodeURIComponent(range)}&interval=${encodeURIComponent(interval)}`;
+                const apiUrl = `${getApiOrigin()}/api/market?${query}`;
+                return await fetchJson(apiUrl, 10000);
+            } catch (error) {
+                console.warn('Dashboard market API fetch failed', error);
+                return null;
+            }
+        }
+
         async function fetchIbkrSpot(symbol) {
             try {
                 const apiUrl = `${getApiOrigin()}/api/ib/spot?symbol=${encodeURIComponent(symbol)}`;
@@ -2740,8 +3248,12 @@
                         throw new Error('IBKR intraday data unavailable');
                     }
                 } catch (error) {
-                    console.warn('IBKR intraday failed, falling back to Yahoo proxy', error);
-                    data = await fetchYahooWithBackoff(symbol, range, interval);
+                    console.warn('IBKR intraday failed, falling back to dashboard market API', error);
+                    data = await fetchDashboardMarket(symbol, interval, range);
+                    if (!data?.candles?.length) {
+                        console.warn('Dashboard intraday API failed, falling back to Yahoo proxy');
+                        data = await fetchYahooWithBackoff(symbol, range, interval);
+                    }
                 }
 
                 if (!data?.candles?.length) return;
@@ -2789,8 +3301,7 @@
 
         async function scoreTouchEvents(events) {
             if (!events?.length) return;
-            const origin = getApiOrigin(5003);
-            const apiUrl = `${origin}/score`;
+            const apiUrl = `${getApiOrigin()}/api/ml/score`;
             const event = events[0];
             const cacheKey = `${event.symbol}_${event.level_type}_${event.level_price}_${Math.floor(event.ts_event / 60000)}`;
             const cached = state.mlCache.get(cacheKey);
@@ -2807,7 +3318,11 @@
                     body: JSON.stringify({ event }),
                     signal: controller ? controller.signal : undefined,
                 });
-                if (!response.ok) return;
+                if (!response.ok) {
+                    setMlServiceState('offline', `Score endpoint HTTP ${response.status}`);
+                    updateMlPanel(null);
+                    return;
+                }
                 const payload = await response.json();
                 payload.preview = Boolean(event.preview);
                 payload.preview_level = event.level_type;
@@ -2821,6 +3336,11 @@
                 updateMlPanel(payload);
             } catch (error) {
                 console.warn('ML score failed', error);
+                const reason = error?.name === 'AbortError'
+                    ? 'ML score timeout (2.5s)'
+                    : (error?.message || 'Unknown ML score error');
+                setMlServiceState('offline', reason);
+                updateMlPanel(null);
             } finally {
                 clearTimeout(timeoutId);
             }
@@ -2868,7 +3388,7 @@
             }
 
             return {
-                event_id: crypto.randomUUID(),
+                event_id: generateEventId(),
                 symbol: state.symbol,
                 ts_event: now,
                 session: 'RTH',
@@ -2961,7 +3481,11 @@
                 state.touchCountByDay[key] = (state.touchCountByDay[key] || 0) + 1;
                 const touchCountToday = state.touchCountByDay[key];
                 const confluence = computeConfluence(levels, level, thresholdBps);
-                events.push(buildTouchEvent({ ...shared, level, absDist, confluence, touchCountToday }));
+                try {
+                    events.push(buildTouchEvent({ ...shared, level, absDist, confluence, touchCountToday }));
+                } catch (error) {
+                    setDebug(`Touch event build failed: ${error.message || error}`);
+                }
                 state.lastTouchByLevel.set(key, now);
             });
 
@@ -2974,11 +3498,15 @@
             if (state.mlPreviewEnabled && nearest && nearest.distance <= previewBps) {
                 const level = nearest.level;
                 const confluence = computeConfluence(levels, level, thresholdBps);
-                const previewEvent = buildTouchEvent({
-                    ...shared, level, absDist: nearest.distance, confluence,
-                    overrides: { touch_count_today: 0, preview: true },
-                });
-                scoreTouchEvents([previewEvent]);
+                try {
+                    const previewEvent = buildTouchEvent({
+                        ...shared, level, absDist: nearest.distance, confluence,
+                        overrides: { touch_count_today: 0, preview: true },
+                    });
+                    scoreTouchEvents([previewEvent]);
+                } catch (error) {
+                    setDebug(`Preview event build failed: ${error.message || error}`);
+                }
             }
         }
 
@@ -2995,6 +3523,46 @@
             const el = document.getElementById(id);
             if (el) {
                 el.textContent = value;
+            }
+        }
+
+        function resetMlHorizonCards() {
+            const horizons = [5, 15, 60];
+            horizons.forEach((h, idx) => {
+                setMlText(`ml-reject-${h}m`, '--');
+                setMlText(`ml-break-${h}m`, '--');
+                setMlText(`ml-mfe-${h}m`, '--');
+                setMlText(`ml-mae-${h}m`, '--');
+                setMlText(`ml-thr-reject-${h}m`, '--');
+                setMlText(`ml-thr-break-${h}m`, '--');
+                const signalEl = document.getElementById(`ml-signal-${h}m`);
+                if (signalEl) {
+                    signalEl.textContent = '--';
+                    signalEl.setAttribute('data-signal', '');
+                }
+                const card = document.querySelectorAll('.ml-horizon-card')[idx];
+                if (card) {
+                    card.setAttribute('data-signal', 'neutral');
+                }
+            });
+        }
+
+        function setMlServiceState(status, message = '') {
+            state.mlServiceStatus = status;
+            state.mlServiceMessage = message || '';
+            const pill = document.getElementById('ml-service-pill');
+            if (pill) {
+                pill.setAttribute('data-state', status);
+                pill.textContent = status === 'online'
+                    ? 'ML Online'
+                    : status === 'offline'
+                        ? 'ML Offline'
+                        : 'ML Checking';
+                if (message) {
+                    pill.title = message;
+                } else {
+                    pill.removeAttribute('title');
+                }
             }
         }
 
@@ -3034,8 +3602,22 @@
 
             if (!payload || !payload.scores) {
                 if (abstainBanner) abstainBanner.classList.remove('visible');
+                resetMlHorizonCards();
+                setMlText('ml-best-horizon', '--');
+                if (state.mlServiceStatus === 'offline') {
+                    status.textContent = 'ML service unavailable';
+                    detail.textContent = state.mlServiceMessage || 'Unable to reach ML API on port 5003';
+                } else if (state.mlServiceStatus === 'checking') {
+                    status.textContent = 'Checking ML service';
+                    detail.textContent = 'Waiting for ML health response';
+                } else {
+                    status.textContent = 'Waiting for touch';
+                    detail.textContent = 'No ML score yet. Monitoring preview/touch events.';
+                }
                 return;
             }
+
+            setMlServiceState('online');
 
             const scores = payload.scores || {};
             const signals = payload.signals || {};
@@ -3194,15 +3776,22 @@
         }
 
         async function loadMlHealth() {
-            const apiUrl = `${getApiOrigin(5003)}/health`;
+            const apiUrl = `${getApiOrigin()}/api/ml/health`;
             try {
                 const response = await fetch(apiUrl);
-                if (!response.ok) return;
+                if (!response.ok) {
+                    setMlServiceState('offline', `Health check HTTP ${response.status}`);
+                    updateMlPanel(null);
+                    return;
+                }
                 const payload = await response.json();
                 state.mlMeta = payload?.manifest || null;
+                setMlServiceState('online');
                 updateMlMetaFields(state.mlMeta);
             } catch (error) {
                 console.warn('ML health fetch failed', error);
+                setMlServiceState('offline', error?.message || 'Health endpoint unreachable');
+                updateMlPanel(null);
             }
         }
 
@@ -3235,9 +3824,13 @@
                     }
                     data.dataSource = 'IBKR';
                 } catch (error) {
-                    console.warn('IBKR market data failed, falling back to Yahoo proxy', error);
-                    setDebug(`IBKR market data failed (${error.message}). Falling back to Yahoo proxy.`);
-                    data = await fetchYahooWithBackoff(symbol, range, interval);
+                    console.warn('IBKR market data failed, falling back to dashboard market API', error);
+                    setDebug(`IBKR market data failed (${error.message}). Falling back to dashboard market API.`);
+                    data = await fetchDashboardMarket(symbol, interval, range);
+                    if (!data?.candles?.length) {
+                        setDebug('Dashboard market API unavailable. Falling back to Yahoo proxy.');
+                        data = await fetchYahooWithBackoff(symbol, range, interval);
+                    }
                 }
 
                 state.candles = data.candles || [];
@@ -3427,13 +4020,17 @@
         async function boot() {
             loadUiPrefs();
             loadMlPrefs();
+            setMlServiceState('checking', 'Booting ML status checks');
             await ensureChartLibrary();
             initializeChart();
+            initializeChartToolbar();
             syncStickyOffsets();
             window.addEventListener('resize', syncStickyOffsets);
             initializeInsightTabs();
             attachEventListeners();
             updateDebugUI();
+            applyChartVisibility();
+            updateDecisionStrip();
             loadMlHealth();
             loadMlMetrics();
             if (state.mlMetricsTimer) {
@@ -3450,11 +4047,16 @@
         }
 
         window.addEventListener('error', (event) => {
-            setDebug(`Runtime error: ${event.message}`);
+            const location = event.filename ? ` @ ${event.filename.split('/').pop()}:${event.lineno || 0}` : '';
+            setDebug(`Runtime error: ${event.message}${location}`);
         });
 
         window.addEventListener('unhandledrejection', (event) => {
-            setDebug(`Unhandled rejection: ${event.reason?.message || event.reason}`);
+            const reason = event.reason?.message || String(event.reason || 'Unknown rejection');
+            setDebug(`Unhandled rejection: ${reason}`);
+            if (typeof event.preventDefault === 'function') {
+                event.preventDefault();
+            }
         });
 
         setDebug('Boot sequence initialized.');

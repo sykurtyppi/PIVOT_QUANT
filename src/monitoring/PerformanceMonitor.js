@@ -463,12 +463,14 @@ export class PerformanceMonitor {
         // Check memory usage
         const memory = this.getMemoryUsage();
         if (memory.used && memory.used > thresholds.memoryUsage) {
+            /* eslint-disable-next-line no-console */
             console.warn(`[PerformanceMonitor] High memory usage: ${(memory.used / 1024 / 1024).toFixed(2)}MB`);
         }
 
         // Check cache hit rate
         const hitRate = this.getCacheHitRate();
         if (hitRate < thresholds.cacheHitRate) {
+            /* eslint-disable-next-line no-console */
             console.warn(`[PerformanceMonitor] Low cache hit rate: ${hitRate.toFixed(2)}% (threshold: ${thresholds.cacheHitRate}%)`);
         }
     }

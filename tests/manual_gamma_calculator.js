@@ -65,7 +65,7 @@ async function testGammaCalculations() {
         console.log(`21d EMA    : $${ema21d.toFixed(2)} vs $${expected['21d EMA']} (diff: ${ema21dDiff.toFixed(2)})`);
 
         // Check gamma flip range
-        const [gammaLow, gammaHigh] = analysis.gammaFlip.level.split('-').map(parseFloat);
+        const [_gammaLow, _gammaHigh] = analysis.gammaFlip.level.split('-').map(parseFloat);
         console.log(`Gamma Flip : $${analysis.gammaFlip.level} vs $${expected['Gamma Flip'].min}-${expected['Gamma Flip'].max}`);
 
         // Performance metrics

@@ -29,6 +29,7 @@ export class QuantPivotEngine {
         // Cache for performance optimization
         this.cache = new Map();
         this.cacheExpiry = new Map();
+        this.cacheCleanupInterval = null;
 
         // State management
         this.state = {
@@ -46,9 +47,8 @@ export class QuantPivotEngine {
      * @private
      */
     _initialize() {
+        const initSessionId = this.monitor.startSession('engine_initialization');
         try {
-            this.monitor.startSession('engine_initialization');
-
             // Validate configuration
             this.validator.validateEngineConfig(this.config);
 
@@ -62,11 +62,13 @@ export class QuantPivotEngine {
             this._setupCacheManagement();
 
             this.state.isInitialized = true;
-            this.monitor.endSession('engine_initialization');
+            this.monitor.endSession(initSessionId, { success: true });
 
             this._logInfo('QuantPivotEngine initialized successfully');
         } catch (error) {
+            this.monitor.endSession(initSessionId, { success: false, error: error.message });
             this._handleError('Initialization failed', error);
+            this._cleanupResources();
             throw new Error(`QuantPivotEngine initialization failed: ${error.message}`);
         }
     }
@@ -81,25 +83,30 @@ export class QuantPivotEngine {
         const sessionId = this.monitor.startSession('pivot_calculation');
 
         try {
+            // Merge options with defaults before validation to enforce complete config contract
+            const calcOptions = {
+                ...this.config.defaultOptions,
+                ...options
+            };
+
+            const optionsValidation = this.validator.validateCalculationOptions(calcOptions);
+            if (!optionsValidation.isValid) {
+                throw new Error(`Calculation options invalid: ${optionsValidation.errors.join(', ')}`);
+            }
+
             // Input validation with detailed error reporting
-            const validationResult = await this.validator.validateOHLCData(ohlcData, options);
+            const validationResult = await this.validator.validateOHLCData(ohlcData, calcOptions);
             if (!validationResult.isValid) {
                 throw new Error(`Data validation failed: ${validationResult.errors.join(', ')}`);
             }
 
             // Check cache for identical calculations
-            const cacheKey = this._generateCacheKey(ohlcData, options);
+            const cacheKey = this._generateCacheKey(ohlcData, calcOptions);
             const cachedResult = this._getCachedResult(cacheKey);
             if (cachedResult) {
                 this.monitor.recordCacheHit(sessionId);
                 return cachedResult;
             }
-
-            // Merge options with defaults
-            const calcOptions = {
-                ...this.config.defaultOptions,
-                ...options
-            };
 
             // Perform comprehensive calculations
             const results = await this._performCalculations(ohlcData, calcOptions);
@@ -115,7 +122,6 @@ export class QuantPivotEngine {
             return results;
 
         } catch (error) {
-            this.state.errorCount++;
             this.monitor.endSession(sessionId, { success: false, error: error.message });
             this._handleError('Pivot calculation failed', error);
             throw error;
@@ -145,11 +151,13 @@ export class QuantPivotEngine {
 
         // 1. Calculate True Range and ATR with institutional precision
         const trueRangeData = await this.mathModels.calculateTrueRange(latestData);
+        const effectiveAtrPeriod = Math.max(1, Math.min(options.atrPeriod, trueRangeData.length));
         const _atrData = await this.mathModels.calculateATR(
             trueRangeData,
-            options.atrPeriod,
+            effectiveAtrPeriod,
             options.atrMethod
         );
+        results.metadata.atrPeriod = effectiveAtrPeriod;
 
         // 2. Calculate multiple pivot methodologies
         const pivotMethods = {
@@ -410,6 +418,7 @@ export class QuantPivotEngine {
 
     _logError(message, error = {}) {
         if (this.config.logging.level <= 0) {
+            /* eslint-disable-next-line no-console */
             console.error(`[QuantPivotEngine] ${message}`, error);
         }
     }
@@ -437,7 +446,16 @@ export class QuantPivotEngine {
      * Update engine configuration
      */
     updateConfiguration(newConfig) {
-        this.config = ConfigurationManager.mergeWithDefaults(newConfig);
+        const configManager = ConfigurationManager.getInstance();
+        const mergedConfig = configManager._deepMerge(this.config, newConfig);
+
+        const schemaValidation = configManager.validateConfiguration(mergedConfig);
+        if (!schemaValidation.isValid) {
+            throw new Error(`Configuration update invalid: ${schemaValidation.errors.join(', ')}`);
+        }
+
+        this.validator.validateEngineConfig(mergedConfig);
+        this.config = mergedConfig;
         this.validator.updateConfig(this.config.validation);
         this.mathModels.updateConfig(this.config.mathematical);
         this._logInfo('Configuration updated');
@@ -459,14 +477,20 @@ export class QuantPivotEngine {
      * Cleanup and resource disposal
      */
     dispose() {
+        this._cleanupResources();
+        this._logInfo('Engine disposed');
+    }
+
+    _cleanupResources() {
         if (this.cacheCleanupInterval) {
             clearInterval(this.cacheCleanupInterval);
+            this.cacheCleanupInterval = null;
         }
+
         this.cache.clear();
         this.cacheExpiry.clear();
         this.monitor.dispose();
         this.state.isInitialized = false;
-        this._logInfo('Engine disposed');
     }
 }
 

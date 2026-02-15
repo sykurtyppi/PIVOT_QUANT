@@ -347,7 +347,7 @@ export class MathematicalModels {
     /**
      * Estimate gamma exposure levels (simplified institutional model)
      */
-    async estimateGammaExposure(ohlcData, levels, config = {}) {
+    async estimateGammaExposure(ohlcData, levels, _config = {}) {
         const volumeProfile = this._calculateVolumeProfile(ohlcData);
         const priceDistribution = this._calculatePriceDistribution(ohlcData);
 
@@ -543,7 +543,6 @@ export class MathematicalModels {
      * Calculate current drawdown
      */
     calculateCurrentDrawdown(ohlcData) {
-        const maxDrawdown = this.calculateMaxDrawdown(ohlcData);
         const currentPrice = ohlcData[ohlcData.length - 1].close;
         let peak = ohlcData[0].close;
 
@@ -572,7 +571,7 @@ export class MathematicalModels {
     /**
      * Calculate level correlations
      */
-    calculateLevelCorrelations(levels) {
+    calculateLevelCorrelations(_levels) {
         // Simplified implementation
         return {
             pearson: 0.85,
@@ -955,7 +954,7 @@ export class MathematicalModels {
     /**
      * Calculate reliability score for pivot level
      */
-    calculateReliabilityScore(levelValue, ohlcData, atrData) {
+    calculateReliabilityScore(levelValue, ohlcData, _atrData) {
         // Simplified reliability calculation based on historical price action
         const prices = ohlcData.map(bar => bar.close);
         const touches = prices.filter(price => Math.abs(price - levelValue) / levelValue < 0.01).length;
@@ -1005,7 +1004,7 @@ export class MathematicalModels {
     /**
      * Calculate level accuracy
      */
-    calculateLevelAccuracy(ohlcData, levels) {
+    calculateLevelAccuracy(_ohlcData, _levels) {
         // Simplified accuracy calculation
         return {
             overall: 0.75,
@@ -1092,16 +1091,16 @@ export class MathematicalModels {
     }
 
     // Placeholder methods for complex calculations (would be fully implemented)
-    _calculateVolumeProfile(ohlcData) { return {}; }
-    _calculatePriceDistribution(ohlcData) { return {}; }
+    _calculateVolumeProfile(_ohlcData) { return {}; }
+    _calculatePriceDistribution(_ohlcData) { return {}; }
     _interpolateVolumeAtPrice(_profile, _price) { return 0; }
     _interpolateDensityAtPrice(_distribution, _price) { return 0; }
     _calculateGammaScore(volume, density) { return volume * density; }
     _classifyGammaLevel(score) { return score > 0.5 ? 'HIGH' : 'LOW'; }
     _analyzeGammaDistribution(_levels) { return {}; }
-    _performLevelSignificanceTest(ohlcData, level, alpha, testType, minSample) {
+    _performLevelSignificanceTest(_ohlcData, _level, _alpha, _testType, minSample) {
         return { pValue: 0.05, testStatistic: 0, confidenceInterval: [0, 1], effectSize: 0, sampleSize: minSample };
     }
-    _calculateVolatilityOfVolatility(ohlcData) { return 0.1; }
+    _calculateVolatilityOfVolatility(_ohlcData) { return 0.1; }
     _calculateRegimeConfidence(_vol, _percentiles) { return 0.8; }
 }

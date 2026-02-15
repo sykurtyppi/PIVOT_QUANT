@@ -62,7 +62,7 @@ export class GammaFlipEngine {
      * @param {Object} emaLevels - EMA levels
      * @returns {Object} Gamma flip analysis
      */
-    calculateGammaFlip(currentPrice, optionsData = null, emaLevels) {
+    calculateGammaFlip(currentPrice, _optionsData = null, emaLevels) {
         // For SPY around 670 range, calculate gamma flip zones
         const basePrice = currentPrice || 670.62;
 

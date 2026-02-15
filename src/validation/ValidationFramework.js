@@ -90,7 +90,7 @@ export class ValidationFramework {
      * @param {Object} options - Validation options
      * @returns {Object} Validation result with detailed error reporting
      */
-    async validateOHLCData(ohlcData, options = {}) {
+    async validateOHLCData(ohlcData, _options = {}) {
         const validationResult = {
             isValid: false,
             errors: [],
