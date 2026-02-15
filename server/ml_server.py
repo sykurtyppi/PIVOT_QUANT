@@ -118,6 +118,23 @@ def health():
     return result
 
 
+@app.post("/reload")
+def reload_models():
+    """Hot-reload model artifacts from disk without restarting the server."""
+    global _startup_error
+    try:
+        registry.load()
+        _startup_error = None
+        return {
+            "status": "ok",
+            "models": registry.available(),
+            "manifest": registry.manifest,
+        }
+    except Exception as exc:
+        _startup_error = str(exc)
+        return {"status": "error", "message": str(exc)}
+
+
 def _check_feature_drift(features: dict, payload: dict) -> list[str]:
     """Check if live feature values fall outside training-set p1/p99 bounds.
 

@@ -753,6 +753,55 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (url.pathname === '/api/ml/health') {
+    try {
+      const data = await fetchLocalJson('http://127.0.0.1:5003/health');
+      sendJson(res, 200, data);
+    } catch (error) {
+      sendJson(res, 502, {
+        error: 'ML health unavailable',
+        message: error?.message || String(error),
+      });
+    }
+    return;
+  }
+
+  if (url.pathname === '/api/ml/reload') {
+    if (req.method !== 'POST') {
+      sendJson(res, 405, { error: 'Method not allowed' });
+      return;
+    }
+    try {
+      const data = await fetchLocalJsonPost('http://127.0.0.1:5003/reload', {});
+      sendJson(res, 200, data);
+    } catch (error) {
+      sendJson(res, 502, {
+        error: 'ML reload unavailable',
+        message: error?.message || String(error),
+      });
+    }
+    return;
+  }
+
+  if (url.pathname === '/api/ml/score') {
+    if (req.method !== 'POST') {
+      sendJson(res, 405, { error: 'Method not allowed' });
+      return;
+    }
+    try {
+      const body = await readBody(req);
+      const payload = body ? JSON.parse(body) : {};
+      const data = await fetchLocalJsonPost('http://127.0.0.1:5003/score', payload);
+      sendJson(res, 200, data);
+    } catch (error) {
+      sendJson(res, 502, {
+        error: 'ML score unavailable',
+        message: error?.message || String(error),
+      });
+    }
+    return;
+  }
+
   if (url.pathname === '/api/events') {
     try {
       const body = await readBody(req);
