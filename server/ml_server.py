@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,6 +21,7 @@ from ml.features import build_feature_row, collect_missing, FEATURE_VERSION
 MODEL_DIR = Path(os.getenv("RF_MODEL_DIR", "data/models"))
 HOST = os.getenv("ML_SERVER_BIND", "127.0.0.1")
 PORT = int(os.getenv("ML_SERVER_PORT", "5003"))
+STALE_MODEL_HOURS = int(os.getenv("STALE_MODEL_HOURS", "48"))
 
 app = FastAPI(title="PivotQuant ML Server", version="1.0.0")
 
@@ -103,10 +105,27 @@ def startup_event():
         print(f"ML server startup warning: {exc}")
 
 
+def _is_model_stale() -> bool:
+    """Check if the model artifacts are older than STALE_MODEL_HOURS."""
+    if not registry.manifest:
+        return False
+    trained_end_ts = registry.manifest.get("trained_end_ts")
+    if not trained_end_ts:
+        return False
+    age_hours = (time.time() * 1000 - trained_end_ts) / (3600 * 1000)
+    return age_hours > STALE_MODEL_HOURS
+
+
 @app.get("/health")
 def health():
     has_models = any(horizons for horizons in registry.available().values())
-    status = "ok" if has_models and _startup_error is None else "degraded"
+    stale = _is_model_stale()
+    if not has_models or _startup_error is not None:
+        status = "degraded"
+    elif stale:
+        status = "stale"
+    else:
+        status = "ok"
     result = {
         "status": status,
         "feature_version": FEATURE_VERSION,
@@ -115,6 +134,10 @@ def health():
     }
     if _startup_error is not None:
         result["startup_error"] = _startup_error
+    if stale:
+        trained_end_ts = registry.manifest.get("trained_end_ts", 0)
+        age_hours = (time.time() * 1000 - trained_end_ts) / (3600 * 1000)
+        result["stale_hours"] = round(age_hours, 1)
     return result
 
 
@@ -171,6 +194,8 @@ def _score_event(event: dict):
         quality_flags.append("MISSING_GAMMA")
     if event.get("data_quality") is not None and event.get("data_quality") < 0.5:
         quality_flags.append("LOW_DATA_QUALITY")
+    if _is_model_stale():
+        quality_flags.append("STALE_MODEL")
 
     stats = registry.manifest.get("stats", {}) if registry.manifest else {}
     calibration = registry.manifest.get("calibration", {}) if registry.manifest else {}

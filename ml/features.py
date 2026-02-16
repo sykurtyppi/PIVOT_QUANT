@@ -38,6 +38,15 @@ DROP_FEATURES = {
     "source",
     "session",
     "symbol",
+    # Dead without IBKR connection (100% null from Yahoo-only collection)
+    "iv_rv_state",
+    "gamma_confidence",
+    "oi_concentration_top5",
+    "zero_dte_share",
+    # Redundant: perfectly anti-correlated with minutes_since_open
+    "minutes_until_close",
+    # Raw ATR in dollars — non-stationary, replaced by atr_bps
+    "atr",
 }
 
 
@@ -207,13 +216,15 @@ def build_feature_row(event: dict[str, Any]) -> dict[str, Any]:
     row["distance_to_upper_sigma"] = event.get("distance_to_upper_sigma_bps")  # bps to +1σ
     row["distance_to_lower_sigma"] = event.get("distance_to_lower_sigma_bps")  # bps to -1σ
 
-    # ── ATR-normalized distance (new) ──
+    # ── ATR features (normalized to bps, not raw dollars) ──
     atr = event.get("atr")
     distance_bps = event.get("distance_bps")
     if atr and atr > 0 and touch_price and touch_price > 0:
         atr_bps = atr / touch_price * 1e4
+        row["atr_bps"] = atr_bps
         row["distance_atr_ratio"] = distance_bps / atr_bps if atr_bps > 0 and distance_bps is not None else None
     else:
+        row["atr_bps"] = None
         row["distance_atr_ratio"] = None
 
     return row

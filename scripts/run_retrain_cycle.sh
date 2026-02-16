@@ -19,6 +19,10 @@ run_step() {
 
 cd "${ROOT_DIR}"
 
+# Backfill recent days to capture any gaps (dashboard outages, weekends).
+# Uses 5m bars from Yahoo (supports longer ranges than 1m's 7-day limit).
+run_step "backfill" python3 scripts/backfill_events.py --range 7d --interval 5m --source yahoo
+
 run_step "build_labels" npm run ml:build-labels
 run_step "export_parquet" npm run ml:export-parquet
 run_step "duckdb_view" npm run ml:duckdb-view
