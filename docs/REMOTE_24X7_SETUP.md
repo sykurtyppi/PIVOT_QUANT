@@ -102,6 +102,8 @@ ML_REPORT_NOTIFY_CHANNELS=email
 
 # avoid 6h retrain spam if scheduled agent is enabled
 ML_REPORT_NOTIFY_ON_RETRAIN=false
+ML_REPORT_EMAIL_STYLE=compact
+ML_REPORT_ANOMALY_LIMIT=6
 
 # email settings (SMTP)
 ML_REPORT_EMAIL_TO=you@example.com
