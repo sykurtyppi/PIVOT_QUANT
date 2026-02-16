@@ -1,0 +1,149 @@
+# Remote 24/7 Dashboard Setup (MacBook Air host -> MacBook Pro client)
+
+This keeps the stack running on the host (Air) and makes the dashboard reachable from another Mac on the same LAN.
+
+## 1) One-time host setup
+
+```bash
+cd /Users/tristanalejandro/PIVOT_QUANT
+bash scripts/install_launch_agent.sh
+```
+
+What this installs:
+
+- LaunchAgent: `com.pivotquant.dashboard`
+- Runner: `server/run_persistent_stack.sh` -> `server/run_all.sh`
+- Keep-awake: `caffeinate` while stack runs
+- External binds: dashboard `0.0.0.0:3000`, ML `0.0.0.0:5003`
+
+## 2) Verify host health
+
+```bash
+cd /Users/tristanalejandro/PIVOT_QUANT
+bash scripts/launch_agent_status.sh
+bash scripts/verify_host_ready.sh
+```
+
+Live logs:
+
+```bash
+tail -f logs/launchd.out.log logs/launchd.err.log logs/dashboard.log logs/ml_server.log
+```
+
+## 3) Open from the client Mac
+
+- `http://<AIR_LAN_IP>:3000`
+- `http://<AIR_LOCAL_HOSTNAME>.local:3000`
+
+## 4) If launchctl reports `Bootstrap failed: 5`
+
+Run this exactly on the host:
+
+```bash
+cd /Users/tristanalejandro/PIVOT_QUANT
+UIDN="$(id -u)"
+LABEL="com.pivotquant.dashboard"
+PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
+
+launchctl bootout "gui/${UIDN}/${LABEL}" 2>/dev/null || true
+launchctl bootout "gui/${UIDN}" "${PLIST}" 2>/dev/null || true
+launchctl remove "${LABEL}" 2>/dev/null || true
+
+bash scripts/install_launch_agent.sh
+launchctl print "gui/${UIDN}/${LABEL}"
+```
+
+## 5) Manual fallback (no LaunchAgent)
+
+```bash
+cd /Users/tristanalejandro/PIVOT_QUANT
+source .venv/bin/activate
+bash server/run_persistent_stack.sh
+```
+
+## 6) Host OS settings
+
+- Keep host plugged into power.
+- Keep user logged in (LaunchAgent is user-session scoped).
+- Allow incoming for `node` and `python3` in Firewall if prompted.
+- Disable disk sleep if you observe stalls.
+
+## 7) Remove services
+
+```bash
+cd /Users/tristanalejandro/PIVOT_QUANT
+bash scripts/uninstall_launch_agent.sh
+bash scripts/uninstall_retrain_launch_agent.sh
+bash scripts/uninstall_daily_report_launch_agent.sh
+```
+
+## Notes on ML "always learning"
+
+24/7 uptime keeps inference/services alive. It does not retrain by itself.
+
+To schedule periodic retraining:
+
+```bash
+cd /Users/tristanalejandro/PIVOT_QUANT
+bash scripts/install_retrain_launch_agent.sh
+```
+
+Retrain cadence is every 6 hours via `scripts/run_retrain_cycle.sh`.
+
+## 8) Daily report delivery (email / iMessage / webhook)
+
+Use a dedicated daily LaunchAgent so you get one clean email on schedule (instead of every retrain).
+
+Create `/Users/tristanalejandro/PIVOT_QUANT/.env` on the host:
+
+```bash
+# choose one or more: email,imessage,webhook
+ML_REPORT_NOTIFY_CHANNELS=email
+
+# avoid 6h retrain spam if scheduled agent is enabled
+ML_REPORT_NOTIFY_ON_RETRAIN=false
+
+# email settings (SMTP)
+ML_REPORT_EMAIL_TO=you@example.com
+ML_REPORT_EMAIL_FROM=you@example.com
+ML_REPORT_SMTP_HOST=smtp.gmail.com
+ML_REPORT_SMTP_PORT=587
+ML_REPORT_SMTP_USER=you@example.com
+ML_REPORT_SMTP_PASS=your_app_password
+ML_REPORT_SMTP_USE_TLS=true
+
+# include useful runtime logs in the email body
+ML_REPORT_INCLUDE_LOG_TAILS=true
+ML_REPORT_LOG_TAIL_LINES=80
+
+# optional iMessage recipients (comma-separated phone/email)
+# ML_REPORT_IMESSAGE_TO=+15551234567
+
+# optional webhook target
+# ML_REPORT_WEBHOOK_URL=https://your-webhook-endpoint
+```
+
+Install scheduled delivery:
+
+```bash
+cd /Users/tristanalejandro/PIVOT_QUANT
+# modes: close (17:10 ET weekdays), morning (08:05 ET weekdays), both
+bash scripts/install_daily_report_launch_agent.sh close
+```
+
+Note: schedule uses Mac host local timezone. You can override times via `.env`:
+`ML_REPORT_MORNING_HOUR`, `ML_REPORT_MORNING_MINUTE`, `ML_REPORT_CLOSE_HOUR`, `ML_REPORT_CLOSE_MINUTE`.
+
+Test once manually:
+
+```bash
+cd /Users/tristanalejandro/PIVOT_QUANT
+source .venv/bin/activate
+npm run ml:notify-report
+```
+
+Logs:
+
+```bash
+tail -f logs/report_delivery.log logs/daily_report.launchd.err.log
+```

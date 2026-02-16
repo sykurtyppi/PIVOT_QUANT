@@ -6,9 +6,11 @@ cd "${ROOT_DIR}"
 
 LABEL_DASH="com.pivotquant.dashboard"
 LABEL_RETRAIN="com.pivotquant.retrain"
+LABEL_DAILY="com.pivotquant.daily_report"
 UID_NUM="$(id -u)"
 TARGET_DASH="gui/${UID_NUM}/${LABEL_DASH}"
 TARGET_RETRAIN="gui/${UID_NUM}/${LABEL_RETRAIN}"
+TARGET_DAILY="gui/${UID_NUM}/${LABEL_DAILY}"
 
 ok() { printf '[OK] %s\n' "$*"; }
 warn() { printf '[WARN] %s\n' "$*"; }
@@ -104,6 +106,7 @@ echo
 echo "LaunchAgents:"
 check_launch_agent "${TARGET_DASH}" "${LABEL_DASH}"
 check_launch_agent "${TARGET_RETRAIN}" "${LABEL_RETRAIN}"
+check_launch_agent "${TARGET_DAILY}" "${LABEL_DAILY}"
 echo
 
 echo "Ports:"
@@ -111,11 +114,13 @@ check_listen 3000 "node"
 check_listen 5003 "python"
 check_listen 5002 "python"
 check_listen 5001 "python"
+check_listen 5004 "python"
 echo
 
 echo "HTTP checks:"
 check_http_root "http://127.0.0.1:3000/"
 check_http_json_field "http://127.0.0.1:5003/health" "status"
+check_http_json_field "http://127.0.0.1:5004/health" "status"
 if [[ -n "${LAN_IP:-}" ]]; then
   check_http_root "http://${LAN_IP}:3000/"
 fi
