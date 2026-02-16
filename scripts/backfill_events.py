@@ -678,8 +678,9 @@ def insert_bars(conn: sqlite3.Connection, symbol: str, candles: list[dict], inte
         )
     if not values:
         return 0
+    before = conn.total_changes
     conn.executemany(sql, values)
-    return conn.total_changes
+    return conn.total_changes - before
 
 
 def insert_events(conn: sqlite3.Connection, events: list[dict]) -> int:
@@ -748,8 +749,9 @@ def insert_events(conn: sqlite3.Connection, events: list[dict]) -> int:
     values = []
     for ev in events:
         values.append([ev.get(col) for col in columns])
+    before = conn.total_changes
     conn.executemany(sql, values)
-    return conn.total_changes
+    return conn.total_changes - before
 
 
 def compute_opening_range(bars: list[dict], or_minutes: int = 30) -> dict:
