@@ -58,6 +58,21 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function tryParseJson(text, defaultValue = null) {
+  if (typeof text !== 'string') {
+    return { ok: false, value: defaultValue };
+  }
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return { ok: true, value: defaultValue };
+  }
+  try {
+    return { ok: true, value: JSON.parse(trimmed) };
+  } catch (_error) {
+    return { ok: false, value: defaultValue };
+  }
+}
+
 function fetchLocalJson(url) {
   return new Promise((resolve, reject) => {
     const client = url.startsWith('https') ? https : http;
@@ -67,20 +82,31 @@ function fetchLocalJson(url) {
         data += chunk;
       });
       res.on('end', () => {
-        if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
-          try {
-            resolve(JSON.parse(data));
-          } catch (error) {
-            reject(new Error('Invalid JSON from gamma bridge'));
+        const statusCode = res.statusCode || 0;
+        const parsed = tryParseJson(data);
+        if (statusCode >= 200 && statusCode < 300) {
+          if (parsed.ok) {
+            resolve(parsed.value);
+          } else {
+            reject({
+              statusCode,
+              message: `Invalid JSON from GET ${url}`,
+              body: data,
+            });
           }
-        } else {
-          reject(new Error(`Gamma bridge HTTP ${res.statusCode || 0}`));
+          return;
         }
+
+        reject({
+          statusCode,
+          message: `HTTP ${statusCode}`,
+          body: parsed.ok ? parsed.value : data,
+        });
       });
     });
-    req.on('error', (error) => reject(error));
+    req.on('error', (error) => reject({ statusCode: 0, message: error.message, error }));
     req.setTimeout(5000, () => {
-      req.destroy(new Error('Gamma bridge timeout'));
+      req.destroy(new Error(`GET timeout to ${url}`));
     });
   });
 }
@@ -103,20 +129,31 @@ function fetchLocalJsonPost(url, payload) {
           body += chunk;
         });
         res.on('end', () => {
-          if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
-            try {
-              resolve(JSON.parse(body));
-            } catch (error) {
-              reject(new Error('Invalid JSON from writer'));
+          const statusCode = res.statusCode || 0;
+          const parsed = tryParseJson(body, {});
+          if (statusCode >= 200 && statusCode < 300) {
+            if (parsed.ok) {
+              resolve(parsed.value);
+            } else {
+              reject({
+                statusCode,
+                message: `Invalid JSON from upstream POST ${url}`,
+                body,
+              });
             }
-          } else {
-            reject(new Error(`Writer HTTP ${res.statusCode || 0}`));
+            return;
           }
+
+          reject({
+            statusCode,
+            message: `HTTP ${statusCode}`,
+            body: parsed.ok ? parsed.value : body,
+          });
         });
       }
     );
-    req.on('error', reject);
-    req.setTimeout(5000, () => req.destroy(new Error('Writer timeout')));
+    req.on('error', (error) => reject({ statusCode: 0, message: error.message, error }));
+    req.setTimeout(5000, () => req.destroy(new Error(`POST timeout to ${url}`)));
     req.write(data);
     req.end();
   });
@@ -360,6 +397,25 @@ function sendJson(res, statusCode, payload) {
   res.end(JSON.stringify(payload, null, 2));
 }
 
+function sendProxyError(res, error, fallbackError, fallbackStatus = 502) {
+  const upstreamStatus = Number(error?.statusCode || 0);
+  const statusCode = upstreamStatus >= 400 && upstreamStatus < 600 ? upstreamStatus : fallbackStatus;
+
+  if (error?.body && typeof error.body === 'object' && !Array.isArray(error.body)) {
+    sendJson(res, statusCode, error.body);
+    return;
+  }
+
+  const payload = {
+    error: fallbackError,
+    message: error?.message || String(error),
+  };
+  if (typeof error?.body === 'string' && error.body.trim()) {
+    payload.upstreamBody = error.body;
+  }
+  sendJson(res, statusCode, payload);
+}
+
 function sendFile(res, filePath) {
   fs.readFile(filePath, (error, data) => {
     if (error) {
@@ -367,7 +423,12 @@ function sendFile(res, filePath) {
       res.end('Not found');
       return;
     }
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.writeHead(200, {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'no-store',
+      Pragma: 'no-cache',
+      Expires: '0',
+    });
     res.end(data);
   });
 }
@@ -688,10 +749,7 @@ const server = http.createServer(async (req, res) => {
       const data = await fetchLocalJson(gammaUrl);
       sendJson(res, 200, data);
     } catch (error) {
-      sendJson(res, 502, {
-        error: 'Gamma bridge unavailable',
-        message: error?.message || String(error),
-      });
+      sendProxyError(res, error, 'Gamma bridge unavailable');
     }
     return;
   }
@@ -708,10 +766,7 @@ const server = http.createServer(async (req, res) => {
       const data = await fetchLocalJson(ibUrl);
       sendJson(res, 200, data);
     } catch (error) {
-      sendJson(res, 502, {
-        error: 'IBKR market bridge unavailable',
-        message: error?.message || String(error),
-      });
+      sendProxyError(res, error, 'IBKR market bridge unavailable');
     }
     return;
   }
@@ -723,10 +778,7 @@ const server = http.createServer(async (req, res) => {
       const data = await fetchLocalJson(ibUrl);
       sendJson(res, 200, data);
     } catch (error) {
-      sendJson(res, 502, {
-        error: 'IBKR spot bridge unavailable',
-        message: error?.message || String(error),
-      });
+      sendProxyError(res, error, 'IBKR spot bridge unavailable');
     }
     return;
   }
@@ -758,10 +810,7 @@ const server = http.createServer(async (req, res) => {
       const data = await fetchLocalJson('http://127.0.0.1:5003/health');
       sendJson(res, 200, data);
     } catch (error) {
-      sendJson(res, 502, {
-        error: 'ML health unavailable',
-        message: error?.message || String(error),
-      });
+      sendProxyError(res, error, 'ML health unavailable');
     }
     return;
   }
@@ -775,10 +824,7 @@ const server = http.createServer(async (req, res) => {
       const data = await fetchLocalJsonPost('http://127.0.0.1:5003/reload', {});
       sendJson(res, 200, data);
     } catch (error) {
-      sendJson(res, 502, {
-        error: 'ML reload unavailable',
-        message: error?.message || String(error),
-      });
+      sendProxyError(res, error, 'ML reload unavailable');
     }
     return;
   }
@@ -794,10 +840,7 @@ const server = http.createServer(async (req, res) => {
       const data = await fetchLocalJsonPost('http://127.0.0.1:5003/score', payload);
       sendJson(res, 200, data);
     } catch (error) {
-      sendJson(res, 502, {
-        error: 'ML score unavailable',
-        message: error?.message || String(error),
-      });
+      sendProxyError(res, error, 'ML score unavailable');
     }
     return;
   }
@@ -810,10 +853,7 @@ const server = http.createServer(async (req, res) => {
       const data = await fetchLocalJsonPost(writerUrl, payload);
       sendJson(res, 200, data);
     } catch (error) {
-      sendJson(res, 502, {
-        error: 'Event writer unavailable',
-        message: error?.message || String(error),
-      });
+      sendProxyError(res, error, 'Event writer unavailable');
     }
     return;
   }
@@ -826,10 +866,7 @@ const server = http.createServer(async (req, res) => {
       const data = await fetchLocalJsonPost(writerUrl, payload);
       sendJson(res, 200, data);
     } catch (error) {
-      sendJson(res, 502, {
-        error: 'Bar writer unavailable',
-        message: error?.message || String(error),
-      });
+      sendProxyError(res, error, 'Bar writer unavailable');
     }
     return;
   }
@@ -844,10 +881,7 @@ const server = http.createServer(async (req, res) => {
       const data = await fetchLocalJson(writerUrl);
       sendJson(res, 200, data);
     } catch (error) {
-      sendJson(res, 502, {
-        error: 'Daily candle aggregation unavailable',
-        message: error?.message || String(error),
-      });
+      sendProxyError(res, error, 'Daily candle aggregation unavailable');
     }
     return;
   }

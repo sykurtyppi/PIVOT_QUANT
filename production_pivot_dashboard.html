@@ -2591,7 +2591,7 @@
             applyChartVisibility();
             updateDecisionStrip();
 
-            maybeLogTouches(levels, state.referencePrice);
+            void maybeLogTouches(levels, state.referencePrice);
         }
 
         function refreshSpotPrice(symbol) {
@@ -3286,16 +3286,27 @@
         }
 
         async function postTouchEvents(events) {
-            if (!events?.length) return;
+            if (!events?.length) {
+                return { ok: true, inserted: 0 };
+            }
             const apiUrl = `${getApiOrigin()}/api/events`;
             try {
-                await fetch(apiUrl, {
+                const response = await fetch(apiUrl, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ events }),
                 });
+                if (!response.ok) {
+                    throw new Error(`Event endpoint HTTP ${response.status}`);
+                }
+                const payload = await response.json().catch(() => ({}));
+                const inserted = Number.isFinite(payload?.inserted)
+                    ? Number(payload.inserted)
+                    : events.length;
+                return { ok: true, inserted, payload };
             } catch (error) {
                 console.warn('Event sync failed', error);
+                return { ok: false, inserted: 0, error };
             }
         }
 
@@ -3303,19 +3314,25 @@
             if (!events?.length) return;
             const apiUrl = `${getApiOrigin()}/api/ml/score`;
             const event = events[0];
+            const usePreviewCache = events.length === 1 && Boolean(event.preview);
             const cacheKey = `${event.symbol}_${event.level_type}_${event.level_price}_${Math.floor(event.ts_event / 60000)}`;
-            const cached = state.mlCache.get(cacheKey);
-            if (cached && Date.now() - cached.ts < 60000) {
-                updateMlPanel(cached.payload);
-                return;
+            if (usePreviewCache) {
+                const cached = state.mlCache.get(cacheKey);
+                if (cached && Date.now() - cached.ts < 60000) {
+                    updateMlPanel(cached.payload);
+                    return;
+                }
             }
             const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
             const timeoutId = setTimeout(() => controller?.abort(), 2500);
             try {
+                const requestBody = events.length === 1
+                    ? { event: events[0] }
+                    : { events };
                 const response = await fetch(apiUrl, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ event }),
+                    body: JSON.stringify(requestBody),
                     signal: controller ? controller.signal : undefined,
                 });
                 if (!response.ok) {
@@ -3324,16 +3341,26 @@
                     return;
                 }
                 const payload = await response.json();
-                payload.preview = Boolean(event.preview);
-                payload.preview_level = event.level_type;
-                payload.preview_distance_bps = event.distance_bps;
-                if (state.mlCache.size >= ML_CACHE_MAX) {
-                    const oldest = state.mlCache.keys().next().value;
-                    state.mlCache.delete(oldest);
+                const panelPayload = Array.isArray(payload?.results)
+                    ? payload.results[0]
+                    : payload;
+                if (!panelPayload) {
+                    setMlServiceState('offline', 'ML score payload missing');
+                    updateMlPanel(null);
+                    return;
                 }
-                state.mlCache.set(cacheKey, { ts: Date.now(), payload });
-                state.lastMlScore = payload;
-                updateMlPanel(payload);
+                panelPayload.preview = Boolean(event.preview);
+                panelPayload.preview_level = event.level_type;
+                panelPayload.preview_distance_bps = event.distance_bps;
+                if (usePreviewCache) {
+                    if (state.mlCache.size >= ML_CACHE_MAX) {
+                        const oldest = state.mlCache.keys().next().value;
+                        state.mlCache.delete(oldest);
+                    }
+                    state.mlCache.set(cacheKey, { ts: Date.now(), payload: panelPayload });
+                }
+                state.lastMlScore = panelPayload;
+                updateMlPanel(panelPayload);
             } catch (error) {
                 console.warn('ML score failed', error);
                 const reason = error?.name === 'AbortError'
@@ -3355,7 +3382,16 @@
             };
         }
 
-        function buildTouchEvent({ level, referencePrice, absDist, confluence, now, emaState, ema9Value, ema21Value, vwapValue, vwapDistBps, barIntervalSec, touchCountToday, overrides }) {
+        function getCanonicalEventTimestampMs() {
+            const latestBar = state.intradayBars?.[state.intradayBars.length - 1];
+            const barTimeSec = Number(latestBar?.time);
+            if (Number.isFinite(barTimeSec) && barTimeSec > 0) {
+                return Math.floor(barTimeSec * 1000);
+            }
+            return Date.now();
+        }
+
+        function buildTouchEvent({ level, referencePrice, absDist, confluence, eventTsMs, emaState, ema9Value, ema21Value, vwapValue, vwapDistBps, barIntervalSec, touchCountToday, overrides }) {
             const touchSide = referencePrice >= level.value ? 1 : -1;
             const gammaFlipDist = state.lastGamma
                 ? ((referencePrice - state.lastGamma) / state.lastGamma) * 1e4
@@ -3380,9 +3416,13 @@
             }
 
             // Sigma band per-bar features
+            // sigma_band_position: centered at 0 (midpoint), -1 = lower 1σ, +1 = upper 1σ
+            // Must match backfill formula: (close - midpoint) / (band_width / 2)
             let sigmaBandPosition = null, distUpperSigmaBps = null, distLowerSigmaBps = null;
             if (Number.isFinite(sigmaUpper) && Number.isFinite(sigmaLower) && sigmaUpper !== sigmaLower) {
-                sigmaBandPosition = (referencePrice - sigmaLower) / (sigmaUpper - sigmaLower);
+                const bandWidth = sigmaUpper - sigmaLower;
+                const midpoint = (sigmaUpper + sigmaLower) / 2;
+                sigmaBandPosition = (referencePrice - midpoint) / (bandWidth / 2);
                 distUpperSigmaBps = (referencePrice - sigmaUpper) / sigmaUpper * 1e4;
                 distLowerSigmaBps = (referencePrice - sigmaLower) / sigmaLower * 1e4;
             }
@@ -3390,7 +3430,7 @@
             return {
                 event_id: generateEventId(),
                 symbol: state.symbol,
-                ts_event: now,
+                ts_event: eventTsMs,
                 session: 'RTH',
                 level_type: level.label,
                 level_price: level.value,
@@ -3423,7 +3463,7 @@
                     : null,
                 bar_interval_sec: barIntervalSec,
                 source: state.dataSource,
-                created_at: now,
+                created_at: eventTsMs,
                 // ── v3 features ──
                 regime_type: v3?.regimeType ?? null,
                 overnight_gap_atr: v3?.overnightGapAtr ?? null,
@@ -3441,8 +3481,8 @@
             };
         }
 
-        function maybeLogTouches(levels, referencePrice) {
-            const now = Date.now();
+        async function maybeLogTouches(levels, referencePrice) {
+            const eventTsMs = getCanonicalEventTimestampMs();
             const thresholdBps = 10;
             const previewBps = Number.isFinite(state.mlPreviewBps) ? state.mlPreviewBps : 30;
             const cooldownMs = 10 * 60 * 1000;
@@ -3458,10 +3498,19 @@
             const vwapDistBps = Number.isFinite(vwapValue)
                 ? ((referencePrice - vwapValue) / vwapValue) * 1e4
                 : null;
-            const shared = { referencePrice, now, emaState, ema9Value, ema21Value, vwapValue, vwapDistBps, barIntervalSec };
+            const shared = {
+                referencePrice,
+                eventTsMs,
+                emaState,
+                ema9Value,
+                ema21Value,
+                vwapValue,
+                vwapDistBps,
+                barIntervalSec,
+            };
 
             // ── Per-day touch counter reset ──
-            const todayKey = formatYmd(now / 1000, state.timeZone);
+            const todayKey = formatYmd(eventTsMs / 1000, state.timeZone);
             if (state.touchCountDate !== todayKey) {
                 state.touchCountByDay = {};
                 state.touchCountDate = todayKey;
@@ -3476,7 +3525,7 @@
 
                 const key = `${state.symbol}_${level.label}`;
                 const last = state.lastTouchByLevel.get(key);
-                if (last && now - last < cooldownMs) return;
+                if (last && eventTsMs - last < cooldownMs) return;
 
                 state.touchCountByDay[key] = (state.touchCountByDay[key] || 0) + 1;
                 const touchCountToday = state.touchCountByDay[key];
@@ -3486,12 +3535,19 @@
                 } catch (error) {
                     setDebug(`Touch event build failed: ${error.message || error}`);
                 }
-                state.lastTouchByLevel.set(key, now);
+                state.lastTouchByLevel.set(key, eventTsMs);
             });
 
             if (events.length) {
-                postTouchEvents(events);
-                scoreTouchEvents(events);
+                const writeResult = await postTouchEvents(events);
+                if (!writeResult?.ok) {
+                    setDebug('Touch event persistence failed; skipped ML scoring for consistency.');
+                    return;
+                }
+                if ((writeResult.inserted ?? 0) <= 0) {
+                    return;
+                }
+                await scoreTouchEvents(events);
                 return;
             }
 
@@ -3503,7 +3559,7 @@
                         ...shared, level, absDist: nearest.distance, confluence,
                         overrides: { touch_count_today: 0, preview: true },
                     });
-                    scoreTouchEvents([previewEvent]);
+                    await scoreTouchEvents([previewEvent]);
                 } catch (error) {
                     setDebug(`Preview event build failed: ${error.message || error}`);
                 }

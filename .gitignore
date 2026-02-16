@@ -15,6 +15,15 @@ data/events.jsonl
 data/exports/
 data/models/*.pkl
 
+# SQLite transient files
+*.sqlite-wal
+*.sqlite-shm
+*.db-wal
+*.db-shm
+
+# Local agent / model caches
+.minimax/
+
 # Logs
 logs/*.log
 

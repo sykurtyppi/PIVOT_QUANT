@@ -1,8 +1,12 @@
 import json
+import logging
 import os
+import sqlite3
 import sys
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Optional
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -17,13 +21,16 @@ import joblib
 
 from ml.features import build_feature_row, collect_missing, FEATURE_VERSION
 
+log = logging.getLogger("ml_server")
 
 MODEL_DIR = Path(os.getenv("RF_MODEL_DIR", "data/models"))
 HOST = os.getenv("ML_SERVER_BIND", "127.0.0.1")
 PORT = int(os.getenv("ML_SERVER_PORT", "5003"))
 STALE_MODEL_HOURS = int(os.getenv("STALE_MODEL_HOURS", "48"))
-
-app = FastAPI(title="PivotQuant ML Server", version="1.0.0")
+PREDICTION_LOG_DB = Path(os.getenv(
+    "PREDICTION_LOG_DB",
+    str(ROOT / "data" / "pivot_events.sqlite"),
+))
 
 allowed_origins = [
     origin.strip()
@@ -32,14 +39,6 @@ allowed_origins = [
     ).split(",")
     if origin.strip()
 ]
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=allowed_origins or ["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 
 class ModelRegistry:
@@ -91,11 +90,11 @@ class ModelRegistry:
 
 
 registry = ModelRegistry()
-_startup_error: str | None = None
+_startup_error: Optional[str] = None
 
 
-@app.on_event("startup")
-def startup_event():
+@asynccontextmanager
+async def lifespan(_app):
     global _startup_error
     try:
         registry.load()
@@ -103,6 +102,18 @@ def startup_event():
     except Exception as exc:
         _startup_error = str(exc)
         print(f"ML server startup warning: {exc}")
+    yield
+
+
+app = FastAPI(title="PivotQuant ML Server", version="1.0.0", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins or ["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 def _is_model_stale() -> bool:
@@ -114,6 +125,98 @@ def _is_model_stale() -> bool:
         return False
     age_hours = (time.time() * 1000 - trained_end_ts) / (3600 * 1000)
     return age_hours > STALE_MODEL_HOURS
+
+
+def _log_prediction(event: dict, result: dict) -> None:
+    """Append a prediction record to the prediction_log table.
+
+    Best-effort: failures are logged but never propagate to the caller.
+    This lets us reconcile live predictions against actual outcomes later.
+    The prediction_log table is created by migrate_db.py (migration v3);
+    CREATE IF NOT EXISTS is kept here as a safety net for standalone use.
+    """
+    event_id = event.get("event_id")
+    if not event_id:
+        return
+
+    conn = None
+    try:
+        conn = sqlite3.connect(str(PREDICTION_LOG_DB))
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS prediction_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id TEXT NOT NULL,
+                ts_prediction INTEGER NOT NULL,
+                model_version TEXT, feature_version TEXT,
+                best_horizon INTEGER, abstain INTEGER NOT NULL DEFAULT 0,
+                signal_5m TEXT, signal_15m TEXT, signal_60m TEXT,
+                prob_reject_5m REAL, prob_reject_15m REAL, prob_reject_60m REAL,
+                prob_break_5m REAL, prob_break_15m REAL, prob_break_60m REAL,
+                threshold_reject_5m REAL, threshold_reject_15m REAL, threshold_reject_60m REAL,
+                threshold_break_5m REAL, threshold_break_15m REAL, threshold_break_60m REAL,
+                quality_flags TEXT,
+                is_preview INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(event_id, model_version)
+            );"""
+        )
+        pred_cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(prediction_log)").fetchall()
+        }
+        if "is_preview" not in pred_cols:
+            conn.execute(
+                "ALTER TABLE prediction_log "
+                "ADD COLUMN is_preview INTEGER NOT NULL DEFAULT 0"
+            )
+
+        scores = result.get("scores", {})
+        signals = result.get("signals", {})
+        thresholds = result.get("thresholds", {})
+        is_preview = 1 if event.get("preview") else 0
+
+        conn.execute(
+            """INSERT OR IGNORE INTO prediction_log (
+                event_id, ts_prediction, model_version, feature_version,
+                best_horizon, abstain,
+                signal_5m, signal_15m, signal_60m,
+                prob_reject_5m, prob_reject_15m, prob_reject_60m,
+                prob_break_5m, prob_break_15m, prob_break_60m,
+                threshold_reject_5m, threshold_reject_15m, threshold_reject_60m,
+                threshold_break_5m, threshold_break_15m, threshold_break_60m,
+                quality_flags, is_preview
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                event_id,
+                int(time.time() * 1000),
+                result.get("model_version"),
+                result.get("feature_version"),
+                result.get("best_horizon"),
+                1 if result.get("abstain") else 0,
+                signals.get("signal_5m"),
+                signals.get("signal_15m"),
+                signals.get("signal_60m"),
+                scores.get("prob_reject_5m"),
+                scores.get("prob_reject_15m"),
+                scores.get("prob_reject_60m"),
+                scores.get("prob_break_5m"),
+                scores.get("prob_break_15m"),
+                scores.get("prob_break_60m"),
+                thresholds.get("threshold_reject_5m"),
+                thresholds.get("threshold_reject_15m"),
+                thresholds.get("threshold_reject_60m"),
+                thresholds.get("threshold_break_5m"),
+                thresholds.get("threshold_break_15m"),
+                thresholds.get("threshold_break_60m"),
+                json.dumps(result.get("quality_flags", [])),
+                is_preview,
+            ),
+        )
+        conn.commit()
+    except Exception as exc:
+        log.warning("Prediction log write failed: %s", exc)
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 @app.get("/health")
@@ -363,9 +466,17 @@ async def score(request: Request):
         raise HTTPException(status_code=503, detail="Models not loaded. Train artifacts first.")
     payload = await request.json()
     if "event" in payload:
-        return JSONResponse(_score_event(payload["event"]))
+        event = payload["event"]
+        result = _score_event(event)
+        _log_prediction(event, result)
+        return JSONResponse(result)
     if "events" in payload:
-        return JSONResponse({"results": [_score_event(ev) for ev in payload["events"]]})
+        results = []
+        for ev in payload["events"]:
+            res = _score_event(ev)
+            _log_prediction(ev, res)
+            results.append(res)
+        return JSONResponse({"results": results})
     raise HTTPException(status_code=400, detail="Payload must include 'event' or 'events'.")
 
 

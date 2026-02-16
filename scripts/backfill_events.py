@@ -9,7 +9,6 @@ import sys
 import time
 import traceback
 import hashlib
-import uuid
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Iterable
@@ -26,6 +25,11 @@ try:
     from zoneinfo import ZoneInfo
 except ImportError:  # pragma: no cover
     ZoneInfo = None  # type: ignore
+
+try:
+    from migrate_db import migrate_connection
+except ImportError:  # pragma: no cover
+    migrate_connection = None  # type: ignore
 
 DEFAULT_DB = os.getenv("PIVOT_DB", "data/pivot_events.sqlite")
 NY_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone.utc
@@ -950,46 +954,59 @@ def build_events(
         # Require at least 2 sessions so EMA has seen multiple closes
         ema_ready = ema9_daily is not None and ema21_daily is not None and idx >= 2
 
-        # ── Opening Range (first 30 minutes) ──
-        or_data = compute_opening_range(session["bars"], or_minutes=30)
-        or_high = or_data["or_high"]
-        or_low = or_data["or_low"]
-
         # ── ATR for this session (from prior day) ──
         session_atr = atr_by_date.get(base["date"])
 
-        # ── OR size / ATR ratio ──
-        or_size_atr_val = None
-        if or_data["or_size"] is not None and session_atr and session_atr > 0:
-            or_size_atr_val = or_data["or_size"] / session_atr
-
-        # ── Regime classification ──
-        prior_for_regime = sessions[idx - 2] if idx >= 2 else None
-        regime_type, overnight_gap_atr, _ = classify_regime(
-            session=session,
-            prior_session=base,
-            atr=session_atr,
-            ema9=ema9_daily if ema_ready else None,
-            ema21=ema21_daily if ema_ready else None,
-            or_data=or_data,
-        )
-
-        # ── Session std for VWAP z-score ──
-        session_std = compute_session_std(session["bars"])
-
-        # ── σ-bands from RV ──
-        rv_for_session = rv_by_date.get(session["date"]) if rv_by_date else None
+        # ── σ-bands from RV (use prior session's RV — no look-ahead) ──
+        # RV on session["date"] includes today's close, which isn't known
+        # until EOD. base["date"] RV is fully known at today's open.
+        rv_for_session = rv_by_date.get(base["date"]) if rv_by_date else None
+        rv_regime_for_session = rv_regime_by_date.get(base["date"]) if rv_regime_by_date else None
         sigma_bands = compute_sigma_bands(base["close"], session_atr, rv_for_session)
 
         for bar in session["bars"]:
             close = bar["close"]
             session_bars_so_far.append(bar)
 
+            # ── Session std (expanding window, no look-ahead) ──
+            session_std = compute_session_std(session_bars_so_far)
+
             typical = (bar["high"] + bar["low"] + bar["close"]) / 3
             vol = bar.get("volume", 0) or 0
             cumulative_vol += vol
             cumulative_vwap += typical * vol
             vwap = cumulative_vwap / cumulative_vol if cumulative_vol > 0 else None
+
+            # ── Opening Range + regime features from bars seen so far (no look-ahead) ──
+            # This matches live behavior: early-session events use partial OR;
+            # post-OR events use completed OR.
+            or_data = compute_opening_range(session_bars_so_far, or_minutes=30)
+            regime_type, overnight_gap_atr, _ = classify_regime(
+                session=session,
+                prior_session=base,
+                atr=session_atr,
+                ema9=ema9_daily if ema_ready else None,
+                ema21=ema21_daily if ema_ready else None,
+                or_data=or_data,
+            )
+            or_high = or_data["or_high"]
+            or_low = or_data["or_low"]
+            or_size_atr_val = None
+            if or_data["or_size"] is not None and session_atr and session_atr > 0:
+                or_size_atr_val = or_data["or_size"] / session_atr
+
+            or_breakout_val = 0
+            or_high_dist = None
+            or_low_dist = None
+            if or_high is not None and or_low is not None:
+                if close > or_high:
+                    or_breakout_val = 1
+                elif close < or_low:
+                    or_breakout_val = -1
+                if or_high != 0:
+                    or_high_dist = (close - or_high) / or_high * 1e4
+                if or_low != 0:
+                    or_low_dist = (close - or_low) / or_low * 1e4
 
             for label, level_price in levels.items():
                 dist_bps = abs((close - level_price) / level_price * 1e4)
@@ -1055,20 +1072,6 @@ def build_events(
 
                 touch_counts[label] += 1
 
-                # ── Opening Range features for this bar ──
-                or_breakout_val = 0
-                or_high_dist = None
-                or_low_dist = None
-                if or_high is not None and or_low is not None:
-                    if close > or_high:
-                        or_breakout_val = 1
-                    elif close < or_low:
-                        or_breakout_val = -1
-                    if or_high != 0:
-                        or_high_dist = (close - or_high) / or_high * 1e4
-                    if or_low != 0:
-                        or_low_dist = (close - or_low) / or_low * 1e4
-
                 # ── σ-band position for this bar ──
                 sigma_pos = None
                 dist_upper_sigma = None
@@ -1107,8 +1110,8 @@ def build_events(
                     "vwap": vwap,
                     "vwap_dist_bps": vwap_dist_bps,
                     "atr": atr_by_date.get(base["date"]),
-                    "rv_30": rv_by_date.get(session["date"]) if rv_by_date else None,
-                    "rv_regime": rv_regime_by_date.get(session["date"]) if rv_regime_by_date else None,
+                    "rv_30": rv_for_session,
+                    "rv_regime": rv_regime_for_session,
                     "iv_rv_state": None,
                     "gamma_mode": None,
                     "gamma_flip": None,
@@ -1164,7 +1167,7 @@ def run_build_labels(db_path: str, horizons: list[int]):
 def main() -> None:
     parser = argparse.ArgumentParser(description="Backfill touch events and labels from intraday bars.")
     parser.add_argument("--db", default=DEFAULT_DB)
-    parser.add_argument("--symbols", default="SPX", help="Comma-separated symbols")
+    parser.add_argument("--symbols", default="SPY", help="Comma-separated symbols")
     parser.add_argument("--interval", default="1m")
     parser.add_argument("--range", dest="range_str", default="5d")
     parser.add_argument("--source", choices=["auto", "ibkr", "yahoo"], default="auto")
@@ -1184,8 +1187,11 @@ def main() -> None:
     conn.execute("PRAGMA foreign_keys=ON;")
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
-    ensure_schema(conn)
-    ensure_new_columns(conn)
+    if migrate_connection is not None:
+        migrate_connection(conn, verbose=False)
+    else:
+        ensure_schema(conn)
+        ensure_new_columns(conn)
 
     total_bars = 0
     total_events = 0

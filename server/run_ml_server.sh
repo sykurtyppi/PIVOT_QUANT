@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ -x ".venv/bin/python" ]; then
-  exec ./.venv/bin/python server/ml_server.py
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+VENV_PY="${ROOT_DIR}/.venv/bin/python3"
+
+if [ -x "${VENV_PY}" ]; then
+  exec "${VENV_PY}" "${ROOT_DIR}/server/ml_server.py"
 fi
 
 if command -v python3 >/dev/null 2>&1; then
-  exec python3 server/ml_server.py
+  exec python3 "${ROOT_DIR}/server/ml_server.py"
 fi
 
 echo "python3 not found. Please install Python 3 and try again." >&2

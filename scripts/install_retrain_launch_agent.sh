@@ -5,6 +5,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LABEL="com.pivotquant.retrain"
 PLIST_PATH="${HOME}/Library/LaunchAgents/${LABEL}.plist"
 LOG_DIR="${ROOT_DIR}/logs"
+UID_NUM="$(id -u)"
+TARGET="gui/${UID_NUM}/${LABEL}"
+
 mkdir -p "${LOG_DIR}" "${HOME}/Library/LaunchAgents"
 
 cat > "${PLIST_PATH}" <<PLIST
@@ -27,7 +30,6 @@ cat > "${PLIST_PATH}" <<PLIST
   <key>RunAtLoad</key>
   <false/>
 
-  <!-- Retrain every 6 hours -->
   <key>StartInterval</key>
   <integer>21600</integer>
 
@@ -46,17 +48,32 @@ cat > "${PLIST_PATH}" <<PLIST
 </plist>
 PLIST
 
-UID_NUM="$(id -u)"
-TARGET="gui/${UID_NUM}/${LABEL}"
+chmod 644 "${PLIST_PATH}"
+chmod 755 "${ROOT_DIR}/scripts/run_retrain_cycle.sh"
+xattr -dr com.apple.quarantine "${PLIST_PATH}" "${ROOT_DIR}" >/dev/null 2>&1 || true
+plutil -lint "${PLIST_PATH}" >/dev/null
 
-if launchctl print "${TARGET}" >/dev/null 2>&1; then
-  echo "Existing ${LABEL} detected. Restarting with new plist..."
+launchctl bootout "${TARGET}" >/dev/null 2>&1 || true
+launchctl bootout "gui/${UID_NUM}" "${PLIST_PATH}" >/dev/null 2>&1 || true
+launchctl remove "${LABEL}" >/dev/null 2>&1 || true
+launchctl disable "${TARGET}" >/dev/null 2>&1 || true
+launchctl enable "${TARGET}" >/dev/null 2>&1 || true
+
+if ! launchctl bootstrap "gui/${UID_NUM}" "${PLIST_PATH}" >/dev/null 2>&1; then
+  echo "First retrain bootstrap failed; retrying..."
+  launchctl bootout "${TARGET}" >/dev/null 2>&1 || true
   launchctl bootout "gui/${UID_NUM}" "${PLIST_PATH}" >/dev/null 2>&1 || true
+  launchctl remove "${LABEL}" >/dev/null 2>&1 || true
+  launchctl enable "${TARGET}" >/dev/null 2>&1 || true
+  launchctl bootstrap "gui/${UID_NUM}" "${PLIST_PATH}"
 fi
 
-launchctl bootstrap "gui/${UID_NUM}" "${PLIST_PATH}"
-launchctl enable "${TARGET}"
 launchctl kickstart -k "${TARGET}" >/dev/null 2>&1 || true
+
+if ! launchctl print "${TARGET}" >/dev/null 2>&1; then
+  echo "[ERROR] LaunchAgent did not load: ${TARGET}" >&2
+  exit 1
+fi
 
 echo "Installed ${LABEL}"
 echo "Plist: ${PLIST_PATH}"

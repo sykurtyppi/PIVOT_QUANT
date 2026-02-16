@@ -1,32 +1,97 @@
 import json
 import os
+import sys
 import sqlite3
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse, parse_qs
 
+# Allow importing from scripts/ (sibling directory)
+_ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+_SCRIPTS_DIR = os.path.join(_ROOT_DIR, "scripts")
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+
+try:
+    from migrate_db import migrate_connection
+except ImportError:
+    migrate_connection = None  # type: ignore
+
 DB_PATH = os.getenv("PIVOT_DB", "data/pivot_events.sqlite")
 HOST = os.getenv("EVENT_WRITER_BIND", "127.0.0.1")
 PORT = int(os.getenv("EVENT_WRITER_PORT", "5002"))
+_SCHEMA_READY = False
 
 
 def connect():
+    global _SCHEMA_READY
     conn = sqlite3.connect(DB_PATH)
     conn.execute("PRAGMA foreign_keys=ON;")
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     conn.execute("PRAGMA temp_store=MEMORY;")
     conn.execute("PRAGMA cache_size=-200000;")
-    ensure_bar_schema(conn)
+    if not _SCHEMA_READY:
+        _ensure_schema(conn)
+        _SCHEMA_READY = True
     return conn
 
 
-def ensure_bar_schema(conn):
-    cur = conn.execute("PRAGMA table_info(bar_data)")
-    cols = {row[1] for row in cur.fetchall()}
-    if "bar_interval_sec" not in cols:
-        conn.execute("ALTER TABLE bar_data ADD COLUMN bar_interval_sec INTEGER")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_bar_symbol_interval ON bar_data(symbol, bar_interval_sec, ts);")
+def _ensure_schema(conn):
+    """Run schema migrations via migrate_db if available, else minimal ensure."""
+    if migrate_connection is not None:
+        migrate_connection(conn, verbose=False)
+        return
+    # Fallback: ensure tables exist with minimal DDL (standalone mode)
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS bar_data (
+            symbol TEXT NOT NULL, ts INTEGER NOT NULL,
+            open REAL NOT NULL, high REAL NOT NULL, low REAL NOT NULL,
+            close REAL NOT NULL, volume REAL, bar_interval_sec INTEGER,
+            PRIMARY KEY (symbol, ts, bar_interval_sec));"""
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS touch_events (
+            event_id TEXT PRIMARY KEY, symbol TEXT NOT NULL,
+            ts_event INTEGER NOT NULL, session TEXT,
+            level_type TEXT NOT NULL, level_price REAL NOT NULL,
+            touch_price REAL NOT NULL, touch_side INTEGER,
+            distance_bps REAL NOT NULL, is_first_touch_today INTEGER DEFAULT 0,
+            touch_count_today INTEGER DEFAULT 1, confluence_count INTEGER DEFAULT 0,
+            confluence_types TEXT, ema9 REAL, ema21 REAL, ema_state INTEGER,
+            vwap REAL, vwap_dist_bps REAL, atr REAL, rv_30 REAL, rv_regime INTEGER,
+            iv_rv_state INTEGER, gamma_mode INTEGER, gamma_flip REAL,
+            gamma_flip_dist_bps REAL, gamma_confidence INTEGER,
+            oi_concentration_top5 REAL, zero_dte_share REAL, data_quality REAL,
+            bar_interval_sec INTEGER, source TEXT, created_at INTEGER NOT NULL,
+            vpoc REAL, vpoc_dist_bps REAL, volume_at_level REAL,
+            mtf_confluence INTEGER DEFAULT 0, mtf_confluence_types TEXT,
+            weekly_pivot REAL, monthly_pivot REAL, level_age_days INTEGER DEFAULT 0,
+            hist_reject_rate REAL, hist_break_rate REAL, hist_sample_size INTEGER DEFAULT 0,
+            regime_type INTEGER, overnight_gap_atr REAL, or_high REAL, or_low REAL,
+            or_size_atr REAL, or_breakout INTEGER, or_high_dist_bps REAL,
+            or_low_dist_bps REAL, session_std REAL, sigma_band_position REAL,
+            distance_to_upper_sigma_bps REAL, distance_to_lower_sigma_bps REAL);"""
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_touch_natural_key "
+        "ON touch_events(symbol, ts_event, level_type, level_price, bar_interval_sec);"
+    )
     conn.commit()
+
+
+def read_schema_version(conn):
+    try:
+        row = conn.execute(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if not row:
+        return None
+    try:
+        return int(row[0])
+    except (TypeError, ValueError):
+        return None
 
 
 def insert_events(conn, events):
@@ -98,8 +163,9 @@ def insert_events(conn, events):
         row = [ev.get(col) for col in columns]
         values.append(row)
 
+    before = conn.total_changes
     conn.executemany(sql, values)
-    return conn.total_changes
+    return conn.total_changes - before
 
 
 def insert_bars(conn, bars, max_interval_sec=3600):
@@ -137,8 +203,9 @@ def insert_bars(conn, bars, max_interval_sec=3600):
         )
     if not values:
         return 0
+    before = conn.total_changes
     conn.executemany(sql, values)
-    return conn.total_changes
+    return conn.total_changes - before
 
 
 def aggregate_daily_candles(conn, symbol, limit=200):
@@ -215,7 +282,20 @@ class WriterHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path in ("/", "/health"):
-            self._send_json(200, {"status": "ok", "service": "event_writer", "db": DB_PATH})
+            conn = connect()
+            try:
+                schema_version = read_schema_version(conn)
+            finally:
+                conn.close()
+            self._send_json(
+                200,
+                {
+                    "status": "ok",
+                    "service": "event_writer",
+                    "db": DB_PATH,
+                    "schema_version": schema_version,
+                },
+            )
             return
 
         if parsed.path == "/daily-candles":

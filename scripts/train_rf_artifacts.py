@@ -2,7 +2,9 @@
 import argparse
 import json
 import os
+import shutil
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -114,6 +116,45 @@ def next_version(out_dir: Path) -> str:
         return "v001"
 
 
+def _temp_path(path: Path) -> Path:
+    return path.with_name(
+        f".{path.name}.tmp-{os.getpid()}-{int(time.time() * 1000)}"
+    )
+
+
+def atomic_write_json(path: Path, payload: dict) -> None:
+    tmp_path = _temp_path(path)
+    try:
+        with tmp_path.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+
+def atomic_joblib_dump(joblib_module, payload: dict, path: Path) -> None:
+    tmp_path = _temp_path(path)
+    try:
+        joblib_module.dump(payload, tmp_path)
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+
+def atomic_copy_file(src: Path, dst: Path) -> None:
+    tmp_path = _temp_path(dst)
+    try:
+        shutil.copy2(src, tmp_path)
+        os.replace(tmp_path, dst)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+
 def compute_horizon_stats(df, target, horizon):
     import numpy as np
 
@@ -149,6 +190,12 @@ def main() -> None:
     parser.add_argument("--random-state", type=int, default=42)
     parser.add_argument("--out-dir", default=DEFAULT_OUT_DIR)
     parser.add_argument("--version", default=None)
+    parser.add_argument(
+        "--allow-partial-manifest",
+        action="store_true",
+        default=False,
+        help="Allow publishing when some target/horizon models are missing",
+    )
     args = parser.parse_args()
 
     pd = require("pandas", "python3 -m pip install pandas")
@@ -169,6 +216,8 @@ def main() -> None:
         "stats": {},
         "trained_end_ts": None,
     }
+    trained_end_ts_max = None
+    latest_aliases: list[tuple[Path, Path]] = []
 
     for horizon in horizons:
         df = load_dataframe(args.db, args.view, horizon)
@@ -178,7 +227,10 @@ def main() -> None:
 
         df = ensure_event_date(df)
         df = df.sort_values("ts_event")
-        manifest["trained_end_ts"] = int(df["ts_event"].max()) if not df.empty else None
+        if not df.empty:
+            horizon_end_ts = int(df["ts_event"].max())
+            if trained_end_ts_max is None or horizon_end_ts > trained_end_ts_max:
+                trained_end_ts_max = horizon_end_ts
 
         label_cols = {
             "event_id",
@@ -286,7 +338,8 @@ def main() -> None:
 
             model_name = f"rf_{target}_{horizon}m_{version}.pkl"
             model_path = out_dir / model_name
-            joblib.dump(
+            atomic_joblib_dump(
+                joblib,
                 {
                     "pipeline": pipeline,
                     "calibrator": calibrator,
@@ -308,15 +361,45 @@ def main() -> None:
 
             latest_name = f"latest_{target}_{horizon}m.pkl"
             latest_path = out_dir / latest_name
-            latest_path.write_bytes(model_path.read_bytes())
+            latest_aliases.append((model_path, latest_path))
+
+    manifest["trained_end_ts"] = trained_end_ts_max
+
+    expected_pairs = {(target, str(horizon)) for target in targets for horizon in horizons}
+    actual_pairs = set()
+    for target, horizon_map in manifest["models"].items():
+        for horizon_key in horizon_map.keys():
+            actual_pairs.add((target, str(horizon_key)))
+    missing_pairs = sorted(expected_pairs - actual_pairs)
+
+    if not actual_pairs:
+        print(
+            "No model artifacts were produced. "
+            "Aborting publish to preserve existing manifest_latest.json.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if missing_pairs and not args.allow_partial_manifest:
+        missing_fmt = ", ".join(f"{t}:{h}m" for t, h in missing_pairs)
+        print(
+            "Partial model set produced; aborting publish to preserve existing manifest_latest.json. "
+            f"Missing: {missing_fmt}. "
+            "Use --allow-partial-manifest to override.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     metadata_path = out_dir / f"metadata_{version}.json"
-    with metadata_path.open("w", encoding="utf-8") as handle:
-        json.dump(manifest, handle, indent=2)
+    atomic_write_json(metadata_path, manifest)
+
+    for source_path, alias_path in latest_aliases:
+        atomic_copy_file(source_path, alias_path)
 
     latest_manifest = out_dir / "manifest_latest.json"
-    with latest_manifest.open("w", encoding="utf-8") as handle:
-        json.dump(manifest, handle, indent=2)
+    # Publish latest manifest last so readers never observe a half-written
+    # pointer to artifacts.
+    atomic_write_json(latest_manifest, manifest)
 
     print(f"Saved manifest to {metadata_path}")
     print(f"Saved latest manifest to {latest_manifest}")

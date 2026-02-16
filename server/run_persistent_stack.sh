@@ -34,6 +34,15 @@ export HOST="${HOST:-0.0.0.0}"
 export PORT="${PORT:-3000}"
 export ML_SERVER_BIND="${ML_SERVER_BIND:-0.0.0.0}"
 export ML_SERVER_PORT="${ML_SERVER_PORT:-5003}"
+export STARTUP_TIMEOUT_SEC="${STARTUP_TIMEOUT_SEC:-120}"
+export LIVE_COLLECTOR_ENABLED="${LIVE_COLLECTOR_ENABLED:-1}"
+export LIVE_COLLECTOR_BIND="${LIVE_COLLECTOR_BIND:-127.0.0.1}"
+export LIVE_COLLECTOR_PORT="${LIVE_COLLECTOR_PORT:-5004}"
+export LIVE_COLLECTOR_SYMBOLS="${LIVE_COLLECTOR_SYMBOLS:-SPY}"
+export LIVE_COLLECTOR_RANGE="${LIVE_COLLECTOR_RANGE:-2d}"
+export LIVE_COLLECTOR_SOURCE="${LIVE_COLLECTOR_SOURCE:-yahoo}"
+export LIVE_COLLECTOR_POLL_SEC="${LIVE_COLLECTOR_POLL_SEC:-45}"
+export LIVE_COLLECTOR_SCORE_ENABLED="${LIVE_COLLECTOR_SCORE_ENABLED:-1}"
 
 # Keep internal writer/bridge private unless explicitly overridden.
 export EVENT_WRITER_BIND="${EVENT_WRITER_BIND:-127.0.0.1}"
@@ -54,6 +63,8 @@ export ML_CORS_ORIGINS
 echo "[run_persistent_stack] Root: ${ROOT_DIR}"
 echo "[run_persistent_stack] Dashboard bind: ${HOST}:${PORT}"
 echo "[run_persistent_stack] ML bind: ${ML_SERVER_BIND}:${ML_SERVER_PORT}"
+echo "[run_persistent_stack] Live collector: enabled=${LIVE_COLLECTOR_ENABLED} bind=${LIVE_COLLECTOR_BIND}:${LIVE_COLLECTOR_PORT} symbols=${LIVE_COLLECTOR_SYMBOLS} range=${LIVE_COLLECTOR_RANGE} source=${LIVE_COLLECTOR_SOURCE} poll=${LIVE_COLLECTOR_POLL_SEC}s score_enabled=${LIVE_COLLECTOR_SCORE_ENABLED}"
+echo "[run_persistent_stack] Startup timeout: ${STARTUP_TIMEOUT_SEC}s"
 if [[ -n "${LAN_IP}" ]]; then
   echo "[run_persistent_stack] LAN URL: http://${LAN_IP}:${PORT}"
 fi
