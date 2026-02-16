@@ -88,6 +88,12 @@ def ensure_new_columns(conn: sqlite3.Connection) -> None:
     for col_name, col_type in new_cols.items():
         if col_name not in cols:
             conn.execute(f"ALTER TABLE touch_events ADD COLUMN {col_name} {col_type}")
+    # Natural-key uniqueness: prevent logical duplicates from repeated backfills.
+    # Safe to call repeatedly — IF NOT EXISTS is a no-op when the index already exists.
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_touch_natural_key "
+        "ON touch_events(symbol, ts_event, level_type, level_price, bar_interval_sec);"
+    )
     conn.commit()
 
 
