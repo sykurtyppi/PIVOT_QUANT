@@ -19,14 +19,21 @@ run_step() {
 
 cd "${ROOT_DIR}"
 
+# Prefer the project venv to avoid picking up a wrong system Python.
+if [ -x "${ROOT_DIR}/.venv/bin/python" ]; then
+  PYTHON="${ROOT_DIR}/.venv/bin/python"
+else
+  PYTHON="python3"
+fi
+
 # Backfill recent days to capture any gaps (dashboard outages, weekends).
 # Uses 5m bars from Yahoo (supports longer ranges than 1m's 7-day limit).
-run_step "backfill" python3 scripts/backfill_events.py --range 7d --interval 5m --source yahoo
+run_step "backfill" "${PYTHON}" scripts/backfill_events.py --range 7d --interval 5m --source yahoo
 
-run_step "build_labels" npm run ml:build-labels
-run_step "export_parquet" npm run ml:export-parquet
-run_step "duckdb_view" npm run ml:duckdb-view
-run_step "train_artifacts" npm run ml:train-artifacts
+run_step "build_labels"    "${PYTHON}" scripts/build_labels.py --horizons 5 15 60 --incremental
+run_step "export_parquet"  "${PYTHON}" scripts/export_parquet.py
+run_step "duckdb_view"     "${PYTHON}" scripts/build_duckdb_view.py
+run_step "train_artifacts" "${PYTHON}" scripts/train_rf_artifacts.py
 
 # Tell the running ML server to hot-reload the new model artifacts.
 echo "[$(timestamp)] Reloading ML server models..." | tee -a "${LOG_DIR}/retrain.log"

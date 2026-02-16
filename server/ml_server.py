@@ -155,7 +155,10 @@ def reload_models():
         }
     except Exception as exc:
         _startup_error = str(exc)
-        return {"status": "error", "message": str(exc)}
+        return JSONResponse(
+            status_code=500,
+            content={"status": "error", "message": str(exc)},
+        )
 
 
 def _check_feature_drift(features: dict, payload: dict) -> list[str]:
@@ -355,7 +358,8 @@ def _score_event(event: dict):
 
 @app.post("/score")
 async def score(request: Request):
-    if registry.manifest is None or not registry.available():
+    has_models = any(horizons for horizons in registry.available().values())
+    if registry.manifest is None or not has_models:
         raise HTTPException(status_code=503, detail="Models not loaded. Train artifacts first.")
     payload = await request.json()
     if "event" in payload:

@@ -8,6 +8,7 @@ import sqlite3
 import sys
 import time
 import traceback
+import hashlib
 import uuid
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -32,6 +33,18 @@ NY_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone.utc
 
 def now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def deterministic_event_id(
+    symbol: str, ts_event: int, level_type: str, level_price: float, interval_sec: int
+) -> str:
+    """Generate a deterministic event ID from the natural key.
+
+    Repeated backfills for the same touch produce the same ID, so
+    INSERT OR IGNORE deduplicates automatically.
+    """
+    raw = f"{symbol}|{ts_event}|{level_type}|{level_price:.4f}|{interval_sec}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:32]
 
 
 def ensure_bar_schema(conn: sqlite3.Connection) -> None:
@@ -1065,7 +1078,9 @@ def build_events(
                         dist_lower_sigma = (close - lower_1s) / lower_1s * 1e4
 
                 event = {
-                    "event_id": str(uuid.uuid4()),
+                    "event_id": deterministic_event_id(
+                        symbol, ts_event, label, level_price, interval_sec
+                    ),
                     "symbol": symbol,
                     "ts_event": ts_event,
                     "session": "RTH",
