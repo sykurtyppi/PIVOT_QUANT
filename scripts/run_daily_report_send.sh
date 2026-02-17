@@ -28,10 +28,36 @@ fi
 PIVOT_DB_PATH="${PIVOT_DB:-${ROOT_DIR}/data/pivot_events.sqlite}"
 REPORT_OUTPUT=""
 REPORT_PATH=""
+REPORT_DATE="${ML_REPORT_REPORT_DATE:-}"
+REPORT_DATE_MODE="${ML_REPORT_REPORT_DATE_MODE:-auto}"
+SCHEDULE_MODE="${ML_REPORT_SCHEDULE_MODE:-}"
 
 echo "[$(timestamp)] START daily_report_send (${PYTHON_INFO})" >> "${LOG_DIR}/report_delivery.log"
 
-if REPORT_OUTPUT="$("${PYTHON}" "${ROOT_DIR}/scripts/generate_daily_ml_report.py" --db "${PIVOT_DB_PATH}" --out-dir "${LOG_DIR}/reports" 2>&1)"; then
+if [[ -z "${REPORT_DATE}" ]]; then
+  if [[ "${REPORT_DATE_MODE}" == "auto" && "${SCHEDULE_MODE}" == "close" ]]; then
+    REPORT_DATE_MODE="et_today"
+  fi
+  if ! REPORT_DATE="$(
+    REPORT_DATE_MODE="${REPORT_DATE_MODE}" "${PYTHON}" -c "from datetime import datetime, timedelta; from zoneinfo import ZoneInfo; import os
+mode = os.getenv('REPORT_DATE_MODE', 'auto').strip().lower()
+now = datetime.now(ZoneInfo('America/New_York'))
+if mode == 'et_today':
+    day = now.date()
+else:
+    day = now.date() if now.hour >= 16 else (now - timedelta(days=1)).date()
+while day.weekday() >= 5:
+    day = day - timedelta(days=1)
+print(day.isoformat())"
+  )"; then
+    echo "[$(timestamp)] ERROR failed to determine report date" >> "${LOG_DIR}/report_delivery.log"
+    exit 1
+  fi
+fi
+
+echo "[$(timestamp)] INFO report_date=${REPORT_DATE} schedule_mode=${SCHEDULE_MODE:-unset} date_mode=${REPORT_DATE_MODE}" >> "${LOG_DIR}/report_delivery.log"
+
+if REPORT_OUTPUT="$("${PYTHON}" "${ROOT_DIR}/scripts/generate_daily_ml_report.py" --db "${PIVOT_DB_PATH}" --out-dir "${LOG_DIR}/reports" --report-date "${REPORT_DATE}" 2>&1)"; then
   printf '%s\n' "${REPORT_OUTPUT}" >> "${LOG_DIR}/report_delivery.log"
   REPORT_PATH="$(printf '%s\n' "${REPORT_OUTPUT}" | tail -n 1)"
 else
@@ -45,9 +71,16 @@ if [[ -z "${REPORT_PATH}" || ! -f "${REPORT_PATH}" ]]; then
   exit 1
 fi
 
-if "${PYTHON}" "${ROOT_DIR}/scripts/send_daily_report.py" --report "${REPORT_PATH}" >> "${LOG_DIR}/report_delivery.log" 2>&1; then
+SEND_OUTPUT=""
+if SEND_OUTPUT="$("${PYTHON}" "${ROOT_DIR}/scripts/send_daily_report.py" --report "${REPORT_PATH}" --db "${PIVOT_DB_PATH}" 2>&1)"; then
+  printf '%s\n' "${SEND_OUTPUT}" >> "${LOG_DIR}/report_delivery.log"
   echo "[$(timestamp)] DONE  daily_report_send" >> "${LOG_DIR}/report_delivery.log"
 else
+  printf '%s\n' "${SEND_OUTPUT}" >> "${LOG_DIR}/report_delivery.log"
+  if printf '%s\n' "${SEND_OUTPUT}" | grep -qiE 'SMTPDataError 550|5\.4\.5 .*sending limit'; then
+    echo "[$(timestamp)] WARN notification skipped (SMTP daily send limit reached)" >> "${LOG_DIR}/report_delivery.log"
+    exit 0
+  fi
   echo "[$(timestamp)] ERROR notification send failed" >> "${LOG_DIR}/report_delivery.log"
   exit 1
 fi

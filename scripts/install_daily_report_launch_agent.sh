@@ -12,6 +12,7 @@ CLOSE_HOUR="${ML_REPORT_CLOSE_HOUR:-17}"
 CLOSE_MINUTE="${ML_REPORT_CLOSE_MINUTE:-10}"
 MORNING_HOUR="${ML_REPORT_MORNING_HOUR:-8}"
 MORNING_MINUTE="${ML_REPORT_MORNING_MINUTE:-5}"
+REPORT_DATE_MODE="${ML_REPORT_REPORT_DATE_MODE:-auto}"
 
 mkdir -p "${LOG_DIR}" "${HOME}/Library/LaunchAgents"
 
@@ -179,6 +180,10 @@ ${SCHEDULE_BLOCK}
   <dict>
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>ML_REPORT_SCHEDULE_MODE</key>
+    <string>${SCHEDULE_MODE}</string>
+    <key>ML_REPORT_REPORT_DATE_MODE</key>
+    <string>${REPORT_DATE_MODE}</string>
   </dict>
 </dict>
 </plist>
