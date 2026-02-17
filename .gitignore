@@ -25,7 +25,10 @@ data/models/*.pkl
 .minimax/
 
 # Logs
-logs/*.log
+logs/
+
+# Stale data files
+data/*.db
 
 # OS files
 .DS_Store

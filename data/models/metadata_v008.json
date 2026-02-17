@@ -1,16 +1,16 @@
 {
-  "version": "v009",
+  "version": "v008",
   "feature_version": "v3",
   "models": {
     "reject": {
-      "5": "rf_reject_5m_v009.pkl",
-      "15": "rf_reject_15m_v009.pkl",
-      "60": "rf_reject_60m_v009.pkl"
+      "5": "rf_reject_5m_v008.pkl",
+      "15": "rf_reject_15m_v008.pkl",
+      "60": "rf_reject_60m_v008.pkl"
     },
     "break": {
-      "5": "rf_break_5m_v009.pkl",
-      "15": "rf_break_15m_v009.pkl",
-      "60": "rf_break_60m_v009.pkl"
+      "5": "rf_break_5m_v008.pkl",
+      "15": "rf_break_15m_v008.pkl",
+      "60": "rf_break_60m_v008.pkl"
     }
   },
   "calibration": {
@@ -97,7 +97,7 @@
   "thresholds": {
     "reject": {
       "5": 0.26207535295932116,
-      "15": 0.4190568820869282,
+      "15": 0.41905688208692804,
       "60": 0.5761551807447358
     },
     "break": {

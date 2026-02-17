@@ -544,6 +544,88 @@
             background: #fbbf24;
         }
 
+        .ml-health-widget {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 6px 12px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            background: rgba(15, 23, 42, 0.5);
+            font-size: 11px;
+            margin-top: 6px;
+        }
+
+        .ml-health-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            padding: 3px 9px;
+            border-radius: 999px;
+            font-weight: 600;
+            font-size: 10px;
+            letter-spacing: 0.4px;
+            text-transform: uppercase;
+            white-space: nowrap;
+        }
+
+        .ml-health-badge::before {
+            content: '';
+            width: 6px;
+            height: 6px;
+            border-radius: 999px;
+        }
+
+        .ml-health-badge[data-health="healthy"] {
+            color: #86efac;
+            border: 1px solid rgba(34, 197, 94, 0.35);
+            background: rgba(22, 101, 52, 0.2);
+        }
+        .ml-health-badge[data-health="healthy"]::before { background: #22c55e; }
+
+        .ml-health-badge[data-health="degrading"] {
+            color: #fde68a;
+            border: 1px solid rgba(245, 158, 11, 0.35);
+            background: rgba(120, 53, 15, 0.2);
+        }
+        .ml-health-badge[data-health="degrading"]::before { background: #f59e0b; }
+
+        .ml-health-badge[data-health="kill-switch"] {
+            color: #fca5a5;
+            border: 1px solid rgba(239, 68, 68, 0.4);
+            background: rgba(127, 29, 29, 0.2);
+        }
+        .ml-health-badge[data-health="kill-switch"]::before { background: #ef4444; }
+
+        .ml-health-badge[data-health="unknown"] {
+            color: var(--muted);
+            border: 1px solid var(--border);
+            background: rgba(15, 23, 42, 0.5);
+        }
+        .ml-health-badge[data-health="unknown"]::before { background: var(--muted); }
+
+        .ml-health-stats {
+            display: flex;
+            gap: 14px;
+            color: var(--muted);
+            font-size: 11px;
+            flex-wrap: wrap;
+        }
+
+        .ml-health-stats span {
+            white-space: nowrap;
+        }
+
+        .ml-health-note {
+            font-size: 10px;
+            color: var(--muted);
+            opacity: 0.7;
+            max-width: 260px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
         .ml-toggle,
         .ml-control {
             display: flex;
@@ -1141,6 +1223,15 @@
                         </label>
                     </div>
                 </div>
+                <div class="ml-health-widget" id="ml-health-widget">
+                    <div class="ml-health-badge" id="ml-health-badge" data-health="unknown">Unknown</div>
+                    <div class="ml-health-stats">
+                        <span>Age: <b id="ml-health-age">--</b></span>
+                        <span>Scores: <b id="ml-health-scores">0</b></span>
+                        <span>Flagged: <b id="ml-health-flagged">0%</b></span>
+                    </div>
+                    <div class="ml-health-note" id="ml-health-note" title="">--</div>
+                </div>
                 <div class="stat-grid stat-grid-3">
                     <div class="stat">
                         <div class="stat-label">Status</div>
@@ -1389,6 +1480,12 @@
             mlMetricsTimer: null,
             mlServiceStatus: 'checking',
             mlServiceMessage: 'Checking ML service health.',
+            mlHealthState: 'unknown',
+            mlHealthNote: '',
+            mlScoresToday: 0,
+            mlFlaggedScores: 0,
+            mlScoreDate: null,
+            mlHealthTimer: null,
             debugEnabled: false,
             debugMessage: '',
             activeInsightTab: 'levels',
@@ -3361,6 +3458,7 @@
                 }
                 state.lastMlScore = panelPayload;
                 updateMlPanel(panelPayload);
+                trackMlScore(panelPayload);
             } catch (error) {
                 console.warn('ML score failed', error);
                 const reason = error?.name === 'AbortError'
@@ -3622,6 +3720,216 @@
             }
         }
 
+        // Session-aware staleness: count only regular market hours (9:30-16:00 ET, weekdays)
+        // Matches generate_daily_ml_report.py compute_session_staleness_hours()
+        const SESSION_STALE_WARN_H = 13;   // matches ML_STALENESS_WARN_SESSION_HOURS
+        const SESSION_STALE_KILL_H = 19.5; // matches ML_STALENESS_KILL_SESSION_HOURS
+
+        function computeSessionStalenessHours() {
+            const trainedEndTs = state.mlMeta?.trained_end_ts;
+            if (!Number.isFinite(trainedEndTs) || trainedEndTs <= 0) return null;
+            const startMs = trainedEndTs;
+            const endMs = Date.now();
+            if (endMs <= startMs) return 0;
+
+            // Convert to ET using Intl — get offset in minutes for a given timestamp
+            function toET(tsMs) {
+                const d = new Date(tsMs);
+                // Use Intl to get ET components
+                const parts = new Intl.DateTimeFormat('en-US', {
+                    timeZone: 'America/New_York',
+                    year: 'numeric', month: '2-digit', day: '2-digit',
+                    hour: '2-digit', minute: '2-digit', second: '2-digit',
+                    hour12: false
+                }).formatToParts(d);
+                const get = (type) => parseInt(parts.find(p => p.type === type)?.value || '0');
+                return {
+                    year: get('year'), month: get('month'), day: get('day'),
+                    hour: get('hour'), minute: get('minute'), second: get('second'),
+                    dayOfWeek: new Date(get('year'), get('month') - 1, get('day')).getDay()
+                };
+            }
+
+            const startET = toET(startMs);
+            const endET = toET(endMs);
+
+            // Walk day-by-day counting session overlap
+            let totalSec = 0;
+            let cursor = new Date(startET.year, startET.month - 1, startET.day);
+            const endDate = new Date(endET.year, endET.month - 1, endET.day);
+
+            while (cursor <= endDate) {
+                const dow = cursor.getDay();
+                if (dow >= 1 && dow <= 5) { // weekdays only
+                    const dayStart = cursor.getTime();
+                    const sessionOpenMs = dayStart + 9.5 * 3600000;  // 9:30
+                    const sessionCloseMs = dayStart + 16 * 3600000;  // 16:00
+
+                    // Approximate: use the cursor date's session window
+                    // Map back to UTC-ish by using the start/end ET dates
+                    const isStartDay = cursor.getFullYear() === startET.year &&
+                        cursor.getMonth() + 1 === startET.month &&
+                        cursor.getDate() === startET.day;
+                    const isEndDay = cursor.getFullYear() === endET.year &&
+                        cursor.getMonth() + 1 === endET.month &&
+                        cursor.getDate() === endET.day;
+
+                    let segStartH = 9.5; // session open
+                    let segEndH = 16;    // session close
+
+                    if (isStartDay) {
+                        const startH = startET.hour + startET.minute / 60;
+                        segStartH = Math.max(segStartH, startH);
+                    }
+                    if (isEndDay) {
+                        const endH = endET.hour + endET.minute / 60;
+                        segEndH = Math.min(segEndH, endH);
+                    }
+
+                    if (segEndH > segStartH) {
+                        totalSec += (segEndH - segStartH) * 3600;
+                    }
+                }
+                cursor.setDate(cursor.getDate() + 1);
+            }
+
+            return totalSec / 3600;
+        }
+
+        function computeWallClockAgeHours() {
+            const trainedEndTs = state.mlMeta?.trained_end_ts;
+            if (!Number.isFinite(trainedEndTs) || trainedEndTs <= 0) return null;
+            return (Date.now() - trainedEndTs) / (3600 * 1000);
+        }
+
+        function formatModelAge(hours) {
+            if (hours == null) return '--';
+            if (hours < 1) return `${Math.round(hours * 60)}m`;
+            if (hours < 48) return `${hours.toFixed(1)}h`;
+            return `${(hours / 24).toFixed(1)}d`;
+        }
+
+        function computeHealthState() {
+            const sessionH = computeSessionStalenessHours();
+            const wallH = computeWallClockAgeHours();
+            const notes = [];
+
+            // Kill-switch: session staleness exceeds kill threshold
+            if (sessionH != null && sessionH >= SESSION_STALE_KILL_H) {
+                return { health: 'kill-switch', note: `Session staleness ${sessionH.toFixed(1)}h exceeds ${SESSION_STALE_KILL_H}h` };
+            }
+
+            // Kill-switch: ML service offline
+            if (state.mlServiceStatus === 'offline') {
+                return { health: 'kill-switch', note: state.mlServiceMessage || 'ML service offline' };
+            }
+
+            // Degrading: session staleness above warn threshold
+            if (sessionH != null && sessionH >= SESSION_STALE_WARN_H) {
+                notes.push(`Session staleness elevated (${sessionH.toFixed(1)}h)`);
+            }
+
+            // Info: wall clock high but gated by session staleness (weekends/holidays)
+            if (wallH != null && wallH >= 72 && sessionH != null && sessionH < SESSION_STALE_KILL_H) {
+                notes.push(`Wall-clock ${wallH.toFixed(0)}h (session ${sessionH.toFixed(1)}h OK)`);
+            }
+
+            // Degrading: high quality flag rate (> 20% of scores flagged)
+            const flagRate = state.mlScoresToday > 0
+                ? state.mlFlaggedScores / state.mlScoresToday
+                : 0;
+            if (state.mlScoresToday >= 5 && flagRate > 0.20) {
+                notes.push(`Quality flag rate ${(flagRate * 100).toFixed(0)}%`);
+            }
+
+            // Degrading: service is checking (not confirmed online yet)
+            if (state.mlServiceStatus === 'checking') {
+                notes.push('Checking ML service');
+            }
+
+            // Degrading: zero scores in session (only flag after market has been open a while)
+            if (state.mlScoresToday === 0 && state.mlScoreDate) {
+                notes.push('No scores yet today');
+            }
+
+            if (notes.length > 0) {
+                return { health: 'degrading', note: notes.join('; ') };
+            }
+
+            return { health: 'healthy', note: 'All systems nominal' };
+        }
+
+        function updateHealthWidget() {
+            const { health, note } = computeHealthState();
+            state.mlHealthState = health;
+            state.mlHealthNote = note;
+
+            const badge = document.getElementById('ml-health-badge');
+            if (badge) {
+                badge.setAttribute('data-health', health);
+                const labels = { 'healthy': 'Healthy', 'degrading': 'Degrading', 'kill-switch': 'Kill-Switch', 'unknown': 'Unknown' };
+                badge.textContent = labels[health] || 'Unknown';
+            }
+
+            const ageEl = document.getElementById('ml-health-age');
+            if (ageEl) {
+                const sessionH = computeSessionStalenessHours();
+                const wallH = computeWallClockAgeHours();
+                ageEl.textContent = sessionH != null
+                    ? `${sessionH.toFixed(1)}h sess`
+                    : formatModelAge(wallH);
+                ageEl.title = wallH != null
+                    ? `Wall-clock: ${formatModelAge(wallH)} | Session: ${sessionH != null ? sessionH.toFixed(1) + 'h' : '--'}`
+                    : '';
+                if (sessionH != null && sessionH >= SESSION_STALE_KILL_H) {
+                    ageEl.style.color = 'var(--danger)';
+                } else if (sessionH != null && sessionH >= SESSION_STALE_WARN_H) {
+                    ageEl.style.color = 'var(--warning)';
+                } else {
+                    ageEl.style.color = '';
+                }
+            }
+
+            const scoresEl = document.getElementById('ml-health-scores');
+            if (scoresEl) scoresEl.textContent = String(state.mlScoresToday);
+
+            const flaggedEl = document.getElementById('ml-health-flagged');
+            if (flaggedEl) {
+                const rate = state.mlScoresToday > 0
+                    ? (state.mlFlaggedScores / state.mlScoresToday * 100).toFixed(0)
+                    : '0';
+                flaggedEl.textContent = `${rate}%`;
+                const rateNum = parseFloat(rate);
+                if (rateNum > 20) {
+                    flaggedEl.style.color = 'var(--warning)';
+                } else {
+                    flaggedEl.style.color = '';
+                }
+            }
+
+            const noteEl = document.getElementById('ml-health-note');
+            if (noteEl) {
+                noteEl.textContent = note;
+                noteEl.title = note;
+            }
+        }
+
+        function trackMlScore(panelPayload) {
+            if (!panelPayload || panelPayload.preview) return;
+            const today = new Date().toISOString().slice(0, 10);
+            if (state.mlScoreDate !== today) {
+                state.mlScoresToday = 0;
+                state.mlFlaggedScores = 0;
+                state.mlScoreDate = today;
+            }
+            state.mlScoresToday++;
+            const flags = panelPayload.quality_flags;
+            if (Array.isArray(flags) && flags.length > 0) {
+                state.mlFlaggedScores++;
+            }
+            updateHealthWidget();
+        }
+
         function formatCalibrationLabel(calibration, horizon = 15) {
             if (!calibration) return '--';
             const key = String(horizon);
@@ -3844,10 +4152,12 @@
                 state.mlMeta = payload?.manifest || null;
                 setMlServiceState('online');
                 updateMlMetaFields(state.mlMeta);
+                updateHealthWidget();
             } catch (error) {
                 console.warn('ML health fetch failed', error);
                 setMlServiceState('offline', error?.message || 'Health endpoint unreachable');
                 updateMlPanel(null);
+                updateHealthWidget();
             }
         }
 
@@ -4093,6 +4403,12 @@
                 clearInterval(state.mlMetricsTimer);
             }
             state.mlMetricsTimer = setInterval(loadMlMetrics, 300000);
+            if (state.mlHealthTimer) {
+                clearInterval(state.mlHealthTimer);
+            }
+            state.mlHealthTimer = setInterval(() => {
+                loadMlHealth();
+            }, 300000);
             loadMarketData();
         }
 
