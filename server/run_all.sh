@@ -313,9 +313,6 @@ start_service "event_writer" "5002" "false" bash server/run_event_writer.sh
 start_service "gamma_bridge" "5001" "true" bash server/run_gamma_bridge.sh
 start_service "ml_server" "5003" "false" bash server/run_ml_server.sh
 start_service "dashboard" "3000" "false" node server/yahoo_proxy.js
-if [[ "${LIVE_COLLECTOR_ACTIVE}" -eq 1 ]]; then
-  start_service "live_collector" "5004" "false" bash server/run_live_collector.sh
-fi
 
 verify_service "event_writer" "5002" "http://127.0.0.1:5002/health"
 # gamma_bridge is optional — depends on IBKR Gateway which may not run
@@ -328,6 +325,8 @@ fi
 verify_service "ml_server" "5003" "http://127.0.0.1:5003/health"
 verify_service "dashboard" "3000" "http://127.0.0.1:3000/"
 if [[ "${LIVE_COLLECTOR_ACTIVE}" -eq 1 ]]; then
+  # Start collector only after core services are confirmed ready to avoid first-cycle score race.
+  start_service "live_collector" "5004" "false" bash server/run_live_collector.sh
   verify_service "live_collector" "5004" "http://127.0.0.1:5004/health"
   quick_check_live_collector || echo "[WARN] live_collector reported degraded status at startup"
 else
