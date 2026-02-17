@@ -75,6 +75,7 @@ cd /Users/tristanalejandro/PIVOT_QUANT
 bash scripts/uninstall_launch_agent.sh
 bash scripts/uninstall_retrain_launch_agent.sh
 bash scripts/uninstall_daily_report_launch_agent.sh
+bash scripts/uninstall_health_alert_launch_agent.sh
 ```
 
 ## Notes on ML "always learning"
@@ -129,6 +130,17 @@ ML_STALENESS_KILL_SESSION_HOURS=19.5
 
 # optional webhook target
 # ML_REPORT_WEBHOOK_URL=https://your-webhook-endpoint
+
+# immediate downtime alerts (state-change only by default)
+ML_ALERT_NOTIFY_CHANNELS=email
+ML_ALERT_ML_HEALTH_URL=http://127.0.0.1:5003/health
+ML_ALERT_COLLECTOR_HEALTH_URL=http://127.0.0.1:5004/health
+ML_ALERT_CHECK_INTERVAL_SEC=60
+ML_ALERT_TIMEOUT_SEC=4
+ML_ALERT_REPEAT_MIN=0
+# optional separate recipients/sender
+# ML_ALERT_EMAIL_TO=you@example.com
+# ML_ALERT_EMAIL_FROM=you@example.com
 ```
 
 Install scheduled delivery:
@@ -154,4 +166,27 @@ Logs:
 
 ```bash
 tail -f logs/report_delivery.log logs/daily_report.launchd.err.log
+```
+
+## 9) Immediate downtime paging (ML / collector)
+
+Install always-on watchdog alerts (runs every minute by default):
+
+```bash
+cd /Users/tristanalejandro/PIVOT_QUANT
+bash scripts/install_health_alert_launch_agent.sh
+```
+
+Manual dry-run check:
+
+```bash
+cd /Users/tristanalejandro/PIVOT_QUANT
+source .venv/bin/activate
+npm run ml:health-alert:check
+```
+
+Watchdog logs:
+
+```bash
+tail -f logs/health_alert.log logs/health_alert.launchd.err.log
 ```

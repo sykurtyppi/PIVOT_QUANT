@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 UID_NUM="$(id -u)"
 LOG_DIR="${ROOT_DIR}/logs"
 
-for LABEL in com.pivotquant.dashboard com.pivotquant.retrain com.pivotquant.daily_report; do
+for LABEL in com.pivotquant.dashboard com.pivotquant.retrain com.pivotquant.daily_report com.pivotquant.health_alert; do
   TARGET="gui/${UID_NUM}/${LABEL}"
   echo "LaunchAgent target: ${TARGET}"
   if launchctl print "${TARGET}" >/dev/null 2>&1; then
@@ -25,6 +25,9 @@ for file in \
   "${LOG_DIR}/retrain.launchd.err.log" \
   "${LOG_DIR}/daily_report.launchd.out.log" \
   "${LOG_DIR}/daily_report.launchd.err.log" \
+  "${LOG_DIR}/health_alert.launchd.out.log" \
+  "${LOG_DIR}/health_alert.launchd.err.log" \
+  "${LOG_DIR}/health_alert.log" \
   "${LOG_DIR}/report_delivery.log"; do
   if [[ -f "${file}" ]]; then
     echo "--- ${file}"

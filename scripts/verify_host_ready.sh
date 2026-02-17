@@ -7,10 +7,12 @@ cd "${ROOT_DIR}"
 LABEL_DASH="com.pivotquant.dashboard"
 LABEL_RETRAIN="com.pivotquant.retrain"
 LABEL_DAILY="com.pivotquant.daily_report"
+LABEL_HEALTH_ALERT="com.pivotquant.health_alert"
 UID_NUM="$(id -u)"
 TARGET_DASH="gui/${UID_NUM}/${LABEL_DASH}"
 TARGET_RETRAIN="gui/${UID_NUM}/${LABEL_RETRAIN}"
 TARGET_DAILY="gui/${UID_NUM}/${LABEL_DAILY}"
+TARGET_HEALTH_ALERT="gui/${UID_NUM}/${LABEL_HEALTH_ALERT}"
 
 ok() { printf '[OK] %s\n' "$*"; }
 warn() { printf '[WARN] %s\n' "$*"; }
@@ -107,6 +109,7 @@ echo "LaunchAgents:"
 check_launch_agent "${TARGET_DASH}" "${LABEL_DASH}"
 check_launch_agent "${TARGET_RETRAIN}" "${LABEL_RETRAIN}"
 check_launch_agent "${TARGET_DAILY}" "${LABEL_DAILY}"
+check_launch_agent "${TARGET_HEALTH_ALERT}" "${LABEL_HEALTH_ALERT}"
 echo
 
 echo "Ports:"
