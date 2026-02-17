@@ -1204,12 +1204,18 @@ def send_email(
     if dry_run:
         return True, f"email: dry-run to {', '.join(recipients)}"
 
-    with smtplib.SMTP(host, port, timeout=30) as smtp:
-        if use_tls:
-            smtp.starttls()
-        if username:
-            smtp.login(username, password)
-        smtp.send_message(message)
+    try:
+        with smtplib.SMTP(host, port, timeout=30) as smtp:
+            if use_tls:
+                smtp.starttls()
+            if username:
+                smtp.login(username, password)
+            smtp.send_message(message)
+    except smtplib.SMTPDataError as exc:
+        raw = exc.smtp_error.decode("utf-8", errors="replace") if isinstance(exc.smtp_error, bytes) else str(exc.smtp_error)
+        return False, f"email: SMTPDataError {exc.smtp_code} ({raw})"
+    except (smtplib.SMTPException, OSError) as exc:
+        return False, f"email: send failed ({exc})"
     return True, f"email: sent to {', '.join(recipients)}"
 
 
