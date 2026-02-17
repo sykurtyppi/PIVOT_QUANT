@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOG_DIR="${ROOT_DIR}/logs"
@@ -9,6 +9,10 @@ LOCK_OWNED=0
 
 timestamp() {
   date '+%Y-%m-%d %H:%M:%S'
+}
+
+now_ms() {
+  echo $(( $(date +%s) * 1000 ))
 }
 
 acquire_lock() {
@@ -55,6 +59,36 @@ run_step() {
   echo "[$(timestamp)] DONE  ${name}" | tee -a "${LOG_DIR}/retrain.log"
 }
 
+PYTHON=""
+RETRAIN_SYMBOLS="${RETRAIN_SYMBOLS:-SPY}"
+PIVOT_DB_PATH="${PIVOT_DB:-${ROOT_DIR}/data/pivot_events.sqlite}"
+REPORT_PATH=""
+REPORT_OUTPUT=""
+NOTIFY_ON_RETRAIN="${ML_REPORT_NOTIFY_ON_RETRAIN:-false}"
+RELOAD_STATUS="unknown"
+
+ops_set() {
+  if [[ -z "${PYTHON}" ]]; then
+    return 0
+  fi
+  "${PYTHON}" scripts/ops_status.py --db "${PIVOT_DB_PATH}" "$@" >> "${LOG_DIR}/retrain.log" 2>&1 || true
+}
+
+mark_failure() {
+  local exit_code="$?"
+  local failed_cmd="${BASH_COMMAND:-unknown}"
+  local ts_ms
+  ts_ms="$(now_ms)"
+  echo "[$(timestamp)] ERROR retrain: command failed (${failed_cmd}) exit=${exit_code}" | tee -a "${LOG_DIR}/retrain.log"
+  ops_set \
+    --set "retrain_state=idle" \
+    --set "retrain_last_status=failed" \
+    --set "retrain_last_end_ms=${ts_ms}" \
+    --set "retrain_last_error=${failed_cmd}" \
+    --set "reload_last_status=${RELOAD_STATUS}"
+}
+
+trap mark_failure ERR
 trap release_lock EXIT INT TERM
 acquire_lock
 
@@ -66,11 +100,12 @@ if [ -x "${ROOT_DIR}/.venv/bin/python" ]; then
 else
   PYTHON="python3"
 fi
-RETRAIN_SYMBOLS="${RETRAIN_SYMBOLS:-SPY}"
-PIVOT_DB_PATH="${PIVOT_DB:-${ROOT_DIR}/data/pivot_events.sqlite}"
-REPORT_PATH=""
-REPORT_OUTPUT=""
-NOTIFY_ON_RETRAIN="${ML_REPORT_NOTIFY_ON_RETRAIN:-false}"
+
+ops_set \
+  --set "retrain_state=running" \
+  --set "retrain_last_status=running" \
+  --set "retrain_last_start_ms=$(now_ms)" \
+  --set "retrain_last_error="
 
 # Backfill recent days to capture any gaps (dashboard outages, weekends).
 # Uses 5m bars from Yahoo (supports longer ranges than 1m's 7-day limit).
@@ -84,8 +119,18 @@ run_step "train_artifacts" "${PYTHON}" scripts/train_rf_artifacts.py
 # Tell the running ML server to hot-reload the new model artifacts.
 echo "[$(timestamp)] Reloading ML server models..." | tee -a "${LOG_DIR}/retrain.log"
 curl -sf -X POST http://127.0.0.1:5003/reload >> "${LOG_DIR}/retrain.log" 2>&1 || {
+  RELOAD_STATUS="failed"
+  ops_set \
+    --set "reload_last_status=failed" \
+    --set "reload_last_at_ms=$(now_ms)"
   echo "[$(timestamp)] WARN: ML server reload failed (server may need manual restart)" | tee -a "${LOG_DIR}/retrain.log"
 }
+if [[ "${RELOAD_STATUS}" != "failed" ]]; then
+  RELOAD_STATUS="ok"
+  ops_set \
+    --set "reload_last_status=ok" \
+    --set "reload_last_at_ms=$(now_ms)"
+fi
 
 echo "[$(timestamp)] Generating daily ML report..." | tee -a "${LOG_DIR}/retrain.log"
 if REPORT_OUTPUT="$("${PYTHON}" scripts/generate_daily_ml_report.py --db "${PIVOT_DB_PATH}" --out-dir "${LOG_DIR}/reports" 2>&1)"; then
@@ -111,3 +156,8 @@ else
 fi
 
 echo "[$(timestamp)] Retrain cycle complete." | tee -a "${LOG_DIR}/retrain.log"
+ops_set \
+  --set "retrain_state=idle" \
+  --set "retrain_last_status=ok" \
+  --set "retrain_last_end_ms=$(now_ms)" \
+  --set "reload_last_status=${RELOAD_STATUS}"

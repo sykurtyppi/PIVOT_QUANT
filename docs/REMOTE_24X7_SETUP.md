@@ -117,6 +117,9 @@ ML_REPORT_SMTP_USE_TLS=true
 # include useful runtime logs in the email body
 ML_REPORT_INCLUDE_LOG_TAILS=true
 ML_REPORT_LOG_TAIL_LINES=80
+ML_COST_SPREAD_BPS=0.8
+ML_COST_SLIPPAGE_BPS=0.4
+ML_COST_COMMISSION_BPS=0.1
 
 # optional iMessage recipients (comma-separated phone/email)
 # ML_REPORT_IMESSAGE_TO=+15551234567

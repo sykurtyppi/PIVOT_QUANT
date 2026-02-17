@@ -412,10 +412,64 @@ def parse_retrain_status(log_tails: dict[str, str]) -> dict[str, str]:
     return result
 
 
+def fetch_ops_status(db_path: str) -> dict[str, str]:
+    conn = connect_db_if_exists(db_path)
+    if conn is None:
+        return {}
+    try:
+        if not table_exists(conn, "ops_status"):
+            return {}
+        rows = conn.execute("SELECT key, value FROM ops_status").fetchall()
+        return {str(r["key"]): str(r["value"]) if r["value"] is not None else "" for r in rows}
+    finally:
+        conn.close()
+
+
+def ms_to_local_str(value: str | None) -> str:
+    if not value:
+        return "unknown"
+    try:
+        ts_ms = int(float(value))
+    except (TypeError, ValueError):
+        return "unknown"
+    return format_ts_et(ts_ms)
+
+
+def build_retrain_status(ops_status: dict[str, str], log_status: dict[str, str]) -> dict[str, str]:
+    if not ops_status:
+        return log_status
+
+    last_end = ms_to_local_str(ops_status.get("retrain_last_end_ms"))
+    reload_status = ops_status.get("reload_last_status", "").strip().lower() or "unknown"
+    retrain_state = ops_status.get("retrain_state", "").strip().lower()
+    retrain_last_status = ops_status.get("retrain_last_status", "").strip().lower()
+
+    next_expected = "unknown"
+    try:
+        end_ms = int(float(ops_status.get("retrain_last_end_ms", "")))
+        next_expected = format_ts_et(end_ms + 6 * 60 * 60 * 1000)
+    except (TypeError, ValueError):
+        pass
+
+    state_hint = ""
+    if retrain_state == "running":
+        state_hint = " (running)"
+    elif retrain_last_status == "failed":
+        state_hint = " (last cycle failed)"
+
+    return {
+        "last_cycle": f"{last_end}{state_hint}",
+        "reload_status": reload_status,
+        "next_expected": next_expected,
+    }
+
+
 def build_action_flags(
     context: dict[str, str],
     db_progress: dict[str, Any],
     retrain_status: dict[str, str],
+    failures_today: dict[str, int] | None = None,
+    impact: dict[str, Any] | None = None,
 ) -> list[str]:
     flags: list[str] = []
 
@@ -430,6 +484,15 @@ def build_action_flags(
     predictions_today = db_progress.get("predictions_today")
     if isinstance(predictions_today, int) and predictions_today == 0:
         flags.append("Investigate scoring pipeline: 0 predictions logged in report window.")
+
+    if failures_today and failures_today.get("failures", 0) > 0:
+        flags.append(
+            f"Resolve scoring errors ({failures_today.get('failures', 0)} failures, "
+            f"{failures_today.get('timeouts', 0)} timeouts today)."
+        )
+
+    if impact and impact.get("avg_net") is not None and float(impact["avg_net"]) < 0:
+        flags.append("Net expectancy is negative after costs; keep risk limits tight or disable execution.")
 
     if retrain_status.get("reload_status") == "failed":
         flags.append("Fix /reload failures before next trading session.")
@@ -455,6 +518,255 @@ def check_http(url: str, expect_json_status: bool = False) -> str:
             return "up"
     except Exception:
         return "down"
+
+
+def parse_float_or_none(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def format_delta(current: float | int | None, previous: float | int | None, better_if_lower: bool = False) -> str:
+    if current is None or previous is None:
+        return "--"
+    delta = float(current) - float(previous)
+    if abs(delta) < 1e-9:
+        return "flat"
+    up = delta > 0
+    arrow = "▲" if up else "▼"
+    direction_good = (not up and better_if_lower) or (up and not better_if_lower)
+    verdict = "better" if direction_good else "worse"
+    return f"{arrow} {delta:+.1f} ({verdict})"
+
+
+def extract_report_dir(path: Path) -> Path:
+    return path.parent
+
+
+def find_previous_report(report_path: Path, current_date: str) -> Path | None:
+    report_dir = extract_report_dir(report_path)
+    candidates = sorted(report_dir.glob("ml_daily_*.md"))
+    prev: Path | None = None
+    for candidate in candidates:
+        stem = candidate.stem  # ml_daily_YYYY-MM-DD
+        parts = stem.split("_")
+        if len(parts) < 3:
+            continue
+        day = parts[-1]
+        if day < current_date:
+            prev = candidate
+    return prev
+
+
+def score_failure_keywords(line: str) -> tuple[bool, bool]:
+    lowered = line.lower()
+    failure = "collector scoring failed" in lowered or "score request failed" in lowered
+    timeout = "timed out" in lowered or "timeout" in lowered
+    return failure, timeout
+
+
+def count_score_failures_by_day(log_files: list[Path], report_day: date) -> dict[str, int]:
+    target_prefix = report_day.strftime("%Y-%m-%d")
+    stats = {"failures": 0, "timeouts": 0}
+    watch = {"live_collector.log", "retrain.log"}
+    for path in log_files:
+        if path.name not in watch or not path.exists():
+            continue
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as fh:
+                for raw in fh:
+                    if not raw.startswith(target_prefix):
+                        continue
+                    failure, timeout = score_failure_keywords(raw)
+                    if failure:
+                        stats["failures"] += 1
+                    if timeout:
+                        stats["timeouts"] += 1
+        except OSError:
+            continue
+    return stats
+
+
+def compute_impact_stats(db_path: str, report_day: date, include_preview: bool = False) -> dict[str, Any]:
+    spread = float(os.getenv("ML_COST_SPREAD_BPS", "0.8"))
+    slippage = float(os.getenv("ML_COST_SLIPPAGE_BPS", "0.4"))
+    commission = float(os.getenv("ML_COST_COMMISSION_BPS", "0.1"))
+    total_cost = spread + slippage + commission
+
+    result: dict[str, Any] = {
+        "cost_model": {"spread": spread, "slippage": slippage, "commission": commission, "total": total_cost},
+        "signals": 0,
+        "avg_gross": None,
+        "avg_net": None,
+        "win_rate_net": None,
+        "by_horizon": {},
+    }
+
+    conn = connect_db_if_exists(db_path)
+    if conn is None:
+        result["error"] = f"DB not found: {db_path}"
+        return result
+
+    try:
+        if not all(table_exists(conn, t) for t in ("prediction_log", "event_labels", "touch_events")):
+            result["error"] = "Required tables missing for impact stats."
+            return result
+
+        pred_cols = {r[1] for r in conn.execute("PRAGMA table_info(prediction_log)").fetchall()}
+        has_preview = "is_preview" in pred_cols
+        preview_filter = ""
+        if has_preview and not include_preview:
+            preview_filter = "AND COALESCE(lp.is_preview, 0) = 0"
+
+        start_ms, end_ms = et_day_bounds_ms(report_day)
+        rows = conn.execute(
+            f"""
+            WITH latest_pred AS (
+                SELECT *
+                FROM (
+                    SELECT pl.*,
+                           ROW_NUMBER() OVER (
+                             PARTITION BY pl.event_id
+                             ORDER BY pl.ts_prediction DESC
+                           ) AS rn
+                    FROM prediction_log pl
+                )
+                WHERE rn = 1
+            )
+            SELECT
+                te.ts_event,
+                el.horizon_min,
+                el.return_bps,
+                lp.signal_5m,
+                lp.signal_15m,
+                lp.signal_60m
+            FROM event_labels el
+            JOIN touch_events te ON te.event_id = el.event_id
+            JOIN latest_pred lp ON lp.event_id = el.event_id
+            WHERE te.ts_event >= ? AND te.ts_event < ?
+              {preview_filter}
+            """,
+            (start_ms, end_ms),
+        ).fetchall()
+
+        gross_vals: list[float] = []
+        net_vals: list[float] = []
+        by_h: dict[int, list[tuple[float, float]]] = {5: [], 15: [], 60: []}
+
+        for row in rows:
+            horizon = int(row["horizon_min"])
+            if horizon == 5:
+                signal = (row["signal_5m"] or "").lower()
+            elif horizon == 15:
+                signal = (row["signal_15m"] or "").lower()
+            elif horizon == 60:
+                signal = (row["signal_60m"] or "").lower()
+            else:
+                continue
+
+            if signal not in {"reject", "break"}:
+                continue
+
+            gross = parse_float_or_none(row["return_bps"])
+            if gross is None:
+                continue
+            net = gross - total_cost
+            gross_vals.append(gross)
+            net_vals.append(net)
+            by_h.setdefault(horizon, []).append((gross, net))
+
+        result["signals"] = len(gross_vals)
+        if gross_vals:
+            result["avg_gross"] = sum(gross_vals) / len(gross_vals)
+            result["avg_net"] = sum(net_vals) / len(net_vals)
+            wins = sum(1 for n in net_vals if n > 0)
+            result["win_rate_net"] = wins / len(net_vals)
+
+        by_h_summary: dict[int, dict[str, Any]] = {}
+        for horizon, pairs in by_h.items():
+            if not pairs:
+                by_h_summary[horizon] = {"n": 0, "avg_net": None}
+                continue
+            n = len(pairs)
+            avg_net = sum(net for _, net in pairs) / n
+            by_h_summary[horizon] = {"n": n, "avg_net": avg_net}
+        result["by_horizon"] = by_h_summary
+    finally:
+        conn.close()
+
+    return result
+
+
+def build_trend_summary(
+    context: dict[str, str],
+    previous_context: dict[str, str] | None,
+    db_current: dict[str, Any],
+    db_previous: dict[str, Any],
+    fails_current: dict[str, int],
+    fails_previous: dict[str, int],
+) -> list[str]:
+    lines: list[str] = []
+
+    cur_stale = parse_float(context.get("staleness"))
+    prev_stale = parse_float(previous_context.get("staleness")) if previous_context else None
+    lines.append(f"Staleness: {format_delta(cur_stale, prev_stale, better_if_lower=True)}")
+
+    lines.append(
+        "Bars today vs prior: "
+        f"{format_delta(parse_float_or_none(db_current.get('bars_today')), parse_float_or_none(db_previous.get('bars_today')))}"
+    )
+    lines.append(
+        "Events today vs prior: "
+        f"{format_delta(parse_float_or_none(db_current.get('events_today')), parse_float_or_none(db_previous.get('events_today')))}"
+    )
+    lines.append(
+        "Predictions today vs prior: "
+        f"{format_delta(parse_float_or_none(db_current.get('predictions_today')), parse_float_or_none(db_previous.get('predictions_today')))}"
+    )
+    lines.append(
+        "Score failures today vs prior: "
+        f"{format_delta(fails_current.get('failures'), fails_previous.get('failures'), better_if_lower=True)}"
+    )
+    return lines
+
+
+def build_impact_lines(impact: dict[str, Any]) -> list[str]:
+    if impact.get("error"):
+        return [f"Impact stats unavailable: {impact['error']}"]
+
+    cost = impact["cost_model"]
+    lines = [
+        "Cost model (bps): "
+        f"spread={float(cost['spread']):.2f}, "
+        f"slippage={float(cost['slippage']):.2f}, "
+        f"commission={float(cost['commission']):.2f} "
+        f"(total={float(cost['total']):.2f})",
+        f"Tradeable matured signals: {impact['signals']}",
+    ]
+
+    if impact.get("avg_gross") is None:
+        lines.append("No matured tradeable returns yet for impact calculation.")
+        return lines
+
+    lines.append(f"Avg gross return: {impact['avg_gross']:.2f} bps")
+    lines.append(f"Avg net return: {impact['avg_net']:.2f} bps")
+    win_rate = impact.get("win_rate_net")
+    if win_rate is not None:
+        lines.append(f"Net win rate: {win_rate * 100:.1f}%")
+
+    by_horizon = impact.get("by_horizon", {})
+    for horizon in (5, 15, 60):
+        h = by_horizon.get(horizon, {})
+        n = h.get("n", 0)
+        avg_net = h.get("avg_net")
+        if n == 0 or avg_net is None:
+            lines.append(f"{horizon}m: N=0")
+        else:
+            lines.append(f"{horizon}m: N={n}, avg net={avg_net:.2f} bps")
+    return lines
 
 def resolve_log_files(cli_logs: list[str]) -> list[Path]:
     if cli_logs:
@@ -662,6 +974,9 @@ def build_compact_email_body(
     anomaly_digest: list[str],
     action_flags: list[str],
     score_failures_tail: int,
+    score_timeouts_today: int,
+    trend_lines: list[str],
+    impact_lines: list[str],
     report_path: Path,
     include_log_tails: bool,
 ) -> str:
@@ -710,12 +1025,24 @@ def build_compact_email_body(
     lines.append(f"- Predictions logged today: {predictions_today if predictions_today is not None else '--'}")
     live_count = db_progress.get("predictions_live_today")
     preview_count = db_progress.get("predictions_preview_today")
+    eligible = events_today if isinstance(events_today, int) else None
+    scored_live = live_count if isinstance(live_count, int) else (
+        predictions_today if isinstance(predictions_today, int) else None
+    )
+    unscored = None
+    if isinstance(eligible, int) and isinstance(scored_live, int):
+        unscored = max(eligible - scored_live, 0)
+
     if live_count is not None or preview_count is not None:
         lines.append(
             f"- Live vs Preview predictions: "
             f"{live_count if live_count is not None else '--'} / {preview_count if preview_count is not None else '--'}"
         )
+    lines.append(f"- Eligible events today: {eligible if eligible is not None else '--'}")
+    lines.append(f"- Scored live today: {scored_live if scored_live is not None else '--'}")
+    lines.append(f"- Unscored eligible today: {unscored if unscored is not None else '--'}")
     lines.append(f"- Score failures (log tail): {score_failures_tail}")
+    lines.append(f"- Score timeouts (today): {score_timeouts_today}")
     lines.append("")
 
     lines.append("Retrain & Reload")
@@ -726,6 +1053,16 @@ def build_compact_email_body(
 
     lines.append("MFE/MAE Drift")
     for line in mfe_mae_summary[:3]:
+        lines.append(f"- {line}")
+    lines.append("")
+
+    lines.append("Trend vs Prior Day")
+    for line in trend_lines:
+        lines.append(f"- {line}")
+    lines.append("")
+
+    lines.append("Impact (Cost-Aware)")
+    for line in impact_lines:
         lines.append(f"- {line}")
     lines.append("")
 
@@ -904,6 +1241,7 @@ def main() -> int:
     summary = build_short_summary(context)
     report_day = parse_report_day(context["report_date"])
     db_progress = fetch_db_progress(args.db, report_day)
+    db_prev = fetch_db_progress(args.db, report_day - timedelta(days=1))
     market_context = get_market_session_context()
     subject = (
         f"{args.subject_prefix} | [{context['health']}] {context['report_date']} "
@@ -919,19 +1257,29 @@ def main() -> int:
     if args.include_log_tails:
         log_tails = build_log_tails(resolve_log_files(args.log_file), args.log_tail_lines)
         log_tail_text = build_log_tail_section(log_tails)
+    resolved_log_files = resolve_log_files(args.log_file)
 
     service_snapshot = {
         "dashboard": check_http("http://127.0.0.1:3000/"),
         "ml": check_http("http://127.0.0.1:5003/health", expect_json_status=True),
         "collector": check_http("http://127.0.0.1:5004/health", expect_json_status=True),
     }
-    retrain_status = parse_retrain_status(log_tails)
+    retrain_status = build_retrain_status(fetch_ops_status(args.db), parse_retrain_status(log_tails))
     health_notes = extract_section_bullets(report_text, "## Health Notes")
     horizon_snapshots = parse_horizon_snapshots(report_text)
     mfe_mae_summary = build_mfe_mae_summary(parse_calibration_drift(report_text))
     anomaly_digest = build_anomaly_digest(log_tails, args.anomaly_limit)
     score_failures_tail = count_score_failures(log_tails)
-    action_flags = build_action_flags(context, db_progress, retrain_status)
+    failures_today = count_score_failures_by_day(resolved_log_files, report_day)
+    failures_prev = count_score_failures_by_day(resolved_log_files, report_day - timedelta(days=1))
+    previous_report_path = find_previous_report(report_path, context["report_date"])
+    previous_context: dict[str, str] | None = None
+    if previous_report_path and previous_report_path.exists():
+        previous_context = parse_report_context(read_report(previous_report_path), previous_report_path)
+    trend_lines = build_trend_summary(context, previous_context, db_progress, db_prev, failures_today, failures_prev)
+    impact_stats = compute_impact_stats(args.db, report_day)
+    impact_lines = build_impact_lines(impact_stats)
+    action_flags = build_action_flags(context, db_progress, retrain_status, failures_today, impact_stats)
     compact_body = build_compact_email_body(
         context=context,
         market_context=market_context,
@@ -944,6 +1292,9 @@ def main() -> int:
         anomaly_digest=anomaly_digest,
         action_flags=action_flags,
         score_failures_tail=score_failures_tail,
+        score_timeouts_today=failures_today.get("timeouts", 0),
+        trend_lines=trend_lines,
+        impact_lines=impact_lines,
         report_path=report_path,
         include_log_tails=bool(log_tail_text),
     )
