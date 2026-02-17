@@ -120,6 +120,9 @@ ML_REPORT_LOG_TAIL_LINES=80
 ML_COST_SPREAD_BPS=0.8
 ML_COST_SLIPPAGE_BPS=0.4
 ML_COST_COMMISSION_BPS=0.1
+# session-aware staleness thresholds (regular session hours)
+ML_STALENESS_WARN_SESSION_HOURS=13
+ML_STALENESS_KILL_SESSION_HOURS=19.5
 
 # optional iMessage recipients (comma-separated phone/email)
 # ML_REPORT_IMESSAGE_TO=+15551234567
@@ -132,7 +135,7 @@ Install scheduled delivery:
 
 ```bash
 cd /Users/tristanalejandro/PIVOT_QUANT
-# modes: close (17:10 ET weekdays), morning (08:05 ET weekdays), both
+# modes: close (17:10 local weekdays), morning (08:05 local weekdays), both
 bash scripts/install_daily_report_launch_agent.sh close
 ```
 

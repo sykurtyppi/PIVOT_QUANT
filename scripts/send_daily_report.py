@@ -45,6 +45,7 @@ except ImportError:  # pragma: no cover
 
 ET_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone.utc
 LOCAL_TZ = datetime.now().astimezone().tzinfo or timezone.utc
+SESSION_STALE_KILL_HOURS = float(os.getenv("ML_STALENESS_KILL_SESSION_HOURS", "19.5"))
 LOG_TS_PATTERNS = [
     re.compile(r"^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]"),
     re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s+\[(?:INFO|WARNING|ERROR|DEBUG)\]"),
@@ -492,8 +493,10 @@ def build_action_flags(
         flags.append("Keep live execution disabled until freshness and scoring recover.")
 
     staleness_hours = parse_float(context.get("staleness"))
-    if staleness_hours is not None and staleness_hours >= 72:
-        flags.append("Trigger retrain now (model staleness exceeds 72h).")
+    if staleness_hours is not None and staleness_hours >= SESSION_STALE_KILL_HOURS:
+        flags.append(
+            f"Trigger retrain now (session staleness exceeds {SESSION_STALE_KILL_HOURS:.1f}h)."
+        )
 
     predictions_today = db_progress.get("predictions_today")
     if isinstance(predictions_today, int) and predictions_today == 0:

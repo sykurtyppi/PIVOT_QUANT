@@ -38,6 +38,10 @@ except ImportError:  # pragma: no cover
     ZoneInfo = None  # type: ignore
 
 ET_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone.utc
+REGULAR_SESSION_OPEN_ET = dtime(9, 30)
+REGULAR_SESSION_CLOSE_ET = dtime(16, 0)
+SESSION_STALE_WARN_HOURS = float(os.getenv("ML_STALENESS_WARN_SESSION_HOURS", "13"))
+SESSION_STALE_KILL_HOURS = float(os.getenv("ML_STALENESS_KILL_SESSION_HOURS", "19.5"))
 
 
 @dataclass
@@ -618,33 +622,89 @@ def pct(part: int, total: int) -> float:
     return (part / total) * 100.0
 
 
-def determine_health_status(bundles: list[MetricBundle], model_stale_hours: float | None) -> tuple[str, list[str]]:
-    notes: list[str] = []
-    if model_stale_hours is not None and model_stale_hours >= 72:
-        return ("kill-switch", [f"Model staleness {model_stale_hours:.1f}h exceeds 72h"])
-    if model_stale_hours is not None and model_stale_hours >= 48:
-        notes.append(f"Model is stale ({model_stale_hours:.1f}h)")
+def compute_session_staleness_hours(start_ms: int | float | None, end_ms: int | float | None) -> float | None:
+    if start_ms is None or end_ms is None:
+        return None
+    try:
+        start_ts = float(start_ms)
+        end_ts = float(end_ms)
+    except (TypeError, ValueError):
+        return None
+    if end_ts <= start_ts:
+        return 0.0
+
+    start_dt = datetime.fromtimestamp(start_ts / 1000.0, tz=timezone.utc).astimezone(ET_TZ)
+    end_dt = datetime.fromtimestamp(end_ts / 1000.0, tz=timezone.utc).astimezone(ET_TZ)
+
+    total_seconds = 0.0
+    day = start_dt.date()
+    while day <= end_dt.date():
+        if day.weekday() < 5:
+            session_start = datetime.combine(day, REGULAR_SESSION_OPEN_ET, tzinfo=ET_TZ)
+            session_end = datetime.combine(day, REGULAR_SESSION_CLOSE_ET, tzinfo=ET_TZ)
+            segment_start = max(session_start, start_dt)
+            segment_end = min(session_end, end_dt)
+            if segment_end > segment_start:
+                total_seconds += (segment_end - segment_start).total_seconds()
+        day += timedelta(days=1)
+
+    return total_seconds / 3600.0
+
+
+def determine_health_status(
+    bundles: list[MetricBundle],
+    wall_stale_hours: float | None,
+    session_stale_hours: float | None,
+) -> tuple[str, list[str]]:
+    risk_notes: list[str] = []
+    info_notes: list[str] = []
+
+    # Gate kill-switch on regular-session elapsed time (prevents weekend/holiday false positives).
+    if session_stale_hours is not None:
+        if session_stale_hours >= SESSION_STALE_KILL_HOURS:
+            return (
+                "kill-switch",
+                [f"Model session staleness {session_stale_hours:.1f}h exceeds {SESSION_STALE_KILL_HOURS:.1f}h"],
+            )
+        if session_stale_hours >= SESSION_STALE_WARN_HOURS:
+            risk_notes.append(
+                f"Model session staleness elevated ({session_stale_hours:.1f}h >= {SESSION_STALE_WARN_HOURS:.1f}h)"
+            )
+        if wall_stale_hours is not None and wall_stale_hours >= 72:
+            info_notes.append(
+                f"Wall-clock staleness {wall_stale_hours:.1f}h (gated by session staleness {session_stale_hours:.1f}h)"
+            )
+    else:
+        # Fallback to previous behavior if session staleness cannot be computed.
+        if wall_stale_hours is not None and wall_stale_hours >= 72:
+            return ("kill-switch", [f"Model staleness {wall_stale_hours:.1f}h exceeds 72h"])
+        if wall_stale_hours is not None and wall_stale_hours >= 48:
+            risk_notes.append(f"Model is stale ({wall_stale_hours:.1f}h)")
 
     active = [b for b in bundles if b.sample_size >= 30]
     if not active:
-        notes.append("Low matured sample count (<30 per horizon)")
-        return ("degrading", notes)
+        risk_notes.append("Low matured sample count (<30 per horizon)")
+        return ("degrading", risk_notes + info_notes)
 
     for b in active:
         if b.ece_reject is not None and b.ece_reject > 0.20:
-            notes.append(f"{b.horizon}m reject ECE elevated ({b.ece_reject:.3f})")
+            risk_notes.append(f"{b.horizon}m reject ECE elevated ({b.ece_reject:.3f})")
         if b.ece_break is not None and b.ece_break > 0.20:
-            notes.append(f"{b.horizon}m break ECE elevated ({b.ece_break:.3f})")
+            risk_notes.append(f"{b.horizon}m break ECE elevated ({b.ece_break:.3f})")
         if b.reject_precision is not None and b.signal_reject_count >= 20 and b.reject_precision < 0.35:
-            notes.append(f"{b.horizon}m reject precision low ({b.reject_precision:.3f})")
+            risk_notes.append(f"{b.horizon}m reject precision low ({b.reject_precision:.3f})")
         if b.break_precision is not None and b.signal_break_count >= 20 and b.break_precision < 0.35:
-            notes.append(f"{b.horizon}m break precision low ({b.break_precision:.3f})")
+            risk_notes.append(f"{b.horizon}m break precision low ({b.break_precision:.3f})")
 
-    if any("precision low" in n for n in notes) and len(notes) >= 2:
-        return ("kill-switch", notes)
-    if notes:
-        return ("degrading", notes)
-    return ("healthy", ["All monitored thresholds within expected ranges"])
+    if any("precision low" in n for n in risk_notes) and len(risk_notes) >= 2:
+        return ("kill-switch", risk_notes + info_notes)
+    if risk_notes:
+        return ("degrading", risk_notes + info_notes)
+
+    healthy_notes = ["All monitored thresholds within expected ranges"]
+    if info_notes:
+        healthy_notes.extend(info_notes)
+    return ("healthy", healthy_notes)
 
 
 def format_metric(v: float | None, digits: int = 3) -> str:
@@ -669,11 +729,17 @@ def render_report(
     feature_version = manifest.get("feature_version", "--")
     trained_end_ts = manifest.get("trained_end_ts")
     trained_end = ts_to_et(trained_end_ts)
-    stale_hours = None
+    stale_hours_wall = None
+    now_ms = time.time() * 1000
     if isinstance(trained_end_ts, (int, float)):
-        stale_hours = (time.time() * 1000 - float(trained_end_ts)) / (3600 * 1000)
+        stale_hours_wall = (now_ms - float(trained_end_ts)) / (3600 * 1000)
+    stale_hours_session = compute_session_staleness_hours(trained_end_ts, now_ms)
 
-    health, health_notes = determine_health_status(bundles, stale_hours)
+    health, health_notes = determine_health_status(
+        bundles=bundles,
+        wall_stale_hours=stale_hours_wall,
+        session_stale_hours=stale_hours_session,
+    )
     report_date_str = report_day.strftime("%Y-%m-%d")
 
     total_preds = len(predictions)
@@ -687,7 +753,14 @@ def render_report(
     lines.append(f"- Window (ET): {ts_to_et(start_ms)} -> {ts_to_et(end_ms)}")
     lines.append(f"- Model: `{model_version}` (feature `{feature_version}`)")
     lines.append(f"- Trained End: {trained_end}")
-    lines.append(f"- Model Staleness: {f'{stale_hours:.1f}h' if stale_hours is not None else '--'}")
+    lines.append(
+        f"- Model Staleness: "
+        f"{f'{stale_hours_session:.1f}h' if stale_hours_session is not None else '--'} "
+        f"(regular session hours)"
+    )
+    lines.append(
+        f"- Wall-Clock Staleness: {f'{stale_hours_wall:.1f}h' if stale_hours_wall is not None else '--'}"
+    )
     lines.append(f"- Health State: **{health.upper()}**")
     lines.append("")
     lines.append("## Headline Counts")
@@ -768,7 +841,7 @@ def render_report(
     lines.append("## Action Checklist")
     lines.append("")
     lines.append("- If health is `KILL-SWITCH`, disable live execution and review the misses section first.")
-    lines.append("- If health is `DEGRADING`, check calibration drift and model staleness before next session.")
+    lines.append("- If health is `DEGRADING`, check calibration drift and session staleness before next session.")
     lines.append("- Verify `run_retrain_cycle.sh` completed and `/reload` succeeded in `logs/retrain.log`.")
     lines.append("")
 
