@@ -220,6 +220,12 @@ def _collect_symbol(conn: sqlite3.Connection, symbol: str) -> tuple[Dict[str, An
         new_events = [ev for ev in events if ev.get("event_id") not in existing_ids]
         if new_events:
             events_inserted = insert_events(conn, new_events)
+            # Score only events that actually made it into touch_events.
+            # Natural-key dedupe can ignore rows even when event_id is novel.
+            inserted_ids = _fetch_existing_event_ids(
+                conn, [ev["event_id"] for ev in new_events if ev.get("event_id")]
+            )
+            new_events = [ev for ev in new_events if ev.get("event_id") in inserted_ids]
 
     return (
         {
