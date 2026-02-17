@@ -9,17 +9,27 @@ timestamp() {
   date '+%Y-%m-%d %H:%M:%S'
 }
 
-if [ -x "${ROOT_DIR}/.venv/bin/python" ]; then
+if [ -x "${ROOT_DIR}/.venv/bin/python3" ]; then
+  PYTHON="${ROOT_DIR}/.venv/bin/python3"
+elif [ -x "${ROOT_DIR}/.venv/bin/python" ]; then
   PYTHON="${ROOT_DIR}/.venv/bin/python"
+elif command -v python3 >/dev/null 2>&1; then
+  PYTHON="$(command -v python3)"
 else
-  PYTHON="python3"
+  echo "[$(timestamp)] ERROR daily_report_send: python3 not found" >> "${LOG_DIR}/report_delivery.log"
+  exit 1
+fi
+
+if ! PYTHON_INFO="$("${PYTHON}" -c "import sys; assert sys.version_info >= (3, 10), f'Python {sys.version.split()[0]} too old; require >=3.10'; print(f'{sys.executable} {sys.version.split()[0]}')" 2>&1)"; then
+  echo "[$(timestamp)] ERROR daily_report_send: ${PYTHON_INFO}" >> "${LOG_DIR}/report_delivery.log"
+  exit 1
 fi
 
 PIVOT_DB_PATH="${PIVOT_DB:-${ROOT_DIR}/data/pivot_events.sqlite}"
 REPORT_OUTPUT=""
 REPORT_PATH=""
 
-echo "[$(timestamp)] START daily_report_send" >> "${LOG_DIR}/report_delivery.log"
+echo "[$(timestamp)] START daily_report_send (${PYTHON_INFO})" >> "${LOG_DIR}/report_delivery.log"
 
 if REPORT_OUTPUT="$("${PYTHON}" "${ROOT_DIR}/scripts/generate_daily_ml_report.py" --db "${PIVOT_DB_PATH}" --out-dir "${LOG_DIR}/reports" 2>&1)"; then
   printf '%s\n' "${REPORT_OUTPUT}" >> "${LOG_DIR}/report_delivery.log"

@@ -101,11 +101,19 @@ acquire_lock
 cd "${ROOT_DIR}"
 
 # Prefer the project venv to avoid picking up a wrong system Python.
-if [ -x "${ROOT_DIR}/.venv/bin/python" ]; then
+if [ -x "${ROOT_DIR}/.venv/bin/python3" ]; then
+  PYTHON="${ROOT_DIR}/.venv/bin/python3"
+elif [ -x "${ROOT_DIR}/.venv/bin/python" ]; then
   PYTHON="${ROOT_DIR}/.venv/bin/python"
+elif command -v python3 >/dev/null 2>&1; then
+  PYTHON="$(command -v python3)"
 else
-  PYTHON="python3"
+  echo "[$(timestamp)] ERROR retrain: python3 not found" | tee -a "${LOG_DIR}/retrain.log"
+  exit 1
 fi
+
+run_step "python_env_check" "${PYTHON}" -c "import sys; assert sys.version_info >= (3, 10), f'Python {sys.version.split()[0]} too old; require >=3.10'; print(sys.executable, sys.version.split()[0])"
+run_step "python_deps_check" "${PYTHON}" -c "import importlib.util, sys; required=['duckdb','pandas','numpy','joblib','sklearn']; missing=[m for m in required if importlib.util.find_spec(m) is None]; print('deps ok' if not missing else 'missing deps: ' + ', '.join(missing)); sys.exit(0 if not missing else 1)"
 
 ops_set \
   --set "retrain_state=running" \

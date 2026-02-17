@@ -6,18 +6,22 @@ from pathlib import Path
 
 DEFAULT_DB = os.getenv("PIVOT_DB", "data/pivot_events.sqlite")
 OUT_DIR = Path(os.getenv("EXPORT_DIR", "data/exports"))
+PIP_INSTALL = f"{sys.executable} -m pip install"
 
 
-def require(module_name: str, hint: str):
+def require(module_name: str, pip_package: str):
     try:
         return __import__(module_name)
     except Exception:
-        print(f"{module_name} not installed. Install with: {hint}", file=sys.stderr)
+        print(
+            f"{module_name} not installed. Install with: {PIP_INSTALL} {pip_package}",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
 
 def export_table(conn: sqlite3.Connection, duckdb_con, table: str, out_path: Path) -> None:
-    pd = require("pandas", "python3 -m pip install pandas")
+    pd = require("pandas", "pandas")
     df = pd.read_sql_query(f"SELECT * FROM {table}", conn)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     duckdb_con.register("tmp_df", df)
@@ -28,7 +32,7 @@ def export_table(conn: sqlite3.Connection, duckdb_con, table: str, out_path: Pat
 
 
 def main() -> None:
-    duckdb = require("duckdb", "python3 -m pip install duckdb")
+    duckdb = require("duckdb", "duckdb")
     conn = sqlite3.connect(DEFAULT_DB)
     con = duckdb.connect()
     try:

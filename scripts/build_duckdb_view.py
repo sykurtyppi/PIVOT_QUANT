@@ -5,13 +5,14 @@ from pathlib import Path
 
 EXPORT_DIR = Path(os.getenv("EXPORT_DIR", "data/exports"))
 DB_PATH = Path(os.getenv("DUCKDB_PATH", "data/pivot_training.duckdb"))
+PIP_INSTALL = f"{sys.executable} -m pip install"
 
 
 def main() -> None:
     try:
         import duckdb  # type: ignore
     except Exception:
-        print("duckdb not installed. Install with: python3 -m pip install duckdb", file=sys.stderr)
+        print(f"duckdb not installed. Install with: {PIP_INSTALL} duckdb", file=sys.stderr)
         sys.exit(1)
 
     touch_csv = EXPORT_DIR / "touch_events.csv"
