@@ -59,6 +59,16 @@ run_step() {
   echo "[$(timestamp)] DONE  ${name}" | tee -a "${LOG_DIR}/retrain.log"
 }
 
+is_truthy() {
+  local raw="${1:-}"
+  local lowered
+  lowered="$(printf '%s' "${raw}" | tr '[:upper:]' '[:lower:]')"
+  case "${lowered}" in
+    1|true|yes|y|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 PYTHON=""
 RETRAIN_SYMBOLS="${RETRAIN_SYMBOLS:-SPY}"
 PIVOT_DB_PATH="${PIVOT_DB:-${ROOT_DIR}/data/pivot_events.sqlite}"
@@ -156,7 +166,7 @@ else
   echo "[$(timestamp)] WARN: daily report generation failed" | tee -a "${LOG_DIR}/retrain.log"
 fi
 
-if [[ -n "${REPORT_PATH}" ]] && [[ -f "${REPORT_PATH}" ]] && [[ "${NOTIFY_ON_RETRAIN,,}" =~ ^(1|true|yes|y|on)$ ]]; then
+if [[ -n "${REPORT_PATH}" ]] && [[ -f "${REPORT_PATH}" ]] && is_truthy "${NOTIFY_ON_RETRAIN}"; then
   echo "[$(timestamp)] Sending daily report notification..." | tee -a "${LOG_DIR}/retrain.log"
   if "${PYTHON}" scripts/send_daily_report.py --report "${REPORT_PATH}" >> "${LOG_DIR}/retrain.log" 2>&1; then
     echo "[$(timestamp)] DONE  notify_daily_report" | tee -a "${LOG_DIR}/retrain.log"
