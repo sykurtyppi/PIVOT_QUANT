@@ -44,6 +44,11 @@ except ImportError:  # pragma: no cover
     ZoneInfo = None  # type: ignore
 
 ET_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone.utc
+LOCAL_TZ = datetime.now().astimezone().tzinfo or timezone.utc
+LOG_TS_PATTERNS = [
+    re.compile(r"^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]"),
+    re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s+\[(?:INFO|WARNING|ERROR|DEBUG)\]"),
+]
 
 
 def parse_csv(raw: str | None) -> list[str]:
@@ -161,6 +166,18 @@ def parse_float(value: str | None) -> float | None:
         return None
     try:
         return float(match.group(0))
+    except ValueError:
+        return None
+
+
+def parse_ms(value: str | None) -> int | None:
+    if value is None:
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        return int(float(text))
     except ValueError:
         return None
 
@@ -426,11 +443,8 @@ def fetch_ops_status(db_path: str) -> dict[str, str]:
 
 
 def ms_to_local_str(value: str | None) -> str:
-    if not value:
-        return "unknown"
-    try:
-        ts_ms = int(float(value))
-    except (TypeError, ValueError):
+    ts_ms = parse_ms(value)
+    if ts_ms is None:
         return "unknown"
     return format_ts_et(ts_ms)
 
@@ -945,11 +959,35 @@ def normalize_anomaly_line(line: str) -> str:
     return text
 
 
-def build_anomaly_digest(log_tails: dict[str, str], limit: int) -> list[str]:
+def parse_log_line_ts_ms(line: str) -> int | None:
+    for pattern in LOG_TS_PATTERNS:
+        match = pattern.match(line)
+        if not match:
+            continue
+        try:
+            dt_local = datetime.strptime(match.group(1), "%Y-%m-%d %H:%M:%S").replace(tzinfo=LOCAL_TZ)
+            return int(dt_local.timestamp() * 1000)
+        except ValueError:
+            return None
+    return None
+
+
+def build_anomaly_digest(log_tails: dict[str, str], limit: int, since_ms: int | None = None) -> list[str]:
     counts: Counter[str] = Counter()
     for path, body in log_tails.items():
         source = Path(path).name
+        current_ts_ms: int | None = None
         for line in body.splitlines():
+            line_ts_ms = parse_log_line_ts_ms(line)
+            if line_ts_ms is not None:
+                current_ts_ms = line_ts_ms
+
+            if since_ms is not None:
+                if current_ts_ms is None:
+                    continue
+                if current_ts_ms < since_ms:
+                    continue
+
             if not is_anomaly_line(line):
                 continue
             normalized = normalize_anomaly_line(line)
@@ -1283,11 +1321,13 @@ def main() -> int:
         "ml": check_http("http://127.0.0.1:5003/health", expect_json_status=True),
         "collector": check_http("http://127.0.0.1:5004/health", expect_json_status=True),
     }
-    retrain_status = build_retrain_status(fetch_ops_status(args.db), parse_retrain_status(log_tails))
+    ops_status = fetch_ops_status(args.db)
+    retrain_status = build_retrain_status(ops_status, parse_retrain_status(log_tails))
     health_notes = extract_section_bullets(report_text, "## Health Notes")
     horizon_snapshots = parse_horizon_snapshots(report_text)
     mfe_mae_summary = build_mfe_mae_summary(parse_calibration_drift(report_text))
-    anomaly_digest = build_anomaly_digest(log_tails, args.anomaly_limit)
+    anomaly_since_ms = parse_ms(ops_status.get("retrain_last_start_ms"))
+    anomaly_digest = build_anomaly_digest(log_tails, args.anomaly_limit, since_ms=anomaly_since_ms)
     score_failures_tail = count_score_failures(log_tails)
     score_timeouts_tail = count_score_timeouts_in_tail(log_tails)
     failures_today = count_score_failures_by_day(resolved_log_files, report_day)
