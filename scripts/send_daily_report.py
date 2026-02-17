@@ -494,8 +494,9 @@ def build_action_flags(
     if impact and impact.get("avg_net") is not None and float(impact["avg_net"]) < 0:
         flags.append("Net expectancy is negative after costs; keep risk limits tight or disable execution.")
 
-    if retrain_status.get("reload_status") == "failed":
-        flags.append("Fix /reload failures before next trading session.")
+    reload_status = retrain_status.get("reload_status", "")
+    if reload_status in {"failed", "skipped_due_to_failure"}:
+        flags.append("Fix retrain/reload pipeline before next trading session.")
 
     if not flags:
         flags.append("No critical actions detected.")
@@ -529,7 +530,11 @@ def parse_float_or_none(value: Any) -> float | None:
         return None
 
 
-def format_delta(current: float | int | None, previous: float | int | None, better_if_lower: bool = False) -> str:
+def format_delta(
+    current: float | int | None,
+    previous: float | int | None,
+    mode: str = "higher_better",
+) -> str:
     if current is None or previous is None:
         return "--"
     delta = float(current) - float(previous)
@@ -537,6 +542,10 @@ def format_delta(current: float | int | None, previous: float | int | None, bett
         return "flat"
     up = delta > 0
     arrow = "▲" if up else "▼"
+    if mode == "neutral":
+        verdict = "change"
+        return f"{arrow} {delta:+.1f} ({verdict})"
+    better_if_lower = mode == "lower_better"
     direction_good = (not up and better_if_lower) or (up and not better_if_lower)
     verdict = "better" if direction_good else "worse"
     return f"{arrow} {delta:+.1f} ({verdict})"
@@ -588,6 +597,16 @@ def count_score_failures_by_day(log_files: list[Path], report_day: date) -> dict
         except OSError:
             continue
     return stats
+
+
+def count_score_timeouts_in_tail(log_tails: dict[str, str]) -> int:
+    total = 0
+    for _, body in log_tails.items():
+        for line in body.splitlines():
+            _, timeout = score_failure_keywords(line)
+            if timeout:
+                total += 1
+    return total
 
 
 def compute_impact_stats(db_path: str, report_day: date, include_preview: bool = False) -> dict[str, Any]:
@@ -712,23 +731,23 @@ def build_trend_summary(
 
     cur_stale = parse_float(context.get("staleness"))
     prev_stale = parse_float(previous_context.get("staleness")) if previous_context else None
-    lines.append(f"Staleness: {format_delta(cur_stale, prev_stale, better_if_lower=True)}")
+    lines.append(f"Staleness: {format_delta(cur_stale, prev_stale, mode='lower_better')}")
 
     lines.append(
         "Bars today vs prior: "
-        f"{format_delta(parse_float_or_none(db_current.get('bars_today')), parse_float_or_none(db_previous.get('bars_today')))}"
+        f"{format_delta(parse_float_or_none(db_current.get('bars_today')), parse_float_or_none(db_previous.get('bars_today')), mode='higher_better')}"
     )
     lines.append(
         "Events today vs prior: "
-        f"{format_delta(parse_float_or_none(db_current.get('events_today')), parse_float_or_none(db_previous.get('events_today')))}"
+        f"{format_delta(parse_float_or_none(db_current.get('events_today')), parse_float_or_none(db_previous.get('events_today')), mode='neutral')}"
     )
     lines.append(
         "Predictions today vs prior: "
-        f"{format_delta(parse_float_or_none(db_current.get('predictions_today')), parse_float_or_none(db_previous.get('predictions_today')))}"
+        f"{format_delta(parse_float_or_none(db_current.get('predictions_today')), parse_float_or_none(db_previous.get('predictions_today')), mode='higher_better')}"
     )
     lines.append(
         "Score failures today vs prior: "
-        f"{format_delta(fails_current.get('failures'), fails_previous.get('failures'), better_if_lower=True)}"
+        f"{format_delta(fails_current.get('failures'), fails_previous.get('failures'), mode='lower_better')}"
     )
     return lines
 
@@ -974,7 +993,7 @@ def build_compact_email_body(
     anomaly_digest: list[str],
     action_flags: list[str],
     score_failures_tail: int,
-    score_timeouts_today: int,
+    score_timeouts_tail: int,
     trend_lines: list[str],
     impact_lines: list[str],
     report_path: Path,
@@ -1042,7 +1061,7 @@ def build_compact_email_body(
     lines.append(f"- Scored live today: {scored_live if scored_live is not None else '--'}")
     lines.append(f"- Unscored eligible today: {unscored if unscored is not None else '--'}")
     lines.append(f"- Score failures (log tail): {score_failures_tail}")
-    lines.append(f"- Score timeouts (today): {score_timeouts_today}")
+    lines.append(f"- Score timeouts (log tail): {score_timeouts_tail}")
     lines.append("")
 
     lines.append("Retrain & Reload")
@@ -1270,6 +1289,7 @@ def main() -> int:
     mfe_mae_summary = build_mfe_mae_summary(parse_calibration_drift(report_text))
     anomaly_digest = build_anomaly_digest(log_tails, args.anomaly_limit)
     score_failures_tail = count_score_failures(log_tails)
+    score_timeouts_tail = count_score_timeouts_in_tail(log_tails)
     failures_today = count_score_failures_by_day(resolved_log_files, report_day)
     failures_prev = count_score_failures_by_day(resolved_log_files, report_day - timedelta(days=1))
     previous_report_path = find_previous_report(report_path, context["report_date"])
@@ -1292,7 +1312,7 @@ def main() -> int:
         anomaly_digest=anomaly_digest,
         action_flags=action_flags,
         score_failures_tail=score_failures_tail,
-        score_timeouts_today=failures_today.get("timeouts", 0),
+        score_timeouts_tail=score_timeouts_tail,
         trend_lines=trend_lines,
         impact_lines=impact_lines,
         report_path=report_path,

@@ -65,7 +65,7 @@ PIVOT_DB_PATH="${PIVOT_DB:-${ROOT_DIR}/data/pivot_events.sqlite}"
 REPORT_PATH=""
 REPORT_OUTPUT=""
 NOTIFY_ON_RETRAIN="${ML_REPORT_NOTIFY_ON_RETRAIN:-false}"
-RELOAD_STATUS="unknown"
+RELOAD_STATUS="not_attempted"
 
 ops_set() {
   if [[ -z "${PYTHON}" ]]; then
@@ -78,14 +78,20 @@ mark_failure() {
   local exit_code="$?"
   local failed_cmd="${BASH_COMMAND:-unknown}"
   local ts_ms
+  local reload_for_failure
   ts_ms="$(now_ms)"
+  reload_for_failure="${RELOAD_STATUS}"
+  if [[ "${reload_for_failure}" == "unknown" || "${reload_for_failure}" == "not_attempted" ]]; then
+    reload_for_failure="skipped_due_to_failure"
+  fi
   echo "[$(timestamp)] ERROR retrain: command failed (${failed_cmd}) exit=${exit_code}" | tee -a "${LOG_DIR}/retrain.log"
   ops_set \
     --set "retrain_state=idle" \
     --set "retrain_last_status=failed" \
     --set "retrain_last_end_ms=${ts_ms}" \
     --set "retrain_last_error=${failed_cmd}" \
-    --set "reload_last_status=${RELOAD_STATUS}"
+    --set "reload_last_status=${reload_for_failure}" \
+    --set "reload_last_at_ms=${ts_ms}"
 }
 
 trap mark_failure ERR
