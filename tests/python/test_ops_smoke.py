@@ -211,6 +211,15 @@ class OpsSmokeTests(unittest.TestCase):
         os.chmod(scripts_dir / "generate_daily_ml_report.py", 0o755)
         os.chmod(scripts_dir / "send_daily_report.py", 0o755)
 
+        # Make the test independent of launchd PATH quirks: the sender script
+        # prefers ROOT/.venv/bin/python3 when available.
+        venv_python = root / ".venv" / "bin" / "python3"
+        venv_python.parent.mkdir(parents=True, exist_ok=True)
+        target_python = Path(PYTHON).resolve()
+        if venv_python.exists() or venv_python.is_symlink():
+            venv_python.unlink()
+        os.symlink(target_python, venv_python)
+
         report_date = "2026-02-18"
         env = {
             "ML_REPORT_NOTIFY_CHANNELS": "none",

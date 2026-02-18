@@ -35,6 +35,7 @@ const HEALTH_ALERT_STATE_FILE = path.join(ROOT_DIR, 'logs', 'health_alert_state.
 const REPORT_DELIVERY_STATE_FILE = path.join(ROOT_DIR, 'logs', 'report_delivery_state.json');
 const REPORT_DELIVERY_LOG_FILE = path.join(ROOT_DIR, 'logs', 'report_delivery.log');
 const HEALTH_ALERT_LOG_FILE = path.join(ROOT_DIR, 'logs', 'health_alert.log');
+const RESTORE_DRILL_LOG_FILE = path.join(ROOT_DIR, 'logs', 'restore_drill.log');
 
 const symbolMap = new Map([
   ['SPX', '^GSPC'],
@@ -597,6 +598,43 @@ function summarizeHealthAlert(logLines) {
   return summary;
 }
 
+function summarizeRestoreDrill(logLines) {
+  const summary = {
+    status: 'unknown',
+    timestamp: null,
+    line: '',
+    snapshot: '',
+    report: '',
+  };
+  for (let idx = logLines.length - 1; idx >= 0; idx -= 1) {
+    const line = logLines[idx];
+    if (!line) continue;
+    if (line.includes('restore drill ok snapshot=')) {
+      summary.status = 'ok';
+      summary.timestamp = parseLogTimestamp(line);
+      summary.line = line;
+      const match = line.match(/snapshot=([0-9_]+)/);
+      if (match) summary.snapshot = match[1];
+      const reportMatch = line.match(/report=([A-Za-z0-9_.-]+)/);
+      if (reportMatch) summary.report = reportMatch[1];
+      return summary;
+    }
+    if (line.includes('restore drill failed')) {
+      summary.status = 'failed';
+      summary.timestamp = parseLogTimestamp(line);
+      summary.line = line;
+      return summary;
+    }
+    if (line.includes('restore drill skipped: lock busy')) {
+      summary.status = 'skipped_lock_busy';
+      summary.timestamp = parseLogTimestamp(line);
+      summary.line = line;
+      return summary;
+    }
+  }
+  return summary;
+}
+
 async function readOpsStatusRows() {
   let Database;
   try {
@@ -636,6 +674,7 @@ async function queryOpsStatus() {
   const reportState = readJsonFileSafe(REPORT_DELIVERY_STATE_FILE, {});
   const reportLog = summarizeReportDelivery(readTailLines(REPORT_DELIVERY_LOG_FILE, 200));
   const alertLog = summarizeHealthAlert(readTailLines(HEALTH_ALERT_LOG_FILE, 200));
+  const drillLog = summarizeRestoreDrill(readTailLines(RESTORE_DRILL_LOG_FILE, 200));
 
   const backupLastRunMs = toNumber(ops.backup_last_run_ms, toNumber(backupState.last_run_ms, null));
   const restoreLastRunMs = toNumber(ops.backup_restore_last_run_ms, null);
@@ -663,11 +702,13 @@ async function queryOpsStatus() {
       error: ops.backup_last_error || '',
     },
     restore_drill: {
-      status: ops.backup_restore_last_status || 'unknown',
-      snapshot: ops.backup_restore_last_snapshot || '',
+      status: ops.backup_restore_last_status || drillLog.status || 'unknown',
+      snapshot: ops.backup_restore_last_snapshot || drillLog.snapshot || '',
       last_run_ms: restoreLastRunMs,
       age_min: ageMinutes(restoreLastRunMs),
       error: ops.backup_restore_last_error || '',
+      last_timestamp: drillLog.timestamp,
+      last_line: drillLog.line,
     },
     host_health: {
       status: ops.host_health_last_status || hostState.status || 'unknown',
