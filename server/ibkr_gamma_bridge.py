@@ -403,6 +403,20 @@ def compute_gamma_walls(symbol, expiry_mode, limit):
 
 
 class GammaHandler(BaseHTTPRequestHandler):
+    def _send_json(self, status_code, payload):
+        body = json.dumps(payload).encode("utf-8")
+        try:
+            self.send_response(status_code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(body)
+            return True
+        except (BrokenPipeError, ConnectionResetError):
+            # Client closed the socket before we could write the response.
+            # This is harmless; avoid noisy traceback spam.
+            return False
+
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path == "/gamma":
@@ -414,19 +428,9 @@ class GammaHandler(BaseHTTPRequestHandler):
             with ib_lock:
                 try:
                     payload = compute_gamma_walls(symbol, expiry, limit)
-                    response = json.dumps(payload).encode("utf-8")
-                    self.send_response(200)
-                    self.send_header("Content-Type", "application/json")
-                    self.send_header("Access-Control-Allow-Origin", "*")
-                    self.end_headers()
-                    self.wfile.write(response)
+                    self._send_json(200, payload)
                 except Exception as exc:
-                    response = json.dumps({"error": "Gamma fetch failed", "message": str(exc)}).encode("utf-8")
-                    self.send_response(502)
-                    self.send_header("Content-Type", "application/json")
-                    self.send_header("Access-Control-Allow-Origin", "*")
-                    self.end_headers()
-                    self.wfile.write(response)
+                    self._send_json(502, {"error": "Gamma fetch failed", "message": str(exc)})
             return
 
         if parsed.path == "/spot":
@@ -441,19 +445,9 @@ class GammaHandler(BaseHTTPRequestHandler):
                         "source": "IBKR",
                         "generatedAt": datetime.utcnow().isoformat() + "Z",
                     }
-                    response = json.dumps(payload).encode("utf-8")
-                    self.send_response(200)
-                    self.send_header("Content-Type", "application/json")
-                    self.send_header("Access-Control-Allow-Origin", "*")
-                    self.end_headers()
-                    self.wfile.write(response)
+                    self._send_json(200, payload)
                 except Exception as exc:
-                    response = json.dumps({"error": "Spot fetch failed", "message": str(exc)}).encode("utf-8")
-                    self.send_response(502)
-                    self.send_header("Content-Type", "application/json")
-                    self.send_header("Access-Control-Allow-Origin", "*")
-                    self.end_headers()
-                    self.wfile.write(response)
+                    self._send_json(502, {"error": "Spot fetch failed", "message": str(exc)})
             return
 
         if parsed.path == "/market":
@@ -465,24 +459,12 @@ class GammaHandler(BaseHTTPRequestHandler):
             with ib_lock:
                 try:
                     payload = fetch_ibkr_market(symbol, interval, range_str)
-                    response = json.dumps(payload).encode("utf-8")
-                    self.send_response(200)
-                    self.send_header("Content-Type", "application/json")
-                    self.send_header("Access-Control-Allow-Origin", "*")
-                    self.end_headers()
-                    self.wfile.write(response)
+                    self._send_json(200, payload)
                 except Exception as exc:
-                    response = json.dumps({"error": "Market fetch failed", "message": str(exc)}).encode("utf-8")
-                    self.send_response(502)
-                    self.send_header("Content-Type", "application/json")
-                    self.send_header("Access-Control-Allow-Origin", "*")
-                    self.end_headers()
-                    self.wfile.write(response)
+                    self._send_json(502, {"error": "Market fetch failed", "message": str(exc)})
             return
 
-        self.send_response(404)
-        self.end_headers()
-        self.wfile.write(b"Not found")
+        self._send_json(404, {"error": "Not found"})
         return
 
 
