@@ -1827,6 +1827,7 @@
             lastWalls: null,
             vixLevel: null,
             gammaData: null,
+            gammaFetchError: null,
             lastEma9: null,
             lastEma21: null,
             lastVwap: null,
@@ -3841,12 +3842,31 @@
                 state.lastGammaDrivers = driverText;
                 document.getElementById('gamma-confidence').innerHTML = `<strong>Gamma Confidence</strong>${Math.round(score)} (${scoreLabel})<br><span style="color: var(--muted); font-size: 11px;">Drivers: ${driverText}</span>`;
             } else {
-                document.getElementById('oi-total').innerHTML = `<strong>Total OI</strong>--`;
-                document.getElementById('oi-concentration').innerHTML = `<strong>OI Concentration</strong>--`;
-                document.getElementById('atm-iv').innerHTML = `<strong>ATM IV</strong>--`;
-                document.getElementById('skew-25d').innerHTML = `<strong>25Δ Skew</strong>--`;
-                document.getElementById('zero-dte-share').innerHTML = `<strong>0DTE Share</strong>--`;
-                document.getElementById('data-quality').innerHTML = `<strong>Data Quality</strong>--`;
+                const rawReason = String(state.gammaFetchError || '').trim();
+                let reasonLabel = 'Unavailable';
+                if (rawReason) {
+                    const lowered = rawReason.toLowerCase();
+                    if (
+                        lowered.includes('10089') ||
+                        lowered.includes('additional subscription') ||
+                        lowered.includes('no gamma data available from ibkr')
+                    ) {
+                        reasonLabel = 'Unavailable (IBKR options subscription)';
+                    } else if (lowered.includes('10197') || lowered.includes('competing live session')) {
+                        reasonLabel = 'Blocked (competing IBKR session)';
+                    } else if (lowered.includes('unable to determine underlying price')) {
+                        reasonLabel = 'Unavailable (underlying price missing)';
+                    } else {
+                        reasonLabel = `Unavailable (${rawReason})`;
+                    }
+                }
+                document.getElementById('oi-total').innerHTML = `<strong>Total OI</strong>N/A`;
+                document.getElementById('oi-concentration').innerHTML = `<strong>OI Concentration</strong>N/A`;
+                document.getElementById('atm-iv').innerHTML = `<strong>ATM IV</strong>N/A`;
+                document.getElementById('skew-25d').innerHTML = `<strong>25Δ Skew</strong>N/A`;
+                document.getElementById('zero-dte-share').innerHTML = `<strong>0DTE Share</strong>N/A`;
+                document.getElementById('data-quality').innerHTML = `<strong>Data Quality</strong>${reasonLabel}`;
+                document.getElementById('data-quality').title = rawReason || 'Gamma/OI feed unavailable';
                 document.getElementById('gamma-confidence').innerHTML = `<strong>Gamma Confidence</strong>--`;
                 state.lastGammaScore = null;
                 state.lastGammaScoreLabel = '--';
@@ -4053,6 +4073,15 @@
                     if (!response.ok) {
                         const error = new Error(`HTTP ${response.status}`);
                         error.status = response.status;
+                        try {
+                            const payload = await response.json();
+                            const detail = payload?.message || payload?.error;
+                            if (detail) {
+                                error.detailMessage = String(detail);
+                            }
+                        } catch (_) {
+                            // ignore non-JSON error payloads
+                        }
                         throw error;
                     }
                     return await response.json();
@@ -4073,6 +4102,15 @@
                             } else {
                                 const error = new Error(`HTTP ${xhr.status}`);
                                 error.status = xhr.status;
+                                try {
+                                    const payload = JSON.parse(xhr.responseText || '{}');
+                                    const detail = payload?.message || payload?.error;
+                                    if (detail) {
+                                        error.detailMessage = String(detail);
+                                    }
+                                } catch (_) {
+                                    // ignore non-JSON error payloads
+                                }
                                 reject(error);
                             }
                         }
@@ -4235,6 +4273,7 @@
                 const apiUrl = `${getApiOrigin()}/api/gamma?symbol=${encodeURIComponent(symbol)}&expiry=${encodeURIComponent(expiryMode)}&limit=60`;
                 const data = await fetchJson(apiUrl, 6000);
                 if (data?.gammaFlip) {
+                    state.gammaFetchError = null;
                     return {
                         source: data.source || 'IBKR',
                         gammaFlip: data.gammaFlip,
@@ -4248,8 +4287,10 @@
                         expiryMode: data.expiryMode || expiryMode,
                     };
                 }
+                state.gammaFetchError = 'Gamma response missing gammaFlip';
             } catch (error) {
                 console.warn('Gamma fetch failed', error);
+                state.gammaFetchError = error?.detailMessage || error?.message || 'Gamma feed unavailable';
             }
             return null;
         }
