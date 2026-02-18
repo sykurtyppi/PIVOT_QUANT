@@ -35,6 +35,9 @@ except ImportError:  # pragma: no cover
 
 DEFAULT_DB = os.getenv("PIVOT_DB", "data/pivot_events.sqlite")
 NY_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone.utc
+GAMMA_BRIDGE_URL = os.getenv("GAMMA_BRIDGE_URL", "http://127.0.0.1:5001/gamma")
+GAMMA_IV_RV_HIGH_RATIO = float(os.getenv("GAMMA_IV_RV_HIGH_RATIO", "1.15"))
+GAMMA_IV_RV_LOW_RATIO = float(os.getenv("GAMMA_IV_RV_LOW_RATIO", "0.85"))
 
 
 def now_ms() -> int:
@@ -274,6 +277,76 @@ def parse_candles(payload: dict) -> list[dict]:
             continue
     normalized.sort(key=lambda b: b["time"])
     return normalized
+
+
+def _to_float(value):
+    try:
+        if value is None:
+            return None
+        out = float(value)
+        if math.isfinite(out):
+            return out
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
+def _parse_generated_at_ms(value: str | None) -> int | None:
+    if not value:
+        return None
+    try:
+        normalized = value.replace("Z", "+00:00")
+        return int(datetime.fromisoformat(normalized).timestamp() * 1000)
+    except ValueError:
+        return None
+
+
+def _derive_gamma_confidence(payload: dict) -> int | None:
+    call_strength = _to_float((payload.get("callWall") or {}).get("strength"))
+    put_strength = _to_float((payload.get("putWall") or {}).get("strength"))
+    strengths = [s for s in (call_strength, put_strength) if s is not None]
+    if not strengths:
+        return None
+    avg_strength = sum(strengths) / len(strengths)
+    return max(0, min(100, int(round(avg_strength))))
+
+
+def fetch_gamma_context(symbol: str, timeout: int = 2) -> dict | None:
+    """Fetch one gamma snapshot from the local IBKR gamma bridge.
+
+    Returns normalized numeric context used to enrich generated touch events.
+    If bridge data is unavailable, returns None (non-fatal).
+    """
+    base_url = (os.getenv("GAMMA_BRIDGE_URL") or GAMMA_BRIDGE_URL).strip()
+    sep = "&" if "?" in base_url else "?"
+    url = f"{base_url}{sep}symbol={symbol}&expiry=front&limit=60"
+    try:
+        payload = fetch_json(url, timeout=timeout, retries=0)
+    except Exception:
+        return None
+
+    gamma_flip = _to_float(payload.get("gammaFlip"))
+    if gamma_flip is None:
+        return None
+
+    generated_at_ms = _parse_generated_at_ms(payload.get("generatedAt"))
+    atm_iv_raw = _to_float((payload.get("stats") or {}).get("atmIV"))
+    context = {
+        "symbol": symbol.upper(),
+        "gamma_flip": gamma_flip,
+        "gamma_confidence": _derive_gamma_confidence(payload),
+        "oi_concentration_top5": _to_float((payload.get("stats") or {}).get("oiConcentration")),
+        "zero_dte_share": _to_float((payload.get("stats") or {}).get("zeroDteShare")),
+        # IB returns impliedVol as a decimal (e.g. 0.22). Convert to % for IV/RV comparison.
+        "atm_iv_pct": atm_iv_raw * 100 if atm_iv_raw is not None else None,
+        "generated_at_ms": generated_at_ms,
+        "generated_at_date_et": (
+            datetime.fromtimestamp(generated_at_ms / 1000, tz=NY_TZ).date()
+            if generated_at_ms is not None
+            else None
+        ),
+    }
+    return context
 
 
 def et_date(epoch_seconds: int):
@@ -923,6 +996,7 @@ def build_events(
     conn: sqlite3.Connection | None = None,
     rv_by_date: dict | None = None,
     rv_regime_by_date: dict | None = None,
+    gamma_context: dict | None = None,
 ):
     events = []
     cooldown_ms = cooldown_min * 60 * 1000
@@ -933,6 +1007,7 @@ def build_events(
 
     # Compute daily EMAs from session closes (matches dashboard daily chart)
     daily_emas = compute_daily_emas(sessions)
+    latest_session_date = sessions[-1]["date"] if sessions else None
 
     for idx in range(1, len(sessions)):
         base = sessions[idx - 1]
@@ -965,6 +1040,21 @@ def build_events(
         rv_for_session = rv_by_date.get(base["date"]) if rv_by_date else None
         rv_regime_for_session = rv_regime_by_date.get(base["date"]) if rv_regime_by_date else None
         sigma_bands = compute_sigma_bands(base["close"], session_atr, rv_for_session)
+        gamma_context_date = gamma_context.get("generated_at_date_et") if gamma_context else None
+        use_gamma_context = bool(
+            gamma_context
+            and (
+                gamma_context_date is None
+                or gamma_context_date == session["date"]
+                or (
+                    latest_session_date is not None
+                    and gamma_context_date is not None
+                    and session["date"] == latest_session_date
+                    and gamma_context_date > latest_session_date
+                    and (gamma_context_date - latest_session_date).days <= 3
+                )
+            )
+        )
 
         for bar in session["bars"]:
             close = bar["close"]
@@ -1045,6 +1135,35 @@ def build_events(
                     vpoc_dist_bps = (close - vpoc) / vpoc * 1e4
                 vol_at_level = volume_at_price(session_bars_so_far, level_price, threshold_bps)
 
+                iv_rv_state = None
+                gamma_mode = None
+                gamma_flip = None
+                gamma_flip_dist_bps = None
+                gamma_confidence = None
+                oi_concentration_top5 = None
+                zero_dte_share = None
+                if use_gamma_context:
+                    gamma_flip = gamma_context.get("gamma_flip")
+                    gamma_confidence = gamma_context.get("gamma_confidence")
+                    oi_concentration_top5 = gamma_context.get("oi_concentration_top5")
+                    zero_dte_share = gamma_context.get("zero_dte_share")
+                    if gamma_flip is not None and gamma_flip != 0:
+                        gamma_mode = 1 if close >= gamma_flip else -1
+                        gamma_flip_dist_bps = (close - gamma_flip) / gamma_flip * 1e4
+                    atm_iv_pct = gamma_context.get("atm_iv_pct")
+                    if (
+                        atm_iv_pct is not None
+                        and rv_for_session is not None
+                        and rv_for_session > 0
+                    ):
+                        iv_rv_ratio = atm_iv_pct / rv_for_session
+                        if iv_rv_ratio >= GAMMA_IV_RV_HIGH_RATIO:
+                            iv_rv_state = 1
+                        elif iv_rv_ratio <= GAMMA_IV_RV_LOW_RATIO:
+                            iv_rv_state = -1
+                        else:
+                            iv_rv_state = 0
+
                 # --- Multi-Timeframe Confluence ---
                 mtf_matches = []
                 for tf_name, tf_pivots in [("weekly", weekly_pivots), ("monthly", monthly_pivots)]:
@@ -1114,13 +1233,13 @@ def build_events(
                     "atr": atr_by_date.get(base["date"]),
                     "rv_30": rv_for_session,
                     "rv_regime": rv_regime_for_session,
-                    "iv_rv_state": None,
-                    "gamma_mode": None,
-                    "gamma_flip": None,
-                    "gamma_flip_dist_bps": None,
-                    "gamma_confidence": None,
-                    "oi_concentration_top5": None,
-                    "zero_dte_share": None,
+                    "iv_rv_state": iv_rv_state,
+                    "gamma_mode": gamma_mode,
+                    "gamma_flip": gamma_flip,
+                    "gamma_flip_dist_bps": gamma_flip_dist_bps,
+                    "gamma_confidence": gamma_confidence,
+                    "oi_concentration_top5": oi_concentration_top5,
+                    "zero_dte_share": zero_dte_share,
                     "data_quality": None,  # computed after event dict is built
                     "bar_interval_sec": interval_sec,
                     "source": source,
@@ -1210,6 +1329,17 @@ def main() -> None:
                 log.warning("No candles for %s. Skipping.", symbol)
                 continue
 
+            gamma_context = fetch_gamma_context(symbol)
+            if gamma_context:
+                log.info(
+                    "%s: gamma context loaded (flip=%.2f, date=%s)",
+                    symbol,
+                    gamma_context["gamma_flip"],
+                    gamma_context.get("generated_at_date_et"),
+                )
+            else:
+                log.info("%s: gamma context unavailable, proceeding without gamma enrichment", symbol)
+
             if args.write_bars:
                 n_bars = insert_bars(conn, symbol, candles, interval_sec)
                 total_bars += n_bars
@@ -1229,6 +1359,7 @@ def main() -> None:
                 conn=conn,
                 rv_by_date=rv_by_date,
                 rv_regime_by_date=rv_regime_by_date,
+                gamma_context=gamma_context,
             )
 
             if args.write_events and events:

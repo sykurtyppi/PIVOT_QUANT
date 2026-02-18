@@ -125,12 +125,16 @@ def pick_expiries(expirations, mode):
     return [exp_list[0]]
 
 
+_ETF_SYMBOLS = {"SPY", "QQQ", "IWM", "DIA", "XLF", "XLE", "XLK", "GLD", "TLT", "HYG", "EEM"}
+_INDEX_SYMBOLS = {"SPX", "NDX", "RUT", "VIX", "DJX"}
+
+
 def get_underlying(symbol):
-    if symbol.upper() == "SPX":
-        return Index("SPX", IB_EXCHANGE, "USD")
-    if symbol.upper() == "SPY":
-        return Stock("SPY", "SMART", "USD")
-    return Index(symbol.upper(), IB_EXCHANGE, "USD")
+    sym = symbol.upper()
+    if sym in _INDEX_SYMBOLS:
+        return Index(sym, IB_EXCHANGE, "USD")
+    # ETFs (including all standard equity ETFs) use Stock contract
+    return Stock(sym, "SMART", "USD")
 
 
 def get_es_fallback():
@@ -175,8 +179,7 @@ def compute_gamma_walls(symbol, expiry_mode, limit):
     underlying = get_underlying(symbol)
     ib.qualifyContracts(underlying)
 
-    ticker = ib.reqTickers(underlying)[0]
-    spot = ticker.marketPrice() or ticker.last or ticker.close
+    spot = _fetch_ticker_price(underlying)
     if not spot:
         raise ValueError("Unable to determine underlying price")
 
@@ -240,7 +243,27 @@ def compute_gamma_walls(symbol, expiry_mode, limit):
             )
 
     ib.qualifyContracts(*contracts)
-    tickers = ib.reqTickers(*contracts)
+
+    # Prefer realtime greeks, but gracefully fall back to delayed feeds when
+    # the account lacks live options subscriptions (common on paper accounts).
+    data_type_attempts = []
+    if IB_DATA_TYPE:
+        try:
+            data_type_attempts.append(int(IB_DATA_TYPE))
+        except ValueError:
+            pass
+    for candidate in (1, 3, 4):
+        if candidate not in data_type_attempts:
+            data_type_attempts.append(candidate)
+
+    tickers = []
+    used_data_type = None
+    for data_type in data_type_attempts:
+        _request_market_data_type(data_type)
+        tickers = ib.reqTickers(*contracts)
+        used_data_type = data_type
+        if any((t.modelGreeks is not None or getattr(t, "delayedGreeks", None) is not None) for t in tickers):
+            break
 
     gex_by_strike = {}
     max_abs = 0.0
@@ -257,7 +280,7 @@ def compute_gamma_walls(symbol, expiry_mode, limit):
 
     for t in tickers:
         total_contracts += 1
-        greeks = t.modelGreeks
+        greeks = t.modelGreeks or getattr(t, "delayedGreeks", None)
         if not greeks or greeks.gamma is None:
             continue
 
@@ -300,7 +323,10 @@ def compute_gamma_walls(symbol, expiry_mode, limit):
             oi_put += size or 0
 
     if not gex_by_strike:
-        raise ValueError("No gamma data available from IBKR")
+        raise ValueError(
+            f"No gamma data available from IBKR (market_data_type={used_data_type}). "
+            "Check IBKR options market-data permissions or use delayed options greeks."
+        )
 
     sorted_strikes = sorted(gex_by_strike.keys())
     cumulative = 0.0

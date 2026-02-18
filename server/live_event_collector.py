@@ -28,6 +28,7 @@ from backfill_events import (
     build_events,
     compute_atr,
     compute_realized_volatility,
+    fetch_gamma_context,
     fetch_market,
     insert_bars,
     insert_events,
@@ -199,6 +200,7 @@ def _collect_symbol(conn: sqlite3.Connection, symbol: str) -> tuple[Dict[str, An
 
     atr_by_date = compute_atr(sessions, ATR_WINDOW)
     rv_by_date, rv_regime_by_date = compute_realized_volatility(sessions, window=30)
+    gamma_context = fetch_gamma_context(symbol)
     events = build_events(
         symbol=symbol,
         sessions=sessions,
@@ -210,6 +212,7 @@ def _collect_symbol(conn: sqlite3.Connection, symbol: str) -> tuple[Dict[str, An
         conn=conn,
         rv_by_date=rv_by_date,
         rv_regime_by_date=rv_regime_by_date,
+        gamma_context=gamma_context,
     )
 
     new_events: List[Dict[str, Any]] = []
