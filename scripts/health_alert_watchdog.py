@@ -15,6 +15,7 @@ import json
 import os
 import smtplib
 import socket
+import subprocess
 import time
 from datetime import datetime, timezone
 from email.message import EmailMessage
@@ -172,6 +173,18 @@ def resolve_channels() -> list[str]:
     return [c.lower() for c in parse_csv(raw)]
 
 
+def email_failover_trigger(message: str) -> bool:
+    lowered = message.lower()
+    return (
+        "535" in lowered
+        or "smtpauthenticationerror" in lowered
+        or "5.7.8" in lowered
+        or "smtpdataerror 550" in lowered
+        or "5.4.5" in lowered
+        or "sending limit" in lowered
+    )
+
+
 def send_email(subject: str, text_body: str, dry_run: bool) -> tuple[bool, str]:
     recipients_raw = os.getenv("ML_ALERT_EMAIL_TO", "").strip() or os.getenv("ML_REPORT_EMAIL_TO", "").strip()
     recipients = parse_csv(recipients_raw)
@@ -215,11 +228,118 @@ def send_email(subject: str, text_body: str, dry_run: bool) -> tuple[bool, str]:
         return False, f"email send failed ({exc})"
 
 
+def escape_applescript(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def send_imessage(message_text: str, dry_run: bool) -> tuple[bool, str]:
+    recipients = parse_csv(
+        os.getenv("ML_ALERT_IMESSAGE_TO", "").strip() or os.getenv("ML_REPORT_IMESSAGE_TO", "").strip()
+    )
+    if not recipients:
+        return False, "imessage: recipients not configured"
+    if dry_run:
+        return True, f"imessage dry-run to {', '.join(recipients)}"
+
+    failures: list[str] = []
+    for recipient in recipients:
+        script = [
+            'tell application "Messages"',
+            "set targetService to 1st service whose service type = iMessage",
+            f'set targetParticipant to participant "{escape_applescript(recipient)}" of targetService',
+            f'send "{escape_applescript(message_text)}" to targetParticipant',
+            "end tell",
+        ]
+        result = subprocess.run(
+            ["osascript", *sum([["-e", line] for line in script], [])],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            failures.append(f"{recipient}: {(result.stderr or '').strip() or 'osascript failed'}")
+
+    if failures:
+        return False, "imessage failed: " + "; ".join(failures)
+    return True, f"imessage sent to {', '.join(recipients)}"
+
+
+def send_webhook(subject: str, body: str, dry_run: bool) -> tuple[bool, str]:
+    url = os.getenv("ML_ALERT_WEBHOOK_URL", "").strip() or os.getenv("ML_REPORT_WEBHOOK_URL", "").strip()
+    if not url:
+        return False, "webhook: URL not configured"
+    payload = json.dumps({"subject": subject, "body": body}).encode("utf-8")
+    if dry_run:
+        return True, f"webhook dry-run to {url}"
+    req = request.Request(
+        url=url,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with request.urlopen(req, timeout=30) as resp:  # noqa: S310
+            if resp.status < 200 or resp.status >= 300:
+                return False, f"webhook HTTP {resp.status}"
+    except error.URLError as exc:
+        return False, f"webhook failed ({exc})"
+    return True, "webhook delivered"
+
+
 def notify(subject: str, body: str, dry_run: bool) -> tuple[bool, str]:
     channels = resolve_channels()
-    if "email" not in channels:
-        return False, "notifications skipped (email channel not enabled)"
-    return send_email(subject, body, dry_run=dry_run)
+    if not channels:
+        return False, "notifications skipped (no channels)"
+
+    attempted: list[str] = []
+    errors: list[str] = []
+    email_fail_msg = ""
+
+    for channel in channels:
+        if channel == "email":
+            ok, msg = send_email(subject, body, dry_run=dry_run)
+            attempted.append("email")
+            if ok:
+                return True, msg
+            errors.append(msg)
+            email_fail_msg = msg
+        elif channel == "webhook":
+            ok, msg = send_webhook(subject, body, dry_run=dry_run)
+            attempted.append("webhook")
+            if ok:
+                return True, msg
+            errors.append(msg)
+        elif channel == "imessage":
+            message_text = f"{subject}\n\n{body}"
+            ok, msg = send_imessage(message_text, dry_run=dry_run)
+            attempted.append("imessage")
+            if ok:
+                return True, msg
+            errors.append(msg)
+
+    # Automatic failover path for common Gmail failures.
+    if email_fail_msg and email_failover_trigger(email_fail_msg):
+        fallback_channels = [
+            c.strip().lower()
+            for c in parse_csv(os.getenv("ML_ALERT_FAILOVER_CHANNELS", "webhook,imessage"))
+            if c.strip()
+        ]
+        for channel in fallback_channels:
+            if channel in attempted:
+                continue
+            if channel == "webhook":
+                ok, msg = send_webhook(subject, body, dry_run=dry_run)
+                if ok:
+                    return True, f"failover {msg}"
+                errors.append(msg)
+            elif channel == "imessage":
+                message_text = f"{subject}\n\n{body}"
+                ok, msg = send_imessage(message_text, dry_run=dry_run)
+                if ok:
+                    return True, f"failover {msg}"
+                errors.append(msg)
+
+    return False, "; ".join(errors) if errors else "notify failed"
 
 
 def should_repeat_down_alert(previous: dict[str, Any], repeat_min: int, now_ts: int) -> bool:
@@ -381,4 +501,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -14,6 +14,9 @@ data/*.duckdb
 data/events.jsonl
 data/exports/
 data/models/*.pkl
+data/models/manifest_active.json
+data/models/manifest_active_prev.json
+data/models/model_registry.json
 
 # SQLite transient files
 *.sqlite-wal
@@ -26,6 +29,7 @@ data/models/*.pkl
 
 # Logs
 logs/
+backups/
 
 # Stale data files
 data/*.db

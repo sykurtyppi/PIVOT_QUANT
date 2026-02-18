@@ -43,6 +43,7 @@ flowchart LR
 - Retrain cycle: `bash scripts/run_retrain_cycle.sh`
 - Retrain LaunchAgent install: `bash scripts/install_retrain_launch_agent.sh`
 - Daily report LaunchAgent install: `bash scripts/install_daily_report_launch_agent.sh [close|morning|both]`
+- Ops resilience LaunchAgents install: `bash scripts/install_ops_resilience_launch_agents.sh`
 
 ## Schedules
 - Live collection:
@@ -60,6 +61,10 @@ flowchart LR
   - Files:
     - `logs/reports/ml_daily_YYYY-MM-DD.md`
     - `logs/reports/ml_daily_latest.md`
+- Backups:
+  - Nightly snapshot: SQLite + models + reports
+  - Weekly restore drill validates latest snapshot
+  - Host health checks run on interval
 
 ## Data and Model Contracts
 - Event identity:
@@ -122,6 +127,10 @@ Current kill-switch logic is reflected in `scripts/generate_daily_ml_report.py` 
 - Report delivery:
   - email / iMessage / webhook from `scripts/send_daily_report.py`
   - scheduler entrypoint: `scripts/run_daily_report_send.sh`
+- Backups and restore:
+  - `scripts/nightly_backup.py`
+  - `scripts/backup_restore_drill.py`
+  - `scripts/host_health_check.py`
 - Persistent history:
   - SQLite table `daily_ml_metrics`
 
@@ -161,10 +170,25 @@ Current kill-switch logic is reflected in `scripts/generate_daily_ml_report.py` 
   - `ML_REPORT_SMTP_USE_TLS`
   - `ML_REPORT_IMESSAGE_TO`
   - `ML_REPORT_WEBHOOK_URL`
+  - `ML_REPORT_FAILOVER_CHANNELS`
+  - `ML_ALERT_FAILOVER_CHANNELS`
   - `ML_REPORT_INCLUDE_LOG_TAILS`
   - `ML_REPORT_LOG_TAIL_LINES`
   - `ML_REPORT_LOG_FILES`
   - `ML_REPORT_ENV_FILE`
+  - `PIVOT_BACKUP_ROOT`
+  - `BACKUP_DAILY_KEEP`
+  - `BACKUP_WEEKLY_KEEP`
+  - `BACKUP_HOUR`
+  - `BACKUP_MINUTE`
+  - `RESTORE_DRILL_WEEKDAY`
+  - `RESTORE_DRILL_HOUR`
+  - `RESTORE_DRILL_MINUTE`
+  - `HOST_HEALTH_CHECK_INTERVAL_SEC`
+  - `HOST_HEALTH_DISK_WARN_PCT`
+  - `HOST_HEALTH_DISK_CRIT_PCT`
+  - `HOST_HEALTH_DB_GROWTH_WARN_MB`
+  - `HOST_HEALTH_DB_GROWTH_CRIT_MB`
 
 ## Quick Verification
 1. `bash scripts/verify_host_ready.sh`

@@ -76,6 +76,7 @@ bash scripts/uninstall_launch_agent.sh
 bash scripts/uninstall_retrain_launch_agent.sh
 bash scripts/uninstall_daily_report_launch_agent.sh
 bash scripts/uninstall_health_alert_launch_agent.sh
+bash scripts/uninstall_ops_resilience_launch_agents.sh
 ```
 
 ## Notes on ML "always learning"
@@ -130,6 +131,8 @@ ML_STALENESS_KILL_SESSION_HOURS=19.5
 
 # optional webhook target
 # ML_REPORT_WEBHOOK_URL=https://your-webhook-endpoint
+# auto-failover if email hits Gmail auth/rate-limit errors
+ML_REPORT_FAILOVER_CHANNELS=webhook,imessage
 
 # immediate downtime alerts (state-change only by default)
 ML_ALERT_NOTIFY_CHANNELS=email
@@ -141,6 +144,9 @@ ML_ALERT_REPEAT_MIN=0
 # optional separate recipients/sender
 # ML_ALERT_EMAIL_TO=you@example.com
 # ML_ALERT_EMAIL_FROM=you@example.com
+# optional alert-only webhook and failover order
+# ML_ALERT_WEBHOOK_URL=https://your-alert-webhook
+ML_ALERT_FAILOVER_CHANNELS=webhook,imessage
 ```
 
 Install scheduled delivery:
@@ -189,4 +195,48 @@ Watchdog logs:
 
 ```bash
 tail -f logs/health_alert.log logs/health_alert.launchd.err.log
+```
+
+## 10) Backups + restore drill + host health checks
+
+Add to `.env` on host:
+
+```bash
+PIVOT_BACKUP_ROOT=/Users/tristanalejandro/PIVOT_QUANT/backups
+BACKUP_DAILY_KEEP=30
+BACKUP_WEEKLY_KEEP=8
+BACKUP_HOUR=22
+BACKUP_MINUTE=20
+RESTORE_DRILL_WEEKDAY=0
+RESTORE_DRILL_HOUR=23
+RESTORE_DRILL_MINUTE=0
+HOST_HEALTH_CHECK_INTERVAL_SEC=900
+HOST_HEALTH_DISK_WARN_PCT=15
+HOST_HEALTH_DISK_CRIT_PCT=8
+HOST_HEALTH_DB_GROWTH_WARN_MB=2048
+HOST_HEALTH_DB_GROWTH_CRIT_MB=4096
+HOST_HEALTH_RESTART_WARN_DELTA=5
+```
+
+Install ops LaunchAgents:
+
+```bash
+cd /Users/tristanalejandro/PIVOT_QUANT
+bash scripts/install_ops_resilience_launch_agents.sh
+```
+
+Manual validation:
+
+```bash
+cd /Users/tristanalejandro/PIVOT_QUANT
+source .venv/bin/activate
+bash scripts/run_nightly_backup.sh
+bash scripts/run_backup_restore_drill.sh
+bash scripts/run_host_health_check.sh
+```
+
+Ops logs:
+
+```bash
+tail -f logs/backup.log logs/restore_drill.log logs/host_health.log
 ```

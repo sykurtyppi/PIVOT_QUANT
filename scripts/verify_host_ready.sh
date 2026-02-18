@@ -8,11 +8,17 @@ LABEL_DASH="com.pivotquant.dashboard"
 LABEL_RETRAIN="com.pivotquant.retrain"
 LABEL_DAILY="com.pivotquant.daily_report"
 LABEL_HEALTH_ALERT="com.pivotquant.health_alert"
+LABEL_BACKUP="com.pivotquant.nightly_backup"
+LABEL_RESTORE_DRILL="com.pivotquant.restore_drill"
+LABEL_HOST_HEALTH="com.pivotquant.host_health"
 UID_NUM="$(id -u)"
 TARGET_DASH="gui/${UID_NUM}/${LABEL_DASH}"
 TARGET_RETRAIN="gui/${UID_NUM}/${LABEL_RETRAIN}"
 TARGET_DAILY="gui/${UID_NUM}/${LABEL_DAILY}"
 TARGET_HEALTH_ALERT="gui/${UID_NUM}/${LABEL_HEALTH_ALERT}"
+TARGET_BACKUP="gui/${UID_NUM}/${LABEL_BACKUP}"
+TARGET_RESTORE_DRILL="gui/${UID_NUM}/${LABEL_RESTORE_DRILL}"
+TARGET_HOST_HEALTH="gui/${UID_NUM}/${LABEL_HOST_HEALTH}"
 
 ok() { printf '[OK] %s\n' "$*"; }
 warn() { printf '[WARN] %s\n' "$*"; }
@@ -110,6 +116,9 @@ check_launch_agent "${TARGET_DASH}" "${LABEL_DASH}"
 check_launch_agent "${TARGET_RETRAIN}" "${LABEL_RETRAIN}"
 check_launch_agent "${TARGET_DAILY}" "${LABEL_DAILY}"
 check_launch_agent "${TARGET_HEALTH_ALERT}" "${LABEL_HEALTH_ALERT}"
+check_launch_agent "${TARGET_BACKUP}" "${LABEL_BACKUP}"
+check_launch_agent "${TARGET_RESTORE_DRILL}" "${LABEL_RESTORE_DRILL}"
+check_launch_agent "${TARGET_HOST_HEALTH}" "${LABEL_HOST_HEALTH}"
 echo
 
 echo "Ports:"

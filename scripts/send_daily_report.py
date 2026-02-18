@@ -1293,6 +1293,21 @@ def send_webhook(
     return True, "webhook: delivered"
 
 
+def email_failover_trigger(message: str) -> bool:
+    lowered = message.lower()
+    # Common Gmail cases:
+    # - 535 auth rejection (bad creds / app password issues)
+    # - 550 5.4.5 daily sending limit exceeded
+    return (
+        "535" in lowered
+        or "smtpauthenticationerror" in lowered
+        or "5.7.8" in lowered
+        or "smtpdataerror 550" in lowered
+        or "5.4.5" in lowered
+        or "sending limit" in lowered
+    )
+
+
 def main() -> int:
     args = parse_args()
     load_env_file(args.env_file)
@@ -1378,9 +1393,13 @@ def main() -> int:
 
     successes = 0
     attempts = 0
+    attempted_channels: set[str] = set()
+    email_failed_msg = ""
+    email_failed_for_failover = False
 
     if "email" in channels:
         attempts += 1
+        attempted_channels.add("email")
         email_to = parse_csv(os.getenv("ML_REPORT_EMAIL_TO"))
         ok, msg = send_email(
             email_to,
@@ -1393,9 +1412,13 @@ def main() -> int:
         )
         print(f"[notify] {msg}")
         successes += 1 if ok else 0
+        if not ok:
+            email_failed_msg = msg
+            email_failed_for_failover = email_failover_trigger(msg)
 
     if "imessage" in channels:
         attempts += 1
+        attempted_channels.add("imessage")
         imessage_to = parse_csv(os.getenv("ML_REPORT_IMESSAGE_TO"))
         ok, msg = send_imessage(imessage_to, imessage_summary, args.dry_run)
         print(f"[notify] {msg}")
@@ -1403,10 +1426,36 @@ def main() -> int:
 
     if "webhook" in channels:
         attempts += 1
+        attempted_channels.add("webhook")
         webhook_url = os.getenv("ML_REPORT_WEBHOOK_URL", "").strip()
         ok, msg = send_webhook(webhook_url, subject, summary, report_path, args.dry_run)
         print(f"[notify] {msg}")
         successes += 1 if ok else 0
+
+    if email_failed_for_failover:
+        fallback_channels = [
+            c.strip().lower()
+            for c in parse_csv(os.getenv("ML_REPORT_FAILOVER_CHANNELS", "webhook,imessage"))
+            if c.strip()
+        ]
+        print(f"[notify] email failover triggered ({email_failed_msg})")
+        for channel in fallback_channels:
+            if channel in attempted_channels:
+                continue
+            if channel == "webhook":
+                attempts += 1
+                attempted_channels.add("webhook")
+                webhook_url = os.getenv("ML_REPORT_WEBHOOK_URL", "").strip()
+                ok, msg = send_webhook(webhook_url, subject, summary, report_path, args.dry_run)
+                print(f"[notify] failover {msg}")
+                successes += 1 if ok else 0
+            elif channel == "imessage":
+                attempts += 1
+                attempted_channels.add("imessage")
+                imessage_to = parse_csv(os.getenv("ML_REPORT_IMESSAGE_TO"))
+                ok, msg = send_imessage(imessage_to, imessage_summary, args.dry_run)
+                print(f"[notify] failover {msg}")
+                successes += 1 if ok else 0
 
     if attempts > 0 and successes == 0:
         return 1
