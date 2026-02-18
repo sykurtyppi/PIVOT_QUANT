@@ -815,6 +815,16 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (url.pathname === '/api/live/health') {
+    try {
+      const data = await fetchLocalJson('http://127.0.0.1:5004/health');
+      sendJson(res, 200, data);
+    } catch (error) {
+      sendProxyError(res, error, 'Live collector health unavailable');
+    }
+    return;
+  }
+
   if (url.pathname === '/api/ml/reload') {
     if (req.method !== 'POST') {
       sendJson(res, 405, { error: 'Method not allowed' });

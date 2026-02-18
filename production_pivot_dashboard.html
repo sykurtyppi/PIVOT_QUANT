@@ -3,7 +3,12 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Institutional Pivot Dashboard</title>
+    <meta name="description" content="Real-time pivot point analysis with ML-driven scoring for institutional trading">
+    <meta name="theme-color" content="#0b0f1a">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>PIVOT QUANT — Institutional Pivot Dashboard</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='18' fill='%230b0f1a'/><text x='50' y='68' font-size='52' font-family='system-ui' font-weight='700' fill='%2360a5fa' text-anchor='middle'>PQ</text></svg>" type="image/svg+xml">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -36,7 +41,9 @@
                         radial-gradient(circle at 20% 80%, rgba(14, 165, 233, 0.18), transparent 45%),
                         var(--bg);
             color: var(--text);
-            line-height: 1.35;
+            line-height: 1.4;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
         }
 
         .app {
@@ -51,7 +58,7 @@
             justify-content: space-between;
             gap: 12px;
             flex-wrap: wrap;
-            padding: 20px 32px;
+            padding: 16px 28px;
             border-bottom: 1px solid var(--border);
             background: rgba(15, 23, 42, 0.9);
             backdrop-filter: blur(12px);
@@ -61,14 +68,14 @@
         }
 
         .title {
-            font-size: 20px;
+            font-size: 22px;
             font-weight: 700;
-            letter-spacing: 0.2px;
+            letter-spacing: 0.15px;
         }
 
         .subtitle {
             color: var(--muted);
-            font-size: 12px;
+            font-size: 11px;
             margin-top: 4px;
         }
 
@@ -117,9 +124,9 @@
 
         .controls {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-            gap: 12px;
-            padding: 16px 32px;
+            grid-template-columns: repeat(auto-fit, minmax(172px, 1fr));
+            gap: 10px;
+            padding: 12px 28px;
             border-bottom: 1px solid var(--border);
             background: rgba(15, 23, 42, 0.78);
             backdrop-filter: blur(10px);
@@ -136,11 +143,19 @@
             color: var(--muted);
         }
 
+        .control-note {
+            font-size: 10px;
+            color: var(--muted);
+            line-height: 1.35;
+            opacity: 0.92;
+            min-height: 14px;
+        }
+
         .control label {
-            font-size: 11px;
-            letter-spacing: 0.25px;
+            font-size: 10px;
+            letter-spacing: 0.4px;
             text-transform: uppercase;
-            font-weight: 600;
+            font-weight: 700;
         }
 
         select, button {
@@ -151,9 +166,9 @@
             background: var(--panel);
             color: var(--text);
             border: 1px solid var(--border);
-            padding: 8px 10px;
+            padding: 7px 10px;
             border-radius: 8px;
-            font-size: 13px;
+            font-size: 12px;
         }
 
         .control button {
@@ -161,7 +176,8 @@
             border: none;
             color: #0b1120;
             font-weight: 600;
-            padding: 10px 12px;
+            font-size: 12px;
+            padding: 9px 12px;
             border-radius: 10px;
             cursor: pointer;
         }
@@ -235,18 +251,50 @@
 
         .grid {
             display: grid;
-            grid-template-columns: 1.1fr 2fr 1.2fr;
-            gap: 16px;
-            padding: 20px 32px 32px;
+            grid-template-columns: minmax(300px, 0.95fr) minmax(980px, 2.95fr);
+            grid-template-areas:
+                "market chart"
+                "insights ml";
+            gap: 14px;
+            padding: 16px 28px 24px;
             flex: 1;
             align-items: start;
+        }
+
+        .market-panel {
+            grid-area: market;
+        }
+
+        .chart-panel {
+            grid-area: chart;
+        }
+
+        #ml-panel {
+            grid-area: ml;
+            align-self: stretch;
+            min-height: 840px;
+        }
+
+        .insights-panel {
+            grid-area: insights;
+            position: sticky;
+            top: calc(var(--header-height, 84px) + var(--controls-height, 126px) + 18px);
+            max-height: none;
+            overflow: visible;
+            align-self: stretch;
+        }
+
+        .insights-panel .tab-panel {
+            overflow: visible;
+            max-height: none;
+            padding-right: 4px;
         }
 
         .decision-strip {
             display: grid;
             grid-template-columns: repeat(6, minmax(140px, 1fr));
-            gap: 10px;
-            padding: 12px 32px;
+            gap: 8px;
+            padding: 10px 28px;
             border-bottom: 1px solid var(--border);
             background: linear-gradient(180deg, rgba(2, 6, 23, 0.3), rgba(2, 6, 23, 0.1));
         }
@@ -255,7 +303,7 @@
             background: rgba(15, 23, 42, 0.72);
             border: 1px solid rgba(148, 163, 184, 0.14);
             border-radius: 12px;
-            padding: 8px 10px;
+            padding: 7px 9px;
             min-width: 0;
         }
 
@@ -270,15 +318,15 @@
         }
 
         .decision-label {
-            font-size: 10px;
-            letter-spacing: 0.35px;
+            font-size: 9px;
+            letter-spacing: 0.4px;
             text-transform: uppercase;
             color: var(--muted);
-            margin-bottom: 4px;
+            margin-bottom: 3px;
         }
 
         .decision-value {
-            font-size: 13px;
+            font-size: 12px;
             font-weight: 600;
             color: var(--text);
             white-space: nowrap;
@@ -302,27 +350,62 @@
             color: var(--danger);
         }
 
-        .panel.span-2 {
-            grid-column: 2 / 4;
+        .system-strip {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            padding: 8px 28px;
+            border-bottom: 1px solid var(--border);
+            background: rgba(2, 6, 23, 0.28);
+        }
+
+        .system-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 5px 10px;
+            border-radius: 999px;
+            border: 1px solid rgba(148, 163, 184, 0.18);
+            background: rgba(15, 23, 42, 0.6);
+            color: var(--muted);
+            font-size: 11px;
+            white-space: nowrap;
+        }
+
+        .system-pill.ok {
+            color: #86efac;
+            border-color: rgba(34, 197, 94, 0.35);
+        }
+
+        .system-pill.warn {
+            color: #fde68a;
+            border-color: rgba(245, 158, 11, 0.35);
+        }
+
+        .system-pill.risk {
+            color: #fca5a5;
+            border-color: rgba(239, 68, 68, 0.4);
         }
 
         .panel {
-            background: rgba(15, 23, 42, 0.9);
+            background: linear-gradient(180deg, rgba(15, 23, 42, 0.92), rgba(10, 16, 30, 0.92));
             border: 1px solid var(--border);
-            border-radius: 16px;
-            padding: 16px;
+            border-radius: 14px;
+            padding: 14px;
             display: flex;
             flex-direction: column;
-            gap: 12px;
+            gap: 10px;
             min-height: 0;
+            box-shadow: 0 10px 28px rgba(2, 6, 23, 0.28);
         }
 
         .panel h3 {
             margin: 0;
-            font-size: 14px;
-            letter-spacing: 0.3px;
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: 0.45px;
             text-transform: uppercase;
-            color: var(--muted);
+            color: #9fb3d1;
         }
 
         .panel-header {
@@ -338,6 +421,55 @@
             gap: 6px;
             flex-wrap: wrap;
             align-items: center;
+        }
+
+        .chart-toolbar-stack {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: 6px;
+        }
+
+        .timeframe-toolbar {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex-wrap: wrap;
+            justify-content: flex-end;
+        }
+
+        .timeframe-label {
+            font-size: 10px;
+            letter-spacing: 0.3px;
+            text-transform: uppercase;
+            font-weight: 700;
+            color: var(--muted);
+            padding-right: 2px;
+        }
+
+        .timeframe-chip {
+            border: 1px solid rgba(148, 163, 184, 0.3);
+            background: rgba(2, 6, 23, 0.5);
+            color: var(--muted);
+            border-radius: 999px;
+            padding: 4px 8px;
+            font-size: 10px;
+            letter-spacing: 0.25px;
+            text-transform: uppercase;
+            font-weight: 700;
+            cursor: pointer;
+            transition: border-color 0.15s, color 0.15s, background 0.15s;
+        }
+
+        .timeframe-chip:hover {
+            color: var(--text);
+            border-color: rgba(148, 163, 184, 0.5);
+        }
+
+        .timeframe-chip.is-active {
+            color: #082033;
+            border-color: transparent;
+            background: linear-gradient(135deg, #7dd3fc, #22d3ee);
         }
 
         .chip-toggle {
@@ -371,23 +503,23 @@
 
         .tablist {
             display: flex;
-            gap: 6px;
+            gap: 4px;
             flex-wrap: wrap;
             background: rgba(2, 6, 23, 0.45);
             border: 1px solid rgba(148, 163, 184, 0.12);
-            padding: 4px;
-            border-radius: 10px;
+            padding: 3px;
+            border-radius: 9px;
         }
 
         .tab-btn {
             background: transparent;
             color: var(--muted);
             border: 1px solid transparent;
-            border-radius: 8px;
-            padding: 6px 10px;
-            font-size: 11px;
+            border-radius: 7px;
+            padding: 5px 8px;
+            font-size: 10px;
             font-weight: 600;
-            letter-spacing: 0.3px;
+            letter-spacing: 0.35px;
             text-transform: uppercase;
             cursor: pointer;
             transition: color 0.15s, border-color 0.15s, background 0.15s;
@@ -416,19 +548,28 @@
         }
 
         .subsection-title {
-            margin: 2px 0 0;
-            font-size: 12px;
-            letter-spacing: 0.35px;
+            margin: 4px 0 0;
+            font-size: 11px;
+            letter-spacing: 0.4px;
             text-transform: uppercase;
             color: var(--muted);
         }
 
         .table-wrap {
             overflow: auto;
-            max-height: 360px;
+            max-height: 520px;
             border-radius: 10px;
             border: 1px solid rgba(148, 163, 184, 0.1);
             background: rgba(2, 6, 23, 0.35);
+        }
+
+        #panel-levels {
+            min-height: 780px;
+        }
+
+        #panel-levels .table-wrap {
+            flex: 1 1 320px;
+            min-height: 300px;
         }
 
         .explain-grid {
@@ -442,7 +583,7 @@
             border: 1px solid rgba(148, 163, 184, 0.11);
             border-radius: 10px;
             padding: 8px 10px;
-            min-height: 76px;
+            min-height: 70px;
         }
 
         .explain-title {
@@ -462,30 +603,42 @@
         .stat-grid {
             display: grid;
             grid-template-columns: 1fr 1fr;
-            gap: 10px;
+            gap: 8px;
         }
 
         .stat-grid-3 {
-            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
         }
 
         .stat {
-            padding: 10px;
-            background: var(--panel-2);
-            border-radius: 10px;
-            border: 1px solid rgba(148, 163, 184, 0.08);
+            padding: 9px;
+            background: linear-gradient(180deg, rgba(15, 23, 42, 0.92), rgba(11, 18, 34, 0.92));
+            border-radius: 9px;
+            border: 1px solid rgba(148, 163, 184, 0.11);
         }
 
         .stat-label {
-            font-size: 11px;
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.32px;
             color: var(--muted);
         }
 
         .stat-value {
-            font-size: 16px;
+            font-size: 15px;
             font-weight: 600;
-            margin-top: 4px;
+            margin-top: 3px;
+            letter-spacing: 0.2px;
             font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+        }
+
+        #ml-detail {
+            white-space: normal;
+            overflow-wrap: anywhere;
+            line-height: 1.28;
+            max-height: 220px;
+            overflow: auto;
+            padding-right: 2px;
         }
 
         .ml-controls {
@@ -493,7 +646,7 @@
             align-items: center;
             gap: 12px;
             flex-wrap: wrap;
-            font-size: 11px;
+            font-size: 10px;
             color: var(--muted);
         }
 
@@ -501,12 +654,12 @@
             display: inline-flex;
             align-items: center;
             gap: 6px;
-            padding: 4px 10px;
+            padding: 3px 9px;
             border-radius: 999px;
             border: 1px solid rgba(148, 163, 184, 0.22);
             background: rgba(15, 23, 42, 0.55);
             color: var(--muted);
-            font-size: 11px;
+            font-size: 10px;
             font-weight: 600;
             letter-spacing: 0.3px;
             text-transform: uppercase;
@@ -540,20 +693,46 @@
             background: #ef4444;
         }
 
+        .ml-service-pill[data-state="degraded"] {
+            color: #fde68a;
+            border-color: rgba(245, 158, 11, 0.35);
+            background: rgba(120, 53, 15, 0.2);
+        }
+
+        .ml-service-pill[data-state="degraded"]::before {
+            background: #f59e0b;
+        }
+
         .ml-service-pill[data-state="checking"]::before {
             background: #fbbf24;
+        }
+
+        .refresh-meta {
+            margin-top: 6px;
+            font-size: 11px;
+            color: var(--muted);
+            min-height: 16px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .control button[disabled] {
+            opacity: 0.72;
+            cursor: wait;
+            filter: grayscale(0.2);
         }
 
         .ml-health-widget {
             display: flex;
             align-items: center;
             gap: 10px;
-            padding: 6px 12px;
+            padding: 5px 10px;
             border-radius: 8px;
             border: 1px solid var(--border);
             background: rgba(15, 23, 42, 0.5);
-            font-size: 11px;
-            margin-top: 6px;
+            font-size: 10px;
+            margin-top: 4px;
         }
 
         .ml-health-badge {
@@ -620,7 +799,7 @@
             font-size: 10px;
             color: var(--muted);
             opacity: 0.7;
-            max-width: 260px;
+            max-width: 340px;
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
@@ -645,25 +824,26 @@
 
         .ml-horizon-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-            gap: 10px;
+            grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+            gap: 8px;
         }
 
         .ml-horizon-card {
-            padding: 10px;
+            padding: 9px;
             background: var(--panel-2);
             border-radius: 10px;
             border: 1px solid rgba(148, 163, 184, 0.08);
             display: flex;
             flex-direction: column;
-            gap: 6px;
-            font-size: 12px;
+            gap: 5px;
+            font-size: 11.5px;
+            min-height: 180px;
         }
 
         .ml-horizon-title {
-            font-size: 12px;
+            font-size: 11px;
             font-weight: 600;
-            letter-spacing: 0.2px;
+            letter-spacing: 0.3px;
             text-transform: uppercase;
             color: var(--accent-2);
         }
@@ -672,6 +852,7 @@
             display: flex;
             justify-content: space-between;
             color: var(--text);
+            font-size: 11.5px;
         }
 
         .ml-metrics-note {
@@ -710,15 +891,16 @@
         }
 
         #chartContainer {
+            width: 100%;
             flex: 1;
-            min-height: 480px;
+            min-height: 560px;
         }
 
         .session-card {
             display: flex;
             flex-direction: column;
-            gap: 6px;
-            padding: 10px 12px;
+            gap: 5px;
+            padding: 9px 10px;
             border-radius: 10px;
             background: rgba(30, 41, 59, 0.7);
             border: 1px solid rgba(148, 163, 184, 0.1);
@@ -727,7 +909,7 @@
         .session-line {
             display: flex;
             justify-content: space-between;
-            font-size: 12px;
+            font-size: 11px;
             color: var(--muted);
         }
 
@@ -739,14 +921,25 @@
         .levels-table {
             width: 100%;
             border-collapse: collapse;
-            font-size: 12px;
+            font-size: 11px;
         }
 
         .levels-table th,
         .levels-table td {
-            padding: 8px 6px;
+            padding: 7px 6px;
             text-align: right;
             border-bottom: 1px solid rgba(148, 163, 184, 0.08);
+        }
+
+        .levels-table th {
+            position: sticky;
+            top: 0;
+            z-index: 2;
+            text-transform: uppercase;
+            letter-spacing: 0.3px;
+            font-size: 10px;
+            color: #9fb3d1;
+            background: rgba(15, 23, 42, 0.96);
         }
 
         .levels-table th:first-child,
@@ -862,7 +1055,7 @@
         .ml-signal-label[data-signal="no_edge"] { color: #fbbf24; background: rgba(251, 191, 36, 0.10); }
 
         .ml-threshold-row {
-            font-size: 10px;
+            font-size: 9px;
             color: var(--muted);
             display: flex;
             justify-content: space-between;
@@ -901,8 +1094,8 @@
             background: rgba(15, 23, 42, 0.7);
             border: 1px solid rgba(148, 163, 184, 0.12);
             border-radius: 10px;
-            padding: 10px 12px;
-            font-size: 12px;
+            padding: 9px 10px;
+            font-size: 11px;
             color: var(--muted);
         }
 
@@ -916,8 +1109,8 @@
             background: rgba(2, 6, 23, 0.6);
             border: 1px solid rgba(148, 163, 184, 0.1);
             border-radius: 10px;
-            padding: 10px 12px;
-            font-size: 12px;
+            padding: 9px 10px;
+            font-size: 11px;
             color: var(--muted);
         }
 
@@ -936,11 +1129,29 @@
 
         @media (max-width: 1500px) {
             .grid {
-                grid-template-columns: 1fr 1.6fr;
+                grid-template-columns: 1fr 1.25fr;
+                grid-template-areas:
+                    "chart chart"
+                    "market insights"
+                    "ml ml";
             }
 
-            .panel.span-2 {
-                grid-column: 1 / -1;
+            #ml-panel {
+                min-height: auto;
+            }
+
+            #panel-levels {
+                min-height: auto;
+            }
+
+            #panel-levels .table-wrap {
+                min-height: 240px;
+                max-height: 440px;
+            }
+
+            .insights-panel {
+                position: static;
+                max-height: none;
             }
 
             .decision-strip {
@@ -951,10 +1162,11 @@
         @media (max-width: 1200px) {
             .grid {
                 grid-template-columns: 1fr;
-            }
-
-            .panel.span-2 {
-                grid-column: auto;
+                grid-template-areas:
+                    "chart"
+                    "ml"
+                    "market"
+                    "insights";
             }
 
             .decision-strip {
@@ -973,6 +1185,10 @@
 
             .controls {
                 padding: 12px 16px;
+            }
+
+            .system-strip {
+                padding: 10px 16px;
             }
 
             .grid {
@@ -1001,6 +1217,15 @@
                 flex-wrap: nowrap;
                 -webkit-overflow-scrolling: touch;
             }
+
+            .chart-toolbar-stack {
+                align-items: flex-start;
+                width: 100%;
+            }
+
+            .timeframe-toolbar {
+                justify-content: flex-start;
+            }
         }
 
         @media (max-width: 600px) {
@@ -1024,19 +1249,120 @@
                 grid-template-columns: 1fr;
             }
         }
+
+        /* ── Toast Notification System ── */
+        .toast-container {
+            position: fixed;
+            top: 16px;
+            right: 16px;
+            z-index: 9999;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            pointer-events: none;
+            max-width: 420px;
+        }
+
+        .toast {
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+            padding: 12px 16px;
+            border-radius: 10px;
+            font-size: 13px;
+            line-height: 1.45;
+            backdrop-filter: blur(12px);
+            border: 1px solid var(--border);
+            pointer-events: auto;
+            animation: toastIn 0.3s ease forwards;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+        }
+
+        .toast.toast-exit {
+            animation: toastOut 0.25s ease forwards;
+        }
+
+        .toast-icon {
+            font-size: 16px;
+            flex-shrink: 0;
+            margin-top: 1px;
+        }
+
+        .toast-body {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .toast-title {
+            font-weight: 600;
+            font-size: 13px;
+            margin-bottom: 2px;
+        }
+
+        .toast-message {
+            color: var(--muted);
+            font-size: 12px;
+            word-break: break-word;
+        }
+
+        .toast-close {
+            background: none;
+            border: none;
+            color: var(--muted);
+            cursor: pointer;
+            font-size: 14px;
+            padding: 0 0 0 8px;
+            line-height: 1;
+            flex-shrink: 0;
+        }
+
+        .toast-close:hover {
+            color: var(--text);
+        }
+
+        .toast[data-level="info"] {
+            background: rgba(96, 165, 250, 0.12);
+            border-color: rgba(96, 165, 250, 0.25);
+        }
+
+        .toast[data-level="success"] {
+            background: rgba(34, 197, 94, 0.12);
+            border-color: rgba(34, 197, 94, 0.25);
+        }
+
+        .toast[data-level="warning"] {
+            background: rgba(245, 158, 11, 0.12);
+            border-color: rgba(245, 158, 11, 0.25);
+        }
+
+        .toast[data-level="error"] {
+            background: rgba(239, 68, 68, 0.15);
+            border-color: rgba(239, 68, 68, 0.3);
+        }
+
+        @keyframes toastIn {
+            from { opacity: 0; transform: translateX(40px); }
+            to   { opacity: 1; transform: translateX(0); }
+        }
+
+        @keyframes toastOut {
+            from { opacity: 1; transform: translateX(0); }
+            to   { opacity: 0; transform: translateX(40px); }
+        }
     </style>
 </head>
 <body>
+    <div id="toast-container" class="toast-container" aria-live="polite" aria-label="Notifications"></div>
     <div class="app">
         <header class="app-header">
             <div>
-                <div class="title">Institutional Pivot Dashboard</div>
-                <div class="subtitle">Daily support and resistance from the prior completed session</div>
+                <div class="title">PIVOT <span style="color: var(--accent)">QUANT</span></div>
+                <div class="subtitle">Institutional pivot analysis · ML-driven level scoring</div>
             </div>
             <div class="status">
                 <div id="status-dot" class="status-dot loading" aria-hidden="true"></div>
                 <span id="status-text" role="status" aria-live="polite">Initializing</span>
-                <button id="debug-toggle" class="ghost-btn" type="button" aria-pressed="false">Debug Off</button>
+                <button id="debug-toggle" class="ghost-btn" type="button" aria-pressed="false" hidden>Debug Off</button>
             </div>
         </header>
 
@@ -1044,8 +1370,12 @@
             <div class="control">
                 <label for="symbol-select">Instrument</label>
                 <select id="symbol-select">
-                    <option value="SPY" selected>SPY</option>
+                    <option value="SPY" selected>SPY — S&P 500</option>
+                    <option value="QQQ">QQQ — Nasdaq 100</option>
+                    <option value="IWM">IWM — Russell 2000</option>
+                    <option value="DIA">DIA — Dow 30</option>
                 </select>
+                <div id="symbol-coverage-note" class="control-note">ML coverage: --</div>
             </div>
             <div class="control">
                 <label for="range-select">History Range</label>
@@ -1067,6 +1397,10 @@
             <div class="control">
                 <label for="interval-select">Candle Interval</label>
                 <select id="interval-select">
+                    <option value="5m">5 Minutes</option>
+                    <option value="15m">15 Minutes</option>
+                    <option value="30m">30 Minutes</option>
+                    <option value="60m">60 Minutes</option>
                     <option value="1d" selected>Daily</option>
                     <option value="1wk">Weekly</option>
                     <option value="1mo">Monthly</option>
@@ -1095,6 +1429,16 @@
                 </select>
             </div>
             <div class="control">
+                <label for="auto-refresh-select">Auto Refresh</label>
+                <select id="auto-refresh-select">
+                    <option value="0">Manual</option>
+                    <option value="30">30 Seconds</option>
+                    <option value="60" selected>1 Minute</option>
+                    <option value="120">2 Minutes</option>
+                    <option value="300">5 Minutes</option>
+                </select>
+            </div>
+            <div class="control">
                 <label>Export</label>
                 <details class="export-menu">
                     <summary>Open Export Options</summary>
@@ -1110,74 +1454,83 @@
             <div class="control">
                 <label>&nbsp;</label>
                 <button id="refresh-btn" type="button">Refresh Data</button>
+                <div id="refresh-meta" class="refresh-meta">Last sync: --</div>
             </div>
+        </section>
+
+        <section class="system-strip" aria-label="System state">
+            <div class="system-pill" id="sys-source">Source: --</div>
+            <div class="system-pill" id="sys-ml">ML: --</div>
+            <div class="system-pill" id="sys-collector">Collector: --</div>
+            <div class="system-pill" id="sys-last-bar">Last bar: --</div>
+            <div class="system-pill" id="sys-refresh">Refresh: --</div>
         </section>
 
         <section class="decision-strip" aria-label="Decision summary">
             <div class="decision-card">
-                <div class="decision-label">Session Bias</div>
+                <div class="decision-label" title="Overall directional lean based on price relative to pivot and EMAs">Session Bias</div>
                 <div class="decision-value" id="decision-bias">--</div>
             </div>
             <div class="decision-card">
-                <div class="decision-label">Nearest Level</div>
+                <div class="decision-label" title="Closest pivot support or resistance level to current price">Nearest Level</div>
                 <div class="decision-value mono" id="decision-nearest">--</div>
             </div>
             <div class="decision-card">
-                <div class="decision-label">Gamma Mode</div>
+                <div class="decision-label" title="Positive gamma = mean-reversion; Negative gamma = trend-following">Gamma Mode</div>
                 <div class="decision-value" id="decision-gamma">--</div>
             </div>
             <div class="decision-card">
-                <div class="decision-label">Vol Regime</div>
+                <div class="decision-label" title="Current volatility regime based on VIX, IV/RV ratio, and ATR">Vol Regime</div>
                 <div class="decision-value" id="decision-vol">--</div>
             </div>
             <div class="decision-card">
-                <div class="decision-label">Confidence</div>
+                <div class="decision-label" title="Composite confidence score weighting data freshness and gamma quality">Confidence</div>
                 <div class="decision-value" id="decision-confidence">--</div>
             </div>
             <div class="decision-card">
-                <div class="decision-label">Data Quality</div>
+                <div class="decision-label" title="Percentage of expected data fields present in the current session">Data Quality</div>
                 <div class="decision-value" id="decision-data">--</div>
             </div>
             <div class="decision-card decision-card-wide">
-                <div class="decision-label">Primary Rationale</div>
+                <div class="decision-label" title="Human-readable explanation of the dominant signal driving bias">Primary Rationale</div>
                 <div class="decision-value" id="decision-rationale">--</div>
             </div>
         </section>
 
         <main class="grid">
-            <section class="panel">
+            <section class="panel market-panel">
                 <h3>Market Snapshot</h3>
                 <div class="stat-grid">
                     <div class="stat">
-                        <div class="stat-label">Current Price</div>
+                        <div class="stat-label" title="Latest traded price from the data feed">Current Price</div>
                         <div id="current-price" class="stat-value">--</div>
                     </div>
                     <div class="stat">
-                        <div class="stat-label">Previous Close</div>
+                        <div class="stat-label" title="Most recent daily closing price — used for gap analysis">Prior Daily Close</div>
                         <div id="previous-close" class="stat-value">--</div>
                     </div>
                     <div class="stat">
-                        <div class="stat-label">Prev High</div>
+                        <div class="stat-label" title="High of the session used for pivot calculation">Session High</div>
                         <div id="session-high" class="stat-value">--</div>
                     </div>
                     <div class="stat">
-                        <div class="stat-label">Prev Low</div>
+                        <div class="stat-label" title="Low of the session used for pivot calculation">Session Low</div>
                         <div id="session-low" class="stat-value">--</div>
                     </div>
                     <div class="stat">
-                        <div class="stat-label">Prev Close</div>
+                        <div class="stat-label" title="Close of the session used for pivot calculation">Session Close</div>
                         <div id="session-close" class="stat-value">--</div>
                     </div>
                     <div class="stat">
-                        <div class="stat-label">ATR (14)</div>
+                        <div class="stat-label" title="Average True Range over 14 periods — measures daily volatility in dollar terms">ATR (14)</div>
                         <div id="atr-value" class="stat-value">--</div>
                     </div>
                     <div class="stat">
-                        <div class="stat-label">EMA 9</div>
+                        <div class="stat-label" title="9-period Exponential Moving Average — fast trend indicator">EMA 9</div>
                         <div id="ema9-value" class="stat-value">--</div>
                     </div>
                     <div class="stat">
-                        <div class="stat-label">EMA 21</div>
+                        <div class="stat-label" title="21-period Exponential Moving Average — intermediate trend indicator">EMA 21</div>
                         <div id="ema21-value" class="stat-value">--</div>
                     </div>
                 </div>
@@ -1193,26 +1546,39 @@
                 </div>
             </section>
 
-            <section class="panel chart-panel span-2">
+            <section class="panel chart-panel">
                 <div class="panel-header">
                     <h3>Price With Pivot Ladder</h3>
-                    <div class="chart-toolbar" role="group" aria-label="Chart layers">
-                        <button class="chip-toggle is-on" id="toggle-pivots" type="button">Pivots</button>
-                        <button class="chip-toggle is-on" id="toggle-gamma-walls" type="button">Gamma</button>
-                        <button class="chip-toggle is-on" id="toggle-ema9" type="button">EMA 9</button>
-                        <button class="chip-toggle is-on" id="toggle-ema21" type="button">EMA 21</button>
-                        <button class="chip-toggle is-on" id="toggle-vwap" type="button">VWAP</button>
-                        <button class="chip-toggle" id="fit-chart" type="button">Fit</button>
+                    <div class="chart-toolbar-stack">
+                        <div class="timeframe-toolbar" role="group" aria-label="Quick timeframe">
+                            <span class="timeframe-label">Quick TF</span>
+                            <button class="timeframe-chip" type="button" data-interval="5m">5m</button>
+                            <button class="timeframe-chip" type="button" data-interval="15m">15m</button>
+                            <button class="timeframe-chip" type="button" data-interval="30m">30m</button>
+                            <button class="timeframe-chip" type="button" data-interval="60m">60m</button>
+                            <button class="timeframe-chip is-active" type="button" data-interval="1d">1D</button>
+                            <button class="timeframe-chip" type="button" data-interval="1wk">1W</button>
+                            <button class="timeframe-chip" type="button" data-interval="1mo">1M</button>
+                        </div>
+                        <div class="chart-toolbar" role="group" aria-label="Chart layers">
+                            <button class="chip-toggle is-on" id="toggle-pivots" type="button">Pivots</button>
+                            <button class="chip-toggle is-on" id="toggle-gamma-walls" type="button">Gamma</button>
+                            <button class="chip-toggle is-on" id="toggle-ema9" type="button">EMA 9</button>
+                            <button class="chip-toggle is-on" id="toggle-ema21" type="button">EMA 21</button>
+                            <button class="chip-toggle is-on" id="toggle-vwap" type="button">VWAP</button>
+                            <button class="chip-toggle" id="fit-chart" type="button">Fit</button>
+                        </div>
                     </div>
                 </div>
                 <div id="chartContainer"></div>
             </section>
 
-            <section class="panel span-2" id="ml-panel">
+            <section class="panel" id="ml-panel">
                 <div class="panel-header">
                     <h3>ML Signal</h3>
                     <div class="ml-controls">
                         <div class="ml-service-pill" id="ml-service-pill" data-state="checking" title="Checking ML service">ML Checking</div>
+                        <div class="ml-service-pill" id="collector-service-pill" data-state="checking" title="Checking live collector">Collector Checking</div>
                         <label class="ml-toggle">
                             <input type="checkbox" id="ml-preview-toggle" checked>
                             <span>Preview mode</span>
@@ -1234,27 +1600,27 @@
                 </div>
                 <div class="stat-grid stat-grid-3">
                     <div class="stat">
-                        <div class="stat-label">Status</div>
+                        <div class="stat-label" title="Current ML scoring status — Waiting, Scored, or Error">Status</div>
                         <div id="ml-status" class="stat-value">Waiting for touch</div>
                     </div>
                     <div class="stat">
-                        <div class="stat-label">Detail</div>
+                        <div class="stat-label" title="Additional context about the latest ML scoring result">Detail</div>
                         <div id="ml-detail" class="stat-value">No ML score yet</div>
                     </div>
                     <div class="stat">
-                        <div class="stat-label">Model</div>
+                        <div class="stat-label" title="Model version and feature set used for predictions">Model</div>
                         <div id="ml-model" class="stat-value">--</div>
                     </div>
                     <div class="stat">
-                        <div class="stat-label">Trained End</div>
+                        <div class="stat-label" title="Last date in the training dataset — older models may drift">Trained End</div>
                         <div id="ml-trained" class="stat-value">--</div>
                     </div>
                     <div class="stat">
-                        <div class="stat-label">Calibration</div>
+                        <div class="stat-label" title="Post-training probability calibration method (e.g. sigmoid, isotonic)">Calibration</div>
                         <div id="ml-calibration" class="stat-value">--</div>
                     </div>
                     <div class="stat">
-                        <div class="stat-label">Best Horizon</div>
+                        <div class="stat-label" title="Horizon with the strongest signal above its optimal threshold">Best Horizon</div>
                         <div id="ml-best-horizon" class="stat-value">--</div>
                     </div>
                 </div>
@@ -1265,10 +1631,10 @@
                     <div class="ml-horizon-card">
                         <div class="ml-horizon-title">5m</div>
                         <div class="ml-signal-label" id="ml-signal-5m">--</div>
-                        <div class="ml-horizon-row">Reject: <span id="ml-reject-5m">--</span></div>
-                        <div class="ml-horizon-row">Break: <span id="ml-break-5m">--</span></div>
-                        <div class="ml-horizon-row">Exp MFE: <span id="ml-mfe-5m">--</span></div>
-                        <div class="ml-horizon-row">Exp MAE: <span id="ml-mae-5m">--</span></div>
+                        <div class="ml-horizon-row" title="Probability that price will reject (bounce) from this level within 5 minutes">Reject: <span id="ml-reject-5m">--</span></div>
+                        <div class="ml-horizon-row" title="Probability that price will break through this level within 5 minutes">Break: <span id="ml-break-5m">--</span></div>
+                        <div class="ml-horizon-row" title="Expected Maximum Favorable Excursion — best-case profit potential in bps">Exp MFE: <span id="ml-mfe-5m">--</span></div>
+                        <div class="ml-horizon-row" title="Expected Maximum Adverse Excursion — worst-case drawdown potential in bps">Exp MAE: <span id="ml-mae-5m">--</span></div>
                         <div class="ml-threshold-row">
                             <span>Thr R: <span id="ml-thr-reject-5m">--</span></span>
                             <span>Thr B: <span id="ml-thr-break-5m">--</span></span>
@@ -1277,10 +1643,10 @@
                     <div class="ml-horizon-card">
                         <div class="ml-horizon-title">15m</div>
                         <div class="ml-signal-label" id="ml-signal-15m">--</div>
-                        <div class="ml-horizon-row">Reject: <span id="ml-reject-15m">--</span></div>
-                        <div class="ml-horizon-row">Break: <span id="ml-break-15m">--</span></div>
-                        <div class="ml-horizon-row">Exp MFE: <span id="ml-mfe-15m">--</span></div>
-                        <div class="ml-horizon-row">Exp MAE: <span id="ml-mae-15m">--</span></div>
+                        <div class="ml-horizon-row" title="Probability that price will reject from this level within 15 minutes">Reject: <span id="ml-reject-15m">--</span></div>
+                        <div class="ml-horizon-row" title="Probability that price will break through this level within 15 minutes">Break: <span id="ml-break-15m">--</span></div>
+                        <div class="ml-horizon-row" title="Expected Maximum Favorable Excursion — best-case profit potential in bps">Exp MFE: <span id="ml-mfe-15m">--</span></div>
+                        <div class="ml-horizon-row" title="Expected Maximum Adverse Excursion — worst-case drawdown potential in bps">Exp MAE: <span id="ml-mae-15m">--</span></div>
                         <div class="ml-threshold-row">
                             <span>Thr R: <span id="ml-thr-reject-15m">--</span></span>
                             <span>Thr B: <span id="ml-thr-break-15m">--</span></span>
@@ -1289,10 +1655,10 @@
                     <div class="ml-horizon-card">
                         <div class="ml-horizon-title">60m</div>
                         <div class="ml-signal-label" id="ml-signal-60m">--</div>
-                        <div class="ml-horizon-row">Reject: <span id="ml-reject-60m">--</span></div>
-                        <div class="ml-horizon-row">Break: <span id="ml-break-60m">--</span></div>
-                        <div class="ml-horizon-row">Exp MFE: <span id="ml-mfe-60m">--</span></div>
-                        <div class="ml-horizon-row">Exp MAE: <span id="ml-mae-60m">--</span></div>
+                        <div class="ml-horizon-row" title="Probability that price will reject from this level within 60 minutes">Reject: <span id="ml-reject-60m">--</span></div>
+                        <div class="ml-horizon-row" title="Probability that price will break through this level within 60 minutes">Break: <span id="ml-break-60m">--</span></div>
+                        <div class="ml-horizon-row" title="Expected Maximum Favorable Excursion — best-case profit potential in bps">Exp MFE: <span id="ml-mfe-60m">--</span></div>
+                        <div class="ml-horizon-row" title="Expected Maximum Adverse Excursion — worst-case drawdown potential in bps">Exp MAE: <span id="ml-mae-60m">--</span></div>
                         <div class="ml-threshold-row">
                             <span>Thr R: <span id="ml-thr-reject-60m">--</span></span>
                             <span>Thr B: <span id="ml-thr-break-60m">--</span></span>
@@ -1301,15 +1667,15 @@
                 </div>
                 <div class="stat-grid stat-grid-3">
                     <div class="stat">
-                        <div class="stat-label">Rolling AUC</div>
+                        <div class="stat-label" title="Area Under ROC Curve — 1.0 is perfect, 0.5 is random. Measures ranking quality of predictions">Rolling AUC</div>
                         <div id="ml-metric-auc" class="stat-value">--</div>
                     </div>
                     <div class="stat">
-                        <div class="stat-label">Rolling Brier</div>
+                        <div class="stat-label" title="Brier Score — 0.0 is perfect. Lower means better-calibrated probabilities. Baseline depends on class frequency">Rolling Brier</div>
                         <div id="ml-metric-brier" class="stat-value">--</div>
                     </div>
                     <div class="stat">
-                        <div class="stat-label">Calib Drift (ECE)</div>
+                        <div class="stat-label" title="Expected Calibration Error — measures gap between predicted probabilities and actual outcomes. Lower is better">Calib Drift (ECE)</div>
                         <div id="ml-metric-ece" class="stat-value">--</div>
                     </div>
                 </div>
@@ -1337,7 +1703,7 @@
                         <button class="tab-btn is-active" id="tab-levels" data-tab="levels" role="tab" aria-controls="panel-levels" aria-selected="true" type="button">Levels</button>
                         <button class="tab-btn" id="tab-gamma" data-tab="gamma" role="tab" aria-controls="panel-gamma" aria-selected="false" tabindex="-1" type="button">Gamma / Vol</button>
                         <button class="tab-btn" id="tab-ivoi" data-tab="ivoi" role="tab" aria-controls="panel-ivoi" aria-selected="false" tabindex="-1" type="button">IV / OI</button>
-                        <button class="tab-btn" id="tab-debug" data-tab="debug" role="tab" aria-controls="panel-debug" aria-selected="false" tabindex="-1" type="button">Debug</button>
+                        <button class="tab-btn" id="tab-debug" data-tab="debug" role="tab" aria-controls="panel-debug" aria-selected="false" tabindex="-1" type="button" hidden>Debug</button>
                     </div>
                 </div>
 
@@ -1388,27 +1754,27 @@
                 <section class="tab-panel" id="panel-gamma" data-tab-panel="gamma" role="tabpanel" aria-labelledby="tab-gamma" hidden>
                     <h4 class="subsection-title">Gamma / Vol Signals</h4>
                     <div class="signal-grid">
-                        <div class="signal-item" id="gamma-mode"><strong>Gamma Mode</strong>--</div>
-                        <div class="signal-item" id="gamma-distance"><strong>Flip Distance</strong>--</div>
-                        <div class="signal-item" id="vol-regime"><strong>Vol Regime</strong>--</div>
-                        <div class="signal-item" id="iv-rv"><strong>IV vs RV</strong>--</div>
-                        <div class="signal-item" id="wall-call"><strong>Call Wall</strong>--</div>
-                        <div class="signal-item" id="wall-put"><strong>Put Wall</strong>--</div>
-                        <div class="signal-item" id="wall-pin"><strong>Pin Candidate</strong>--</div>
-                        <div class="signal-item" id="playbook"><strong>Playbook</strong>--</div>
-                        <div class="signal-item" id="gamma-confidence"><strong>Gamma Confidence</strong>--</div>
+                        <div class="signal-item" id="gamma-mode" title="Positive gamma (dealer hedging dampens moves) vs Negative gamma (dealer hedging amplifies moves)"><strong>Gamma Mode</strong>--</div>
+                        <div class="signal-item" id="gamma-distance" title="Distance from current price to the gamma flip level (where net gamma changes sign)"><strong>Flip Distance</strong>--</div>
+                        <div class="signal-item" id="vol-regime" title="Current volatility environment classified by VIX and IV/RV ratio"><strong>Vol Regime</strong>--</div>
+                        <div class="signal-item" id="iv-rv" title="Implied Volatility vs Realized Volatility ratio — above 1.0 means options are relatively expensive"><strong>IV vs RV</strong>--</div>
+                        <div class="signal-item" id="wall-call" title="Strike with highest call open interest — acts as resistance via dealer hedging"><strong>Call Wall</strong>--</div>
+                        <div class="signal-item" id="wall-put" title="Strike with highest put open interest — acts as support via dealer hedging"><strong>Put Wall</strong>--</div>
+                        <div class="signal-item" id="wall-pin" title="Strike where price may gravitate toward due to balanced OI — max pain effect"><strong>Pin Candidate</strong>--</div>
+                        <div class="signal-item" id="playbook" title="Suggested trading approach based on gamma environment and vol regime"><strong>Playbook</strong>--</div>
+                        <div class="signal-item" id="gamma-confidence" title="Reliability score for gamma data based on freshness and coverage"><strong>Gamma Confidence</strong>--</div>
                     </div>
                 </section>
 
                 <section class="tab-panel" id="panel-ivoi" data-tab-panel="ivoi" role="tabpanel" aria-labelledby="tab-ivoi" hidden>
                     <h4 class="subsection-title">IV / OI Summary</h4>
                     <div class="signal-grid">
-                        <div class="signal-item" id="oi-total"><strong>Total OI</strong>--</div>
-                        <div class="signal-item" id="oi-concentration"><strong>OI Concentration</strong>--</div>
-                        <div class="signal-item" id="atm-iv"><strong>ATM IV</strong>--</div>
-                        <div class="signal-item" id="skew-25d"><strong>25Δ Skew</strong>--</div>
-                        <div class="signal-item" id="zero-dte-share"><strong>0DTE Share</strong>--</div>
-                        <div class="signal-item" id="data-quality"><strong>Data Quality</strong>--</div>
+                        <div class="signal-item" id="oi-total" title="Total open interest across the selected expiry chain"><strong>Total OI</strong>--</div>
+                        <div class="signal-item" id="oi-concentration" title="Ratio of top-5 strike OI to total — high concentration = strong magnet levels"><strong>OI Concentration</strong>--</div>
+                        <div class="signal-item" id="atm-iv" title="Implied Volatility for At-The-Money options — a market-implied expected move"><strong>ATM IV</strong>--</div>
+                        <div class="signal-item" id="skew-25d" title="Difference between 25-delta put IV and 25-delta call IV — positive = demand for downside protection"><strong>25Δ Skew</strong>--</div>
+                        <div class="signal-item" id="zero-dte-share" title="Percentage of open interest expiring today — high 0DTE share amplifies intraday gamma effects"><strong>0DTE Share</strong>--</div>
+                        <div class="signal-item" id="data-quality" title="Freshness and completeness of the options data feed"><strong>Data Quality</strong>--</div>
                     </div>
                 </section>
 
@@ -1426,6 +1792,9 @@
     <script>
         const state = {
             chart: null,
+            chartResizeObserver: null,
+            chartResizeHandler: null,
+            resizeChartToContainer: null,
             candleSeries: null,
             pivotLines: [],
             ema9Series: null,
@@ -1463,6 +1832,12 @@
             lastVwap: null,
             spotTimer: null,
             intradayTimer: null,
+            autoRefreshSec: 60,
+            autoRefreshTimer: null,
+            autoRefreshCountdownTimer: null,
+            nextAutoRefreshAt: null,
+            lastRefreshAt: null,
+            marketLoading: false,
             intradaySyncInFlight: false,
             lastTouchByLevel: new Map(),
             touchCountByDay: {},
@@ -1480,12 +1855,17 @@
             mlMetricsTimer: null,
             mlServiceStatus: 'checking',
             mlServiceMessage: 'Checking ML service health.',
+            collectorServiceStatus: 'checking',
+            collectorServiceMessage: 'Checking live collector health.',
+            mlCoverageSupported: true,
+            mlCoverageNoticeSymbol: null,
             mlHealthState: 'unknown',
             mlHealthNote: '',
             mlScoresToday: 0,
             mlFlaggedScores: 0,
             mlScoreDate: null,
             mlHealthTimer: null,
+            collectorHealthTimer: null,
             debugEnabled: false,
             debugMessage: '',
             activeInsightTab: 'levels',
@@ -1506,7 +1886,111 @@
             lastGammaDrivers: '--',
             lastDataQualityLabel: '--',
             lastDataCoverage: null,
+            lastBarTs: null,
         };
+
+        // ── Toast Notification System ──
+        const TOAST_ICONS = { info: 'ℹ️', success: '✅', warning: '⚠️', error: '❌' };
+        const TOAST_TITLES = { info: 'Info', success: 'Success', warning: 'Warning', error: 'Error' };
+        const TOAST_DURATIONS = { info: 4000, success: 3000, warning: 5000, error: 7000 };
+        let _toastDedup = new Map();
+
+        function showToast(message, level = 'info', opts = {}) {
+            const container = document.getElementById('toast-container');
+            if (!container) return;
+
+            // Deduplicate: suppress identical messages within 3s
+            const dedupKey = `${level}:${message}`;
+            const now = Date.now();
+            if (_toastDedup.has(dedupKey) && now - _toastDedup.get(dedupKey) < 3000) return;
+            _toastDedup.set(dedupKey, now);
+            if (_toastDedup.size > 50) {
+                const oldest = [..._toastDedup.entries()].sort((a, b) => a[1] - b[1]).slice(0, 25);
+                oldest.forEach(([k]) => _toastDedup.delete(k));
+            }
+
+            const title = opts.title || TOAST_TITLES[level] || 'Notice';
+            const duration = opts.duration || TOAST_DURATIONS[level] || 4000;
+            const icon = TOAST_ICONS[level] || 'ℹ️';
+
+            const toast = document.createElement('div');
+            toast.className = 'toast';
+            toast.setAttribute('data-level', level);
+            toast.setAttribute('role', 'alert');
+
+            const iconSpan = document.createElement('span');
+            iconSpan.className = 'toast-icon';
+            iconSpan.textContent = icon;
+
+            const body = document.createElement('div');
+            body.className = 'toast-body';
+
+            const titleDiv = document.createElement('div');
+            titleDiv.className = 'toast-title';
+            titleDiv.textContent = title;
+
+            const msgDiv = document.createElement('div');
+            msgDiv.className = 'toast-message';
+            if (opts.html) {
+                // Only used by internal callers with controlled markup (e.g. keyboard help)
+                msgDiv.innerHTML = message;
+            } else {
+                msgDiv.textContent = message;
+            }
+
+            body.appendChild(titleDiv);
+            body.appendChild(msgDiv);
+
+            const closeBtn = document.createElement('button');
+            closeBtn.className = 'toast-close';
+            closeBtn.setAttribute('aria-label', 'Dismiss');
+            closeBtn.innerHTML = '&times;';
+
+            toast.appendChild(iconSpan);
+            toast.appendChild(body);
+            toast.appendChild(closeBtn);
+
+            const dismiss = () => {
+                toast.classList.add('toast-exit');
+                setTimeout(() => toast.remove(), 260);
+            };
+
+            closeBtn.addEventListener('click', dismiss);
+            container.appendChild(toast);
+
+            // Cap visible toasts at 5
+            const toasts = container.querySelectorAll('.toast:not(.toast-exit)');
+            if (toasts.length > 5) {
+                toasts[0].classList.add('toast-exit');
+                setTimeout(() => toasts[0].remove(), 260);
+            }
+
+            setTimeout(dismiss, duration);
+        }
+
+        const RANGE_ORDER = ['1mo', '3mo', '6mo', '1y'];
+        const INTRADAY_INTERVALS = new Set(['1m', '5m', '15m', '30m', '60m', '90m']);
+        const ML_SUPPORTED_SYMBOLS = new Set(['SPY']);
+        const INTRADAY_RANGE_CAP = {
+            '5m': '1mo',
+            '15m': '3mo',
+            '30m': '3mo',
+            '60m': '6mo',
+            '90m': '6mo',
+        };
+
+        const isIntradayInterval = (interval) =>
+            typeof interval === 'string' && (INTRADAY_INTERVALS.has(interval) || interval.endsWith('h'));
+
+        const isMlSupportedSymbol = (symbol) =>
+            typeof symbol === 'string' && ML_SUPPORTED_SYMBOLS.has(symbol.toUpperCase());
+
+        function clampRangeByCap(range, maxRange) {
+            const rangeIdx = RANGE_ORDER.indexOf(range);
+            const capIdx = RANGE_ORDER.indexOf(maxRange);
+            if (rangeIdx === -1 || capIdx === -1) return range;
+            return rangeIdx > capIdx ? maxRange : range;
+        }
 
         const formatNumber = (value, digits = 2) => {
             if (!Number.isFinite(value)) return '--';
@@ -1648,7 +2132,19 @@
 
         const saveUiPrefs = () => {
             try {
-                localStorage.setItem('debugMode', state.debugEnabled ? '1' : '0');
+                const prefs = {
+                    debugMode: state.debugEnabled ? '1' : '0',
+                    symbol: state.symbol,
+                    range: state.range,
+                    interval: state.interval,
+                    pivotType: state.pivotType,
+                    lookback: String(state.lookbackSessions),
+                    autoRefreshSec: String(state.autoRefreshSec),
+                    visibility: state.uiVisibility,
+                };
+                localStorage.setItem('pq_ui_prefs', JSON.stringify(prefs));
+                // Keep legacy key for backward compat
+                localStorage.setItem('debugMode', prefs.debugMode);
             } catch (error) {
                 console.warn('Unable to persist UI prefs', error);
             }
@@ -1656,9 +2152,27 @@
 
         const loadUiPrefs = () => {
             try {
-                const debugMode = localStorage.getItem('debugMode');
-                if (debugMode !== null) {
-                    state.debugEnabled = debugMode === '1';
+                const raw = localStorage.getItem('pq_ui_prefs');
+                if (raw) {
+                    const prefs = JSON.parse(raw);
+                    if (prefs.debugMode !== undefined) state.debugEnabled = prefs.debugMode === '1';
+                    if (prefs.symbol) state.symbol = prefs.symbol;
+                    if (prefs.range) state.range = prefs.range;
+                    if (prefs.interval) state.interval = prefs.interval;
+                    if (prefs.pivotType) state.pivotType = prefs.pivotType;
+                    if (prefs.lookback && Number.isFinite(Number(prefs.lookback))) state.lookbackSessions = Number(prefs.lookback);
+                    if (prefs.autoRefreshSec !== undefined && Number.isFinite(Number(prefs.autoRefreshSec))) {
+                        state.autoRefreshSec = Math.max(0, Number(prefs.autoRefreshSec));
+                    }
+                    if (prefs.visibility && typeof prefs.visibility === 'object') {
+                        Object.assign(state.uiVisibility, prefs.visibility);
+                    }
+                } else {
+                    // Fallback to legacy key
+                    const debugMode = localStorage.getItem('debugMode');
+                    if (debugMode !== null) {
+                        state.debugEnabled = debugMode === '1';
+                    }
                 }
             } catch (error) {
                 console.warn('Unable to load UI prefs', error);
@@ -1674,11 +2188,20 @@
             const toggle = document.getElementById('debug-toggle');
             const panel = document.getElementById('debug-panel');
             const hint = document.getElementById('debug-hint');
+            const debugTab = document.getElementById('tab-debug');
+
+            // Only show debug controls when debug mode is unlocked via ?debug=1 or localStorage
+            const debugUnlocked = state.debugEnabled || new URLSearchParams(window.location.search).get('debug') === '1';
 
             if (toggle) {
+                toggle.hidden = !debugUnlocked;
                 toggle.classList.toggle('active', state.debugEnabled);
                 toggle.setAttribute('aria-pressed', state.debugEnabled ? 'true' : 'false');
                 toggle.textContent = state.debugEnabled ? 'Debug On' : 'Debug Off';
+            }
+
+            if (debugTab) {
+                debugTab.hidden = !debugUnlocked;
             }
 
             if (panel) {
@@ -1780,6 +2303,7 @@
                     state.uiVisibility[key] = !state.uiVisibility[key];
                     syncToggleButton(id, state.uiVisibility[key]);
                     applyChartVisibility();
+                    saveUiPrefs();
                 });
             });
 
@@ -1793,6 +2317,35 @@
                     }
                 });
             }
+        }
+
+        function syncIntervalQuickChips() {
+            const selectedInterval = document.getElementById('interval-select')?.value;
+            const chips = document.querySelectorAll('.timeframe-chip[data-interval]');
+            chips.forEach((chip) => {
+                const active = chip.dataset.interval === selectedInterval;
+                chip.classList.toggle('is-active', active);
+                chip.setAttribute('aria-pressed', active ? 'true' : 'false');
+            });
+        }
+
+        function initializeIntervalToolbar() {
+            const intervalSelect = document.getElementById('interval-select');
+            const chips = Array.from(document.querySelectorAll('.timeframe-chip[data-interval]'));
+            if (!intervalSelect || !chips.length) return;
+
+            chips.forEach((chip) => {
+                chip.setAttribute('aria-pressed', 'false');
+                chip.addEventListener('click', () => {
+                    const nextInterval = chip.dataset.interval;
+                    if (!nextInterval || intervalSelect.value === nextInterval) return;
+                    intervalSelect.value = nextInterval;
+                    syncIntervalQuickChips();
+                    loadMarketData();
+                });
+            });
+
+            syncIntervalQuickChips();
         }
 
         function updateDecisionStrip() {
@@ -1905,8 +2458,216 @@
         function setStatus(type, message) {
             const dot = document.getElementById('status-dot');
             const text = document.getElementById('status-text');
-            dot.className = `status-dot ${type}`;
-            text.textContent = message;
+            if (dot) dot.className = `status-dot ${type}`;
+            if (text) text.textContent = message;
+        }
+
+        function formatRefreshClock(epochMs) {
+            if (!Number.isFinite(epochMs)) return '--';
+            return new Date(epochMs).toLocaleTimeString([], {
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit',
+            });
+        }
+
+        function formatAgeShort(epochMs) {
+            if (!Number.isFinite(epochMs)) return '--';
+            const deltaMs = Math.max(0, Date.now() - epochMs);
+            const deltaSec = Math.floor(deltaMs / 1000);
+            if (deltaSec < 60) return `${deltaSec}s`;
+            const deltaMin = Math.floor(deltaSec / 60);
+            if (deltaMin < 60) return `${deltaMin}m`;
+            const deltaHour = deltaMin / 60;
+            if (deltaHour < 48) return `${deltaHour.toFixed(1)}h`;
+            return `${(deltaHour / 24).toFixed(1)}d`;
+        }
+
+        function setSystemPill(id, text, tone = '', title = '') {
+            const pill = document.getElementById(id);
+            if (!pill) return;
+            pill.textContent = text;
+            pill.classList.remove('ok', 'warn', 'risk');
+            if (tone) {
+                pill.classList.add(tone);
+            }
+            if (title) {
+                pill.title = title;
+            } else {
+                pill.removeAttribute('title');
+            }
+        }
+
+        function updateSymbolCoverageNote() {
+            const note = document.getElementById('symbol-coverage-note');
+            if (!note) return;
+            const symbol = (state.symbol || '').toUpperCase();
+            const supported = isMlSupportedSymbol(symbol);
+            state.mlCoverageSupported = supported;
+
+            if (supported) {
+                note.textContent = `ML coverage: full (${symbol})`;
+                note.style.color = 'var(--success)';
+                state.mlCoverageNoticeSymbol = null;
+                return;
+            }
+
+            note.textContent = `ML coverage: limited (${symbol}) · model scoring is SPY-only`;
+            note.style.color = 'var(--warning)';
+            if (state.mlCoverageNoticeSymbol !== symbol) {
+                showToast(
+                    `ML scoring is currently validated for SPY. ${symbol} stays chart-only until dedicated models are trained.`,
+                    'warning',
+                    { title: 'Coverage Notice', duration: 7000 }
+                );
+                state.mlCoverageNoticeSymbol = symbol;
+            }
+        }
+
+        function updateSystemStrip() {
+            const sourceValue = state.dataSource || '--';
+            setSystemPill(
+                'sys-source',
+                `Source: ${sourceValue}`,
+                sourceValue && sourceValue !== '--' ? 'ok' : '',
+                `Instrument ${state.symbol || '--'}`
+            );
+
+            const mlLabel = state.mlServiceStatus === 'online'
+                ? 'online'
+                : state.mlServiceStatus === 'offline'
+                    ? 'offline'
+                    : state.mlServiceStatus === 'degraded'
+                        ? 'degraded'
+                        : 'checking';
+            const mlTone = state.mlServiceStatus === 'online'
+                ? 'ok'
+                : state.mlServiceStatus === 'offline'
+                    ? 'risk'
+                    : 'warn';
+            const healthSuffix = state.mlHealthState === 'kill-switch'
+                ? ' · kill-switch'
+                : state.mlHealthState === 'degrading'
+                    ? ' · degrading'
+                    : '';
+            setSystemPill(
+                'sys-ml',
+                `ML: ${mlLabel}${healthSuffix}`,
+                mlTone,
+                state.mlServiceMessage || ''
+            );
+
+            const collectorLabel = state.collectorServiceStatus === 'online'
+                ? 'online'
+                : state.collectorServiceStatus === 'offline'
+                    ? 'offline'
+                    : state.collectorServiceStatus === 'degraded'
+                        ? 'degraded'
+                        : 'checking';
+            const collectorTone = state.collectorServiceStatus === 'online'
+                ? 'ok'
+                : state.collectorServiceStatus === 'offline'
+                    ? 'risk'
+                    : 'warn';
+            setSystemPill(
+                'sys-collector',
+                `Collector: ${collectorLabel}`,
+                collectorTone,
+                state.collectorServiceMessage || ''
+            );
+
+            const lastBarLabel = Number.isFinite(state.lastBarTs)
+                ? `${new Date(state.lastBarTs).toLocaleTimeString('en-US', {
+                    timeZone: state.timeZone,
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit',
+                    hour12: false,
+                })} (${formatAgeShort(state.lastBarTs)} ago)`
+                : '--';
+            const freshnessWindowMs = isIntradayInterval(state.interval)
+                ? 15 * 60 * 1000
+                : 36 * 60 * 60 * 1000;
+            const lastBarTone = Number.isFinite(state.lastBarTs)
+                ? (Date.now() - state.lastBarTs <= freshnessWindowMs ? 'ok' : 'warn')
+                : '';
+            setSystemPill('sys-last-bar', `Last bar: ${lastBarLabel}`, lastBarTone);
+
+            const autoSec = Number(state.autoRefreshSec) || 0;
+            const refreshLabel = autoSec > 0
+                ? `Refresh: ${autoSec}s auto · last ${formatRefreshClock(state.lastRefreshAt)}`
+                : `Refresh: manual · last ${formatRefreshClock(state.lastRefreshAt)}`;
+            setSystemPill('sys-refresh', refreshLabel, autoSec > 0 ? 'ok' : '');
+        }
+
+        function updateRefreshMeta() {
+            const meta = document.getElementById('refresh-meta');
+            const refreshButton = document.getElementById('refresh-btn');
+            const autoSec = Number(state.autoRefreshSec) || 0;
+
+            if (refreshButton) {
+                refreshButton.disabled = Boolean(state.marketLoading);
+                refreshButton.textContent = state.marketLoading ? 'Refreshing…' : 'Refresh Data';
+            }
+
+            if (!meta) {
+                updateSystemStrip();
+                return;
+            }
+
+            const lastSync = formatRefreshClock(state.lastRefreshAt);
+            if (state.marketLoading) {
+                meta.textContent = autoSec > 0
+                    ? `Last sync: ${lastSync} · Auto: ${autoSec}s`
+                    : `Last sync: ${lastSync} · Auto: Off`;
+                updateSystemStrip();
+                return;
+            }
+
+            if (autoSec <= 0) {
+                meta.textContent = `Last sync: ${lastSync} · Auto: Off`;
+                updateSystemStrip();
+                return;
+            }
+
+            const secondsUntil = Number.isFinite(state.nextAutoRefreshAt)
+                ? Math.max(0, Math.ceil((state.nextAutoRefreshAt - Date.now()) / 1000))
+                : autoSec;
+            meta.textContent = `Last sync: ${lastSync} · Next refresh: ${secondsUntil}s`;
+            updateSystemStrip();
+        }
+
+        function clearAutoRefreshTimers() {
+            if (state.autoRefreshTimer) {
+                clearInterval(state.autoRefreshTimer);
+                state.autoRefreshTimer = null;
+            }
+            if (state.autoRefreshCountdownTimer) {
+                clearInterval(state.autoRefreshCountdownTimer);
+                state.autoRefreshCountdownTimer = null;
+            }
+        }
+
+        function startAutoRefreshLoop() {
+            clearAutoRefreshTimers();
+            const autoSec = Number(state.autoRefreshSec) || 0;
+            if (autoSec <= 0) {
+                state.nextAutoRefreshAt = null;
+                updateRefreshMeta();
+                return;
+            }
+
+            state.nextAutoRefreshAt = Date.now() + autoSec * 1000;
+            state.autoRefreshTimer = setInterval(() => {
+                state.nextAutoRefreshAt = Date.now() + autoSec * 1000;
+                if (!state.marketLoading) {
+                    loadMarketData();
+                }
+                updateRefreshMeta();
+            }, autoSec * 1000);
+
+            state.autoRefreshCountdownTimer = setInterval(updateRefreshMeta, 1000);
+            updateRefreshMeta();
         }
 
         function setPanelLoading(panelIds, loading) {
@@ -1923,8 +2684,12 @@
 
         function syncStickyOffsets() {
             const header = document.querySelector('.app-header');
+            const controls = document.querySelector('.controls');
             if (!header) return;
             document.documentElement.style.setProperty('--header-height', `${header.offsetHeight}px`);
+            if (controls) {
+                document.documentElement.style.setProperty('--controls-height', `${controls.offsetHeight}px`);
+            }
         }
 
         function initializeChart() {
@@ -1935,6 +2700,15 @@
                 state.candleSeries = null;
                 return;
             }
+
+            const measureChartViewport = () => {
+                const rect = container.getBoundingClientRect();
+                const width = Math.max(320, Math.floor(rect.width || container.clientWidth || 0));
+                const height = Math.max(360, Math.floor(rect.height || container.clientHeight || 0));
+                return { width, height };
+            };
+
+            const initialViewport = measureChartViewport();
 
             const addCandles = (chart, options) => {
                 if (typeof chart.addCandlestickSeries === 'function') {
@@ -1958,16 +2732,38 @@
 
             state._addLine = addLine;
             state.chart = LightweightCharts.createChart(container, {
+                width: initialViewport.width,
+                height: initialViewport.height,
                 layout: {
                     background: { color: '#0b0f1a' },
-                    textColor: '#e2e8f0',
+                    textColor: '#cbd5e1',
                 },
                 grid: {
-                    vertLines: { color: 'rgba(148, 163, 184, 0.08)' },
-                    horzLines: { color: 'rgba(148, 163, 184, 0.08)' },
+                    vertLines: { color: 'rgba(148, 163, 184, 0.12)' },
+                    horzLines: { color: 'rgba(148, 163, 184, 0.12)' },
                 },
-                rightPriceScale: { autoScale: true },
-                timeScale: { timeVisible: true, secondsVisible: false },
+                rightPriceScale: {
+                    autoScale: true,
+                    borderColor: 'rgba(148, 163, 184, 0.28)',
+                    minimumWidth: 78,
+                },
+                timeScale: {
+                    timeVisible: true,
+                    secondsVisible: false,
+                    borderColor: 'rgba(148, 163, 184, 0.24)',
+                },
+                crosshair: {
+                    vertLine: {
+                        color: 'rgba(148, 163, 184, 0.35)',
+                        width: 1,
+                        labelBackgroundColor: '#1e293b',
+                    },
+                    horzLine: {
+                        color: 'rgba(148, 163, 184, 0.28)',
+                        width: 1,
+                        labelBackgroundColor: '#1e293b',
+                    },
+                },
             });
 
             state.candleSeries = addCandles(state.chart, {
@@ -2002,16 +2798,41 @@
                 title: 'VWAP',
             });
 
+            const applyChartSize = () => {
+                if (!state.chart) return;
+                const viewport = measureChartViewport();
+                state.chart.applyOptions({
+                    width: viewport.width,
+                    height: viewport.height,
+                });
+            };
+            state.resizeChartToContainer = applyChartSize;
+
             let resizeTimer;
-            window.addEventListener('resize', () => {
+            const scheduleResize = () => {
                 clearTimeout(resizeTimer);
                 resizeTimer = setTimeout(() => {
-                    state.chart.applyOptions({
-                        width: container.clientWidth,
-                        height: container.clientHeight,
-                    });
+                    applyChartSize();
                 }, 150);
-            });
+            };
+
+            if (state.chartResizeHandler) {
+                window.removeEventListener('resize', state.chartResizeHandler);
+            }
+            state.chartResizeHandler = scheduleResize;
+            window.addEventListener('resize', scheduleResize);
+
+            if (state.chartResizeObserver) {
+                state.chartResizeObserver.disconnect();
+            }
+            if (typeof ResizeObserver === 'function') {
+                state.chartResizeObserver = new ResizeObserver(() => {
+                    scheduleResize();
+                });
+                state.chartResizeObserver.observe(container);
+            }
+
+            applyChartSize();
         }
 
         function clearPivotLines() {
@@ -2036,6 +2857,65 @@
             state.gammaLines = [];
         }
 
+        function getLevelLabelSet(levels, referencePrice) {
+            const labelSet = new Set(['PP', 'PIVOT', 'GAMMA', 'R1', 'S1']);
+            if (!Array.isArray(levels) || !Number.isFinite(referencePrice)) {
+                return labelSet;
+            }
+
+            const supports = levels
+                .filter((level) => level.type === 'support')
+                .sort((a, b) => Math.abs(a.distanceBps) - Math.abs(b.distanceBps));
+            const resistances = levels
+                .filter((level) => level.type === 'resistance')
+                .sort((a, b) => Math.abs(a.distanceBps) - Math.abs(b.distanceBps));
+
+            if (supports[0]?.label) labelSet.add(supports[0].label);
+            if (resistances[0]?.label) labelSet.add(resistances[0].label);
+
+            // Keep next ring for intraday visibility without over-labeling.
+            if (isIntradayInterval(state.interval)) {
+                if (supports[1]?.label && Math.abs(supports[1].distanceBps) <= 120) labelSet.add(supports[1].label);
+                if (resistances[1]?.label && Math.abs(resistances[1].distanceBps) <= 120) labelSet.add(resistances[1].label);
+            }
+
+            return labelSet;
+        }
+
+        function getLevelVisualStyle(level, referencePrice, labelSet) {
+            const distanceBps = Number.isFinite(referencePrice)
+                ? Math.abs(((level.value - referencePrice) / referencePrice) * 1e4)
+                : Number.POSITIVE_INFINITY;
+            const isMiddle = typeof level.label === 'string' && level.label.startsWith('M');
+            const isKey = Boolean(labelSet?.has(level.label));
+            const nearScreenCenter = distanceBps <= 18;
+
+            const shouldLabel = !isMiddle && (isKey || nearScreenCenter);
+            const deEmphasized = !isKey && !nearScreenCenter;
+
+            return {
+                shouldLabel,
+                lineWidth: isKey ? 2 : 1,
+                lineStyle: deEmphasized ? 2 : 0,
+                opacity: deEmphasized ? 0.32 : isKey ? 0.95 : 0.62,
+            };
+        }
+
+        function compactChartLabel(label) {
+            const normalized = String(label || '').trim().toUpperCase();
+            const map = {
+                'CALL WALL': 'CALL WALL',
+                'PUT WALL': 'PUT WALL',
+                'GAMMA': 'GAMMA',
+                'PIVOT': 'PIVOT',
+                'PP': 'PIVOT POINT',
+                'EMA 9': 'EMA 9',
+                'EMA 21': 'EMA 21',
+                'VWAP': 'VWAP',
+            };
+            return map[normalized] || String(label || '');
+        }
+
         function renderPivotLines(levels) {
             if (!state.chart) return;
             clearPivotLines();
@@ -2044,23 +2924,26 @@
             if (!times.length) return;
             const startTime = times[0].time;
             const endTime = times[times.length - 1].time;
+            const labelSet = getLevelLabelSet(levels, state.referencePrice);
 
             levels.forEach((level) => {
+                const style = getLevelVisualStyle(level, state.referencePrice, labelSet);
                 const color = level.type === 'gamma'
-                    ? 'rgba(168, 85, 247, 0.9)'
+                    ? `rgba(168, 85, 247, ${style.opacity})`
                     : level.type === 'pivot'
-                        ? 'rgba(251, 191, 36, 0.9)'
+                        ? `rgba(251, 191, 36, ${style.opacity})`
                         : level.type === 'support'
-                            ? 'rgba(16, 185, 129, 0.8)'
-                            : 'rgba(249, 115, 22, 0.8)';
+                            ? `rgba(16, 185, 129, ${style.opacity})`
+                            : `rgba(249, 115, 22, ${style.opacity})`;
 
                 const addLine = state._addLine || ((chart, options) => chart.addLineSeries(options));
                 const line = addLine(state.chart, {
                     color,
-                    lineWidth: level.label === 'PP' || level.label === 'PIVOT' ? 2 : 1,
-                    priceLineVisible: true,
-                    lastValueVisible: true,
-                    title: `${level.label}: ${formatNumber(level.value)}`,
+                    lineWidth: style.lineWidth,
+                    lineStyle: style.lineStyle,
+                    priceLineVisible: style.shouldLabel,
+                    lastValueVisible: style.shouldLabel,
+                    title: compactChartLabel(level.label),
                 });
 
                 line.setData([
@@ -2078,9 +2961,9 @@
             clearGammaLines();
 
             const entries = [
-                walls.callWall ? { label: 'CALL WALL', data: walls.callWall } : null,
-                walls.putWall ? { label: 'PUT WALL', data: walls.putWall } : null,
-                walls.pin ? { label: 'PIN', data: walls.pin } : null,
+                walls.callWall ? { label: 'CALL WALL', shortLabel: 'CALL WALL', data: walls.callWall } : null,
+                walls.putWall ? { label: 'PUT WALL', shortLabel: 'PUT WALL', data: walls.putWall } : null,
+                walls.pin ? { label: 'PIN', shortLabel: 'PIN', data: walls.pin } : null,
             ].filter(Boolean);
 
             if (!entries.length) return;
@@ -2089,14 +2972,24 @@
             if (!times.length) return;
             const startTime = times[0].time;
             const endTime = times[times.length - 1].time;
+            const nearestLabel = entries
+                .slice()
+                .sort((a, b) => Math.abs(a.data.price - state.referencePrice) - Math.abs(b.data.price - state.referencePrice))[0]?.label;
 
             entries.forEach((entry) => {
+                const isNearest = entry.label === nearestLabel;
+                const color = entry.label === 'CALL WALL'
+                    ? `rgba(249, 115, 22, ${isNearest ? 0.92 : 0.62})`
+                    : entry.label === 'PUT WALL'
+                        ? `rgba(16, 185, 129, ${isNearest ? 0.92 : 0.62})`
+                        : `rgba(168, 85, 247, ${isNearest ? 0.9 : 0.54})`;
                 const line = (state._addLine || ((chart, options) => chart.addLineSeries(options)))(state.chart, {
-                    color: 'rgba(168, 85, 247, 0.8)',
-                    lineWidth: 2,
-                    priceLineVisible: true,
-                    lastValueVisible: true,
-                    title: `${entry.label}: ${formatNumber(entry.data.price)}`,
+                    color,
+                    lineWidth: isNearest ? 2 : 1,
+                    lineStyle: entry.label === 'PIN' ? 2 : 0,
+                    priceLineVisible: isNearest,
+                    lastValueVisible: isNearest,
+                    title: entry.shortLabel,
                 });
 
                 line.setData([
@@ -2109,10 +3002,19 @@
             });
         }
 
-        function focusChartOnSession(sessionIndex) {
+        function focusChartOnSession(sessionRef) {
             if (!state.chart || !state.candles.length) return;
-            const start = Math.max(0, sessionIndex - 3);
-            const end = Math.min(state.candles.length - 1, sessionIndex + 3);
+            const sessionStartIndex = Number.isFinite(sessionRef?.sessionStartIndex)
+                ? Number(sessionRef.sessionStartIndex)
+                : Number(sessionRef);
+            const sessionEndIndex = Number.isFinite(sessionRef?.sessionEndIndex)
+                ? Number(sessionRef.sessionEndIndex)
+                : Number(sessionRef);
+            if (!Number.isFinite(sessionStartIndex) || !Number.isFinite(sessionEndIndex)) return;
+
+            const paddingBars = isIntradayInterval(state.interval) ? 20 : 3;
+            const start = Math.max(0, sessionStartIndex - paddingBars);
+            const end = Math.min(state.candles.length - 1, sessionEndIndex + paddingBars);
             const from = state.candles[start]?.time;
             const to = state.candles[end]?.time;
             if (!from || !to || !state.chart.timeScale) return;
@@ -2579,6 +3481,9 @@
         function updateMarketSnapshot(data, sessionEntry, atr) {
             const sessionCandle = sessionEntry?.baseCandle;
             state.sessionCandle = sessionCandle;
+            const lastCandle = state.candles?.[state.candles.length - 1];
+            const lastBarSec = Number(lastCandle?.time);
+            state.lastBarTs = Number.isFinite(lastBarSec) ? Math.floor(lastBarSec * 1000) : null;
 
             document.getElementById('current-price').textContent = formatNumber(data.currentPrice);
             document.getElementById('previous-close').textContent = formatNumber(data.previousClose);
@@ -2598,18 +3503,78 @@
             document.getElementById('source-note').textContent = sourceNote;
             document.getElementById('lookback-window').textContent = `${state.lookbackSessions} sessions`;
             document.getElementById('last-updated').textContent = data.asOf ? new Date(data.asOf).toLocaleString() : '--';
+            updateSystemStrip();
         }
 
         function buildPivotHistory(candles, timeZone) {
+            if (!Array.isArray(candles) || candles.length < 2) return [];
+
+            if (!isIntradayInterval(state.interval)) {
+                const history = [];
+                for (let i = 1; i < candles.length; i += 1) {
+                    const baseCandle = candles[i - 1];
+                    history.push({
+                        sessionIndex: i,
+                        sessionStartIndex: i,
+                        sessionEndIndex: i,
+                        sessionDate: formatYmd(candles[i].time, timeZone),
+                        baseIndex: i - 1,
+                        baseDate: formatYmd(baseCandle.time, timeZone),
+                        baseSessionPosition: i - 1,
+                        baseCandle,
+                    });
+                }
+                return history;
+            }
+
+            const sessions = [];
+            let currentSession = null;
+            candles.forEach((candle, index) => {
+                const sessionDate = formatYmd(candle.time, timeZone);
+                if (!currentSession || currentSession.sessionDate !== sessionDate) {
+                    if (currentSession) sessions.push(currentSession);
+                    currentSession = {
+                        sessionDate,
+                        startIndex: index,
+                        endIndex: index,
+                        open: candle.open,
+                        high: candle.high,
+                        low: candle.low,
+                        close: candle.close,
+                        volume: Number.isFinite(candle.volume) ? candle.volume : 0,
+                        time: candle.time,
+                    };
+                    return;
+                }
+                currentSession.endIndex = index;
+                currentSession.high = Math.max(currentSession.high, candle.high);
+                currentSession.low = Math.min(currentSession.low, candle.low);
+                currentSession.close = candle.close;
+                currentSession.volume += Number.isFinite(candle.volume) ? candle.volume : 0;
+                currentSession.time = candle.time;
+            });
+            if (currentSession) sessions.push(currentSession);
+
             const history = [];
-            for (let i = 1; i < candles.length; i += 1) {
-                const baseCandle = candles[i - 1];
+            for (let i = 1; i < sessions.length; i += 1) {
+                const baseSession = sessions[i - 1];
+                const targetSession = sessions[i];
                 history.push({
-                    sessionIndex: i,
-                    sessionDate: formatYmd(candles[i].time, timeZone),
-                    baseIndex: i - 1,
-                    baseDate: formatYmd(baseCandle.time, timeZone),
-                    baseCandle,
+                    sessionIndex: targetSession.endIndex,
+                    sessionStartIndex: targetSession.startIndex,
+                    sessionEndIndex: targetSession.endIndex,
+                    sessionDate: targetSession.sessionDate,
+                    baseIndex: baseSession.endIndex,
+                    baseDate: baseSession.sessionDate,
+                    baseSessionPosition: i - 1,
+                    baseCandle: {
+                        time: baseSession.time,
+                        open: baseSession.open,
+                        high: baseSession.high,
+                        low: baseSession.low,
+                        close: baseSession.close,
+                        volume: baseSession.volume,
+                    },
                 });
             }
             return history;
@@ -2639,8 +3604,22 @@
             const isIncomplete = data.session?.isLastSessionComplete === false;
             entry.sessionStatus = isLatest && isIncomplete ? 'In progress (levels from prior day)' : 'Completed';
 
-            const startIndex = Math.max(0, entry.baseIndex - state.lookbackSessions + 1);
-            const windowCandles = state.candles.slice(startIndex, entry.baseIndex + 1);
+            let windowCandles = [];
+            if (Number.isFinite(entry.baseSessionPosition)) {
+                const endPos = Number(entry.baseSessionPosition);
+                const startPos = Math.max(0, endPos - state.lookbackSessions + 1);
+                windowCandles = state.pivotHistory
+                    .slice(startPos, endPos + 1)
+                    .map((item) => item.baseCandle)
+                    .filter((candle) =>
+                        Number.isFinite(candle?.high) &&
+                        Number.isFinite(candle?.low) &&
+                        Number.isFinite(candle?.close)
+                    );
+            } else {
+                const startIndex = Math.max(0, entry.baseIndex - state.lookbackSessions + 1);
+                windowCandles = state.candles.slice(startIndex, entry.baseIndex + 1);
+            }
             const atr = calculateATR(windowCandles, 14);
 
             const rawLevels = calculatePivotLevels(state.pivotType || 'standard', entry.baseCandle.high, entry.baseCandle.low, entry.baseCandle.close);
@@ -2665,7 +3644,7 @@
             updateKeyLevels(levels, state.referencePrice);
             renderPivotLines(levels);
 
-            focusChartOnSession(entry.sessionIndex);
+            focusChartOnSession(entry);
 
             // ── Compute v3 ML features from intraday bars ──
             const priorClose = entry.baseCandle.close;
@@ -2686,9 +3665,36 @@
             updateGammaPanel(windowCandles, gammaLevel, state.referencePrice, gammaSource);
             renderGammaWalls(state.lastWalls);
             applyChartVisibility();
+            if (typeof state.resizeChartToContainer === 'function') {
+                state.resizeChartToContainer();
+            }
             updateDecisionStrip();
 
             void maybeLogTouches(levels, state.referencePrice);
+        }
+
+        /**
+         * Lightweight spot-price update: recalculates only price-dependent DOM
+         * (distances, key levels, decision strip, touch detection) without
+         * re-rendering chart series, gamma panel, or ML feature pipeline.
+         */
+        function updateSpotDependents() {
+            const levels = state.lastLevels;
+            const price = state.referencePrice;
+            if (!levels?.length || !Number.isFinite(price)) return;
+
+            // Recalculate distances on existing levels
+            levels.forEach((l) => {
+                l.distance = ((l.value - price) / price) * 100;
+                l.distanceBps = ((l.value - price) / price) * 1e4;
+            });
+
+            updatePivotTable(levels);
+            updateKeyLevels(levels, price);
+            updateDecisionStrip();
+
+            // Touch detection (has its own 10-min cooldown)
+            void maybeLogTouches(levels, price);
         }
 
         function refreshSpotPrice(symbol) {
@@ -2701,11 +3707,10 @@
                 if (!spotData?.spot) return;
 
                 state.referencePrice = spotData.spot;
-                document.getElementById('current-price').textContent = formatNumber(state.referencePrice);
+                const el = document.getElementById('current-price');
+                if (el) el.textContent = formatNumber(state.referencePrice);
 
-                if (state.latestData && state.selectedSessionIndex) {
-                    renderForSession(state.latestData, state.selectedSessionIndex);
-                }
+                updateSpotDependents();
             }, 5000);
         }
 
@@ -3023,6 +4028,9 @@
         const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
         function normalizeRangeForInterval(range, interval) {
+            if (isIntradayInterval(interval) && INTRADAY_RANGE_CAP[interval]) {
+                range = clampRangeByCap(range, INTRADAY_RANGE_CAP[interval]);
+            }
             if (interval === '1wk') {
                 if (range === '1mo') return '3mo';
                 if (range === '3mo') return '6mo';
@@ -3586,6 +4594,12 @@
             const cooldownMs = 10 * 60 * 1000;
             const events = [];
             let nearest = null;
+            const symbol = (state.symbol || '').toUpperCase();
+            if (!isMlSupportedSymbol(symbol)) {
+                setMlServiceState('online', `Coverage limited for ${symbol}; scoring disabled`);
+                updateMlPanel(null);
+                return;
+            }
             const barIntervalSec = intervalToSeconds(state.intradayInterval);
             const ema9Value = state.lastEma9;
             const ema21Value = state.lastEma21;
@@ -3701,7 +4715,72 @@
             });
         }
 
+        function setCollectorServiceState(status, message = '') {
+            const prevStatus = state.collectorServiceStatus;
+            state.collectorServiceStatus = status;
+            state.collectorServiceMessage = message || '';
+
+            const pill = document.getElementById('collector-service-pill');
+            if (pill) {
+                pill.setAttribute('data-state', status);
+                pill.textContent = status === 'online'
+                    ? 'Collector Online'
+                    : status === 'degraded'
+                        ? 'Collector Degraded'
+                        : status === 'offline'
+                            ? 'Collector Offline'
+                            : 'Collector Checking';
+                if (message) {
+                    pill.title = message;
+                } else {
+                    pill.removeAttribute('title');
+                }
+            }
+
+            if (prevStatus !== 'checking' && prevStatus !== status) {
+                if (status === 'offline') {
+                    showToast('Live collector is offline. Event ingestion paused.', 'error', { title: 'Collector Down' });
+                } else if (status === 'degraded') {
+                    showToast('Live collector is degraded. Monitoring for recovery.', 'warning', { title: 'Collector Degraded' });
+                } else if (status === 'online' && (prevStatus === 'offline' || prevStatus === 'degraded')) {
+                    showToast('Live collector recovered.', 'success', { title: 'Collector Online' });
+                }
+            }
+            updateSystemStrip();
+        }
+
+        async function loadCollectorHealth() {
+            const apiUrl = `${getApiOrigin()}/api/live/health`;
+            try {
+                const response = await fetch(apiUrl);
+                if (!response.ok) {
+                    setCollectorServiceState('offline', `Collector health HTTP ${response.status}`);
+                    return;
+                }
+                const payload = await response.json();
+                const rawStatus = String(payload?.status || '').trim().toLowerCase();
+                const lastError = payload?.state?.last_error || '';
+
+                if (rawStatus === 'ok') {
+                    setCollectorServiceState('online', 'Collector healthy');
+                    return;
+                }
+                if (rawStatus === 'degraded') {
+                    setCollectorServiceState('degraded', lastError || 'Collector degraded');
+                    return;
+                }
+                if (rawStatus === 'starting') {
+                    setCollectorServiceState('checking', 'Collector starting');
+                    return;
+                }
+                setCollectorServiceState('offline', `Collector status: ${rawStatus || 'unknown'}`);
+            } catch (error) {
+                setCollectorServiceState('offline', error?.message || 'Collector endpoint unreachable');
+            }
+        }
+
         function setMlServiceState(status, message = '') {
+            const prevStatus = state.mlServiceStatus;
             state.mlServiceStatus = status;
             state.mlServiceMessage = message || '';
             const pill = document.getElementById('ml-service-pill');
@@ -3718,12 +4797,40 @@
                     pill.removeAttribute('title');
                 }
             }
+            // Show toast on status transitions (skip initial "checking" state)
+            if (prevStatus !== 'checking' && prevStatus !== status) {
+                if (status === 'offline') {
+                    showToast('ML scoring service is unreachable. Predictions paused.', 'warning', { title: 'ML Offline' });
+                } else if (status === 'online' && prevStatus === 'offline') {
+                    showToast('ML scoring service reconnected.', 'success', { title: 'ML Online' });
+                }
+            }
+            updateSystemStrip();
         }
 
         // Session-aware staleness: count only regular market hours (9:30-16:00 ET, weekdays)
         // Matches generate_daily_ml_report.py compute_session_staleness_hours()
         const SESSION_STALE_WARN_H = 13;   // matches ML_STALENESS_WARN_SESSION_HOURS
         const SESSION_STALE_KILL_H = 19.5; // matches ML_STALENESS_KILL_SESSION_HOURS
+
+        // NYSE full-closure holidays — mirrors generate_daily_ml_report.py NYSE_HOLIDAYS
+        // Format: 'YYYY-MM-DD' strings for fast Set lookup. Update annually.
+        const NYSE_HOLIDAYS = new Set([
+            // 2025
+            '2025-01-01','2025-01-20','2025-02-17','2025-04-18','2025-05-26',
+            '2025-06-19','2025-07-04','2025-09-01','2025-11-27','2025-12-25',
+            // 2026
+            '2026-01-01','2026-01-19','2026-02-16','2026-04-03','2026-05-25',
+            '2026-06-19','2026-07-03','2026-09-07','2026-11-26','2026-12-25',
+            // 2027
+            '2027-01-01','2027-01-18','2027-02-15','2027-03-26','2027-05-31',
+            '2027-06-18','2027-07-05','2027-09-06','2027-11-25','2027-12-24',
+        ]);
+
+        function isNyseHoliday(year, month, day) {
+            const key = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+            return NYSE_HOLIDAYS.has(key);
+        }
 
         function computeSessionStalenessHours() {
             const trainedEndTs = state.mlMeta?.trained_end_ts;
@@ -3760,7 +4867,8 @@
 
             while (cursor <= endDate) {
                 const dow = cursor.getDay();
-                if (dow >= 1 && dow <= 5) { // weekdays only
+                const cY = cursor.getFullYear(), cM = cursor.getMonth() + 1, cD = cursor.getDate();
+                if (dow >= 1 && dow <= 5 && !isNyseHoliday(cY, cM, cD)) { // weekdays, non-holidays
                     const dayStart = cursor.getTime();
                     const sessionOpenMs = dayStart + 9.5 * 3600000;  // 9:30
                     const sessionCloseMs = dayStart + 16 * 3600000;  // 16:00
@@ -3912,6 +5020,7 @@
                 noteEl.textContent = note;
                 noteEl.title = note;
             }
+            updateSystemStrip();
         }
 
         function trackMlScore(panelPayload) {
@@ -3963,6 +5072,17 @@
             if (!panel || !status || !detail) return;
 
             updateMlMetaFields(payload || state.mlMeta);
+            const symbol = (state.symbol || '--').toUpperCase();
+            const mlSupported = isMlSupportedSymbol(symbol);
+
+            if (!mlSupported) {
+                if (abstainBanner) abstainBanner.classList.remove('visible');
+                resetMlHorizonCards();
+                setMlText('ml-best-horizon', '--');
+                status.textContent = 'Coverage limited';
+                detail.textContent = `ML scoring is currently SPY-only. ${symbol} shows chart + structure analytics only.`;
+                return;
+            }
 
             if (!payload || !payload.scores) {
                 if (abstainBanner) abstainBanner.classList.remove('visible');
@@ -4162,6 +5282,15 @@
         }
 
         async function loadMarketData() {
+            if (state.marketLoading) {
+                return;
+            }
+            state.marketLoading = true;
+            if ((Number(state.autoRefreshSec) || 0) > 0) {
+                state.nextAutoRefreshAt = Date.now() + (Number(state.autoRefreshSec) * 1000);
+            }
+            updateRefreshMeta();
+
             const symbol = document.getElementById('symbol-select').value;
             let range = document.getElementById('range-select').value;
             const pivotType = document.getElementById('pivot-select').value;
@@ -4178,6 +5307,9 @@
             state.pivotType = pivotType;
             state.interval = interval;
             state.lookbackSessions = lookback;
+            saveUiPrefs();
+            updateSymbolCoverageNote();
+            updateSystemStrip();
             setStatus('loading', 'Fetching market data');
             setPanelLoading(['ml-panel'], true);
 
@@ -4206,6 +5338,9 @@
                 state.dataSource = data.dataSource || 'Yahoo Finance';
                 state.referencePrice = data.currentPrice || state.candles[state.candles.length - 1].close;
                 state.timeZone = data.session?.timeZone || 'America/New_York';
+                const lastCandle = state.candles[state.candles.length - 1];
+                const lastBarSec = Number(lastCandle?.time);
+                state.lastBarTs = Number.isFinite(lastBarSec) ? Math.floor(lastBarSec * 1000) : null;
 
                 // Merge persisted daily candles from bar_data to fill session gaps
                 if (interval === '1d' || interval === 'daily') {
@@ -4256,7 +5391,7 @@
                     // Keep bar_data dedicated to intraday bars for ML labeling.
                 }
 
-                syncIntradayBars(symbol);
+                startIntradaySync(symbol);
 
                 state.latestData = data;
                 refreshSpotPrice(symbol);
@@ -4284,25 +5419,47 @@
                 setPanelLoading(['ml-panel'], false);
                 setStatus('ready', `Live data loaded (${fetchInfo})`);
                 setDebug(`Loaded ${state.candles.length} candles. Session ${data.session?.usedDate || '--'}.`);
+                updateSystemStrip();
             } catch (error) {
                 console.error(error);
                 setPanelLoading(['ml-panel'], false);
                 setStatus('error', 'Data fetch failed');
+                const userMsg = 'Unable to load market data. Check that the Yahoo proxy is running on port 3000.';
                 const tbody = document.getElementById('pivot-table-body');
-                tbody.innerHTML = `<tr><td colspan="4" style="text-align: center; color: var(--danger); padding: 20px;">${error.message}</td></tr>`;
-                document.getElementById('nearest-resistance').innerHTML = `<strong>Nearest resistance:</strong> ${error.message}`;
-                document.getElementById('nearest-support').innerHTML = `<strong>Nearest support:</strong> ${error.message}`;
-                document.getElementById('strongest-resistance').innerHTML = `<strong>Strongest resistance:</strong> ${error.message}`;
-                document.getElementById('strongest-support').innerHTML = `<strong>Strongest support:</strong> ${error.message}`;
-                document.getElementById('gamma-level').innerHTML = `<strong>Gamma flip:</strong> ${error.message}`;
+                tbody.innerHTML = `<tr><td colspan="4" style="text-align: center; color: var(--danger); padding: 20px;">Data unavailable</td></tr>`;
+                document.getElementById('nearest-resistance').innerHTML = `<strong>Nearest resistance:</strong> --`;
+                document.getElementById('nearest-support').innerHTML = `<strong>Nearest support:</strong> --`;
+                document.getElementById('strongest-resistance').innerHTML = `<strong>Strongest resistance:</strong> --`;
+                document.getElementById('strongest-support').innerHTML = `<strong>Strongest support:</strong> --`;
+                document.getElementById('gamma-level').innerHTML = `<strong>Gamma flip:</strong> --`;
+                showToast(userMsg, 'error', { title: 'Data Fetch Failed' });
                 setDebug(`Error: ${error.message}`);
+                updateSystemStrip();
+            } finally {
+                state.marketLoading = false;
+                state.lastRefreshAt = Date.now();
+                updateRefreshMeta();
             }
         }
 
         function attachEventListeners() {
             document.getElementById('refresh-btn').addEventListener('click', loadMarketData);
+            document.getElementById('auto-refresh-select').addEventListener('change', (event) => {
+                const value = Number(event.target.value);
+                state.autoRefreshSec = Number.isFinite(value) ? Math.max(0, value) : 0;
+                saveUiPrefs();
+                startAutoRefreshLoop();
+                showToast(
+                    state.autoRefreshSec > 0
+                        ? `Auto refresh enabled (${state.autoRefreshSec}s)`
+                        : 'Auto refresh disabled',
+                    'info',
+                    { title: 'Refresh Mode', duration: 2500 }
+                );
+            });
             document.getElementById('pivot-select').addEventListener('change', (event) => {
                 state.pivotType = event.target.value;
+                saveUiPrefs();
                 if (state.candles.length) {
                     state.pivotHistory = buildPivotHistory(state.candles, state.timeZone);
                     state.historyBySessionIndex = new Map(state.pivotHistory.map((entry) => [entry.sessionIndex, entry]));
@@ -4317,7 +5474,10 @@
             });
             document.getElementById('symbol-select').addEventListener('change', loadMarketData);
             document.getElementById('range-select').addEventListener('change', loadMarketData);
-            document.getElementById('interval-select').addEventListener('change', loadMarketData);
+            document.getElementById('interval-select').addEventListener('change', () => {
+                syncIntervalQuickChips();
+                loadMarketData();
+            });
             document.getElementById('gamma-expiry-select').addEventListener('change', async () => {
                 state.gammaData = await fetchGammaData(state.symbol);
                 if (state.latestData && state.selectedSessionIndex) {
@@ -4331,6 +5491,7 @@
             });
             document.getElementById('lookback-select').addEventListener('change', (event) => {
                 state.lookbackSessions = Number(event.target.value);
+                saveUiPrefs();
                 if (state.latestData && state.selectedSessionIndex) {
                     renderForSession(state.latestData, state.selectedSessionIndex);
                 }
@@ -4383,21 +5544,102 @@
             }
         }
 
+        // ── Keyboard Shortcuts ──
+        function initKeyboardShortcuts() {
+            document.addEventListener('keydown', (event) => {
+                // Skip if user is typing in an input/select
+                const tag = event.target.tagName;
+                if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+
+                const key = event.key.toLowerCase();
+                const ctrl = event.ctrlKey || event.metaKey;
+
+                switch (key) {
+                    case 'r':
+                        if (!ctrl) { event.preventDefault(); loadMarketData(); showToast('Refreshing data...', 'info'); }
+                        break;
+                    case '1':
+                        event.preventDefault();
+                        document.getElementById('tab-levels')?.click();
+                        break;
+                    case '2':
+                        event.preventDefault();
+                        document.getElementById('tab-gamma')?.click();
+                        break;
+                    case '3':
+                        event.preventDefault();
+                        document.getElementById('tab-ivoi')?.click();
+                        break;
+                    case 'p':
+                        event.preventDefault();
+                        state.uiVisibility.pivots = !state.uiVisibility.pivots;
+                        syncToggleButton('toggle-pivots', state.uiVisibility.pivots);
+                        applyChartVisibility();
+                        saveUiPrefs();
+                        break;
+                    case 'g':
+                        event.preventDefault();
+                        state.uiVisibility.gammaWalls = !state.uiVisibility.gammaWalls;
+                        syncToggleButton('toggle-gamma-walls', state.uiVisibility.gammaWalls);
+                        applyChartVisibility();
+                        saveUiPrefs();
+                        break;
+                    case 'f':
+                        event.preventDefault();
+                        document.getElementById('fit-chart')?.click();
+                        break;
+                    case '?':
+                        event.preventDefault();
+                        showToast(
+                            '<b>R</b> Refresh · <b>1-3</b> Tabs · <b>P</b> Pivots · <b>G</b> Gamma · <b>F</b> Fit chart · <b>?</b> Help',
+                            'info',
+                            { title: 'Keyboard Shortcuts', duration: 8000, html: true }
+                        );
+                        break;
+                }
+            });
+        }
+
+        function restoreUiFromState() {
+            // Sync persisted state values back into DOM selects
+            const selects = {
+                'symbol-select': state.symbol,
+                'range-select': state.range,
+                'interval-select': state.interval,
+                'pivot-select': state.pivotType,
+                'lookback-select': String(state.lookbackSessions),
+                'auto-refresh-select': String(state.autoRefreshSec),
+            };
+            for (const [id, value] of Object.entries(selects)) {
+                const el = document.getElementById(id);
+                if (el && value) {
+                    const opt = el.querySelector(`option[value="${value}"]`);
+                    if (opt) el.value = value;
+                }
+            }
+        }
+
         async function boot() {
             loadUiPrefs();
             loadMlPrefs();
+            restoreUiFromState();
+            updateSymbolCoverageNote();
+            updateSystemStrip();
             setMlServiceState('checking', 'Booting ML status checks');
             await ensureChartLibrary();
             initializeChart();
             initializeChartToolbar();
+            initializeIntervalToolbar();
             syncStickyOffsets();
             window.addEventListener('resize', syncStickyOffsets);
             initializeInsightTabs();
             attachEventListeners();
+            initKeyboardShortcuts();
             updateDebugUI();
             applyChartVisibility();
             updateDecisionStrip();
             loadMlHealth();
+            loadCollectorHealth();
             loadMlMetrics();
             if (state.mlMetricsTimer) {
                 clearInterval(state.mlMetricsTimer);
@@ -4409,7 +5651,17 @@
             state.mlHealthTimer = setInterval(() => {
                 loadMlHealth();
             }, 300000);
+            if (state.collectorHealthTimer) {
+                clearInterval(state.collectorHealthTimer);
+            }
+            state.collectorHealthTimer = setInterval(() => {
+                loadCollectorHealth();
+            }, 60000);
+            updateRefreshMeta();
             loadMarketData();
+            startAutoRefreshLoop();
+            setTimeout(() => state.resizeChartToContainer?.(), 220);
+            setTimeout(() => state.resizeChartToContainer?.(), 900);
         }
 
         if (document.readyState === 'loading') {
@@ -4421,11 +5673,13 @@
         window.addEventListener('error', (event) => {
             const location = event.filename ? ` @ ${event.filename.split('/').pop()}:${event.lineno || 0}` : '';
             setDebug(`Runtime error: ${event.message}${location}`);
+            showToast('A runtime error occurred. Check the Debug panel for details.', 'error', { title: 'Runtime Error' });
         });
 
         window.addEventListener('unhandledrejection', (event) => {
             const reason = event.reason?.message || String(event.reason || 'Unknown rejection');
             setDebug(`Unhandled rejection: ${reason}`);
+            showToast('An unexpected error occurred. Check the Debug panel for details.', 'error', { title: 'Unexpected Error' });
             if (typeof event.preventDefault === 'function') {
                 event.preventDefault();
             }
