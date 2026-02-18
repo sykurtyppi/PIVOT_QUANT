@@ -25,12 +25,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ops_lock import hold_lock
+
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ENV_FILE = ROOT / ".env"
 DEFAULT_LOG_FILE = ROOT / "logs" / "backup.log"
 DEFAULT_STATE_FILE = ROOT / "logs" / "backup_state.json"
 DEFAULT_BACKUP_ROOT = ROOT / "backups"
+DEFAULT_LOCK_FILE = ROOT / "logs" / "ops_resilience.lock"
 DEFAULT_DB = Path(os.getenv("PIVOT_DB", str(ROOT / "data" / "pivot_events.sqlite")))
 DEFAULT_MODELS_DIR = Path(os.getenv("RF_MODEL_DIR", str(ROOT / "data" / "models")))
 DEFAULT_REPORTS_DIR = ROOT / "logs" / "reports"
@@ -47,6 +50,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weekly-keep", type=int, default=int(os.getenv("BACKUP_WEEKLY_KEEP", "8")))
     parser.add_argument("--log-file", default=str(DEFAULT_LOG_FILE))
     parser.add_argument("--state-file", default=str(DEFAULT_STATE_FILE))
+    parser.add_argument(
+        "--lock-file",
+        default=os.getenv("PIVOT_OPS_LOCK_FILE", str(DEFAULT_LOCK_FILE)),
+    )
+    parser.add_argument(
+        "--lock-timeout-sec",
+        type=int,
+        default=int(os.getenv("PIVOT_OPS_LOCK_TIMEOUT_SEC", "300")),
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -112,6 +124,17 @@ def parse_snapshot_name(name: str) -> datetime | None:
         return datetime.strptime(name, "%Y%m%d_%H%M%S")
     except ValueError:
         return None
+
+
+def allocate_snapshot_paths(snapshots_root: Path) -> tuple[str, Path, Path]:
+    snapshots_root.mkdir(parents=True, exist_ok=True)
+    while True:
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        final_dir = snapshots_root / stamp
+        staging_dir = snapshots_root / f".{stamp}.inprogress"
+        if not final_dir.exists() and not staging_dir.exists():
+            return stamp, final_dir, staging_dir
+        time.sleep(1)
 
 
 def set_ops_status(db_path: Path, pairs: dict[str, str]) -> None:
@@ -219,6 +242,7 @@ def run() -> int:
 
     backup_root = Path(args.backup_root).expanduser()
     snapshots_root = backup_root / "snapshots"
+    lock_file = Path(args.lock_file).expanduser()
     db_path = Path(args.db_path).expanduser()
     models_dir = Path(args.models_dir).expanduser()
     reports_dir = Path(args.reports_dir).expanduser()
@@ -226,81 +250,106 @@ def run() -> int:
     state_file = Path(args.state_file).expanduser()
     ops_db = Path(os.getenv("PIVOT_DB", str(DEFAULT_DB))).expanduser()
 
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    snapshot_dir = snapshots_root / stamp
-    db_backup = snapshot_dir / "pivot_events.sqlite"
-    models_archive = snapshot_dir / "models.tar.gz"
-    reports_archive = snapshot_dir / "reports.tar.gz"
-    manifest_path = snapshot_dir / "manifest.json"
-
-    log_line(log_file, f"backup start snapshot={stamp} dry_run={args.dry_run}")
+    stamp = ""
+    snapshot_dir: Path | None = None
+    staging_dir: Path | None = None
+    log_line(log_file, f"backup start dry_run={args.dry_run}")
 
     try:
-        if not args.dry_run:
-            snapshot_dir.mkdir(parents=True, exist_ok=False)
-            backup_sqlite(db_path, db_backup)
-            create_tar_gz(models_dir, models_archive, "models")
-            create_tar_gz(reports_dir, reports_archive, "reports")
+        with hold_lock(lock_file, args.lock_timeout_sec, "nightly_backup"):
+            if not args.dry_run:
+                stamp, snapshot_dir, staging_dir = allocate_snapshot_paths(snapshots_root)
+                db_backup = staging_dir / "pivot_events.sqlite"
+                models_archive = staging_dir / "models.tar.gz"
+                reports_archive = staging_dir / "reports.tar.gz"
+                manifest_path = staging_dir / "manifest.json"
 
-            manifest = {
-                "snapshot": stamp,
-                "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
-                "db_source": str(db_path),
-                "models_source": str(models_dir),
-                "reports_source": str(reports_dir),
-                "files": {
-                    "pivot_events.sqlite": {
-                        "size_bytes": db_backup.stat().st_size,
-                        "sha256": sha256_file(db_backup),
+                log_line(log_file, f"backup snapshot={stamp} lock_acquired")
+                staging_dir.mkdir(parents=True, exist_ok=False)
+                backup_sqlite(db_path, db_backup)
+                create_tar_gz(models_dir, models_archive, "models")
+                create_tar_gz(reports_dir, reports_archive, "reports")
+
+                manifest = {
+                    "snapshot": stamp,
+                    "status": "complete",
+                    "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+                    "db_source": str(db_path),
+                    "models_source": str(models_dir),
+                    "reports_source": str(reports_dir),
+                    "files": {
+                        "pivot_events.sqlite": {
+                            "size_bytes": db_backup.stat().st_size,
+                            "sha256": sha256_file(db_backup),
+                        },
+                        "models.tar.gz": {
+                            "size_bytes": models_archive.stat().st_size,
+                            "sha256": sha256_file(models_archive),
+                        },
+                        "reports.tar.gz": {
+                            "size_bytes": reports_archive.stat().st_size,
+                            "sha256": sha256_file(reports_archive),
+                        },
                     },
-                    "models.tar.gz": {
-                        "size_bytes": models_archive.stat().st_size,
-                        "sha256": sha256_file(models_archive),
-                    },
-                    "reports.tar.gz": {
-                        "size_bytes": reports_archive.stat().st_size,
-                        "sha256": sha256_file(reports_archive),
-                    },
+                }
+                manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+                # Finalize atomically so restore drill never observes a partial snapshot.
+                staging_dir.replace(snapshot_dir)
+                latest_link = backup_root / "latest"
+                tmp_link = backup_root / ".latest.tmp"
+                if tmp_link.exists() or tmp_link.is_symlink():
+                    tmp_link.unlink()
+                tmp_link.symlink_to(snapshot_dir, target_is_directory=True)
+                tmp_link.replace(latest_link)
+            else:
+                stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                log_line(log_file, f"backup snapshot={stamp} lock_acquired (dry-run)")
+
+            removed_count, _ = prune_snapshots(
+                snapshots_root=snapshots_root,
+                daily_keep=args.daily_keep,
+                weekly_keep=args.weekly_keep,
+                dry_run=args.dry_run,
+                log_file=log_file,
+            )
+
+            set_ops_status(
+                ops_db,
+                {
+                    "backup_last_status": "ok",
+                    "backup_last_run_ms": str(now_ms()),
+                    "backup_last_snapshot": stamp,
+                    "backup_last_error": "",
+                    "backup_last_removed_count": str(removed_count),
                 },
+            )
+
+            state_payload = {
+                "last_status": "ok",
+                "last_snapshot": stamp,
+                "last_run_ms": now_ms(),
+                "daily_keep": args.daily_keep,
+                "weekly_keep": args.weekly_keep,
             }
-            manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-            latest_link = backup_root / "latest"
-            tmp_link = backup_root / ".latest.tmp"
-            if tmp_link.exists() or tmp_link.is_symlink():
-                tmp_link.unlink()
-            tmp_link.symlink_to(snapshot_dir, target_is_directory=True)
-            tmp_link.replace(latest_link)
-
-        removed_count, _ = prune_snapshots(
-            snapshots_root=snapshots_root,
-            daily_keep=args.daily_keep,
-            weekly_keep=args.weekly_keep,
-            dry_run=args.dry_run,
-            log_file=log_file,
-        )
-
+            write_state(state_file, state_payload)
+            log_line(log_file, f"backup done snapshot={stamp}")
+            return 0
+    except TimeoutError:
+        log_line(log_file, f"backup skipped: lock busy ({lock_file})")
         set_ops_status(
             ops_db,
             {
-                "backup_last_status": "ok",
+                "backup_last_status": "skipped_lock_busy",
                 "backup_last_run_ms": str(now_ms()),
-                "backup_last_snapshot": stamp,
-                "backup_last_error": "",
-                "backup_last_removed_count": str(removed_count),
+                "backup_last_snapshot": "",
+                "backup_last_error": f"lock busy: {lock_file}",
             },
         )
-
-        state_payload = {
-            "last_status": "ok",
-            "last_snapshot": stamp,
-            "last_run_ms": now_ms(),
-            "daily_keep": args.daily_keep,
-            "weekly_keep": args.weekly_keep,
-        }
-        write_state(state_file, state_payload)
-        log_line(log_file, f"backup done snapshot={stamp}")
         return 0
     except Exception as exc:  # pragma: no cover
+        if staging_dir and staging_dir.exists():
+            shutil.rmtree(staging_dir, ignore_errors=True)
         log_line(log_file, f"backup failed: {exc}")
         set_ops_status(
             ops_db,

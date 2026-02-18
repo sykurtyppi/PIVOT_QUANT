@@ -21,9 +21,17 @@ Output location:
 - `${PIVOT_BACKUP_ROOT}/snapshots/YYYYMMDD_HHMMSS/`
 - `${PIVOT_BACKUP_ROOT}/latest` symlink points to most recent snapshot
 
+Concurrency/consistency protections:
+- snapshots are built in a hidden staging directory (`.YYYYMMDD_HHMMSS.inprogress`) and atomically renamed when complete
+- restore drill only considers snapshots that include all expected files and a complete manifest
+- backup + restore drill share a lock file (`PIVOT_OPS_LOCK_FILE`) to prevent overlapping runs
+- if lock wait exceeds `PIVOT_OPS_LOCK_TIMEOUT_SEC`, run is marked `skipped_lock_busy`
+
 ## 2) Retention
 
 Configured in `.env`:
+- `PIVOT_OPS_LOCK_FILE=/Users/tristanalejandro/PIVOT_QUANT/logs/ops_resilience.lock`
+- `PIVOT_OPS_LOCK_TIMEOUT_SEC=300`
 - `BACKUP_DAILY_KEEP=30`
 - `BACKUP_WEEKLY_KEEP=8`
 
@@ -42,6 +50,7 @@ Checks:
 - key table row counts
 - extract `models.tar.gz` and verify model manifest
 - extract `reports.tar.gz` and verify report files
+- choose latest complete snapshot (manifest + required archives + DB file)
 
 State keys (SQLite `ops_status`):
 - `backup_restore_last_status`
