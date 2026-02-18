@@ -509,7 +509,10 @@ def map_bar_size(interval):
 
 def parse_bar_timestamp(raw_date):
     if isinstance(raw_date, (int, float)):
-        return int(raw_date)
+        ts = int(raw_date)
+        if ts > 10_000_000_000:
+            return ts // 1000
+        return ts
     if isinstance(raw_date, datetime):
         return int(raw_date.timestamp())
 
@@ -521,7 +524,10 @@ def parse_bar_timestamp(raw_date):
 
     for fmt in ("%Y%m%d %H:%M:%S", "%Y%m%d"):
         try:
-            return int(datetime.strptime(text, fmt).timestamp())
+            parsed = datetime.strptime(text, fmt)
+            if fmt == "%Y%m%d":
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return int(parsed.timestamp())
         except ValueError:
             continue
 
@@ -529,6 +535,11 @@ def parse_bar_timestamp(raw_date):
         return int(datetime.fromisoformat(text).timestamp())
     except ValueError as exc:
         raise ValueError(f"Unrecognized bar date format: {raw_date}") from exc
+
+
+def canonical_session_timestamp(ts):
+    dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+    return int(datetime(dt.year, dt.month, dt.day, 12, 0, 0, tzinfo=timezone.utc).timestamp())
 
 
 def fetch_ibkr_market(symbol, interval, range_str):
@@ -578,21 +589,29 @@ def fetch_ibkr_market(symbol, interval, range_str):
     if not bars:
         raise ValueError("No historical data returned from IBKR")
 
-    candles = []
+    daily_like_interval = interval in {"1d", "daily", "1wk", "1mo"}
+    candles_by_key = {}
     for bar in bars:
         ts = parse_bar_timestamp(bar.date)
-        candles.append(
-            {
-                "time": ts,
-                "open": float(bar.open),
-                "high": float(bar.high),
-                "low": float(bar.low),
-                "close": float(bar.close),
-                "volume": float(bar.volume or 0),
-            }
-        )
+        if daily_like_interval:
+            ts = canonical_session_timestamp(ts)
+        candle = {
+            "time": ts,
+            "open": float(bar.open),
+            "high": float(bar.high),
+            "low": float(bar.low),
+            "close": float(bar.close),
+            "volume": float(bar.volume or 0),
+        }
+        if daily_like_interval:
+            candle["sessionDate"] = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
+            key = candle["sessionDate"]
+        else:
+            key = str(ts)
+        candles_by_key[key] = candle
 
-    candles = [c for c in candles if c["open"] and c["high"] and c["low"] and c["close"]]
+    candles = sorted(candles_by_key.values(), key=lambda c: c["time"])
+    candles = [c for c in candles if _is_finite(c["open"]) and _is_finite(c["high"]) and _is_finite(c["low"]) and _is_finite(c["close"])]
     if not candles:
         raise ValueError("Historical data contains no valid candles")
 
@@ -625,7 +644,7 @@ def fetch_ibkr_market(symbol, interval, range_str):
         "candles": candles,
         "session": {
             "usedIndex": len(candles) - 1,
-            "usedDate": datetime.utcfromtimestamp(last["time"]).strftime("%Y-%m-%d"),
+            "usedDate": last.get("sessionDate") or datetime.utcfromtimestamp(last["time"]).strftime("%Y-%m-%d"),
             "isLastSessionComplete": is_last_complete,
             "timeZone": "America/New_York",
         },

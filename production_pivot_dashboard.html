@@ -4304,10 +4304,21 @@
             return Math.floor(Date.UTC(year, month - 1, day, 12, 0, 0) / 1000);
         }
 
+        function getDailyDateKey(candle, timeZone) {
+            if (!candle) return null;
+            const explicit = String(candle.sessionDate || '').trim();
+            if (/^\d{4}-\d{2}-\d{2}$/.test(explicit)) {
+                return explicit;
+            }
+            const ts = Number(candle.time);
+            if (!Number.isFinite(ts)) return null;
+            return formatYmd(ts, timeZone);
+        }
+
         function normalizeDailyCandles(candles, timeZone) {
             const byDate = new Map();
             for (const candle of candles || []) {
-                const dateKey = formatYmd(candle.time, timeZone);
+                const dateKey = getDailyDateKey(candle, timeZone);
                 if (!dateKey) continue;
                 byDate.set(dateKey, candle);
             }
@@ -4329,12 +4340,12 @@
             const byDate = new Map();
             // Persisted candles first (lower priority)
             for (const candle of persistedCandles) {
-                const dateKey = formatYmd(candle.time, timeZone);
+                const dateKey = getDailyDateKey(candle, timeZone);
                 byDate.set(dateKey, candle);
             }
             // Live candles overwrite persisted for same date (higher priority)
             for (const candle of liveCandles) {
-                const dateKey = formatYmd(candle.time, timeZone);
+                const dateKey = getDailyDateKey(candle, timeZone);
                 byDate.set(dateKey, candle);
             }
             const merged = Array.from(byDate.values());
