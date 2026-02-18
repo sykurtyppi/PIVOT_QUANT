@@ -14,6 +14,7 @@ import hashlib
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Iterable
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 logging.basicConfig(
@@ -225,15 +226,71 @@ def fetch_json(url: str, timeout: int = 12, retries: int = 2) -> dict:
 
 
 def fetch_market(symbol: str, interval: str, range_str: str, source: str) -> tuple[dict, str]:
+    def fetch_market_yahoo_direct() -> tuple[dict, str]:
+        query = urlencode(
+            {
+                "range": range_str,
+                "interval": interval,
+                "includePrePost": "false",
+                "events": "div,splits",
+            }
+        )
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?{query}"
+        payload = fetch_json(url)
+        chart = payload.get("chart") or {}
+        result = (chart.get("result") or [{}])[0]
+        timestamps = result.get("timestamp") or []
+        quote = (((result.get("indicators") or {}).get("quote") or [{}])[0]) or {}
+        opens = quote.get("open") or []
+        highs = quote.get("high") or []
+        lows = quote.get("low") or []
+        closes = quote.get("close") or []
+        volumes = quote.get("volume") or []
+
+        candles: list[dict] = []
+        for idx, ts in enumerate(timestamps):
+            try:
+                o = opens[idx]
+                h = highs[idx]
+                l = lows[idx]
+                c = closes[idx]
+                if any(v is None for v in (o, h, l, c)):
+                    continue
+                v = volumes[idx] if idx < len(volumes) and volumes[idx] is not None else 0
+                candles.append(
+                    {
+                        "time": int(ts),
+                        "open": float(o),
+                        "high": float(h),
+                        "low": float(l),
+                        "close": float(c),
+                        "volume": float(v),
+                    }
+                )
+            except Exception:
+                continue
+
+        if not candles:
+            err = ((chart.get("error") or {}).get("description")) or "no candles in Yahoo response"
+            raise ValueError(f"Yahoo direct fetch returned empty data: {err}")
+
+        return {"symbol": symbol, "candles": candles}, "Yahoo"
+
     if source == "ibkr":
         url = f"http://127.0.0.1:5001/market?symbol={symbol}&range={range_str}&interval={interval}"
         return fetch_json(url), "IBKR"
     if source == "yahoo":
-        url = (
+        proxy_url = (
             "http://127.0.0.1:3000/api/market"
             f"?source=yahoo&symbol={symbol}&range={range_str}&interval={interval}"
         )
-        return fetch_json(url), "Yahoo"
+        try:
+            return fetch_json(proxy_url), "Yahoo"
+        except Exception as exc:
+            # Launchd retrain may run before the dashboard proxy is accepting connections.
+            # Fall back to Yahoo's public chart endpoint so retrain remains autonomous.
+            log.warning("Yahoo proxy unavailable for %s (%s); falling back to direct Yahoo API", symbol, exc)
+            return fetch_market_yahoo_direct()
 
     # auto
     try:
