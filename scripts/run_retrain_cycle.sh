@@ -60,17 +60,8 @@ run_step() {
 }
 
 run_ops_smoke() {
-  local npm_cmd
   local attempt
-  npm_cmd="$(command -v npm || true)"
-  if [[ -n "${npm_cmd}" ]]; then
-    if "${npm_cmd}" run -s ml:test:smoke >> "${LOG_DIR}/retrain.log" 2>&1; then
-      return 0
-    fi
-    echo "[$(timestamp)] WARN ops_smoke via npm failed; retrying direct unittest runner" | tee -a "${LOG_DIR}/retrain.log"
-  else
-    echo "[$(timestamp)] WARN npm not found in PATH; running direct unittest runner" | tee -a "${LOG_DIR}/retrain.log"
-  fi
+  echo "[$(timestamp)] INFO ops_smoke running direct unittest runner" | tee -a "${LOG_DIR}/retrain.log"
   for attempt in 1 2; do
     if "${PYTHON}" -m unittest discover -s tests/python -p "test_*.py" -v >> "${LOG_DIR}/retrain.log" 2>&1; then
       if (( attempt > 1 )); then
