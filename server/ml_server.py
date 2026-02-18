@@ -24,6 +24,9 @@ from ml.features import build_feature_row, collect_missing, FEATURE_VERSION
 log = logging.getLogger("ml_server")
 
 MODEL_DIR = Path(os.getenv("RF_MODEL_DIR", "data/models"))
+RF_MANIFEST_PATH = os.getenv("RF_MANIFEST_PATH", "").strip()
+RF_ACTIVE_MANIFEST = os.getenv("RF_ACTIVE_MANIFEST", "manifest_active.json").strip() or "manifest_active.json"
+RF_CANDIDATE_MANIFEST = os.getenv("RF_CANDIDATE_MANIFEST", "manifest_latest.json").strip() or "manifest_latest.json"
 HOST = os.getenv("ML_SERVER_BIND", "127.0.0.1")
 PORT = int(os.getenv("ML_SERVER_PORT", "5003"))
 STALE_MODEL_HOURS = int(os.getenv("STALE_MODEL_HOURS", "48"))
@@ -44,15 +47,25 @@ allowed_origins = [
 class ModelRegistry:
     def __init__(self):
         self.manifest = None
+        self.manifest_path: str | None = None
         self.models = {"reject": {}, "break": {}}
         self.thresholds = {"reject": {}, "break": {}}
 
+    def resolve_manifest_path(self) -> Path:
+        if RF_MANIFEST_PATH:
+            return Path(RF_MANIFEST_PATH)
+        active_path = MODEL_DIR / RF_ACTIVE_MANIFEST
+        if active_path.exists():
+            return active_path
+        return MODEL_DIR / RF_CANDIDATE_MANIFEST
+
     def load(self):
-        manifest_path = MODEL_DIR / "manifest_latest.json"
+        manifest_path = self.resolve_manifest_path()
         if not manifest_path.exists():
             raise FileNotFoundError(f"Missing manifest at {manifest_path}")
         with manifest_path.open("r", encoding="utf-8") as handle:
             self.manifest = json.load(handle)
+        self.manifest_path = str(manifest_path)
 
         self.models = {"reject": {}, "break": {}}
         self.thresholds = {"reject": {}, "break": {}}
@@ -233,6 +246,7 @@ def health():
         "status": status,
         "feature_version": FEATURE_VERSION,
         "manifest": registry.manifest,
+        "manifest_path": registry.manifest_path,
         "models": registry.available(),
     }
     if _startup_error is not None:

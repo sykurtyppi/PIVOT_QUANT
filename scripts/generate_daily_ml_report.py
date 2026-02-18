@@ -25,7 +25,10 @@ from typing import Any
 DEFAULT_DB = os.getenv("PIVOT_DB", "data/pivot_events.sqlite")
 DEFAULT_REPORT_DIR = os.getenv("ML_REPORT_DIR", "logs/reports")
 ROOT = Path(__file__).resolve().parents[1]
-MANIFEST_PATH = Path(os.getenv("RF_MODEL_DIR", str(ROOT / "data" / "models"))) / "manifest_latest.json"
+MODEL_DIR = Path(os.getenv("RF_MODEL_DIR", str(ROOT / "data" / "models")))
+RF_MANIFEST_PATH = os.getenv("RF_MANIFEST_PATH", "").strip()
+RF_ACTIVE_MANIFEST = os.getenv("RF_ACTIVE_MANIFEST", "manifest_active.json").strip() or "manifest_active.json"
+RF_CANDIDATE_MANIFEST = os.getenv("RF_CANDIDATE_MANIFEST", "manifest_latest.json").strip() or "manifest_latest.json"
 
 try:
     from migrate_db import migrate_connection
@@ -42,6 +45,44 @@ REGULAR_SESSION_OPEN_ET = dtime(9, 30)
 REGULAR_SESSION_CLOSE_ET = dtime(16, 0)
 SESSION_STALE_WARN_HOURS = float(os.getenv("ML_STALENESS_WARN_SESSION_HOURS", "13"))
 SESSION_STALE_KILL_HOURS = float(os.getenv("ML_STALENESS_KILL_SESSION_HOURS", "19.5"))
+
+# NYSE full-closure holidays (update annually).
+# Source: https://www.nyse.com/markets/hours-calendars
+NYSE_HOLIDAYS: set[date] = {
+    # 2025
+    date(2025, 1, 1),   # New Year's Day
+    date(2025, 1, 20),  # MLK Day
+    date(2025, 2, 17),  # Presidents' Day
+    date(2025, 4, 18),  # Good Friday
+    date(2025, 5, 26),  # Memorial Day
+    date(2025, 6, 19),  # Juneteenth
+    date(2025, 7, 4),   # Independence Day
+    date(2025, 9, 1),   # Labor Day
+    date(2025, 11, 27), # Thanksgiving
+    date(2025, 12, 25), # Christmas Day
+    # 2026
+    date(2026, 1, 1),   # New Year's Day
+    date(2026, 1, 19),  # MLK Day
+    date(2026, 2, 16),  # Presidents' Day
+    date(2026, 4, 3),   # Good Friday
+    date(2026, 5, 25),  # Memorial Day
+    date(2026, 6, 19),  # Juneteenth
+    date(2026, 7, 3),   # Independence Day (observed)
+    date(2026, 9, 7),   # Labor Day
+    date(2026, 11, 26), # Thanksgiving
+    date(2026, 12, 25), # Christmas Day
+    # 2027 (pre-loaded for EOY runs)
+    date(2027, 1, 1),   # New Year's Day
+    date(2027, 1, 18),  # MLK Day
+    date(2027, 2, 15),  # Presidents' Day
+    date(2027, 3, 26),  # Good Friday
+    date(2027, 5, 31),  # Memorial Day
+    date(2027, 6, 18),  # Juneteenth (observed)
+    date(2027, 7, 5),   # Independence Day (observed)
+    date(2027, 9, 6),   # Labor Day
+    date(2027, 11, 25), # Thanksgiving
+    date(2027, 12, 24), # Christmas Day (observed)
+}
 
 
 @dataclass
@@ -371,11 +412,21 @@ def ts_to_et(ts_ms: int | None) -> str:
     return dt.strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
+def resolve_manifest_path() -> Path:
+    if RF_MANIFEST_PATH:
+        return Path(RF_MANIFEST_PATH)
+    active_path = MODEL_DIR / RF_ACTIVE_MANIFEST
+    if active_path.exists():
+        return active_path
+    return MODEL_DIR / RF_CANDIDATE_MANIFEST
+
+
 def parse_manifest() -> dict[str, Any]:
-    if not MANIFEST_PATH.exists():
+    manifest_path = resolve_manifest_path()
+    if not manifest_path.exists():
         return {}
     try:
-        with MANIFEST_PATH.open("r", encoding="utf-8") as handle:
+        with manifest_path.open("r", encoding="utf-8") as handle:
             return json.load(handle)
     except Exception:
         return {}
@@ -639,7 +690,7 @@ def compute_session_staleness_hours(start_ms: int | float | None, end_ms: int | 
     total_seconds = 0.0
     day = start_dt.date()
     while day <= end_dt.date():
-        if day.weekday() < 5:
+        if day.weekday() < 5 and day not in NYSE_HOLIDAYS:
             session_start = datetime.combine(day, REGULAR_SESSION_OPEN_ET, tzinfo=ET_TZ)
             session_end = datetime.combine(day, REGULAR_SESSION_CLOSE_ET, tzinfo=ET_TZ)
             segment_start = max(session_start, start_dt)
