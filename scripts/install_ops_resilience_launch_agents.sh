@@ -22,6 +22,7 @@ mkdir -p "${LOG_DIR}" "${PLIST_DIR}"
 install_plist() {
   local label="$1"
   local plist_path="$2"
+  local kickstart_now="${3:-true}"
 
   chmod 644 "${plist_path}"
   plutil -lint "${plist_path}" >/dev/null
@@ -41,7 +42,9 @@ install_plist() {
     launchctl bootstrap "gui/${UID_NUM}" "${plist_path}"
   fi
 
-  launchctl kickstart -k "gui/${UID_NUM}/${label}" >/dev/null 2>&1 || true
+  if [[ "${kickstart_now}" == "true" ]]; then
+    launchctl kickstart -k "gui/${UID_NUM}/${label}" >/dev/null 2>&1 || true
+  fi
   launchctl print "gui/${UID_NUM}/${label}" >/dev/null
 }
 
@@ -135,9 +138,9 @@ chmod 755 \
   "${ROOT_DIR}/scripts/run_backup_restore_drill.sh" \
   "${ROOT_DIR}/scripts/run_host_health_check.sh"
 
-install_plist "${BACKUP_LABEL}" "${BACKUP_PLIST}"
-install_plist "${DRILL_LABEL}" "${DRILL_PLIST}"
-install_plist "${HOST_LABEL}" "${HOST_PLIST}"
+install_plist "${BACKUP_LABEL}" "${BACKUP_PLIST}" "true"
+install_plist "${DRILL_LABEL}" "${DRILL_PLIST}" "false"
+install_plist "${HOST_LABEL}" "${HOST_PLIST}" "true"
 
 echo "Installed ops resilience LaunchAgents:"
 echo "  ${BACKUP_LABEL} (daily ${BACKUP_HOUR}:$(printf '%02d' "${BACKUP_MINUTE}"))"
@@ -147,3 +150,4 @@ echo "Use:"
 echo "  launchctl print gui/${UID_NUM}/${BACKUP_LABEL}"
 echo "  launchctl print gui/${UID_NUM}/${DRILL_LABEL}"
 echo "  launchctl print gui/${UID_NUM}/${HOST_LABEL}"
+echo "Note: restore drill agent is installed without immediate kickstart; it runs on schedule."

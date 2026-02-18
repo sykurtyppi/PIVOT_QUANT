@@ -26,12 +26,15 @@ Concurrency/consistency protections:
 - restore drill only considers snapshots that include all expected files and a complete manifest
 - backup + restore drill share a lock file (`PIVOT_OPS_LOCK_FILE`) to prevent overlapping runs
 - if lock wait exceeds `PIVOT_OPS_LOCK_TIMEOUT_SEC`, run is marked `skipped_lock_busy`
+- daily report sender has its own lock + dedupe state to prevent duplicate sends
 
 ## 2) Retention
 
 Configured in `.env`:
 - `PIVOT_OPS_LOCK_FILE=/Users/tristanalejandro/PIVOT_QUANT/logs/ops_resilience.lock`
 - `PIVOT_OPS_LOCK_TIMEOUT_SEC=300`
+- `ML_REPORT_LOCK_WAIT_SEC=120`
+- `ML_REPORT_FORCE_SEND=false`
 - `BACKUP_DAILY_KEEP=30`
 - `BACKUP_WEEKLY_KEEP=8`
 
@@ -112,6 +115,11 @@ bash scripts/run_backup_restore_drill.sh
 bash scripts/run_host_health_check.sh
 bash scripts/launch_agent_status.sh
 ```
+
+Daily report duplicate-send guard:
+- lock file: `logs/.daily_report_send.lock`
+- state file: `logs/report_delivery_state.json`
+- intentional resend: set `ML_REPORT_FORCE_SEND=true`
 
 ## References
 
