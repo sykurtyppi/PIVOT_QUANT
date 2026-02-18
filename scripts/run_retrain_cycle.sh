@@ -59,6 +59,20 @@ run_step() {
   echo "[$(timestamp)] DONE  ${name}" | tee -a "${LOG_DIR}/retrain.log"
 }
 
+run_ops_smoke() {
+  local npm_cmd
+  npm_cmd="$(command -v npm || true)"
+  if [[ -n "${npm_cmd}" ]]; then
+    if "${npm_cmd}" run -s ml:test:smoke >> "${LOG_DIR}/retrain.log" 2>&1; then
+      return 0
+    fi
+    echo "[$(timestamp)] WARN ops_smoke via npm failed; retrying direct unittest runner" | tee -a "${LOG_DIR}/retrain.log"
+  else
+    echo "[$(timestamp)] WARN npm not found in PATH; running direct unittest runner" | tee -a "${LOG_DIR}/retrain.log"
+  fi
+  "${PYTHON}" -m unittest discover -s tests/python -p "test_*.py" -v >> "${LOG_DIR}/retrain.log" 2>&1
+}
+
 is_truthy() {
   local raw="${1:-}"
   local lowered
@@ -129,7 +143,7 @@ run_step "python_deps_check" "${PYTHON}" -c "import importlib.util, sys; require
 
 if is_truthy "${RUN_OPS_SMOKE_ON_RETRAIN}"; then
   echo "[$(timestamp)] START ops_smoke" | tee -a "${LOG_DIR}/retrain.log"
-  if npm run -s ml:test:smoke >> "${LOG_DIR}/retrain.log" 2>&1; then
+  if run_ops_smoke; then
     echo "[$(timestamp)] DONE  ops_smoke" | tee -a "${LOG_DIR}/retrain.log"
   else
     echo "[$(timestamp)] ERROR ops_smoke failed; aborting retrain" | tee -a "${LOG_DIR}/retrain.log"
