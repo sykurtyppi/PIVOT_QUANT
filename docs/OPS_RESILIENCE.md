@@ -51,7 +51,7 @@ Checks:
 - restore latest DB backup to temp path
 - `PRAGMA quick_check`
 - key table row counts
-- extract `models.tar.gz` and verify model manifest
+- extract `models.tar.gz` and verify candidate model manifest (`RF_CANDIDATE_MANIFEST`, legacy fallback `manifest_latest.json`)
 - extract `reports.tar.gz` and verify report files
 - choose latest complete snapshot (manifest + required archives + DB file)
 

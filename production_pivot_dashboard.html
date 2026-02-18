@@ -1703,6 +1703,7 @@
                         <button class="tab-btn is-active" id="tab-levels" data-tab="levels" role="tab" aria-controls="panel-levels" aria-selected="true" type="button">Levels</button>
                         <button class="tab-btn" id="tab-gamma" data-tab="gamma" role="tab" aria-controls="panel-gamma" aria-selected="false" tabindex="-1" type="button">Gamma / Vol</button>
                         <button class="tab-btn" id="tab-ivoi" data-tab="ivoi" role="tab" aria-controls="panel-ivoi" aria-selected="false" tabindex="-1" type="button">IV / OI</button>
+                        <button class="tab-btn" id="tab-ops" data-tab="ops" role="tab" aria-controls="panel-ops" aria-selected="false" tabindex="-1" type="button">Ops</button>
                         <button class="tab-btn" id="tab-debug" data-tab="debug" role="tab" aria-controls="panel-debug" aria-selected="false" tabindex="-1" type="button" hidden>Debug</button>
                     </div>
                 </div>
@@ -1775,6 +1776,23 @@
                         <div class="signal-item" id="skew-25d" title="Difference between 25-delta put IV and 25-delta call IV — positive = demand for downside protection"><strong>25Δ Skew</strong>--</div>
                         <div class="signal-item" id="zero-dte-share" title="Percentage of open interest expiring today — high 0DTE share amplifies intraday gamma effects"><strong>0DTE Share</strong>--</div>
                         <div class="signal-item" id="data-quality" title="Freshness and completeness of the options data feed"><strong>Data Quality</strong>--</div>
+                    </div>
+                </section>
+
+                <section class="tab-panel" id="panel-ops" data-tab-panel="ops" role="tabpanel" aria-labelledby="tab-ops" hidden>
+                    <h4 class="subsection-title">Ops Status</h4>
+                    <div class="signal-grid">
+                        <div class="signal-item" id="ops-backup-age" title="Minutes since last successful nightly backup run"><strong>Backup Age</strong>--</div>
+                        <div class="signal-item" id="ops-backup-status" title="Most recent backup status and snapshot id"><strong>Backup Status</strong>--</div>
+                        <div class="signal-item" id="ops-drill-status" title="Most recent restore-drill verification result"><strong>Restore Drill</strong>--</div>
+                        <div class="signal-item" id="ops-host-status" title="Host health status from disk, DB growth, and launchd checks"><strong>Host Health</strong>--</div>
+                        <div class="signal-item" id="ops-report-alerts" title="Daily report notification channel health"><strong>Report Alerts</strong>--</div>
+                        <div class="signal-item" id="ops-immediate-alerts" title="Immediate ML/collector alert channel health"><strong>Immediate Alerts</strong>--</div>
+                    </div>
+                    <div class="alerts">
+                        <div class="alert" id="ops-backup-note">Backup note: --</div>
+                        <div class="alert" id="ops-drill-note">Drill note: --</div>
+                        <div class="alert" id="ops-alert-note">Alert note: --</div>
                     </div>
                 </section>
 
@@ -1867,6 +1885,8 @@
             mlScoreDate: null,
             mlHealthTimer: null,
             collectorHealthTimer: null,
+            opsStatus: null,
+            opsStatusTimer: null,
             debugEnabled: false,
             debugMessage: '',
             activeInsightTab: 'levels',
@@ -4859,6 +4879,104 @@
             }
         }
 
+        function formatOpsAge(mins) {
+            if (!Number.isFinite(mins) || mins < 0) return '--';
+            if (mins < 60) return `${Math.round(mins)}m ago`;
+            const hours = mins / 60;
+            if (hours < 48) return `${hours.toFixed(1)}h ago`;
+            return `${(hours / 24).toFixed(1)}d ago`;
+        }
+
+        function setOpsField(id, label, value) {
+            const el = document.getElementById(id);
+            if (!el) return;
+            el.innerHTML = `<strong>${label}</strong>${value ?? '--'}`;
+        }
+
+        function updateOpsPanel(payload) {
+            state.opsStatus = payload || null;
+
+            if (!payload) {
+                setOpsField('ops-backup-age', 'Backup Age', '--');
+                setOpsField('ops-backup-status', 'Backup Status', '--');
+                setOpsField('ops-drill-status', 'Restore Drill', '--');
+                setOpsField('ops-host-status', 'Host Health', '--');
+                setOpsField('ops-report-alerts', 'Report Alerts', '--');
+                setOpsField('ops-immediate-alerts', 'Immediate Alerts', '--');
+                const backupNote = document.getElementById('ops-backup-note');
+                if (backupNote) backupNote.textContent = 'Backup note: --';
+                const drillNote = document.getElementById('ops-drill-note');
+                if (drillNote) drillNote.textContent = 'Drill note: --';
+                const alertNote = document.getElementById('ops-alert-note');
+                if (alertNote) alertNote.textContent = 'Alert note: --';
+                return;
+            }
+
+            const backup = payload.backup || {};
+            const drill = payload.restore_drill || {};
+            const host = payload.host_health || {};
+            const alerts = payload.alerts || {};
+            const reportAlerts = alerts.daily_report || {};
+            const immediateAlerts = alerts.immediate || {};
+
+            setOpsField('ops-backup-age', 'Backup Age', formatOpsAge(Number(backup.age_min)));
+            setOpsField(
+                'ops-backup-status',
+                'Backup Status',
+                `${String(backup.status || 'unknown').toUpperCase()}${backup.snapshot ? ` · ${backup.snapshot}` : ''}`
+            );
+            setOpsField(
+                'ops-drill-status',
+                'Restore Drill',
+                `${String(drill.status || 'unknown').toUpperCase()}${drill.snapshot ? ` · ${drill.snapshot}` : ''}`
+            );
+            setOpsField(
+                'ops-host-status',
+                'Host Health',
+                `${String(host.status || 'unknown').toUpperCase()} · warn ${Number(host.warn_count || 0)} · crit ${Number(host.crit_count || 0)}`
+            );
+            setOpsField(
+                'ops-report-alerts',
+                'Report Alerts',
+                `${String(reportAlerts.last_status || 'unknown').toUpperCase()}${Array.isArray(reportAlerts.channels) ? ` · ${reportAlerts.channels.join(',') || 'none'}` : ''}`
+            );
+            setOpsField(
+                'ops-immediate-alerts',
+                'Immediate Alerts',
+                `${String(immediateAlerts.last_status || 'unknown').toUpperCase()}${Array.isArray(immediateAlerts.channels) ? ` · ${immediateAlerts.channels.join(',') || 'none'}` : ''}`
+            );
+
+            const backupNote = document.getElementById('ops-backup-note');
+            if (backupNote) {
+                backupNote.textContent = `Backup note: ${backup.error || 'No backup errors recorded.'}`;
+            }
+            const drillNote = document.getElementById('ops-drill-note');
+            if (drillNote) {
+                drillNote.textContent = `Drill note: ${drill.error || 'Restore drill healthy.'}`;
+            }
+            const alertNote = document.getElementById('ops-alert-note');
+            if (alertNote) {
+                const reportTs = reportAlerts.last_timestamp || '--';
+                const immediateTs = immediateAlerts.last_timestamp || '--';
+                alertNote.textContent = `Alert note: report@${reportTs} | immediate@${immediateTs}`;
+            }
+        }
+
+        async function loadOpsStatus() {
+            const apiUrl = `${getApiOrigin()}/api/ops/status`;
+            try {
+                const response = await fetch(apiUrl);
+                if (!response.ok) {
+                    updateOpsPanel(null);
+                    return;
+                }
+                const payload = await response.json();
+                updateOpsPanel(payload);
+            } catch (_error) {
+                updateOpsPanel(null);
+            }
+        }
+
         function setMlServiceState(status, message = '') {
             const prevStatus = state.mlServiceStatus;
             state.mlServiceStatus = status;
@@ -5652,6 +5770,10 @@
                         event.preventDefault();
                         document.getElementById('tab-ivoi')?.click();
                         break;
+                    case '4':
+                        event.preventDefault();
+                        document.getElementById('tab-ops')?.click();
+                        break;
                     case 'p':
                         event.preventDefault();
                         state.uiVisibility.pivots = !state.uiVisibility.pivots;
@@ -5673,7 +5795,7 @@
                     case '?':
                         event.preventDefault();
                         showToast(
-                            '<b>R</b> Refresh · <b>1-3</b> Tabs · <b>P</b> Pivots · <b>G</b> Gamma · <b>F</b> Fit chart · <b>?</b> Help',
+                            '<b>R</b> Refresh · <b>1-4</b> Tabs · <b>P</b> Pivots · <b>G</b> Gamma · <b>F</b> Fit chart · <b>?</b> Help',
                             'info',
                             { title: 'Keyboard Shortcuts', duration: 8000, html: true }
                         );
@@ -5722,6 +5844,7 @@
             updateDecisionStrip();
             loadMlHealth();
             loadCollectorHealth();
+            loadOpsStatus();
             loadMlMetrics();
             if (state.mlMetricsTimer) {
                 clearInterval(state.mlMetricsTimer);
@@ -5739,6 +5862,12 @@
             state.collectorHealthTimer = setInterval(() => {
                 loadCollectorHealth();
             }, 60000);
+            if (state.opsStatusTimer) {
+                clearInterval(state.opsStatusTimer);
+            }
+            state.opsStatusTimer = setInterval(() => {
+                loadOpsStatus();
+            }, 120000);
             updateRefreshMeta();
             loadMarketData();
             startAutoRefreshLoop();

@@ -4,7 +4,7 @@
 This policy controls promotion of trained ML artifacts from `candidate` to `active` for live scoring.
 
 ## Lifecycle
-1. `train_rf_artifacts.py` publishes `data/models/manifest_latest.json` (candidate).
+1. `train_rf_artifacts.py` publishes `data/models/manifest_runtime_latest.json` (candidate).
 2. `scripts/model_governance.py evaluate` applies promotion gates.
 3. If gates pass, candidate is promoted to `data/models/manifest_active.json`.
 4. `ml_server.py` serves active manifest by default.

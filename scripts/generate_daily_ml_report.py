@@ -29,7 +29,11 @@ MODEL_DIR = Path(os.getenv("RF_MODEL_DIR", str(ROOT / "data" / "models")))
 DEFAULT_GAMMA_LOG = ROOT / "logs" / "gamma_bridge.log"
 RF_MANIFEST_PATH = os.getenv("RF_MANIFEST_PATH", "").strip()
 RF_ACTIVE_MANIFEST = os.getenv("RF_ACTIVE_MANIFEST", "manifest_active.json").strip() or "manifest_active.json"
-RF_CANDIDATE_MANIFEST = os.getenv("RF_CANDIDATE_MANIFEST", "manifest_latest.json").strip() or "manifest_latest.json"
+RF_CANDIDATE_MANIFEST = (
+    os.getenv("RF_CANDIDATE_MANIFEST", "manifest_runtime_latest.json").strip()
+    or "manifest_runtime_latest.json"
+)
+LEGACY_CANDIDATE_MANIFEST = "manifest_latest.json"
 
 try:
     from migrate_db import migrate_connection
@@ -469,7 +473,14 @@ def resolve_manifest_path() -> Path:
     active_path = MODEL_DIR / RF_ACTIVE_MANIFEST
     if active_path.exists():
         return active_path
-    return MODEL_DIR / RF_CANDIDATE_MANIFEST
+    candidate_path = MODEL_DIR / RF_CANDIDATE_MANIFEST
+    if candidate_path.exists():
+        return candidate_path
+    if candidate_path.name != LEGACY_CANDIDATE_MANIFEST:
+        legacy_path = MODEL_DIR / LEGACY_CANDIDATE_MANIFEST
+        if legacy_path.exists():
+            return legacy_path
+    return candidate_path
 
 
 def parse_manifest() -> dict[str, Any]:

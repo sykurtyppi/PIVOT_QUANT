@@ -17,6 +17,10 @@ from ml.features import FEATURE_VERSION, build_feature_row, drop_features
 DEFAULT_DUCKDB = os.getenv("DUCKDB_PATH", "data/pivot_training.duckdb")
 DEFAULT_VIEW = os.getenv("DUCKDB_VIEW", "training_events_v1")
 DEFAULT_OUT_DIR = os.getenv("RF_MODEL_DIR", "data/models")
+DEFAULT_CANDIDATE_MANIFEST = (
+    os.getenv("RF_CANDIDATE_MANIFEST", "manifest_runtime_latest.json").strip()
+    or "manifest_runtime_latest.json"
+)
 
 
 def require(module_name: str, hint: str):
@@ -191,6 +195,11 @@ def main() -> None:
     parser.add_argument("--out-dir", default=DEFAULT_OUT_DIR)
     parser.add_argument("--version", default=None)
     parser.add_argument(
+        "--candidate-manifest",
+        default=DEFAULT_CANDIDATE_MANIFEST,
+        help="Runtime candidate manifest filename written into --out-dir",
+    )
+    parser.add_argument(
         "--allow-partial-manifest",
         action="store_true",
         default=False,
@@ -275,14 +284,28 @@ def main() -> None:
                 print(f"Not enough events for {target} {horizon}m.")
                 continue
 
+            X_train = X.loc[~calib_mask]
+            y_train = y.loc[~calib_mask]
+            # Some features can be present overall but become fully missing in
+            # the non-calibration training split. Drop them to avoid imputer warnings.
+            all_null_train_cols = [col for col in X_train.columns if not X_train[col].notna().any()]
+            if all_null_train_cols:
+                X = X.drop(columns=all_null_train_cols)
+                X_train = X_train.drop(columns=all_null_train_cols)
+                print(
+                    f"Dropping all-null training features for {target} {horizon}m: "
+                    + ", ".join(sorted(all_null_train_cols))
+                )
+
+            if X.shape[1] == 0:
+                print(f"No usable features for {target} {horizon}m after null filtering.")
+                continue
+
             categorical_cols = [
                 c for c in X.columns if not pd.api.types.is_numeric_dtype(X[c])
             ]
             numeric_cols = [c for c in X.columns if pd.api.types.is_numeric_dtype(X[c])]
             pipeline = build_pipeline(numeric_cols, categorical_cols, args)
-
-            X_train = X.loc[~calib_mask]
-            y_train = y.loc[~calib_mask]
             pipeline.fit(X_train, y_train)
 
             calibrator = None
@@ -375,7 +398,7 @@ def main() -> None:
     if not actual_pairs:
         print(
             "No model artifacts were produced. "
-            "Aborting publish to preserve existing manifest_latest.json.",
+            f"Aborting publish to preserve existing {args.candidate_manifest}.",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -383,7 +406,7 @@ def main() -> None:
     if missing_pairs and not args.allow_partial_manifest:
         missing_fmt = ", ".join(f"{t}:{h}m" for t, h in missing_pairs)
         print(
-            "Partial model set produced; aborting publish to preserve existing manifest_latest.json. "
+            f"Partial model set produced; aborting publish to preserve existing {args.candidate_manifest}. "
             f"Missing: {missing_fmt}. "
             "Use --allow-partial-manifest to override.",
             file=sys.stderr,
@@ -396,7 +419,7 @@ def main() -> None:
     for source_path, alias_path in latest_aliases:
         atomic_copy_file(source_path, alias_path)
 
-    latest_manifest = out_dir / "manifest_latest.json"
+    latest_manifest = out_dir / args.candidate_manifest
     # Publish latest manifest last so readers never observe a half-written
     # pointer to artifacts.
     atomic_write_json(latest_manifest, manifest)

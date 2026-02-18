@@ -31,6 +31,7 @@ DEFAULT_LABELS = [
     "com.pivotquant.restore_drill",
     "com.pivotquant.host_health",
 ]
+OK_EXIT_CODES = {"0", "(never exited)", "unknown"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -158,9 +159,10 @@ def run() -> int:
 
     disk_warn_pct = float(os.getenv("HOST_HEALTH_DISK_WARN_PCT", "15"))
     disk_crit_pct = float(os.getenv("HOST_HEALTH_DISK_CRIT_PCT", "8"))
+    db_growth_min_mb = float(os.getenv("HOST_HEALTH_DB_GROWTH_MIN_MB", "256"))
     db_growth_warn_mb = float(os.getenv("HOST_HEALTH_DB_GROWTH_WARN_MB", "2048"))
     db_growth_crit_mb = float(os.getenv("HOST_HEALTH_DB_GROWTH_CRIT_MB", "4096"))
-    restart_warn_delta = int(os.getenv("HOST_HEALTH_RESTART_WARN_DELTA", "5"))
+    restart_warn_delta = int(os.getenv("HOST_HEALTH_RESTART_WARN_DELTA", "20"))
 
     previous = load_state(state_file)
     previous_db_size = int(previous.get("db_size_bytes") or 0)
@@ -181,14 +183,16 @@ def run() -> int:
     db_size = db_path.stat().st_size if db_path.exists() else 0
     growth_mb = 0.0
     growth_mb_per_day = 0.0
+    db_size_mb = db_size / (1024 * 1024)
     if previous_db_size > 0 and checked_at_ms > previous_ts > 0:
         growth_mb = (db_size - previous_db_size) / (1024 * 1024)
         elapsed_days = max((checked_at_ms - previous_ts) / (1000 * 60 * 60 * 24), 1e-6)
         growth_mb_per_day = growth_mb / elapsed_days
-        if growth_mb_per_day >= db_growth_crit_mb:
-            issues_crit.append(f"db_growth_mb_per_day={growth_mb_per_day:.2f} above crit {db_growth_crit_mb:.2f}")
-        elif growth_mb_per_day >= db_growth_warn_mb:
-            issues_warn.append(f"db_growth_mb_per_day={growth_mb_per_day:.2f} above warn {db_growth_warn_mb:.2f}")
+        if db_size_mb >= db_growth_min_mb:
+            if growth_mb_per_day >= db_growth_crit_mb:
+                issues_crit.append(f"db_growth_mb_per_day={growth_mb_per_day:.2f} above crit {db_growth_crit_mb:.2f}")
+            elif growth_mb_per_day >= db_growth_warn_mb:
+                issues_warn.append(f"db_growth_mb_per_day={growth_mb_per_day:.2f} above warn {db_growth_warn_mb:.2f}")
 
     uid = os.getuid()
     labels = [x.strip() for x in os.getenv("HOST_HEALTH_LABELS", ",".join(DEFAULT_LABELS)).split(",") if x.strip()]
@@ -199,12 +203,19 @@ def run() -> int:
         if not metric["loaded"]:
             issues_warn.append(f"{label}: not loaded")
             continue
-        if metric["last_exit_code"] not in {"0", "(never exited)"}:
+
+        state_value = str(metric.get("state", "unknown")).strip().lower()
+        exit_code = str(metric.get("last_exit_code", "unknown")).strip().lower()
+        # Running services often keep a stale non-zero/unknown exit code from an old run.
+        # Surface exit-code warnings only when a job is not currently running.
+        if state_value != "running" and exit_code not in OK_EXIT_CODES:
             issues_warn.append(f"{label}: last_exit_code={metric['last_exit_code']}")
+
         prev_runs = int(previous_runs.get(label, 0)) if isinstance(previous_runs, dict) else 0
         if prev_runs > 0:
             delta = metric["runs"] - prev_runs
-            if delta >= restart_warn_delta:
+            # Restart churn matters mainly for always-on services.
+            if state_value == "running" and delta >= restart_warn_delta:
                 issues_warn.append(f"{label}: runs delta={delta} since last check")
 
     status = "ok"
@@ -215,7 +226,7 @@ def run() -> int:
 
     summary = (
         f"host_health status={status} disk_free_pct={free_pct:.2f} "
-        f"db_size_mb={db_size / (1024 * 1024):.2f} "
+        f"db_size_mb={db_size_mb:.2f} "
         f"db_growth_mb_per_day={growth_mb_per_day:.2f} "
         f"warn={len(issues_warn)} crit={len(issues_crit)}"
     )

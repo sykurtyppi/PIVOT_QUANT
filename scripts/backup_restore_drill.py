@@ -30,6 +30,8 @@ DEFAULT_LOG_FILE = ROOT / "logs" / "restore_drill.log"
 DEFAULT_BACKUP_ROOT = ROOT / "backups"
 DEFAULT_LOCK_FILE = ROOT / "logs" / "ops_resilience.lock"
 DEFAULT_DB = Path(os.getenv("PIVOT_DB", str(ROOT / "data" / "pivot_events.sqlite")))
+DEFAULT_CANDIDATE_MANIFEST = "manifest_runtime_latest.json"
+LEGACY_CANDIDATE_MANIFEST = "manifest_latest.json"
 
 
 def parse_args() -> argparse.Namespace:
@@ -76,6 +78,14 @@ def log_line(path: Path, message: str) -> None:
 
 def now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def candidate_manifest_names() -> list[str]:
+    configured = os.getenv("RF_CANDIDATE_MANIFEST", DEFAULT_CANDIDATE_MANIFEST).strip() or DEFAULT_CANDIDATE_MANIFEST
+    names = [configured]
+    if configured != LEGACY_CANDIDATE_MANIFEST:
+        names.append(LEGACY_CANDIDATE_MANIFEST)
+    return names
 
 
 def set_ops_status(db_path: Path, pairs: dict[str, str]) -> None:
@@ -224,9 +234,15 @@ def run() -> int:
                     except TypeError:
                         tar.extractall(reports_extract)
 
-                model_manifest = models_extract / "models" / "manifest_latest.json"
-                if not model_manifest.exists():
-                    raise FileNotFoundError("restored models missing manifest_latest.json")
+                model_manifest = None
+                for candidate_name in candidate_manifest_names():
+                    candidate_path = models_extract / "models" / candidate_name
+                    if candidate_path.exists():
+                        model_manifest = candidate_path
+                        break
+                if model_manifest is None:
+                    expected = ", ".join(candidate_manifest_names())
+                    raise FileNotFoundError(f"restored models missing candidate manifest ({expected})")
                 report_files = list((reports_extract / "reports").glob("ml_daily_*.md"))
                 if not report_files:
                     raise FileNotFoundError("restored reports missing ml_daily_*.md")
@@ -235,6 +251,7 @@ def run() -> int:
                     "snapshot": snapshot.name,
                     "db_quick_check": db_check["quick_check"],
                     "counts": db_check["counts"],
+                    "manifest": model_manifest.name,
                     "restored_report_files": len(report_files),
                 }
                 report_path = ROOT / "logs" / f"restore_drill_{snapshot.name}.json"

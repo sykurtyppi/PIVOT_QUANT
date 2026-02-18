@@ -26,7 +26,11 @@ log = logging.getLogger("ml_server")
 MODEL_DIR = Path(os.getenv("RF_MODEL_DIR", "data/models"))
 RF_MANIFEST_PATH = os.getenv("RF_MANIFEST_PATH", "").strip()
 RF_ACTIVE_MANIFEST = os.getenv("RF_ACTIVE_MANIFEST", "manifest_active.json").strip() or "manifest_active.json"
-RF_CANDIDATE_MANIFEST = os.getenv("RF_CANDIDATE_MANIFEST", "manifest_latest.json").strip() or "manifest_latest.json"
+RF_CANDIDATE_MANIFEST = (
+    os.getenv("RF_CANDIDATE_MANIFEST", "manifest_runtime_latest.json").strip()
+    or "manifest_runtime_latest.json"
+)
+LEGACY_CANDIDATE_MANIFEST = "manifest_latest.json"
 HOST = os.getenv("ML_SERVER_BIND", "127.0.0.1")
 PORT = int(os.getenv("ML_SERVER_PORT", "5003"))
 STALE_MODEL_HOURS = int(os.getenv("STALE_MODEL_HOURS", "48"))
@@ -57,7 +61,14 @@ class ModelRegistry:
         active_path = MODEL_DIR / RF_ACTIVE_MANIFEST
         if active_path.exists():
             return active_path
-        return MODEL_DIR / RF_CANDIDATE_MANIFEST
+        candidate_path = MODEL_DIR / RF_CANDIDATE_MANIFEST
+        if candidate_path.exists():
+            return candidate_path
+        if candidate_path.name != LEGACY_CANDIDATE_MANIFEST:
+            legacy_path = MODEL_DIR / LEGACY_CANDIDATE_MANIFEST
+            if legacy_path.exists():
+                return legacy_path
+        return candidate_path
 
     def load(self):
         manifest_path = self.resolve_manifest_path()

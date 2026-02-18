@@ -14,6 +14,7 @@ data/*.duckdb
 data/events.jsonl
 data/exports/
 data/models/*.pkl
+data/models/manifest_runtime_latest.json
 data/models/manifest_active.json
 data/models/manifest_active_prev.json
 data/models/model_registry.json

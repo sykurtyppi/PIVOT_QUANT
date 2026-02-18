@@ -28,6 +28,13 @@ const EXPORT_DIR = path.join(ROOT_DIR, 'data', 'exports');
 const METRICS_FILE = path.join(EXPORT_DIR, 'rf_walkforward_metrics.json');
 const CALIB_FILE = path.join(EXPORT_DIR, 'rf_calibration_curve.json');
 const SQLITE_DB = path.join(ROOT_DIR, 'data', 'pivot_events.sqlite');
+const ENV_FILE = path.join(ROOT_DIR, '.env');
+const BACKUP_STATE_FILE = path.join(ROOT_DIR, 'logs', 'backup_state.json');
+const HOST_HEALTH_STATE_FILE = path.join(ROOT_DIR, 'logs', 'host_health_state.json');
+const HEALTH_ALERT_STATE_FILE = path.join(ROOT_DIR, 'logs', 'health_alert_state.json');
+const REPORT_DELIVERY_STATE_FILE = path.join(ROOT_DIR, 'logs', 'report_delivery_state.json');
+const REPORT_DELIVERY_LOG_FILE = path.join(ROOT_DIR, 'logs', 'report_delivery.log');
+const HEALTH_ALERT_LOG_FILE = path.join(ROOT_DIR, 'logs', 'health_alert.log');
 
 const symbolMap = new Map([
   ['SPX', '^GSPC'],
@@ -476,6 +483,221 @@ function readJsonFile(filePath) {
   return JSON.parse(raw);
 }
 
+function readJsonFileSafe(filePath, fallback = null) {
+  try {
+    const value = readJsonFile(filePath);
+    return value == null ? fallback : value;
+  } catch (_error) {
+    return fallback;
+  }
+}
+
+function loadEnvMap(filePath) {
+  const env = {};
+  if (!fs.existsSync(filePath)) return env;
+  const lines = fs.readFileSync(filePath, 'utf8').split(/\r?\n/);
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+    const idx = line.indexOf('=');
+    if (idx <= 0) continue;
+    const key = line.slice(0, idx).trim();
+    const value = line.slice(idx + 1).trim().replace(/^['"]|['"]$/g, '');
+    if (key) env[key] = value;
+  }
+  return env;
+}
+
+function parseCsv(raw) {
+  if (typeof raw !== 'string' || !raw.trim()) return [];
+  return raw
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function toNumber(value, fallback = null) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function ageMinutes(tsMs) {
+  const value = toNumber(tsMs, null);
+  if (!Number.isFinite(value) || value <= 0) return null;
+  return Math.max(0, Math.round((Date.now() - value) / 60000));
+}
+
+function readTailLines(filePath, maxLines = 120) {
+  if (!fs.existsSync(filePath)) return [];
+  const lines = fs.readFileSync(filePath, 'utf8').split(/\r?\n/).filter(Boolean);
+  if (lines.length <= maxLines) return lines;
+  return lines.slice(-maxLines);
+}
+
+function parseLogTimestamp(line) {
+  if (typeof line !== 'string') return null;
+  const match = line.match(/^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]/);
+  if (!match) return null;
+  return match[1];
+}
+
+function summarizeReportDelivery(logLines) {
+  const summary = {
+    status: 'unknown',
+    timestamp: null,
+    line: '',
+  };
+  for (let idx = logLines.length - 1; idx >= 0; idx -= 1) {
+    const line = logLines[idx];
+    if (!line) continue;
+    if (line.includes('DONE  daily_report_send')) {
+      summary.status = 'ok';
+      summary.timestamp = parseLogTimestamp(line);
+      summary.line = line;
+      return summary;
+    }
+    if (line.includes('WARN notification skipped')) {
+      summary.status = 'warning';
+      summary.timestamp = parseLogTimestamp(line);
+      summary.line = line;
+      return summary;
+    }
+    if (line.includes('ERROR notification send failed') || line.includes('ERROR daily report generation failed')) {
+      summary.status = 'error';
+      summary.timestamp = parseLogTimestamp(line);
+      summary.line = line;
+      return summary;
+    }
+  }
+  return summary;
+}
+
+function summarizeHealthAlert(logLines) {
+  const summary = {
+    status: 'unknown',
+    timestamp: null,
+    line: '',
+  };
+  for (let idx = logLines.length - 1; idx >= 0; idx -= 1) {
+    const line = logLines[idx];
+    if (!line) continue;
+    if (line.includes('notify ok')) {
+      summary.status = 'ok';
+      summary.timestamp = parseLogTimestamp(line);
+      summary.line = line;
+      return summary;
+    }
+    if (line.includes('notify failed')) {
+      summary.status = 'error';
+      summary.timestamp = parseLogTimestamp(line);
+      summary.line = line;
+      return summary;
+    }
+  }
+  return summary;
+}
+
+async function readOpsStatusRows() {
+  let Database;
+  try {
+    const mod = await import('better-sqlite3');
+    Database = mod.default;
+  } catch (_err) {
+    return {};
+  }
+
+  if (!fs.existsSync(SQLITE_DB)) {
+    return {};
+  }
+
+  const db = new Database(SQLITE_DB, { readonly: true });
+  try {
+    const exists = db.prepare(
+      "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ops_status' LIMIT 1"
+    ).get();
+    if (!exists) return {};
+    const rows = db.prepare('SELECT key, value FROM ops_status').all();
+    const out = {};
+    rows.forEach((row) => {
+      out[row.key] = row.value;
+    });
+    return out;
+  } finally {
+    db.close();
+  }
+}
+
+async function queryOpsStatus() {
+  const env = loadEnvMap(ENV_FILE);
+  const ops = await readOpsStatusRows();
+  const backupState = readJsonFileSafe(BACKUP_STATE_FILE, {});
+  const hostState = readJsonFileSafe(HOST_HEALTH_STATE_FILE, {});
+  const alertState = readJsonFileSafe(HEALTH_ALERT_STATE_FILE, {});
+  const reportState = readJsonFileSafe(REPORT_DELIVERY_STATE_FILE, {});
+  const reportLog = summarizeReportDelivery(readTailLines(REPORT_DELIVERY_LOG_FILE, 200));
+  const alertLog = summarizeHealthAlert(readTailLines(HEALTH_ALERT_LOG_FILE, 200));
+
+  const backupLastRunMs = toNumber(ops.backup_last_run_ms, toNumber(backupState.last_run_ms, null));
+  const restoreLastRunMs = toNumber(ops.backup_restore_last_run_ms, null);
+  const hostLastRunMs = toNumber(ops.host_health_last_run_ms, toNumber(hostState.checked_at_ms, null));
+
+  const reportChannels = parseCsv(
+    env.ML_REPORT_NOTIFY_CHANNELS || process.env.ML_REPORT_NOTIFY_CHANNELS || ''
+  );
+  const alertChannels = parseCsv(
+    env.ML_ALERT_NOTIFY_CHANNELS
+      || process.env.ML_ALERT_NOTIFY_CHANNELS
+      || env.ML_REPORT_NOTIFY_CHANNELS
+      || process.env.ML_REPORT_NOTIFY_CHANNELS
+      || ''
+  );
+
+  return {
+    generated_at: new Date().toISOString(),
+    backup: {
+      status: ops.backup_last_status || backupState.last_status || 'unknown',
+      snapshot: ops.backup_last_snapshot || backupState.last_snapshot || '',
+      last_run_ms: backupLastRunMs,
+      age_min: ageMinutes(backupLastRunMs),
+      removed_count: toNumber(ops.backup_last_removed_count, 0),
+      error: ops.backup_last_error || '',
+    },
+    restore_drill: {
+      status: ops.backup_restore_last_status || 'unknown',
+      snapshot: ops.backup_restore_last_snapshot || '',
+      last_run_ms: restoreLastRunMs,
+      age_min: ageMinutes(restoreLastRunMs),
+      error: ops.backup_restore_last_error || '',
+    },
+    host_health: {
+      status: ops.host_health_last_status || hostState.status || 'unknown',
+      last_run_ms: hostLastRunMs,
+      age_min: ageMinutes(hostLastRunMs),
+      warn_count: toNumber(ops.host_health_warn_count, 0),
+      crit_count: toNumber(ops.host_health_crit_count, 0),
+      disk_free_pct: toNumber(ops.host_health_disk_free_pct, null),
+      db_growth_mb_per_day: toNumber(ops.host_health_db_growth_mb_per_day, null),
+      error: ops.host_health_last_error || '',
+    },
+    alerts: {
+      daily_report: {
+        channels: reportChannels,
+        last_status: reportLog.status,
+        last_timestamp: reportLog.timestamp,
+        last_line: reportLog.line,
+        sent_keys: Object.keys(reportState?.sent || {}).length,
+      },
+      immediate: {
+        channels: alertChannels,
+        last_status: alertLog.status,
+        last_timestamp: alertLog.timestamp,
+        last_line: alertLog.line,
+        services: alertState?.services || {},
+      },
+    },
+  };
+}
+
 function average(values) {
   const clean = values.filter((value) => Number.isFinite(value));
   if (!clean.length) return null;
@@ -821,6 +1043,19 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, 200, data);
     } catch (error) {
       sendProxyError(res, error, 'Live collector health unavailable');
+    }
+    return;
+  }
+
+  if (url.pathname === '/api/ops/status') {
+    try {
+      const data = await queryOpsStatus();
+      sendJson(res, 200, data);
+    } catch (error) {
+      sendJson(res, 500, {
+        error: 'Ops status unavailable',
+        message: error?.message || String(error),
+      });
     }
     return;
   }

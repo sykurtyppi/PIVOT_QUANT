@@ -2,7 +2,7 @@
 """PivotQuant model governance controller.
 
 Implements a conservative candidate -> active promotion flow:
-1) train_rf_artifacts.py writes a candidate manifest (manifest_latest.json)
+1) train_rf_artifacts.py writes a runtime candidate manifest
 2) this script evaluates promotion gates
 3) if accepted, candidate is promoted to manifest_active.json
 4) serving code reads manifest_active.json (fallback-safe)
@@ -26,7 +26,10 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 
 DEFAULT_MODELS_DIR = Path(os.getenv("RF_MODEL_DIR", "data/models"))
-DEFAULT_CANDIDATE_MANIFEST = os.getenv("RF_CANDIDATE_MANIFEST", "manifest_latest.json")
+DEFAULT_CANDIDATE_MANIFEST = (
+    os.getenv("RF_CANDIDATE_MANIFEST", "manifest_runtime_latest.json").strip()
+    or "manifest_runtime_latest.json"
+)
 DEFAULT_ACTIVE_MANIFEST = os.getenv("RF_ACTIVE_MANIFEST", "manifest_active.json")
 DEFAULT_PREV_ACTIVE_MANIFEST = os.getenv("RF_PREV_ACTIVE_MANIFEST", "manifest_active_prev.json")
 DEFAULT_STATE_FILE = os.getenv("RF_GOVERNANCE_STATE", "model_registry.json")
@@ -41,6 +44,7 @@ DEFAULT_ALLOW_FEATURE_VERSION_CHANGE = os.getenv(
 DEFAULT_DB = os.getenv("PIVOT_DB", str(ROOT / "data" / "pivot_events.sqlite"))
 STATE_SCHEMA_VERSION = 1
 MAX_HISTORY = 200
+LEGACY_CANDIDATE_MANIFEST = "manifest_latest.json"
 
 
 @dataclass
@@ -95,6 +99,17 @@ def parse_horizons(value: str) -> list[int]:
     for raw in parse_csv_list(value):
         out.append(int(raw))
     return out
+
+
+def resolve_candidate_manifest_path(models_dir: Path, configured_name: str) -> Path:
+    configured_path = models_dir / configured_name
+    if configured_path.exists():
+        return configured_path
+    if configured_path.name != LEGACY_CANDIDATE_MANIFEST:
+        legacy_path = models_dir / LEGACY_CANDIDATE_MANIFEST
+        if legacy_path.exists():
+            return legacy_path
+    return configured_path
 
 
 def to_float(value: Any) -> float | None:
@@ -330,7 +345,7 @@ def _persist_state_and_ops(
 
 def cmd_status(args: argparse.Namespace) -> int:
     models_dir = Path(args.models_dir)
-    candidate_path = models_dir / args.candidate_manifest
+    candidate_path = resolve_candidate_manifest_path(models_dir, args.candidate_manifest)
     active_path = models_dir / args.active_manifest
     prev_path = models_dir / args.prev_active_manifest
     state_path = models_dir / args.state_file
@@ -346,6 +361,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     out = {
         "status": "ok",
         "models_dir": str(models_dir),
+        "candidate_manifest_configured": str(models_dir / args.candidate_manifest),
         "candidate_manifest": str(candidate_path),
         "active_manifest": str(active_path),
         "prev_active_manifest": str(prev_path),
@@ -363,7 +379,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 def cmd_evaluate(args: argparse.Namespace) -> int:
     models_dir = Path(args.models_dir)
-    candidate_path = models_dir / args.candidate_manifest
+    candidate_path = resolve_candidate_manifest_path(models_dir, args.candidate_manifest)
     active_path = models_dir / args.active_manifest
     prev_path = models_dir / args.prev_active_manifest
     state_path = models_dir / args.state_file
@@ -390,6 +406,7 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
         "reason": "",
         "gate_failures": [],
         "paths": {
+            "candidate_manifest_configured": str(models_dir / args.candidate_manifest),
             "candidate_manifest": str(candidate_path),
             "active_manifest": str(active_path),
             "prev_active_manifest": str(prev_path),

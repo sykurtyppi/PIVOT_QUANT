@@ -20,7 +20,7 @@ flowchart LR
     E --> G["export_parquet.py"]
     G --> H["DuckDB training view"]
     H --> I["train_rf_artifacts.py"]
-    I --> J["manifest_latest.json (candidate) + model pkl"]
+    I --> J["manifest_runtime_latest.json (candidate) + model pkl"]
     J --> J2["model_governance.py<br/>promote candidate->active"]
     J2 --> J3["manifest_active.json (served)"]
     J3 --> K["ml_server.py (:5003)<br/>/score + /health + /reload"]
@@ -84,7 +84,7 @@ flowchart LR
 - Artifact publish safety:
   - `train_rf_artifacts.py` aborts publish on empty/partial model set unless explicitly overridden.
 - Governance promotion:
-  - `scripts/model_governance.py evaluate` promotes `manifest_latest.json` to `manifest_active.json` only if gates pass.
+  - `scripts/model_governance.py evaluate` promotes `manifest_runtime_latest.json` to `manifest_active.json` only if gates pass.
   - `manifest_active_prev.json` keeps the last active snapshot for rollback.
 
 ## Reload Trigger
@@ -93,7 +93,7 @@ flowchart LR
 - Reload failure is logged as warning and does not crash the stack.
 - Serving contract:
   - `ml_server.py` serves `RF_MANIFEST_PATH` if provided.
-  - Otherwise it serves `manifest_active.json` when present, then falls back to `manifest_latest.json`.
+  - Otherwise it serves `manifest_active.json` when present, then falls back to `RF_CANDIDATE_MANIFEST` (legacy fallback: `manifest_latest.json`).
 
 ## Health State Definitions
 - `healthy`:
@@ -187,8 +187,10 @@ Current kill-switch logic is reflected in `scripts/generate_daily_ml_report.py` 
   - `HOST_HEALTH_CHECK_INTERVAL_SEC`
   - `HOST_HEALTH_DISK_WARN_PCT`
   - `HOST_HEALTH_DISK_CRIT_PCT`
+  - `HOST_HEALTH_DB_GROWTH_MIN_MB`
   - `HOST_HEALTH_DB_GROWTH_WARN_MB`
   - `HOST_HEALTH_DB_GROWTH_CRIT_MB`
+  - `HOST_HEALTH_RESTART_WARN_DELTA`
 
 ## Quick Verification
 1. `bash scripts/verify_host_ready.sh`
