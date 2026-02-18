@@ -26,6 +26,7 @@ DEFAULT_DB = os.getenv("PIVOT_DB", "data/pivot_events.sqlite")
 DEFAULT_REPORT_DIR = os.getenv("ML_REPORT_DIR", "logs/reports")
 ROOT = Path(__file__).resolve().parents[1]
 MODEL_DIR = Path(os.getenv("RF_MODEL_DIR", str(ROOT / "data" / "models")))
+DEFAULT_GAMMA_LOG = ROOT / "logs" / "gamma_bridge.log"
 RF_MANIFEST_PATH = os.getenv("RF_MANIFEST_PATH", "").strip()
 RF_ACTIVE_MANIFEST = os.getenv("RF_ACTIVE_MANIFEST", "manifest_active.json").strip() or "manifest_active.json"
 RF_CANDIDATE_MANIFEST = os.getenv("RF_CANDIDATE_MANIFEST", "manifest_latest.json").strip() or "manifest_latest.json"
@@ -412,6 +413,56 @@ def ts_to_et(ts_ms: int | None) -> str:
     return dt.strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
+def gamma_permission_missing_detected(log_path: Path = DEFAULT_GAMMA_LOG, tail_lines: int = 400) -> bool:
+    """Detect IBKR options market-data permission gaps from gamma bridge logs."""
+    if not log_path.exists():
+        return False
+    try:
+        lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except Exception:
+        return False
+    tail = lines[-tail_lines:] if tail_lines > 0 else lines
+    for line in tail:
+        lowered = line.lower()
+        if "error 10089" in lowered:
+            return True
+        if "requested market data requires additional subscription" in lowered:
+            return True
+    return False
+
+
+def fetch_gamma_coverage(
+    conn: sqlite3.Connection,
+    start_ms: int,
+    end_ms: int,
+) -> dict[str, int]:
+    row = conn.execute(
+        """
+        SELECT
+            COUNT(*) AS events_total,
+            SUM(CASE WHEN gamma_mode IS NOT NULL THEN 1 ELSE 0 END) AS gamma_mode_nonnull,
+            SUM(CASE WHEN gamma_flip IS NOT NULL THEN 1 ELSE 0 END) AS gamma_flip_nonnull,
+            SUM(CASE WHEN gamma_flip_dist_bps IS NOT NULL THEN 1 ELSE 0 END) AS gamma_flip_dist_nonnull
+        FROM touch_events
+        WHERE ts_event >= ? AND ts_event < ?
+        """,
+        (start_ms, end_ms),
+    ).fetchone()
+    if row is None:
+        return {
+            "events_total": 0,
+            "gamma_mode_nonnull": 0,
+            "gamma_flip_nonnull": 0,
+            "gamma_flip_dist_nonnull": 0,
+        }
+    return {
+        "events_total": int(row["events_total"] or 0),
+        "gamma_mode_nonnull": int(row["gamma_mode_nonnull"] or 0),
+        "gamma_flip_nonnull": int(row["gamma_flip_nonnull"] or 0),
+        "gamma_flip_dist_nonnull": int(row["gamma_flip_dist_nonnull"] or 0),
+    }
+
+
 def resolve_manifest_path() -> Path:
     if RF_MANIFEST_PATH:
         return Path(RF_MANIFEST_PATH)
@@ -785,6 +836,8 @@ def render_report(
     if isinstance(trained_end_ts, (int, float)):
         stale_hours_wall = (now_ms - float(trained_end_ts)) / (3600 * 1000)
     stale_hours_session = compute_session_staleness_hours(trained_end_ts, now_ms)
+    gamma_permission_missing = gamma_permission_missing_detected()
+    gamma_coverage = fetch_gamma_coverage(conn, start_ms, end_ms)
 
     health, health_notes = determine_health_status(
         bundles=bundles,
@@ -824,6 +877,22 @@ def render_report(
     lines.append("")
     lines.append(f"- RV Regime: low={regime_summary['rv_low']}, normal={regime_summary['rv_normal']}, high={regime_summary['rv_high']}, unknown={regime_summary['unknown']}")
     lines.append(f"- Day Regime: trend_up={regime_summary['trend_up']}, trend_down={regime_summary['trend_down']}, range={regime_summary['range']}, vol_expansion={regime_summary['vol_expansion']}")
+    lines.append("")
+
+    lines.append("## Gamma Coverage")
+    lines.append("")
+    lines.append(
+        f"- Touch events in window: {gamma_coverage['events_total']}"
+    )
+    lines.append(
+        f"- Gamma-populated events: mode={gamma_coverage['gamma_mode_nonnull']}, "
+        f"flip={gamma_coverage['gamma_flip_nonnull']}, flip_dist={gamma_coverage['gamma_flip_dist_nonnull']}"
+    )
+    if gamma_permission_missing:
+        lines.append(
+            "- IBKR options market-data permission issue detected (`Error 10089`); "
+            "gamma enrichment may be unavailable."
+        )
     lines.append("")
 
     lines.append("## Horizon Metrics")
@@ -888,12 +957,26 @@ def render_report(
     lines.append("")
     for note in health_notes:
         lines.append(f"- {note}")
+    if (
+        gamma_permission_missing
+        and gamma_coverage["events_total"] > 0
+        and gamma_coverage["gamma_mode_nonnull"] == 0
+    ):
+        lines.append(
+            "- Gamma features are currently absent due to IBKR market-data permissions "
+            "(Error 10089 in `logs/gamma_bridge.log`)."
+        )
     lines.append("")
     lines.append("## Action Checklist")
     lines.append("")
     lines.append("- If health is `KILL-SWITCH`, disable live execution and review the misses section first.")
     lines.append("- If health is `DEGRADING`, check calibration drift and session staleness before next session.")
     lines.append("- Verify `run_retrain_cycle.sh` completed and `/reload` succeeded in `logs/retrain.log`.")
+    if gamma_permission_missing:
+        lines.append(
+            "- Resolve IBKR options market-data API permissions to restore gamma enrichment "
+            "(bridge currently reports Error 10089)."
+        )
     lines.append("")
 
     return "\n".join(lines)

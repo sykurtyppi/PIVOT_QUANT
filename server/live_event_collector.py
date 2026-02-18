@@ -81,7 +81,7 @@ SCORE_API_URL = os.getenv("LIVE_COLLECTOR_SCORE_URL", "http://127.0.0.1:5003/sco
 SCORE_BATCH_SIZE = max(1, int(os.getenv("LIVE_COLLECTOR_SCORE_BATCH_SIZE", "64")))
 SCORE_TIMEOUT_SEC = max(1, int(os.getenv("LIVE_COLLECTOR_SCORE_TIMEOUT_SEC", "6")))
 GAMMA_REFRESH_SEC = max(30, int(os.getenv("LIVE_COLLECTOR_GAMMA_REFRESH_SEC", "300")))
-GAMMA_RETRY_SEC = max(30, int(os.getenv("LIVE_COLLECTOR_GAMMA_RETRY_SEC", "900")))
+GAMMA_RETRY_SEC = max(30, int(os.getenv("LIVE_COLLECTOR_GAMMA_RETRY_SEC", "1800")))
 INTERVAL_SEC = _interval_to_seconds(INTERVAL)
 
 if SOURCE not in ("auto", "ibkr", "yahoo"):
