@@ -80,6 +80,8 @@ SCORE_ENABLED = _env_bool("LIVE_COLLECTOR_SCORE_ENABLED", True)
 SCORE_API_URL = os.getenv("LIVE_COLLECTOR_SCORE_URL", "http://127.0.0.1:5003/score")
 SCORE_BATCH_SIZE = max(1, int(os.getenv("LIVE_COLLECTOR_SCORE_BATCH_SIZE", "64")))
 SCORE_TIMEOUT_SEC = max(1, int(os.getenv("LIVE_COLLECTOR_SCORE_TIMEOUT_SEC", "6")))
+GAMMA_REFRESH_SEC = max(30, int(os.getenv("LIVE_COLLECTOR_GAMMA_REFRESH_SEC", "300")))
+GAMMA_RETRY_SEC = max(30, int(os.getenv("LIVE_COLLECTOR_GAMMA_RETRY_SEC", "900")))
 INTERVAL_SEC = _interval_to_seconds(INTERVAL)
 
 if SOURCE not in ("auto", "ibkr", "yahoo"):
@@ -87,6 +89,8 @@ if SOURCE not in ("auto", "ibkr", "yahoo"):
 
 _state_lock = threading.Lock()
 _stop_event = threading.Event()
+_gamma_cache_lock = threading.Lock()
+_gamma_cache: Dict[str, Dict[str, Any]] = {}
 _state: Dict[str, Any] = {
     "status": "starting",
     "started_at_ms": int(time.time() * 1000),
@@ -122,6 +126,69 @@ def _get_state_snapshot() -> Dict[str, Any]:
 
 def _chunked(items: List[Any], chunk_size: int) -> List[List[Any]]:
     return [items[i:i + chunk_size] for i in range(0, len(items), chunk_size)]
+
+
+def _get_gamma_context(symbol: str) -> Dict[str, Any] | None:
+    now_ms = int(time.time() * 1000)
+    refresh_ms = GAMMA_REFRESH_SEC * 1000
+    retry_ms = GAMMA_RETRY_SEC * 1000
+
+    with _gamma_cache_lock:
+        entry = dict(_gamma_cache.get(symbol, {}))
+
+    cached_context = entry.get("context")
+    status = entry.get("status")
+    next_refresh_ms = int(entry.get("next_refresh_ms") or 0)
+
+    if cached_context is not None and now_ms < next_refresh_ms:
+        return cached_context
+    if cached_context is None and status == "failed" and now_ms < next_refresh_ms:
+        return None
+
+    fresh_context = fetch_gamma_context(symbol)
+    if fresh_context is not None:
+        recovered = status in ("failed", "degraded")
+        with _gamma_cache_lock:
+            _gamma_cache[symbol] = {
+                "context": fresh_context,
+                "status": "ok",
+                "next_refresh_ms": now_ms + refresh_ms,
+                "last_success_ms": now_ms,
+            }
+        if recovered:
+            log.info("Gamma context recovered for %s", symbol)
+        return fresh_context
+
+    if cached_context is not None:
+        with _gamma_cache_lock:
+            _gamma_cache[symbol] = {
+                "context": cached_context,
+                "status": "degraded",
+                "next_refresh_ms": now_ms + retry_ms,
+                "last_success_ms": entry.get("last_success_ms"),
+            }
+        if status != "degraded":
+            log.warning(
+                "Gamma context unavailable for %s; using cached snapshot and retrying in %ss",
+                symbol,
+                GAMMA_RETRY_SEC,
+            )
+        return cached_context
+
+    with _gamma_cache_lock:
+        _gamma_cache[symbol] = {
+            "context": None,
+            "status": "failed",
+            "next_refresh_ms": now_ms + retry_ms,
+            "last_success_ms": entry.get("last_success_ms"),
+        }
+    if status != "failed":
+        log.warning(
+            "Gamma context unavailable for %s; retrying in %ss",
+            symbol,
+            GAMMA_RETRY_SEC,
+        )
+    return None
 
 
 def _fetch_existing_event_ids(conn: sqlite3.Connection, event_ids: List[str]) -> set[str]:
@@ -200,7 +267,7 @@ def _collect_symbol(conn: sqlite3.Connection, symbol: str) -> tuple[Dict[str, An
 
     atr_by_date = compute_atr(sessions, ATR_WINDOW)
     rv_by_date, rv_regime_by_date = compute_realized_volatility(sessions, window=30)
-    gamma_context = fetch_gamma_context(symbol)
+    gamma_context = _get_gamma_context(symbol)
     events = build_events(
         symbol=symbol,
         sessions=sessions,
