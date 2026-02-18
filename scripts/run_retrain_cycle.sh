@@ -77,7 +77,6 @@ REPORT_PATH=""
 REPORT_OUTPUT=""
 NOTIFY_ON_RETRAIN="${ML_REPORT_NOTIFY_ON_RETRAIN:-false}"
 RELOAD_STATUS="not_attempted"
-GOVERNANCE_FORCE_ARGS=()
 
 ops_set() {
   if [[ -z "${PYTHON}" ]]; then
@@ -142,14 +141,19 @@ run_step "export_parquet"  "${PYTHON}" scripts/export_parquet.py
 run_step "duckdb_view"     "${PYTHON}" scripts/build_duckdb_view.py
 run_step "train_artifacts" "${PYTHON}" scripts/train_rf_artifacts.py
 if is_truthy "${MODEL_GOV_FORCE_PROMOTE:-false}"; then
-  GOVERNANCE_FORCE_ARGS=(--force-promote)
+  run_step "governance_evaluate" \
+    "${PYTHON}" scripts/model_governance.py \
+    --models-dir "${MODEL_DIR}" \
+    --ops-db "${PIVOT_DB_PATH}" \
+    evaluate \
+    --force-promote
+else
+  run_step "governance_evaluate" \
+    "${PYTHON}" scripts/model_governance.py \
+    --models-dir "${MODEL_DIR}" \
+    --ops-db "${PIVOT_DB_PATH}" \
+    evaluate
 fi
-run_step "governance_evaluate" \
-  "${PYTHON}" scripts/model_governance.py \
-  --models-dir "${MODEL_DIR}" \
-  --ops-db "${PIVOT_DB_PATH}" \
-  evaluate \
-  "${GOVERNANCE_FORCE_ARGS[@]}"
 
 # Tell the running ML server to hot-reload the new model artifacts.
 echo "[$(timestamp)] Reloading ML server models..." | tee -a "${LOG_DIR}/retrain.log"
