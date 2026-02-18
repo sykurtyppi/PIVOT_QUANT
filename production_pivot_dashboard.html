@@ -4296,6 +4296,35 @@
             }
         }
 
+        function dailyDateKeyToCanonicalTime(dateKey) {
+            const [year, month, day] = String(dateKey || '').split('-').map((v) => Number(v));
+            if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) return null;
+            // Anchor to 12:00 UTC so the ET trading date remains stable across
+            // local/browser time zones and DST shifts.
+            return Math.floor(Date.UTC(year, month - 1, day, 12, 0, 0) / 1000);
+        }
+
+        function normalizeDailyCandles(candles, timeZone) {
+            const byDate = new Map();
+            for (const candle of candles || []) {
+                const dateKey = formatYmd(candle.time, timeZone);
+                if (!dateKey) continue;
+                byDate.set(dateKey, candle);
+            }
+
+            const normalized = [];
+            for (const [dateKey, candle] of byDate.entries()) {
+                const canonicalTime = dailyDateKeyToCanonicalTime(dateKey);
+                if (!Number.isFinite(canonicalTime)) continue;
+                normalized.push({
+                    ...candle,
+                    time: canonicalTime,
+                });
+            }
+            normalized.sort((a, b) => a.time - b.time);
+            return normalized;
+        }
+
         function mergeDailyCandles(liveCandles, persistedCandles, timeZone) {
             const byDate = new Map();
             // Persisted candles first (lower priority)
@@ -4309,8 +4338,7 @@
                 byDate.set(dateKey, candle);
             }
             const merged = Array.from(byDate.values());
-            merged.sort((a, b) => a.time - b.time);
-            return merged;
+            return normalizeDailyCandles(merged, timeZone);
         }
 
         async function postBars(bars, symbol, intervalSec) {
@@ -5342,8 +5370,10 @@
                 const lastBarSec = Number(lastCandle?.time);
                 state.lastBarTs = Number.isFinite(lastBarSec) ? Math.floor(lastBarSec * 1000) : null;
 
-                // Merge persisted daily candles from bar_data to fill session gaps
+                // Normalize daily timestamps and merge persisted daily bars to
+                // avoid duplicate-looking same-day candles across sources/time zones.
                 if (interval === '1d' || interval === 'daily') {
+                    state.candles = normalizeDailyCandles(state.candles, state.timeZone);
                     const persistedCandles = await fetchPersistedDailyCandles(symbol);
                     if (persistedCandles.length) {
                         const liveCandleCount = state.candles.length;
