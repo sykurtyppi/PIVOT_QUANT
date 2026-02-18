@@ -114,6 +114,7 @@ bash scripts/run_nightly_backup.sh
 bash scripts/run_backup_restore_drill.sh
 bash scripts/run_host_health_check.sh
 bash scripts/launch_agent_status.sh
+npm run ml:test:smoke
 ```
 
 Daily report duplicate-send guard:

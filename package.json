@@ -56,6 +56,7 @@
     "ml:host-health:run": "bash scripts/run_host_health_check.sh",
     "ml:ops:install": "bash scripts/install_ops_resilience_launch_agents.sh",
     "ml:ops:uninstall": "bash scripts/uninstall_ops_resilience_launch_agents.sh",
+    "ml:test:smoke": "python3 -m unittest discover -s tests/python -p \"test_*.py\" -v",
     "ml:reconcile": "python3 scripts/reconcile_predictions.py",
     "ml:reconcile:cost": "python3 scripts/reconcile_predictions.py --spread-bps 0.8 --slippage-bps 0.4 --commission-bps 0.1",
     "ml:server": "bash server/run_ml_server.sh",
