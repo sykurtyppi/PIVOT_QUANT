@@ -498,7 +498,7 @@ def map_bar_size(interval):
         return "15 mins"
     if interval == "30m":
         return "30 mins"
-    if interval == "1h":
+    if interval in {"60m", "1h"}:
         return "1 hour"
     if interval == "1wk":
         return "1 week"
