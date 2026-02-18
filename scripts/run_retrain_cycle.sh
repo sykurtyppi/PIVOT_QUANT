@@ -76,6 +76,7 @@ MODEL_DIR="${RF_MODEL_DIR:-data/models}"
 REPORT_PATH=""
 REPORT_OUTPUT=""
 NOTIFY_ON_RETRAIN="${ML_REPORT_NOTIFY_ON_RETRAIN:-false}"
+RUN_OPS_SMOKE_ON_RETRAIN="${ML_RUN_OPS_SMOKE_ON_RETRAIN:-true}"
 RELOAD_STATUS="not_attempted"
 
 ops_set() {
@@ -125,6 +126,22 @@ fi
 
 run_step "python_env_check" "${PYTHON}" -c "import sys; assert sys.version_info >= (3, 10), f'Python {sys.version.split()[0]} too old; require >=3.10'; print(sys.executable, sys.version.split()[0])"
 run_step "python_deps_check" "${PYTHON}" -c "import importlib.util, sys; required=['duckdb','pandas','numpy','joblib','sklearn']; missing=[m for m in required if importlib.util.find_spec(m) is None]; print('deps ok' if not missing else 'missing deps: ' + ', '.join(missing)); sys.exit(0 if not missing else 1)"
+
+if is_truthy "${RUN_OPS_SMOKE_ON_RETRAIN}"; then
+  echo "[$(timestamp)] START ops_smoke" | tee -a "${LOG_DIR}/retrain.log"
+  if npm run -s ml:test:smoke >> "${LOG_DIR}/retrain.log" 2>&1; then
+    echo "[$(timestamp)] DONE  ops_smoke" | tee -a "${LOG_DIR}/retrain.log"
+  else
+    echo "[$(timestamp)] ERROR ops_smoke failed; aborting retrain" | tee -a "${LOG_DIR}/retrain.log"
+    "${PYTHON}" scripts/health_alert_watchdog.py \
+      --notify-subject "${ML_ALERT_SUBJECT_PREFIX:-[ALERT]} OPS SMOKE FAILED" \
+      --notify-body "host=$(hostname) step=ops_smoke status=failed log=${LOG_DIR}/retrain.log" \
+      >> "${LOG_DIR}/retrain.log" 2>&1 || true
+    exit 1
+  fi
+else
+  echo "[$(timestamp)] INFO ops_smoke skipped (ML_RUN_OPS_SMOKE_ON_RETRAIN=false)" | tee -a "${LOG_DIR}/retrain.log"
+fi
 
 ops_set \
   --set "retrain_state=running" \

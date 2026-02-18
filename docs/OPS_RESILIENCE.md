@@ -122,6 +122,11 @@ Daily report duplicate-send guard:
 - state file: `logs/report_delivery_state.json`
 - intentional resend: set `ML_REPORT_FORCE_SEND=true`
 
+Retrain smoke gate:
+- `run_retrain_cycle.sh` runs `npm run ml:test:smoke` before backfill/train
+- controlled by `ML_RUN_OPS_SMOKE_ON_RETRAIN=true|false`
+- on failure: retrain aborts and sends immediate alert through `ML_ALERT_NOTIFY_CHANNELS`
+
 ## References
 
 - SQLite backup API guidance: https://www.sqlite.org/backup.html

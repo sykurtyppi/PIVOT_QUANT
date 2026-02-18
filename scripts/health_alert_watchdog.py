@@ -404,6 +404,16 @@ def parse_args() -> argparse.Namespace:
         default=int(os.getenv("ML_ALERT_REPEAT_MIN", "0")),
         help="If >0, send reminder while still DOWN every N minutes.",
     )
+    parser.add_argument(
+        "--notify-subject",
+        default="",
+        help="Optional one-shot custom alert subject. If provided with --notify-body, health checks are skipped.",
+    )
+    parser.add_argument(
+        "--notify-body",
+        default="",
+        help="Optional one-shot custom alert body for --notify-subject mode.",
+    )
     return parser.parse_args()
 
 
@@ -417,6 +427,14 @@ def main() -> int:
     host = socket.gethostname()
     checked_at = now_iso_utc()
     now_ts = int(time.time())
+
+    if args.notify_subject.strip() and args.notify_body.strip():
+        ok, msg = notify(subject=args.notify_subject.strip(), body=args.notify_body.strip(), dry_run=args.dry_run)
+        if ok:
+            log_line(log_file, f"custom_alert notify ok ({msg})")
+            return 0
+        log_line(log_file, f"custom_alert notify failed ({msg})")
+        return 1
 
     services = {
         "ml": os.getenv("ML_ALERT_ML_HEALTH_URL", "http://127.0.0.1:5003/health").strip(),
