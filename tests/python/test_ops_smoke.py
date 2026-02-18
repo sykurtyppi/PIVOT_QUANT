@@ -8,6 +8,7 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tarfile
 import tempfile
 import textwrap
@@ -16,7 +17,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-PYTHON = shutil.which("python3") or "python3"
+PYTHON = str(Path(sys.executable).resolve())
 
 
 def run_cmd(cmd: list[str], cwd: Path, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
