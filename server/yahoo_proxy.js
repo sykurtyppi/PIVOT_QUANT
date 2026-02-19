@@ -3,11 +3,21 @@ import https from 'https';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { buildConversionSnapshot, convertLevels, normalizeInstrument } from './level_converter.js';
 
 const HOST = process.env.HOST || '127.0.0.1';
 const PORT = Number(process.env.PORT || 3000);
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 15000);
 const CACHE_MAX_SIZE = Number(process.env.CACHE_MAX_SIZE || 50);
+const LEVEL_CONVERTER_SNAPSHOT_TTL_MS = Number(
+  process.env.LEVEL_CONVERTER_SNAPSHOT_TTL_MS || 60000
+);
+const LEVEL_CONVERTER_RESULT_TTL_MS = Number(
+  process.env.LEVEL_CONVERTER_RESULT_TTL_MS || 30000
+);
+const LEVEL_CONVERTER_CACHE_MAX_SIZE = Number(
+  process.env.LEVEL_CONVERTER_CACHE_MAX_SIZE || 120
+);
 const MAX_RETRIES = Number(process.env.MAX_RETRIES || 5);
 const BASE_DELAY_MS = Number(process.env.BASE_DELAY_MS || 800);
 const MAX_DELAY_MS = Number(process.env.MAX_DELAY_MS || 8000);
@@ -40,9 +50,17 @@ const RESTORE_DRILL_LOG_FILE = path.join(ROOT_DIR, 'logs', 'restore_drill.log');
 const symbolMap = new Map([
   ['SPX', '^GSPC'],
   ['SPY', 'SPY'],
+  ['US500', '^GSPC'],
+  ['US 500', '^GSPC'],
+  ['S&P500', '^GSPC'],
+  ['S&P 500', '^GSPC'],
+  ['SP500', '^GSPC'],
+  ['ES', 'ES=F'],
 ]);
 
 const cache = new Map();
+const levelConversionSnapshotCache = new Map();
+const levelConversionResultCache = new Map();
 
 /**
  * LRU cache eviction: remove expired entries first, then oldest if over limit.
@@ -59,6 +77,31 @@ function evictCache() {
   while (cache.size > CACHE_MAX_SIZE) {
     const oldestKey = cache.keys().next().value;
     cache.delete(oldestKey);
+  }
+}
+
+function readTimedCache(map, key, ttlMs) {
+  const entry = map.get(key);
+  if (!entry) return null;
+  const ageMs = Date.now() - entry.timestamp;
+  if (ageMs >= ttlMs) {
+    map.delete(key);
+    return null;
+  }
+  return { data: entry.data, ageMs };
+}
+
+function writeTimedCache(map, key, data, ttlMs, maxSize) {
+  map.set(key, { timestamp: Date.now(), data });
+  const now = Date.now();
+  for (const [entryKey, entryValue] of map.entries()) {
+    if (now - entryValue.timestamp >= ttlMs) {
+      map.delete(entryKey);
+    }
+  }
+  while (map.size > maxSize) {
+    const oldestKey = map.keys().next().value;
+    map.delete(oldestKey);
   }
 }
 
@@ -394,6 +437,150 @@ async function getYahooData({ symbol, range = '3mo', interval = '1d' }) {
   cache.set(cacheKey, { timestamp: Date.now(), data: response });
   evictCache();
   return response;
+}
+
+function extractCandleClose(data, preferSessionClose = false) {
+  const candles = Array.isArray(data?.candles) ? data.candles : [];
+  if (!candles.length) return null;
+  if (preferSessionClose) {
+    const rawIdx = toNumber(data?.session?.usedIndex, candles.length - 1);
+    const idx = Math.max(0, Math.min(candles.length - 1, Math.floor(rawIdx)));
+    const close = toNumber(candles[idx]?.close, null);
+    if (Number.isFinite(close)) return close;
+  }
+  const lastClose = toNumber(candles[candles.length - 1]?.close, null);
+  if (Number.isFinite(lastClose)) return lastClose;
+  return null;
+}
+
+async function fetchInstrumentReferencePrice(instrument, mode) {
+  const normalized = normalizeInstrument(instrument, 'SPY');
+  const marketSymbol = normalized === 'US500' ? 'SPX' : normalized;
+  const safeMode = mode === 'live' ? 'live' : 'prior_close';
+
+  if (safeMode === 'live') {
+    try {
+      const spotUrl = `http://127.0.0.1:5001/spot?symbol=${encodeURIComponent(marketSymbol)}`;
+      const spot = await fetchLocalJson(spotUrl);
+      const spotPrice = toNumber(spot?.spot ?? spot?.currentPrice, null);
+      if (Number.isFinite(spotPrice)) {
+        return {
+          price: spotPrice,
+          source: 'IBKR spot',
+          asOf: spot?.generatedAt || new Date().toISOString(),
+        };
+      }
+    } catch (_error) {
+      // Fallback to Yahoo snapshot below.
+    }
+  }
+
+  const yahooData = await getYahooData({
+    symbol: marketSymbol,
+    range: safeMode === 'live' ? '1d' : '5d',
+    interval: safeMode === 'live' ? '1m' : '1d',
+  });
+
+  let price = null;
+  if (safeMode === 'prior_close') {
+    price = extractCandleClose(yahooData, true);
+  }
+  if (!Number.isFinite(price)) {
+    price = toNumber(yahooData?.currentPrice, null);
+  }
+  if (!Number.isFinite(price)) {
+    price = extractCandleClose(yahooData, false);
+  }
+  if (!Number.isFinite(price)) {
+    throw new Error(`Unable to resolve price for ${marketSymbol}`);
+  }
+
+  return {
+    price,
+    source: safeMode === 'prior_close' ? 'Yahoo prior close' : 'Yahoo',
+    asOf: yahooData?.asOf || new Date().toISOString(),
+  };
+}
+
+function buildLevelConversionCacheKey(payload) {
+  const levels = Array.isArray(payload?.levels) ? payload.levels : [];
+  const compactLevels = levels.map((level) => {
+    if (!level || typeof level !== 'object') {
+      const numeric = toNumber(level, null);
+      return [numeric];
+    }
+    return [
+      String(level.label || ''),
+      String(level.type || ''),
+      toNumber(level.value, null),
+      toNumber(level.distance, null),
+      toNumber(level.strength, null),
+      toNumber(level.touches, null),
+      toNumber(level.bounces, null),
+      toNumber(level.breaks, null),
+    ];
+  });
+
+  return JSON.stringify({
+    from: normalizeInstrument(payload?.from || payload?.fromInstrument || 'SPY', 'SPY'),
+    to: normalizeInstrument(payload?.to || payload?.toInstrument || 'SPX', 'SPX'),
+    mode: payload?.mode === 'live' ? 'live' : 'prior_close',
+    esBasisMode: payload?.esBasisMode !== false,
+    levels: compactLevels,
+  });
+}
+
+async function getLevelConversionSnapshot(mode) {
+  const safeMode = mode === 'live' ? 'live' : 'prior_close';
+  const cacheKey = `snapshot:${safeMode}`;
+  const cached = readTimedCache(
+    levelConversionSnapshotCache,
+    cacheKey,
+    LEVEL_CONVERTER_SNAPSHOT_TTL_MS
+  );
+  if (cached) {
+    return { snapshot: cached.data, cache: { hit: true, ageMs: cached.ageMs } };
+  }
+
+  const [spyRef, spxRef] = await Promise.all([
+    fetchInstrumentReferencePrice('SPY', safeMode),
+    fetchInstrumentReferencePrice('SPX', safeMode),
+  ]);
+
+  let esRef = null;
+  try {
+    esRef = await fetchInstrumentReferencePrice('ES', safeMode);
+  } catch (_error) {
+    esRef = null;
+  }
+
+  const asOfEpoch = [spyRef?.asOf, spxRef?.asOf, esRef?.asOf]
+    .map((value) => Date.parse(value || ''))
+    .filter((value) => Number.isFinite(value));
+  const asOf = asOfEpoch.length ? new Date(Math.max(...asOfEpoch)).toISOString() : new Date().toISOString();
+  const source = [...new Set([spyRef.source, spxRef.source, esRef?.source].filter(Boolean))].join(', ');
+
+  const snapshot = buildConversionSnapshot({
+    mode: safeMode,
+    source,
+    asOf,
+    esBasisMode: true,
+    prices: {
+      SPY: spyRef.price,
+      SPX: spxRef.price,
+      US500: spxRef.price,
+      ES: Number.isFinite(esRef?.price) ? esRef.price : spxRef.price,
+    },
+  });
+
+  writeTimedCache(
+    levelConversionSnapshotCache,
+    cacheKey,
+    snapshot,
+    LEVEL_CONVERTER_SNAPSHOT_TTL_MS,
+    LEVEL_CONVERTER_CACHE_MAX_SIZE
+  );
+  return { snapshot, cache: { hit: false, ageMs: 0 } };
 }
 
 function sendJson(res, statusCode, payload) {
@@ -1168,6 +1355,106 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, 200, data);
     } catch (error) {
       sendProxyError(res, error, 'Daily candle aggregation unavailable');
+    }
+    return;
+  }
+
+  if (url.pathname === '/api/levels/convert') {
+    if (req.method !== 'POST') {
+      sendJson(res, 405, { error: 'Method not allowed' });
+      return;
+    }
+    try {
+      const body = await readBody(req);
+      const payload = body ? JSON.parse(body) : {};
+      const levels = Array.isArray(payload?.levels) ? payload.levels : [];
+      if (levels.length > 1000) {
+        sendJson(res, 413, {
+          error: 'Too many levels',
+          message: 'Maximum 1000 levels per conversion request.',
+        });
+        return;
+      }
+
+      const fromRequested = String(payload?.from || payload?.fromInstrument || 'SPY');
+      const toRequested = String(payload?.to || payload?.toInstrument || 'SPX');
+      const fromInstrument = normalizeInstrument(fromRequested, 'SPY');
+      const toInstrument = normalizeInstrument(toRequested, 'SPX');
+      const mode = payload?.mode === 'live' ? 'live' : 'prior_close';
+      const esBasisMode = payload?.esBasisMode !== false;
+
+      const cacheKey = buildLevelConversionCacheKey({
+        levels,
+        from: fromInstrument,
+        to: toInstrument,
+        mode,
+        esBasisMode,
+      });
+      const cached = readTimedCache(
+        levelConversionResultCache,
+        cacheKey,
+        LEVEL_CONVERTER_RESULT_TTL_MS
+      );
+      if (cached) {
+        const conversion = cached.data?.conversion
+          ? {
+              ...cached.data.conversion,
+              cache: {
+                ...(cached.data.conversion.cache || {}),
+                hit: true,
+                ageMs: cached.ageMs,
+              },
+            }
+          : null;
+        sendJson(res, 200, {
+          ...cached.data,
+          conversion,
+        });
+        return;
+      }
+
+      const snapshotResult = await getLevelConversionSnapshot(mode);
+      const converted = convertLevels({
+        levels,
+        fromInstrument,
+        toInstrument,
+        snapshot: snapshotResult.snapshot,
+        esBasisMode,
+      });
+
+      const response = {
+        status: 'ok',
+        levels: converted.levels,
+        conversion: {
+          ...converted.metadata,
+          fromRequested,
+          toRequested,
+          fromInstrument,
+          toInstrument,
+          levelCount: levels.length,
+          cache: {
+            hit: false,
+            ageMs: 0,
+            snapshotHit: snapshotResult.cache.hit,
+            snapshotAgeMs: snapshotResult.cache.ageMs,
+          },
+        },
+      };
+
+      writeTimedCache(
+        levelConversionResultCache,
+        cacheKey,
+        response,
+        LEVEL_CONVERTER_RESULT_TTL_MS,
+        LEVEL_CONVERTER_CACHE_MAX_SIZE
+      );
+      sendJson(res, 200, response);
+    } catch (error) {
+      const statusCode = error instanceof SyntaxError ? 400 : 500;
+      sendJson(res, statusCode, {
+        error: 'Level conversion failed',
+        message: error?.message || String(error),
+      });
     }
     return;
   }

@@ -249,6 +249,34 @@
             font-size: 12px;
         }
 
+        .export-convert-group {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-left: auto;
+        }
+
+        .export-convert-label {
+            font-size: 11px;
+            color: var(--muted);
+            white-space: nowrap;
+        }
+
+        .export-convert-select {
+            min-width: 132px;
+            background: var(--panel);
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 6px 8px;
+            font-size: 12px;
+        }
+
+        .export-convert-select:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
         .grid {
             display: grid;
             grid-template-columns: minmax(300px, 0.95fr) minmax(980px, 2.95fr);
@@ -1448,6 +1476,14 @@
                         <button id="export-txt" type="button">TXT</button>
                         <button id="export-txt-zones" type="button">TXT Zones</button>
                         <input id="export-zone-bps" class="export-zone-input" type="number" min="0.5" max="20" step="0.5" value="2" title="Zone band (bps)">
+                        <div class="export-convert-group">
+                            <label class="export-convert-label" for="export-convert-to">Convert To</label>
+                            <select id="export-convert-to" class="export-convert-select" title="Convert SPY levels to index-equivalent levels in export files.">
+                                <option value="native" selected>Native (No Convert)</option>
+                                <option value="SPX">S&P500 (SPX)</option>
+                                <option value="US500">US500</option>
+                            </select>
+                        </div>
                     </div>
                 </details>
             </div>
@@ -1852,6 +1888,7 @@
             spotTimer: null,
             intradayTimer: null,
             autoRefreshSec: 60,
+            exportConvertTo: 'native',
             autoRefreshTimer: null,
             autoRefreshCountdownTimer: null,
             nextAutoRefreshAt: null,
@@ -2161,6 +2198,7 @@
                     pivotType: state.pivotType,
                     lookback: String(state.lookbackSessions),
                     autoRefreshSec: String(state.autoRefreshSec),
+                    exportConvertTo: state.exportConvertTo,
                     visibility: state.uiVisibility,
                 };
                 localStorage.setItem('pq_ui_prefs', JSON.stringify(prefs));
@@ -2184,6 +2222,9 @@
                     if (prefs.lookback && Number.isFinite(Number(prefs.lookback))) state.lookbackSessions = Number(prefs.lookback);
                     if (prefs.autoRefreshSec !== undefined && Number.isFinite(Number(prefs.autoRefreshSec))) {
                         state.autoRefreshSec = Math.max(0, Number(prefs.autoRefreshSec));
+                    }
+                    if (prefs.exportConvertTo) {
+                        state.exportConvertTo = normalizeExportInstrument(prefs.exportConvertTo);
                     }
                     if (prefs.visibility && typeof prefs.visibility === 'object') {
                         Object.assign(state.uiVisibility, prefs.visibility);
@@ -2519,6 +2560,48 @@
             }
         }
 
+        function normalizeExportInstrument(raw) {
+            const value = String(raw || 'native').trim().toUpperCase();
+            if (!value || value === 'NATIVE' || value === 'NONE') return 'native';
+            if (value === 'SPY') return 'SPY';
+            if (value === 'SPX' || value === 'SP500' || value === 'S&P500' || value === 'S&P 500') return 'SPX';
+            if (value === 'US500' || value === 'US 500') return 'US500';
+            return 'native';
+        }
+
+        function getExportInstrumentLabel(instrument) {
+            const normalized = normalizeExportInstrument(instrument);
+            if (normalized === 'SPX') return 'S&P500';
+            if (normalized === 'US500') return 'US500';
+            return 'SPY';
+        }
+
+        function sanitizeFilenameToken(raw) {
+            return String(raw || '')
+                .replace(/[^A-Za-z0-9._-]+/g, '_')
+                .replace(/^_+|_+$/g, '')
+                .slice(0, 40);
+        }
+
+        function updateExportConversionControl() {
+            const select = document.getElementById('export-convert-to');
+            if (!select) return;
+            const isSpy = String(state.symbol || '').toUpperCase() === 'SPY';
+            if (!isSpy) {
+                state.exportConvertTo = 'native';
+                select.value = 'native';
+                select.disabled = true;
+                select.title = 'Conversion is currently available for SPY exports only.';
+                return;
+            }
+
+            select.disabled = false;
+            const preferred = normalizeExportInstrument(state.exportConvertTo || select.value || 'native');
+            state.exportConvertTo = preferred;
+            select.value = preferred;
+            select.title = 'Convert exported SPY levels to S&P500 or US500 using backend market ratios.';
+        }
+
         function updateSymbolCoverageNote() {
             const note = document.getElementById('symbol-coverage-note');
             if (!note) return;
@@ -2530,11 +2613,13 @@
                 note.textContent = `ML coverage: full (${symbol})`;
                 note.style.color = 'var(--success)';
                 state.mlCoverageNoticeSymbol = null;
+                updateExportConversionControl();
                 return;
             }
 
             note.textContent = `ML coverage: limited (${symbol}) · model scoring is SPY-only`;
             note.style.color = 'var(--warning)';
+            updateExportConversionControl();
             if (state.mlCoverageNoticeSymbol !== symbol) {
                 showToast(
                     `ML scoring is currently validated for SPY. ${symbol} stays chart-only until dedicated models are trained.`,
@@ -3919,7 +4004,7 @@
                 gammaUsedOpenInterest: state.gammaData?.usedOpenInterest || false,
                 vix: state.vixLevel,
                 walls: state.lastWalls,
-                levels: state.lastLevels,
+                levels: Array.isArray(state.lastLevels) ? state.lastLevels.map((level) => ({ ...level })) : [],
             };
         }
 
@@ -3935,12 +4020,113 @@
             URL.revokeObjectURL(url);
         }
 
-        function exportCsv() {
+        function buildExportFilename(report, extension, suffix = '') {
+            const symbolToken = sanitizeFilenameToken(report?.symbol || 'SPY');
+            const dayToken = sanitizeFilenameToken(report?.tradingDay || 'day');
+            const instrumentToken = sanitizeFilenameToken(report?.exportInstrument || report?.symbol || 'SPY');
+            const withInstrument = report?.conversion
+                ? `pivot_levels_${symbolToken}_${dayToken}_${instrumentToken}`
+                : `pivot_levels_${symbolToken}_${dayToken}`;
+            return `${withInstrument}${suffix}.${extension}`;
+        }
+
+        function buildConversionMetaRows(report) {
+            const rows = [
+                `# exportInstrument=${report.exportInstrument || report.symbol}`,
+                `# conversionApplied=${Boolean(report.conversion)}`,
+            ];
+
+            if (!report.conversion) {
+                return rows;
+            }
+
+            const conv = report.conversion;
+            rows.push(`# conversionFrom=${conv.fromRequested || conv.fromInstrument || 'SPY'}`);
+            rows.push(`# conversionTo=${conv.toRequested || conv.toInstrument || report.exportInstrument}`);
+            rows.push(`# conversionRatio=${formatNumber(conv.ratio, 8)}`);
+            rows.push(`# conversionMode=${conv.mode || 'prior_close'}`);
+            rows.push(`# conversionSource=${conv.source || '--'}`);
+            rows.push(`# conversionAsOf=${conv.asOf || report.generatedAt}`);
+
+            if (conv.prices && typeof conv.prices === 'object') {
+                rows.push(`# conversionPriceSPY=${formatNumber(Number(conv.prices.SPY), 4)}`);
+                rows.push(`# conversionPriceSPX=${formatNumber(Number(conv.prices.SPX), 4)}`);
+                rows.push(`# conversionPriceUS500=${formatNumber(Number(conv.prices.US500), 4)}`);
+            }
+            return rows;
+        }
+
+        async function prepareReportForExport() {
             const report = buildReportPayload();
             if (!report) {
                 setDebug('Export failed: no report data');
-                return;
+                return null;
             }
+
+            const selectedTarget = normalizeExportInstrument(
+                state.exportConvertTo || document.getElementById('export-convert-to')?.value || 'native'
+            );
+            const sourceInstrument = normalizeExportInstrument(report.sourceSymbol || report.symbol || 'SPY');
+            const baseExportInstrument = sourceInstrument === 'native'
+                ? String(report.sourceSymbol || report.symbol || 'SPY').toUpperCase()
+                : sourceInstrument;
+
+            report.exportInstrument = baseExportInstrument;
+            report.conversion = null;
+
+            if (selectedTarget === 'native' || selectedTarget === sourceInstrument) {
+                return report;
+            }
+
+            if (sourceInstrument !== 'SPY') {
+                showToast(
+                    'Level conversion is currently available for SPY exports only. Exporting native levels.',
+                    'warning',
+                    { title: 'Conversion Skipped', duration: 5000 }
+                );
+                return report;
+            }
+
+            try {
+                const apiUrl = `${getApiOrigin()}/api/levels/convert`;
+                const payload = {
+                    levels: report.levels,
+                    from: sourceInstrument,
+                    to: selectedTarget,
+                    mode: 'prior_close',
+                    esBasisMode: true,
+                };
+                const converted = await postJson(apiUrl, payload, 7000);
+                if (!Array.isArray(converted?.levels)) {
+                    throw new Error('Invalid level conversion response');
+                }
+
+                report.levels = converted.levels.map((level) => ({ ...level }));
+                report.conversion = converted.conversion || null;
+                report.exportInstrument = getExportInstrumentLabel(selectedTarget);
+
+                if (
+                    Number.isFinite(report.referencePrice) &&
+                    Number.isFinite(Number(report.conversion?.ratio))
+                ) {
+                    report.referencePriceConverted = report.referencePrice * Number(report.conversion.ratio);
+                }
+            } catch (error) {
+                const detail = error?.detailMessage || error?.message || String(error);
+                showToast(
+                    `Level conversion unavailable (${detail}). Exporting native levels.`,
+                    'warning',
+                    { title: 'Conversion Fallback', duration: 6000 }
+                );
+                setDebug(`Export conversion fallback: ${detail}`);
+            }
+
+            return report;
+        }
+
+        async function exportCsv() {
+            const report = await prepareReportForExport();
+            if (!report) return;
 
             const header = [
                 'label',
@@ -3979,6 +4165,7 @@
                 `# vix=${report.vix}`,
                 `# dataSource=${report.dataSource}`,
                 `# generatedAt=${report.generatedAt}`,
+                ...buildConversionMetaRows(report),
             ];
 
             const csv = [
@@ -3987,25 +4174,27 @@
                 ...rows.map((row) => row.join(',')),
             ].join('\n');
 
-            downloadBlob(`pivot_levels_${report.symbol}_${report.tradingDay}.csv`, csv, 'text/csv');
+            downloadBlob(buildExportFilename(report, 'csv'), csv, 'text/csv');
         }
 
-        function exportJson() {
-            const report = buildReportPayload();
-            if (!report) {
-                setDebug('Export failed: no report data');
-                return;
-            }
+        async function exportJson() {
+            const report = await prepareReportForExport();
+            if (!report) return;
             const json = JSON.stringify(report, null, 2);
-            downloadBlob(`pivot_levels_${report.symbol}_${report.tradingDay}.json`, json, 'application/json');
+            downloadBlob(buildExportFilename(report, 'json'), json, 'application/json');
         }
 
-        function exportTxt() {
-            const report = buildReportPayload();
-            if (!report) {
-                setDebug('Export failed: no report data');
-                return;
-            }
+        async function exportTxt() {
+            const report = await prepareReportForExport();
+            if (!report) return;
+
+            const metaRows = [
+                `# symbol=${report.symbol}`,
+                `# tradingDay=${report.tradingDay}`,
+                `# generatedAt=${report.generatedAt}`,
+                ...buildConversionMetaRows(report),
+                '---',
+            ];
             const lines = report.levels
                 .filter((level) => Number.isFinite(level.value))
                 .map((level) => {
@@ -4013,16 +4202,13 @@
                     const label = level.label ? `: ${level.label}` : '';
                     return `${price}${label}`;
                 });
-            const content = lines.join('\n').trim();
-            downloadBlob(`pivot_levels_${report.symbol}_${report.tradingDay}.txt`, content, 'text/plain');
+            const content = [...metaRows, ...lines].join('\n').trim();
+            downloadBlob(buildExportFilename(report, 'txt'), content, 'text/plain');
         }
 
-        function exportTxtZones() {
-            const report = buildReportPayload();
-            if (!report) {
-                setDebug('Export failed: no report data');
-                return;
-            }
+        async function exportTxtZones() {
+            const report = await prepareReportForExport();
+            if (!report) return;
 
             const zoneInput = document.getElementById('export-zone-bps');
             const rawZoneBps = zoneInput ? Number(zoneInput.value) : 2;
@@ -4050,7 +4236,17 @@
                 }
             });
 
+            const metaRows = [
+                `# symbol=${report.symbol}`,
+                `# tradingDay=${report.tradingDay}`,
+                `# generatedAt=${report.generatedAt}`,
+                `# zoneBps=${formatNumber(zoneBps, 2)}`,
+                ...buildConversionMetaRows(report),
+                '---',
+            ];
+
             const content = [
+                metaRows.join('\n'),
                 lineRows.join('\n'),
                 '---',
                 supportZones.join('\n'),
@@ -4059,7 +4255,7 @@
             ].join('\n').trim();
 
             downloadBlob(
-                `pivot_levels_${report.symbol}_${report.tradingDay}_zones.txt`,
+                buildExportFilename(report, 'txt', '_zones'),
                 content,
                 'text/plain'
             );
@@ -4138,6 +4334,81 @@
                     xhr.onerror = () => reject(new Error('Network error'));
                     xhr.ontimeout = () => reject(new Error('Request timeout'));
                     xhr.send();
+                });
+            } finally {
+                clearTimeout(timeoutId);
+            }
+        }
+
+        async function postJson(url, payload, timeoutMs = 10000) {
+            const supportsAbort = typeof AbortController !== 'undefined';
+            const controller = supportsAbort ? new AbortController() : null;
+            const timeoutId = setTimeout(() => {
+                if (controller) controller.abort();
+            }, timeoutMs);
+            try {
+                if (typeof fetch === 'function') {
+                    const response = await fetch(
+                        url,
+                        controller
+                            ? {
+                                  method: 'POST',
+                                  headers: { 'Content-Type': 'application/json' },
+                                  body: JSON.stringify(payload || {}),
+                                  signal: controller.signal,
+                              }
+                            : {
+                                  method: 'POST',
+                                  headers: { 'Content-Type': 'application/json' },
+                                  body: JSON.stringify(payload || {}),
+                              }
+                    );
+                    if (!response.ok) {
+                        const error = new Error(`HTTP ${response.status}`);
+                        error.status = response.status;
+                        try {
+                            const parsed = await response.json();
+                            const detail = parsed?.message || parsed?.error;
+                            if (detail) error.detailMessage = String(detail);
+                        } catch (_error) {
+                            // Ignore invalid JSON in error payloads.
+                        }
+                        throw error;
+                    }
+                    return await response.json();
+                }
+
+                return await new Promise((resolve, reject) => {
+                    const xhr = new XMLHttpRequest();
+                    xhr.open('POST', url, true);
+                    xhr.timeout = timeoutMs;
+                    xhr.setRequestHeader('Content-Type', 'application/json');
+                    xhr.onreadystatechange = () => {
+                        if (xhr.readyState !== XMLHttpRequest.DONE) return;
+                        if (xhr.status >= 200 && xhr.status < 300) {
+                            try {
+                                resolve(JSON.parse(xhr.responseText));
+                            } catch (_error) {
+                                reject(new Error('Invalid JSON'));
+                            }
+                            return;
+                        }
+                        const error = new Error(`HTTP ${xhr.status}`);
+                        error.status = xhr.status;
+                        try {
+                            const parsed = JSON.parse(xhr.responseText || '{}');
+                            const detail = parsed?.message || parsed?.error;
+                            if (detail) {
+                                error.detailMessage = String(detail);
+                            }
+                        } catch (_error) {
+                            // Ignore invalid JSON in error payloads.
+                        }
+                        reject(error);
+                    };
+                    xhr.onerror = () => reject(new Error('Network error'));
+                    xhr.ontimeout = () => reject(new Error('Request timeout'));
+                    xhr.send(JSON.stringify(payload || {}));
                 });
             } finally {
                 clearTimeout(timeoutId);
@@ -5700,6 +5971,14 @@
             document.getElementById('export-json').addEventListener('click', exportJson);
             document.getElementById('export-txt').addEventListener('click', exportTxt);
             document.getElementById('export-txt-zones').addEventListener('click', exportTxtZones);
+            const exportConvertSelect = document.getElementById('export-convert-to');
+            if (exportConvertSelect) {
+                exportConvertSelect.addEventListener('change', (event) => {
+                    state.exportConvertTo = normalizeExportInstrument(event.target.value);
+                    saveUiPrefs();
+                    updateExportConversionControl();
+                });
+            }
 
             const debugToggle = document.getElementById('debug-toggle');
             if (debugToggle) {
@@ -5813,6 +6092,7 @@
                 'pivot-select': state.pivotType,
                 'lookback-select': String(state.lookbackSessions),
                 'auto-refresh-select': String(state.autoRefreshSec),
+                'export-convert-to': normalizeExportInstrument(state.exportConvertTo),
             };
             for (const [id, value] of Object.entries(selects)) {
                 const el = document.getElementById(id);
@@ -5821,6 +6101,7 @@
                     if (opt) el.value = value;
                 }
             }
+            updateExportConversionControl();
         }
 
         async function boot() {
