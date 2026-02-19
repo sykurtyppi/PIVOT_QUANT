@@ -27,6 +27,7 @@ DEFAULT_LABELS = [
     "com.pivotquant.retrain",
     "com.pivotquant.daily_report",
     "com.pivotquant.health_alert",
+    "com.pivotquant.session_routine",
     "com.pivotquant.nightly_backup",
     "com.pivotquant.restore_drill",
     "com.pivotquant.host_health",

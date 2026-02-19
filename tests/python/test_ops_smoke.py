@@ -287,6 +287,21 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(len(payload["levels"]), 2)
         self.assertAlmostEqual(float(payload["levels"][0]["value"]), 5000.0, places=8)
 
+    def test_session_routine_contract_present(self) -> None:
+        installer = (REPO_ROOT / "scripts" / "install_session_routine_launch_agent.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("com.pivotquant.session_routine", installer)
+        self.assertIn("run_session_routine_check.sh", installer)
+
+        checker = (REPO_ROOT / "scripts" / "session_routine_check.py").read_text(encoding="utf-8")
+        self.assertIn("ML_SESSION_PREOPEN_HOUR", checker)
+        self.assertIn("ML_SESSION_POSTOPEN_HOUR", checker)
+        self.assertIn("ML_SESSION_OPS_STATUS_URL", checker)
+
+        proc = run_cmd([PYTHON, "-m", "py_compile", "scripts/session_routine_check.py"], cwd=REPO_ROOT)
+        self.assertEqual(proc.returncode, 0, msg=f"{proc.stdout}\n{proc.stderr}")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

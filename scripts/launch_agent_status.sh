@@ -10,6 +10,7 @@ for LABEL in \
   com.pivotquant.retrain \
   com.pivotquant.daily_report \
   com.pivotquant.health_alert \
+  com.pivotquant.session_routine \
   com.pivotquant.nightly_backup \
   com.pivotquant.restore_drill \
   com.pivotquant.host_health; do
@@ -34,6 +35,9 @@ for file in \
   "${LOG_DIR}/daily_report.launchd.err.log" \
   "${LOG_DIR}/health_alert.launchd.out.log" \
   "${LOG_DIR}/health_alert.launchd.err.log" \
+  "${LOG_DIR}/session_routine.launchd.out.log" \
+  "${LOG_DIR}/session_routine.launchd.err.log" \
+  "${LOG_DIR}/session_routine.log" \
   "${LOG_DIR}/health_alert.log" \
   "${LOG_DIR}/backup.launchd.out.log" \
   "${LOG_DIR}/backup.launchd.err.log" \
