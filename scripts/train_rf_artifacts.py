@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
 
 from ml.calibration import ProbabilityCalibrator
 from ml.features import FEATURE_VERSION, build_feature_row, drop_features
+from ml.thresholds import select_threshold, utility_bps_for_target
 
 DEFAULT_DUCKDB = os.getenv("DUCKDB_PATH", "data/pivot_training.duckdb")
 DEFAULT_VIEW = os.getenv("DUCKDB_VIEW", "training_events_v1")
@@ -22,6 +23,16 @@ DEFAULT_CANDIDATE_MANIFEST = (
     os.getenv("RF_CANDIDATE_MANIFEST", "manifest_runtime_latest.json").strip()
     or "manifest_runtime_latest.json"
 )
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return float(default)
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return float(default)
 
 
 def require(module_name: str, hint: str):
@@ -216,7 +227,33 @@ def compute_horizon_stats(df, target, horizon):
     return stats
 
 
+def split_calibration_slices(X_calib, y_calib, *, fit_fraction: float, min_fit_events: int, min_tune_events: int):
+    n = len(X_calib)
+    if n == 0:
+        return X_calib, y_calib, X_calib, y_calib, False
+
+    fit_n = int(round(n * fit_fraction))
+    fit_n = max(int(min_fit_events), fit_n)
+    fit_n = min(fit_n, max(0, n - int(min_tune_events)))
+
+    if fit_n <= 0 or fit_n >= n:
+        return X_calib, y_calib, X_calib, y_calib, False
+
+    X_fit = X_calib.iloc[:fit_n]
+    y_fit = y_calib.iloc[:fit_n]
+    X_tune = X_calib.iloc[fit_n:]
+    y_tune = y_calib.iloc[fit_n:]
+    return X_fit, y_fit, X_tune, y_tune, True
+
+
 def main() -> None:
+    default_trade_cost_bps = _env_float(
+        "RF_THRESHOLD_TRADE_COST_BPS",
+        _env_float("ML_COST_SPREAD_BPS", 0.8)
+        + _env_float("ML_COST_SLIPPAGE_BPS", 0.4)
+        + _env_float("ML_COST_COMMISSION_BPS", 0.1),
+    )
+
     parser = argparse.ArgumentParser(description="Train RF artifacts for inference server.")
     parser.add_argument("--db", default=DEFAULT_DUCKDB)
     parser.add_argument("--view", default=DEFAULT_VIEW)
@@ -229,6 +266,48 @@ def main() -> None:
     parser.add_argument("--max-depth", type=int, default=12)
     parser.add_argument("--min-samples-leaf", type=int, default=5)
     parser.add_argument("--random-state", type=int, default=42)
+    parser.add_argument(
+        "--threshold-objective",
+        choices=["f1", "utility_bps"],
+        default=os.getenv("RF_THRESHOLD_OBJECTIVE", "f1"),
+        help="Threshold objective: f1 (default) or utility_bps (cost-aware).",
+    )
+    parser.add_argument(
+        "--threshold-precision-floor",
+        type=float,
+        default=_env_float("RF_THRESHOLD_PRECISION_FLOOR", 0.40),
+        help="Minimum precision required for candidate threshold selection.",
+    )
+    parser.add_argument(
+        "--threshold-min-signals",
+        type=int,
+        default=int(_env_float("RF_THRESHOLD_MIN_SIGNALS", 10)),
+        help="Minimum predicted positives required for threshold candidates.",
+    )
+    parser.add_argument(
+        "--threshold-trade-cost-bps",
+        type=float,
+        default=default_trade_cost_bps,
+        help="Per-signal cost (bps) used with utility_bps objective.",
+    )
+    parser.add_argument(
+        "--threshold-stability-band",
+        type=float,
+        default=_env_float("RF_THRESHOLD_STABILITY_BAND", 0.0),
+        help="Average score over +/- band around threshold to avoid knife-edge picks.",
+    )
+    parser.add_argument(
+        "--calib-fit-fraction",
+        type=float,
+        default=_env_float("RF_CALIB_FIT_FRACTION", 0.6),
+        help="Fraction of calibration window used to fit calibrator; remainder used for threshold tuning.",
+    )
+    parser.add_argument(
+        "--calib-min-fit-events",
+        type=int,
+        default=int(_env_float("RF_CALIB_MIN_FIT_EVENTS", 20)),
+        help="Minimum events reserved for calibration fitting slice.",
+    )
     parser.add_argument("--out-dir", default=DEFAULT_OUT_DIR)
     parser.add_argument(
         "--metadata-dir",
@@ -266,6 +345,7 @@ def main() -> None:
         "feature_version": FEATURE_VERSION,
         "models": {},
         "calibration": {},
+        "thresholds_meta": {},
         "stats": {},
         "trained_end_ts": None,
     }
@@ -312,7 +392,6 @@ def main() -> None:
 
         dates = sorted({d for d in df["event_date_et"].tolist() if d is not None})
         calib_dates = set(dates[-args.calib_days :]) if args.calib_days and dates else set()
-        calib_mask = df["event_date_et"].isin(calib_dates)
 
         for target in targets:
             if target not in df.columns:
@@ -323,13 +402,14 @@ def main() -> None:
 
             y = sub[target].astype(int)
             X = feature_df.loc[sub.index]
+            calib_mask_sub = sub["event_date_et"].isin(calib_dates)
 
             if len(X) < args.min_events:
                 print(f"Not enough events for {target} {horizon}m.")
                 continue
 
-            X_train = X.loc[~calib_mask]
-            y_train = y.loc[~calib_mask]
+            X_train = X.loc[~calib_mask_sub]
+            y_train = y.loc[~calib_mask_sub]
             # Some features can be present overall but become fully missing in
             # the non-calibration training split. Drop them to avoid imputer warnings.
             all_null_train_cols = [col for col in X_train.columns if not X_train[col].notna().any()]
@@ -354,40 +434,117 @@ def main() -> None:
 
             calibrator = None
             calib_method = None
+            calibration_shared_slice = False
+            X_calib_fit = None
+            y_calib_fit = None
+            X_calib_tune = None
+            y_calib_tune = None
             if args.calibration != "none":
-                X_calib = X.loc[calib_mask]
-                y_calib = y.loc[calib_mask]
-                if len(X_calib) >= 20 and len(set(y_calib)) == 2:
-                    calib_method = choose_calibration(args.calibration, len(X_calib))
-                    calibrator = ProbabilityCalibrator(pipeline, calib_method).fit(X_calib, y_calib)
+                X_calib = X.loc[calib_mask_sub]
+                y_calib = y.loc[calib_mask_sub]
+                (
+                    X_calib_fit,
+                    y_calib_fit,
+                    X_calib_tune,
+                    y_calib_tune,
+                    split_used,
+                ) = split_calibration_slices(
+                    X_calib,
+                    y_calib,
+                    fit_fraction=float(args.calib_fit_fraction),
+                    min_fit_events=int(args.calib_min_fit_events),
+                    min_tune_events=int(args.threshold_min_signals),
+                )
+                calibration_shared_slice = not split_used
+                if len(X_calib_fit) >= 20 and len(set(y_calib_fit)) == 2:
+                    calib_method = choose_calibration(args.calibration, len(X_calib_fit))
+                    calibrator = ProbabilityCalibrator(pipeline, calib_method).fit(X_calib_fit, y_calib_fit)
 
             # Compute optimal decision threshold on calibration set only.
             # Never fall back to the training set — that causes optimistic bias.
-            import numpy as np
             optimal_threshold = 0.5
+            threshold_stability_band = float(args.threshold_stability_band)
+            if args.threshold_objective == "utility_bps" and threshold_stability_band <= 0.0:
+                threshold_stability_band = 0.02
+            threshold_meta = {
+                "objective": args.threshold_objective,
+                "score": None,
+                "precision": None,
+                "recall": None,
+                "signals": 0,
+                "evaluated_candidates": 0,
+                "fallback": True,
+                "precision_floor": float(args.threshold_precision_floor),
+                "min_signals": int(args.threshold_min_signals),
+                "trade_cost_bps": float(args.threshold_trade_cost_bps),
+                "stability_band": float(threshold_stability_band),
+                "top_candidates": [],
+                "calibration_shared_slice": bool(calibration_shared_slice),
+                "calibration_fit_size": int(len(X_calib_fit)) if X_calib_fit is not None else 0,
+                "threshold_tune_size": int(len(X_calib_tune)) if X_calib_tune is not None else 0,
+                "search_enabled": True,
+                "search_skip_reason": "",
+            }
             model_obj = calibrator if calibrator is not None else pipeline
-            X_calib_set = X.loc[calib_mask]
-            if hasattr(model_obj, "predict_proba") and len(X_calib_set) >= 20:
-                y_calib_for_thresh = y.loc[X_calib_set.index]
+            X_calib_set = X_calib_tune if X_calib_tune is not None else X.loc[calib_mask_sub]
+            y_calib_for_thresh = y_calib_tune if y_calib_tune is not None else y.loc[X_calib_set.index]
+            if calibrator is not None and calibration_shared_slice:
+                threshold_meta["search_enabled"] = False
+                threshold_meta["search_skip_reason"] = "shared_calibration_slice"
+            elif not hasattr(model_obj, "predict_proba"):
+                threshold_meta["search_enabled"] = False
+                threshold_meta["search_skip_reason"] = "model_missing_predict_proba"
+            elif len(X_calib_set) < 20:
+                threshold_meta["search_enabled"] = False
+                threshold_meta["search_skip_reason"] = "insufficient_tuning_rows"
+
+            if threshold_meta["search_enabled"]:
                 try:
                     probs_calib = model_obj.predict_proba(X_calib_set)
                     if probs_calib.shape[1] == 2 and len(set(y_calib_for_thresh)) == 2:
                         y_prob_calib = probs_calib[:, 1]
-                        from sklearn.metrics import precision_recall_curve, f1_score as f1_fn
-                        precisions, recalls, thresholds = precision_recall_curve(
-                            y_calib_for_thresh, y_prob_calib
+                        utility_values = None
+                        if args.threshold_objective == "utility_bps":
+                            utility_values = utility_bps_for_target(
+                                sub.loc[X_calib_set.index, "return_bps"],
+                                sub.loc[X_calib_set.index, "touch_side"],
+                                target,
+                                trade_cost_bps=float(args.threshold_trade_cost_bps),
+                            )
+                        selection = select_threshold(
+                            y_calib_for_thresh.to_numpy(),
+                            y_prob_calib,
+                            objective=args.threshold_objective,
+                            precision_floor=float(args.threshold_precision_floor),
+                            min_signals=int(args.threshold_min_signals),
+                            default_threshold=0.5,
+                            utility_per_signal=utility_values,
+                            stability_band=float(threshold_stability_band),
                         )
-                        best_f1 = 0.0
-                        for i, thresh in enumerate(thresholds):
-                            if precisions[i] < 0.4:
-                                continue
-                            y_pred_t = (np.asarray(y_prob_calib) >= thresh).astype(int)
-                            f1_val = float(f1_fn(y_calib_for_thresh, y_pred_t, zero_division=0))
-                            if f1_val > best_f1:
-                                best_f1 = f1_val
-                                optimal_threshold = float(thresh)
+                        optimal_threshold = float(selection.threshold)
+                        threshold_meta.update(
+                            {
+                                "score": float(selection.score),
+                                "precision": float(selection.precision),
+                                "recall": float(selection.recall),
+                                "signals": int(selection.signals),
+                                "evaluated_candidates": int(selection.evaluated_candidates),
+                                "fallback": bool(selection.fallback),
+                                "stability_score": float(
+                                    selection.stability_score
+                                    if selection.stability_score is not None
+                                    else selection.score
+                                ),
+                                "top_candidates": selection.top_candidates,
+                            }
+                        )
+                    else:
+                        threshold_meta["search_enabled"] = False
+                        threshold_meta["search_skip_reason"] = "invalid_probability_shape_or_labels"
                 except Exception:
                     optimal_threshold = 0.5
+                    threshold_meta["search_enabled"] = False
+                    threshold_meta["search_skip_reason"] = "threshold_selection_exception"
 
             # Compute per-feature quantile bounds for drift detection at inference.
             # Uses the full training set (not calib) since we want the broadest
@@ -412,6 +569,7 @@ def main() -> None:
                     "calibrator": calibrator,
                     "calibration": calib_method or "none",
                     "optimal_threshold": optimal_threshold,
+                    "threshold_meta": threshold_meta,
                     "feature_columns": list(X.columns),
                     "numeric_columns": numeric_cols,
                     "categorical_columns": categorical_cols,
@@ -424,6 +582,7 @@ def main() -> None:
             manifest["calibration"].setdefault(target, {})[str(horizon)] = calib_method or "none"
             manifest["thresholds"] = manifest.get("thresholds", {})
             manifest["thresholds"].setdefault(target, {})[str(horizon)] = optimal_threshold
+            manifest["thresholds_meta"].setdefault(target, {})[str(horizon)] = threshold_meta
             manifest["stats"].setdefault(str(horizon), {})[target] = compute_horizon_stats(df, target, horizon)
 
             latest_name = f"latest_{target}_{horizon}m.pkl"
