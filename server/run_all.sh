@@ -74,15 +74,16 @@ release_lock() {
 }
 
 cleanup() {
+  local pids=("${PIDS[@]-}")
   if [[ "${CLEANUP_DONE}" -eq 1 ]]; then
     return 0
   fi
   CLEANUP_DONE=1
 
-  if [[ "${PIDS+set}" == "set" ]] && [[ "${#PIDS[@]}" -gt 0 ]]; then
+  if [[ "${#pids[@]}" -gt 0 ]]; then
     echo "Stopping managed services..."
   fi
-  for pid in "${PIDS[@]-}"; do
+  for pid in "${pids[@]}"; do
     [[ -n "${pid}" ]] || continue
     if kill -0 "${pid}" >/dev/null 2>&1; then
       kill "${pid}" >/dev/null 2>&1 || true
@@ -147,7 +148,8 @@ start_service() {
 is_optional_pid() {
   local pid="$1"
   local candidate
-  for candidate in "${OPTIONAL_PIDS[@]}"; do
+  for candidate in "${OPTIONAL_PIDS[@]-}"; do
+    [[ -n "${candidate}" ]] || continue
     if [[ "${candidate}" == "${pid}" ]]; then
       return 0
     fi
@@ -161,19 +163,21 @@ remove_pid() {
   local next_optional=()
   local candidate
 
-  for candidate in "${PIDS[@]}"; do
+  for candidate in "${PIDS[@]-}"; do
+    [[ -n "${candidate}" ]] || continue
     if [[ "${candidate}" != "${pid}" ]]; then
       next_pids+=("${candidate}")
     fi
   done
-  for candidate in "${OPTIONAL_PIDS[@]}"; do
+  for candidate in "${OPTIONAL_PIDS[@]-}"; do
+    [[ -n "${candidate}" ]] || continue
     if [[ "${candidate}" != "${pid}" ]]; then
       next_optional+=("${candidate}")
     fi
   done
 
-  PIDS=("${next_pids[@]}")
-  OPTIONAL_PIDS=("${next_optional[@]}")
+  PIDS=("${next_pids[@]-}")
+  OPTIONAL_PIDS=("${next_optional[@]-}")
 }
 
 wait_for_port() {
@@ -275,7 +279,8 @@ monitor_stack() {
       quick_check_live_collector || echo "[WARN] live_collector status degraded"
     fi
 
-    for pid in "${PIDS[@]}"; do
+    for pid in "${PIDS[@]-}"; do
+      [[ -n "${pid}" ]] || continue
       if ! kill -0 "${pid}" >/dev/null 2>&1; then
         if is_optional_pid "${pid}"; then
           echo "[WARN] Optional managed service exited (pid ${pid}). Continuing."
