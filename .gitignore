@@ -18,6 +18,9 @@ data/models/manifest_runtime_latest.json
 data/models/manifest_active.json
 data/models/manifest_active_prev.json
 data/models/model_registry.json
+data/models/metadata_runtime/
+data/models/metadata_v*.json
+data/models/manifest_latest.json
 
 # SQLite transient files
 *.sqlite-wal

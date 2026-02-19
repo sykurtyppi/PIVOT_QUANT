@@ -244,6 +244,49 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("DONE  daily_report_send", log_text)
         self.assertIn("report already sent", log_text)
 
+    def test_level_converter_contract_and_route_present(self) -> None:
+        proxy_source = (REPO_ROOT / "server" / "yahoo_proxy.js").read_text(encoding="utf-8")
+        self.assertIn("/api/levels/convert", proxy_source)
+
+        if shutil.which("node") is None:
+            self.skipTest("node is not available in PATH")
+
+        node_script = textwrap.dedent(
+            """
+            import { buildConversionSnapshot, convertLevels } from './server/level_converter.js';
+            const snapshot = buildConversionSnapshot({
+              prices: { SPY: 500, SPX: 5000, US500: 5000, ES: 5005 },
+              mode: 'prior_close',
+              source: 'smoke-test',
+              asOf: '2026-02-19T00:00:00Z',
+              esBasisMode: true,
+            });
+            const converted = convertLevels({
+              levels: [{ label: 'PP', value: 500 }, { label: 'R1', value: 505 }],
+              fromInstrument: 'SPY',
+              toInstrument: 'US500',
+              snapshot,
+              esBasisMode: true,
+            });
+            console.log(JSON.stringify(converted));
+            """
+        ).strip()
+
+        proc = run_cmd(
+            ["node", "--input-type=module", "-e", node_script],
+            cwd=REPO_ROOT,
+        )
+        self.assertEqual(proc.returncode, 0, msg=f"{proc.stdout}\n{proc.stderr}")
+
+        payload = json.loads(proc.stdout)
+        self.assertIn("levels", payload)
+        self.assertIn("metadata", payload)
+        self.assertEqual(payload["metadata"]["fromInstrument"], "SPY")
+        self.assertEqual(payload["metadata"]["toInstrument"], "US500")
+        self.assertAlmostEqual(float(payload["metadata"]["ratio"]), 10.0, places=8)
+        self.assertEqual(len(payload["levels"]), 2)
+        self.assertAlmostEqual(float(payload["levels"][0]["value"]), 5000.0, places=8)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

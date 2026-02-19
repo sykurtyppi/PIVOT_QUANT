@@ -17,6 +17,7 @@ from ml.features import FEATURE_VERSION, build_feature_row, drop_features
 DEFAULT_DUCKDB = os.getenv("DUCKDB_PATH", "data/pivot_training.duckdb")
 DEFAULT_VIEW = os.getenv("DUCKDB_VIEW", "training_events_v1")
 DEFAULT_OUT_DIR = os.getenv("RF_MODEL_DIR", "data/models")
+DEFAULT_METADATA_DIR = os.getenv("RF_METADATA_DIR", "metadata_runtime")
 DEFAULT_CANDIDATE_MANIFEST = (
     os.getenv("RF_CANDIDATE_MANIFEST", "manifest_runtime_latest.json").strip()
     or "manifest_runtime_latest.json"
@@ -108,16 +109,52 @@ def build_feature_dataframe(df):
     return pd.DataFrame(rows, index=df.index)
 
 
-def next_version(out_dir: Path) -> str:
-    existing = sorted(out_dir.glob("metadata_v*.json"))
-    if not existing:
+def _parse_version_number(label: str) -> int | None:
+    if not label:
+        return None
+    raw = str(label).strip().lower()
+    if raw.startswith("v"):
+        raw = raw[1:]
+    if not raw.isdigit():
+        return None
+    return int(raw)
+
+
+def _resolve_metadata_dir(out_dir: Path, raw_metadata_dir: str) -> Path:
+    candidate = Path(raw_metadata_dir)
+    if not candidate.is_absolute():
+        candidate = out_dir / candidate
+    return candidate
+
+
+def next_version(out_dir: Path, metadata_dir: Path) -> str:
+    version_numbers: list[int] = []
+
+    for path in metadata_dir.glob("metadata_v*.json"):
+        parsed = _parse_version_number(path.stem.replace("metadata_", ""))
+        if parsed is not None:
+            version_numbers.append(parsed)
+
+    # Backward compatibility: include legacy metadata files in model root.
+    for path in out_dir.glob("metadata_v*.json"):
+        parsed = _parse_version_number(path.stem.replace("metadata_", ""))
+        if parsed is not None:
+            version_numbers.append(parsed)
+
+    # Fallback: infer from existing model artifacts if metadata files were cleaned.
+    for path in out_dir.glob("rf_*_v*.pkl"):
+        stem = path.stem
+        if "_v" not in stem:
+            continue
+        suffix = stem.rsplit("_v", 1)[-1]
+        parsed = _parse_version_number(suffix)
+        if parsed is not None:
+            version_numbers.append(parsed)
+
+    if not version_numbers:
         return "v001"
-    last = existing[-1].stem.replace("metadata_", "")
-    try:
-        num = int(last.replace("v", ""))
-        return f"v{num + 1:03d}"
-    except ValueError:
-        return "v001"
+
+    return f"v{max(version_numbers) + 1:03d}"
 
 
 def _temp_path(path: Path) -> Path:
@@ -193,6 +230,11 @@ def main() -> None:
     parser.add_argument("--min-samples-leaf", type=int, default=5)
     parser.add_argument("--random-state", type=int, default=42)
     parser.add_argument("--out-dir", default=DEFAULT_OUT_DIR)
+    parser.add_argument(
+        "--metadata-dir",
+        default=DEFAULT_METADATA_DIR,
+        help="Directory for runtime metadata manifests (absolute or relative to --out-dir)",
+    )
     parser.add_argument("--version", default=None)
     parser.add_argument(
         "--candidate-manifest",
@@ -212,7 +254,9 @@ def main() -> None:
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    version = args.version or next_version(out_dir)
+    metadata_dir = _resolve_metadata_dir(out_dir, args.metadata_dir)
+    metadata_dir.mkdir(parents=True, exist_ok=True)
+    version = args.version or next_version(out_dir, metadata_dir)
 
     horizons = [int(h.strip()) for h in args.horizons.split(",") if h.strip()]
     targets = [t.strip() for t in args.targets.split(",") if t.strip()]
@@ -413,7 +457,7 @@ def main() -> None:
         )
         sys.exit(1)
 
-    metadata_path = out_dir / f"metadata_{version}.json"
+    metadata_path = metadata_dir / f"metadata_{version}.json"
     atomic_write_json(metadata_path, manifest)
 
     for source_path, alias_path in latest_aliases:

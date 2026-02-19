@@ -26,6 +26,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 
 DEFAULT_MODELS_DIR = Path(os.getenv("RF_MODEL_DIR", "data/models"))
+DEFAULT_METADATA_DIR = os.getenv("RF_METADATA_DIR", "metadata_runtime").strip() or "metadata_runtime"
 DEFAULT_CANDIDATE_MANIFEST = (
     os.getenv("RF_CANDIDATE_MANIFEST", "manifest_runtime_latest.json").strip()
     or "manifest_runtime_latest.json"
@@ -319,8 +320,21 @@ def _ops_set(db_path: str, pairs: dict[str, str]) -> None:
         conn.close()
 
 
-def _metadata_manifest(models_dir: Path, version: str) -> Path:
-    return models_dir / f"metadata_{version}.json"
+def _resolve_metadata_dir(models_dir: Path, raw_metadata_dir: str) -> Path:
+    candidate = Path(raw_metadata_dir)
+    if not candidate.is_absolute():
+        candidate = models_dir / candidate
+    return candidate
+
+
+def _metadata_manifest_candidates(
+    models_dir: Path, metadata_dir: Path, version: str
+) -> list[Path]:
+    preferred = metadata_dir / f"metadata_{version}.json"
+    legacy = models_dir / f"metadata_{version}.json"
+    if preferred == legacy:
+        return [preferred]
+    return [preferred, legacy]
 
 
 def _persist_state_and_ops(
@@ -345,6 +359,7 @@ def _persist_state_and_ops(
 
 def cmd_status(args: argparse.Namespace) -> int:
     models_dir = Path(args.models_dir)
+    metadata_dir = _resolve_metadata_dir(models_dir, args.metadata_dir)
     candidate_path = resolve_candidate_manifest_path(models_dir, args.candidate_manifest)
     active_path = models_dir / args.active_manifest
     prev_path = models_dir / args.prev_active_manifest
@@ -361,6 +376,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     out = {
         "status": "ok",
         "models_dir": str(models_dir),
+        "metadata_dir": str(metadata_dir),
         "candidate_manifest_configured": str(models_dir / args.candidate_manifest),
         "candidate_manifest": str(candidate_path),
         "active_manifest": str(active_path),
@@ -379,6 +395,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 def cmd_evaluate(args: argparse.Namespace) -> int:
     models_dir = Path(args.models_dir)
+    metadata_dir = _resolve_metadata_dir(models_dir, args.metadata_dir)
     candidate_path = resolve_candidate_manifest_path(models_dir, args.candidate_manifest)
     active_path = models_dir / args.active_manifest
     prev_path = models_dir / args.prev_active_manifest
@@ -406,6 +423,7 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
         "reason": "",
         "gate_failures": [],
         "paths": {
+            "metadata_dir": str(metadata_dir),
             "candidate_manifest_configured": str(models_dir / args.candidate_manifest),
             "candidate_manifest": str(candidate_path),
             "active_manifest": str(active_path),
@@ -591,6 +609,7 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
 
 def cmd_rollback(args: argparse.Namespace) -> int:
     models_dir = Path(args.models_dir)
+    metadata_dir = _resolve_metadata_dir(models_dir, args.metadata_dir)
     active_path = models_dir / args.active_manifest
     prev_path = models_dir / args.prev_active_manifest
     state_path = models_dir / args.state_file
@@ -604,9 +623,10 @@ def cmd_rollback(args: argparse.Namespace) -> int:
     target_version = args.to_version or state.get("previous_active_version")
     target_path: Path | None = None
     if target_version:
-        explicit = _metadata_manifest(models_dir, str(target_version))
-        if explicit.exists():
-            target_path = explicit
+        for explicit in _metadata_manifest_candidates(models_dir, metadata_dir, str(target_version)):
+            if explicit.exists():
+                target_path = explicit
+                break
     if target_path is None and prev_path.exists():
         target_path = prev_path
     if target_path is None:
@@ -665,6 +685,11 @@ def cmd_rollback(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Model governance controller")
     parser.add_argument("--models-dir", default=str(DEFAULT_MODELS_DIR))
+    parser.add_argument(
+        "--metadata-dir",
+        default=DEFAULT_METADATA_DIR,
+        help="Directory for metadata manifests (absolute or relative to --models-dir)",
+    )
     parser.add_argument("--candidate-manifest", default=DEFAULT_CANDIDATE_MANIFEST)
     parser.add_argument("--active-manifest", default=DEFAULT_ACTIVE_MANIFEST)
     parser.add_argument("--prev-active-manifest", default=DEFAULT_PREV_ACTIVE_MANIFEST)
