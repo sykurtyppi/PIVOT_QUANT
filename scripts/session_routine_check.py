@@ -452,14 +452,17 @@ def main() -> int:
                 f"{phase}: check complete (level={level}, notify={'skipped' if not should_notify else 'disabled'})",
             )
 
-        day_state[phase] = {
-            "checked_at_utc": now_iso_utc(),
-            "checked_at_et": now_et.strftime("%Y-%m-%d %H:%M:%S %Z"),
-            "level": level,
-            "subject": subject,
-            "notified": notified,
-            "dry_run": bool(args.dry_run),
-        }
+        # Do not consume daily phase slots when running dry/no-notify probes.
+        # This keeps manual diagnostics from suppressing the scheduled alert.
+        if not args.dry_run and not args.no_notify:
+            day_state[phase] = {
+                "checked_at_utc": now_iso_utc(),
+                "checked_at_et": now_et.strftime("%Y-%m-%d %H:%M:%S %Z"),
+                "level": level,
+                "subject": subject,
+                "notified": notified,
+                "dry_run": bool(args.dry_run),
+            }
 
     state["last_run_utc"] = now_iso_utc()
     state["host"] = socket.gethostname()
