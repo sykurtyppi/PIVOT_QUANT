@@ -79,10 +79,11 @@ cleanup() {
   fi
   CLEANUP_DONE=1
 
-  if [[ "${#PIDS[@]}" -gt 0 ]]; then
+  if [[ "${PIDS+set}" == "set" ]] && [[ "${#PIDS[@]}" -gt 0 ]]; then
     echo "Stopping managed services..."
   fi
-  for pid in "${PIDS[@]}"; do
+  for pid in "${PIDS[@]-}"; do
+    [[ -n "${pid}" ]] || continue
     if kill -0 "${pid}" >/dev/null 2>&1; then
       kill "${pid}" >/dev/null 2>&1 || true
     fi
