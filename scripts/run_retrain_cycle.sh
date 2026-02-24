@@ -8,13 +8,27 @@ LOCK_DIR="${LOG_DIR}/run_retrain_cycle.lock"
 LOCK_OWNED=0
 ENV_FILE="${ROOT_DIR}/.env"
 
-if [[ -f "${ENV_FILE}" ]]; then
-  # Export .env values so launchd-triggered runs pick up runtime settings.
-  set -a
-  # shellcheck disable=SC1090
-  source "${ENV_FILE}"
-  set +a
-fi
+load_env_file() {
+  local env_path="$1"
+  local raw line key value
+  [[ -f "${env_path}" ]] || return 0
+
+  while IFS= read -r raw || [[ -n "${raw}" ]]; do
+    line="${raw#"${raw%%[![:space:]]*}"}"
+    [[ -z "${line}" ]] && continue
+    [[ "${line:0:1}" == "#" ]] && continue
+    [[ "${line}" == "export "* ]] && line="${line#export }"
+    [[ "${line}" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || continue
+
+    key="${line%%=*}"
+    value="${line#*=}"
+    export "${key}=${value}"
+  done < "${env_path}"
+}
+
+# Load .env in a strict, non-executing way so malformed/comment prose
+# lines never crash retrain runs under launchd.
+load_env_file "${ENV_FILE}"
 
 timestamp() {
   date '+%Y-%m-%d %H:%M:%S'

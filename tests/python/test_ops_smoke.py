@@ -316,7 +316,8 @@ class OpsSmokeTests(unittest.TestCase):
     def test_retrain_cycle_sources_dotenv(self) -> None:
         retrain_script = (REPO_ROOT / "scripts" / "run_retrain_cycle.sh").read_text(encoding="utf-8")
         self.assertIn('ENV_FILE="${ROOT_DIR}/.env"', retrain_script)
-        self.assertIn('source "${ENV_FILE}"', retrain_script)
+        self.assertIn("load_env_file()", retrain_script)
+        self.assertIn('load_env_file "${ENV_FILE}"', retrain_script)
 
     def test_model_governance_skips_regression_gates_when_support_is_low(self) -> None:
         module = load_module("model_governance", REPO_ROOT / "scripts" / "model_governance.py")
