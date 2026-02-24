@@ -6,6 +6,15 @@ LOG_DIR="${ROOT_DIR}/logs"
 mkdir -p "${LOG_DIR}"
 LOCK_DIR="${LOG_DIR}/run_retrain_cycle.lock"
 LOCK_OWNED=0
+ENV_FILE="${ROOT_DIR}/.env"
+
+if [[ -f "${ENV_FILE}" ]]; then
+  # Export .env values so launchd-triggered runs pick up runtime settings.
+  set -a
+  # shellcheck disable=SC1090
+  source "${ENV_FILE}"
+  set +a
+fi
 
 timestamp() {
   date '+%Y-%m-%d %H:%M:%S'
