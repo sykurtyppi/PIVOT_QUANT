@@ -208,18 +208,19 @@ def atomic_copy_file(src: Path, dst: Path) -> None:
 
 
 def compute_horizon_stats(df, target, horizon):
-    import numpy as np
-
     stats = {}
     sub = df[df["horizon_min"] == horizon]
     if sub.empty:
         return stats
 
+    stats["sample_size"] = int(sub.shape[0])
     for label in ["reject", "break"]:
         if label not in sub.columns:
             continue
         pos = sub[sub[label] == 1]
         neg = sub[sub[label] == 0]
+        stats[f"{label}_count"] = int(pos.shape[0])
+        stats[f"{label}_other_count"] = int(neg.shape[0])
         stats[f"{label}_rate"] = float(pos.shape[0] / max(1, sub.shape[0]))
         for metric in ["mfe_bps", "mae_bps"]:
             stats[f"{metric}_{label}"] = float(pos[metric].mean()) if not pos.empty else None

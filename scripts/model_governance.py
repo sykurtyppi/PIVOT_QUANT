@@ -39,6 +39,14 @@ DEFAULT_REQUIRED_HORIZONS = os.getenv("MODEL_GOV_REQUIRED_HORIZONS", "5,15,60")
 DEFAULT_MIN_TRAINED_END_DELTA_MS = int(os.getenv("MODEL_GOV_MIN_TRAINED_END_DELTA_MS", "0"))
 DEFAULT_MAX_MFE_REGRESSION_BPS = float(os.getenv("MODEL_GOV_MAX_MFE_REGRESSION_BPS", "1.5"))
 DEFAULT_MAX_MAE_WORSENING_BPS = float(os.getenv("MODEL_GOV_MAX_MAE_WORSENING_BPS", "2.0"))
+DEFAULT_MIN_TOTAL_SAMPLES = int(os.getenv("MODEL_GOV_MIN_TOTAL_SAMPLES", "0"))
+DEFAULT_MIN_POSITIVE_SAMPLES = int(os.getenv("MODEL_GOV_MIN_POSITIVE_SAMPLES", "0"))
+DEFAULT_MIN_POSITIVE_SAMPLES_REJECT = int(
+    os.getenv("MODEL_GOV_MIN_POSITIVE_SAMPLES_REJECT", str(DEFAULT_MIN_POSITIVE_SAMPLES))
+)
+DEFAULT_MIN_POSITIVE_SAMPLES_BREAK = int(
+    os.getenv("MODEL_GOV_MIN_POSITIVE_SAMPLES_BREAK", str(DEFAULT_MIN_POSITIVE_SAMPLES))
+)
 DEFAULT_ALLOW_FEATURE_VERSION_CHANGE = os.getenv(
     "MODEL_GOV_ALLOW_FEATURE_VERSION_CHANGE", "false"
 ).strip().lower() in {"1", "true", "yes", "y", "on"}
@@ -55,6 +63,9 @@ class GateConfig:
     min_trained_end_delta_ms: int
     max_mfe_regression_bps: float
     max_mae_worsening_bps: float
+    min_total_samples: int
+    min_positive_samples_reject: int
+    min_positive_samples_break: int
     allow_feature_version_change: bool
 
 
@@ -120,6 +131,18 @@ def to_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def to_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return None
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -222,8 +245,9 @@ def evaluate_gates(
     active: dict[str, Any],
     candidate: dict[str, Any],
     gates: GateConfig,
-) -> list[str]:
+) -> tuple[list[str], list[str]]:
     failures: list[str] = []
+    skips: list[str] = []
 
     active_feature = active.get("feature_version")
     candidate_feature = candidate.get("feature_version")
@@ -259,6 +283,50 @@ def evaluate_gates(
             if not isinstance(active_block, dict) or not isinstance(cand_block, dict):
                 continue
 
+            active_sample = to_int(active_block.get("sample_size"))
+            cand_sample = to_int(cand_block.get("sample_size"))
+            if active_sample is None:
+                active_sample = to_int(active_h.get("sample_size")) if isinstance(active_h, dict) else None
+            if cand_sample is None:
+                cand_sample = to_int(cand_h.get("sample_size")) if isinstance(cand_h, dict) else None
+            if gates.min_total_samples > 0:
+                if active_sample is None or cand_sample is None:
+                    skips.append(
+                        f"{target}:{horizon}m skipped regression gates "
+                        f"(missing sample_size; min_total={gates.min_total_samples})"
+                    )
+                    continue
+                if active_sample < gates.min_total_samples or cand_sample < gates.min_total_samples:
+                    skips.append(
+                        f"{target}:{horizon}m skipped regression gates "
+                        f"(sample_size active={active_sample} candidate={cand_sample} "
+                        f"< min_total={gates.min_total_samples})"
+                    )
+                    continue
+
+            required_positive = (
+                gates.min_positive_samples_reject
+                if target == "reject"
+                else gates.min_positive_samples_break
+            )
+            if required_positive > 0:
+                pos_key = f"{target}_count"
+                active_pos = to_int(active_block.get(pos_key))
+                cand_pos = to_int(cand_block.get(pos_key))
+                if active_pos is None or cand_pos is None:
+                    skips.append(
+                        f"{target}:{horizon}m skipped regression gates "
+                        f"(missing {pos_key}; min_positive={required_positive})"
+                    )
+                    continue
+                if active_pos < required_positive or cand_pos < required_positive:
+                    skips.append(
+                        f"{target}:{horizon}m skipped regression gates "
+                        f"({pos_key} active={active_pos} candidate={cand_pos} "
+                        f"< min_positive={required_positive})"
+                    )
+                    continue
+
             if target == "reject":
                 mfe_key = "mfe_bps_reject"
                 mae_key = "mae_bps_reject"
@@ -285,7 +353,7 @@ def evaluate_gates(
                         f"{active_mae:.2f} -> {cand_mae:.2f} (>{gates.max_mae_worsening_bps:.2f} bps)"
                     )
 
-    return failures
+    return failures, skips
 
 
 def _ops_set(db_path: str, pairs: dict[str, str]) -> None:
@@ -407,6 +475,13 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
         min_trained_end_delta_ms=args.min_trained_end_delta_ms,
         max_mfe_regression_bps=args.max_mfe_regression_bps,
         max_mae_worsening_bps=args.max_mae_worsening_bps,
+        min_total_samples=args.min_total_samples,
+        min_positive_samples_reject=max(
+            int(args.min_positive_samples), int(args.min_positive_samples_reject)
+        ),
+        min_positive_samples_break=max(
+            int(args.min_positive_samples), int(args.min_positive_samples_break)
+        ),
         allow_feature_version_change=args.allow_feature_version_change,
     )
     state = load_state(state_path)
@@ -422,6 +497,7 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
         "candidate_version": candidate_version,
         "reason": "",
         "gate_failures": [],
+        "gate_skips": [],
         "paths": {
             "metadata_dir": str(metadata_dir),
             "candidate_manifest_configured": str(models_dir / args.candidate_manifest),
@@ -531,7 +607,7 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
         print(json.dumps(result))
         return 0
 
-    gate_failures = evaluate_gates(active, candidate, gates)
+    gate_failures, gate_skips = evaluate_gates(active, candidate, gates)
     if gate_failures and not args.force_promote:
         reason = "candidate rejected by governance gates"
         result.update(
@@ -540,6 +616,7 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
                 "promoted": False,
                 "reason": reason,
                 "gate_failures": gate_failures,
+                "gate_skips": gate_skips,
                 "active_version": active_version,
             }
         )
@@ -600,6 +677,7 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
             "active_version": candidate_version,
             "reason": state["last_reason"],
             "gate_failures": gate_failures,
+            "gate_skips": gate_skips,
         }
     )
     _persist_state_and_ops(state_path, state, args.ops_db, result)
@@ -718,6 +796,27 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-mae-worsening-bps",
         type=float,
         default=DEFAULT_MAX_MAE_WORSENING_BPS,
+    )
+    eval_cmd.add_argument(
+        "--min-total-samples",
+        type=int,
+        default=DEFAULT_MIN_TOTAL_SAMPLES,
+    )
+    eval_cmd.add_argument(
+        "--min-positive-samples",
+        type=int,
+        default=DEFAULT_MIN_POSITIVE_SAMPLES,
+        help="Global minimum positive-label count for MAE/MFE regression gates.",
+    )
+    eval_cmd.add_argument(
+        "--min-positive-samples-reject",
+        type=int,
+        default=DEFAULT_MIN_POSITIVE_SAMPLES_REJECT,
+    )
+    eval_cmd.add_argument(
+        "--min-positive-samples-break",
+        type=int,
+        default=DEFAULT_MIN_POSITIVE_SAMPLES_BREAK,
     )
     eval_cmd.add_argument(
         "--allow-feature-version-change",

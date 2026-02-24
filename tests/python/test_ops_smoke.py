@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 import os
 import shutil
 import sqlite3
@@ -32,6 +33,16 @@ def run_cmd(cmd: list[str], cwd: Path, env: dict[str, str] | None = None) -> sub
         capture_output=True,
         check=False,
     )
+
+
+def load_module(module_name: str, module_path: Path):
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Failed to load module spec for {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 class OpsSmokeTests(unittest.TestCase):
@@ -301,6 +312,96 @@ class OpsSmokeTests(unittest.TestCase):
 
         proc = run_cmd([PYTHON, "-m", "py_compile", "scripts/session_routine_check.py"], cwd=REPO_ROOT)
         self.assertEqual(proc.returncode, 0, msg=f"{proc.stdout}\n{proc.stderr}")
+
+    def test_model_governance_skips_regression_gates_when_support_is_low(self) -> None:
+        module = load_module("model_governance", REPO_ROOT / "scripts" / "model_governance.py")
+        gates = module.GateConfig(
+            required_targets=["break"],
+            required_horizons=[5],
+            min_trained_end_delta_ms=0,
+            max_mfe_regression_bps=1.5,
+            max_mae_worsening_bps=2.0,
+            min_total_samples=200,
+            min_positive_samples_reject=0,
+            min_positive_samples_break=25,
+            allow_feature_version_change=False,
+        )
+        active = {
+            "feature_version": "v3",
+            "trained_end_ts": 1000,
+            "stats": {
+                "5": {
+                    "break": {
+                        "sample_size": 120,
+                        "break_count": 10,
+                        "mfe_bps_break": 8.0,
+                        "mae_bps_break": -25.0,
+                    }
+                }
+            },
+        }
+        candidate = {
+            "feature_version": "v3",
+            "trained_end_ts": 2000,
+            "stats": {
+                "5": {
+                    "break": {
+                        "sample_size": 130,
+                        "break_count": 11,
+                        "mfe_bps_break": 6.0,
+                        "mae_bps_break": -35.0,
+                    }
+                }
+            },
+        }
+        failures, skips = module.evaluate_gates(active, candidate, gates)
+        self.assertEqual(failures, [])
+        self.assertTrue(any("break:5m skipped regression gates" in item for item in skips))
+
+    def test_model_governance_enforces_regression_gates_when_support_is_high(self) -> None:
+        module = load_module("model_governance", REPO_ROOT / "scripts" / "model_governance.py")
+        gates = module.GateConfig(
+            required_targets=["break"],
+            required_horizons=[5],
+            min_trained_end_delta_ms=0,
+            max_mfe_regression_bps=1.5,
+            max_mae_worsening_bps=2.0,
+            min_total_samples=200,
+            min_positive_samples_reject=0,
+            min_positive_samples_break=25,
+            allow_feature_version_change=False,
+        )
+        active = {
+            "feature_version": "v3",
+            "trained_end_ts": 1000,
+            "stats": {
+                "5": {
+                    "break": {
+                        "sample_size": 300,
+                        "break_count": 40,
+                        "mfe_bps_break": 8.0,
+                        "mae_bps_break": -25.0,
+                    }
+                }
+            },
+        }
+        candidate = {
+            "feature_version": "v3",
+            "trained_end_ts": 2000,
+            "stats": {
+                "5": {
+                    "break": {
+                        "sample_size": 320,
+                        "break_count": 43,
+                        "mfe_bps_break": 7.5,
+                        "mae_bps_break": -29.0,
+                    }
+                }
+            },
+        }
+        failures, skips = module.evaluate_gates(active, candidate, gates)
+        self.assertTrue(any("break:5m mae_bps_break worsened" in item for item in failures))
+        self.assertEqual(skips, [])
 
 
 if __name__ == "__main__":
