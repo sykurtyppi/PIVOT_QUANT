@@ -39,6 +39,8 @@ ML_SHADOW_HORIZONS = {
     for h in os.getenv("ML_SHADOW_HORIZONS", "30").split(",")
     if h.strip().isdigit()
 }
+if not ML_SHADOW_HORIZONS:
+    ML_SHADOW_HORIZONS = {30}
 PREDICTION_LOG_DB = Path(os.getenv(
     "PREDICTION_LOG_DB",
     str(ROOT / "data" / "pivot_events.sqlite"),
@@ -412,7 +414,7 @@ def _score_event(event: dict):
     if not scored_horizons:
         scored_horizons = list(all_horizons)
 
-    for horizon in scored_horizons:
+    for horizon in all_horizons:
         pr = scores.get(f"prob_reject_{horizon}m")
         pb = scores.get(f"prob_break_{horizon}m")
         if pr is None and pb is None:
@@ -463,7 +465,7 @@ def _score_event(event: dict):
     # confidence above their threshold. Fall back to raw edge if no signal.
     best_horizon = None
     best_score = None
-    for horizon in all_horizons:
+    for horizon in scored_horizons:
         pr = scores.get(f"prob_reject_{horizon}m")
         pb = scores.get(f"prob_break_{horizon}m")
         if pr is None and pb is None:

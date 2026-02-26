@@ -16,6 +16,8 @@ import textwrap
 import unittest
 from pathlib import Path
 
+import numpy as np
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PYTHON = str(Path(sys.executable).resolve())
@@ -343,6 +345,64 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("LATEST_SCHEMA_VERSION = 5", migrate_db)
         self.assertIn("migration_5_prediction_log_shadow_30m", migrate_db)
         self.assertIn("signal_30m", migrate_db)
+
+    def test_30m_shadow_horizon_runtime_behavior(self) -> None:
+        ml_server = load_module("ml_server_shadow_runtime", REPO_ROOT / "server" / "ml_server.py")
+
+        class DummyModel:
+            classes_ = np.array([0, 1])
+
+            def __init__(self, prob: float) -> None:
+                self.prob = prob
+
+            def predict_proba(self, _df):
+                return np.array([[1.0 - self.prob, self.prob]], dtype=float)
+
+        def set_registry(*, reject_probs: dict[int, float], break_probs: dict[int, float]) -> None:
+            ml_server.registry.models = {"reject": {}, "break": {}}
+            for horizon, prob in reject_probs.items():
+                ml_server.registry.models["reject"][horizon] = {
+                    "feature_columns": ["x"],
+                    "pipeline": DummyModel(prob),
+                    "calibration": "sigmoid",
+                }
+            for horizon, prob in break_probs.items():
+                ml_server.registry.models["break"][horizon] = {
+                    "feature_columns": ["x"],
+                    "pipeline": DummyModel(prob),
+                    "calibration": "sigmoid",
+                }
+            ml_server.registry.thresholds = {
+                "reject": {h: 0.5 for h in (5, 15, 30, 60)},
+                "break": {h: 0.5 for h in (5, 15, 30, 60)},
+            }
+            ml_server.registry.manifest = {"version": "vtest", "trained_end_ts": 0}
+
+        ml_server.build_feature_row = lambda _event: {"x": 1.0}
+        ml_server.collect_missing = lambda _features: []
+
+        # 30m is strongest, but cannot become best_horizon when shadowed.
+        set_registry(
+            reject_probs={5: 0.55, 15: 0.56, 30: 0.99, 60: 0.57},
+            break_probs={5: 0.10, 15: 0.10, 30: 0.10, 60: 0.10},
+        )
+        result = ml_server._score_event({"event_id": "shadow_case_strong_30m"})
+        self.assertEqual(result["signals"].get("signal_30m"), "reject")
+        self.assertNotEqual(result["best_horizon"], 30)
+        self.assertEqual(result["best_horizon"], 60)
+        self.assertFalse(result["abstain"])
+
+        # If only shadow horizon has directional signal, abstain remains true.
+        set_registry(
+            reject_probs={5: 0.10, 15: 0.10, 30: 0.95, 60: 0.10},
+            break_probs={5: 0.10, 15: 0.10, 30: 0.10, 60: 0.10},
+        )
+        result = ml_server._score_event({"event_id": "shadow_case_only_30m"})
+        self.assertEqual(result["signals"].get("signal_30m"), "reject")
+        self.assertEqual(result["signals"].get("signal_5m"), "no_edge")
+        self.assertEqual(result["signals"].get("signal_15m"), "no_edge")
+        self.assertEqual(result["signals"].get("signal_60m"), "no_edge")
+        self.assertTrue(result["abstain"])
 
     def test_model_governance_skips_regression_gates_when_support_is_low(self) -> None:
         module = load_module("model_governance", REPO_ROOT / "scripts" / "model_governance.py")
