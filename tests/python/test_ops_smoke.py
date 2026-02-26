@@ -101,6 +101,7 @@ class OpsSmokeTests(unittest.TestCase):
         backup_root = self.tmp / "backups"
         log_file = self.tmp / "logs" / "backup.log"
         state_file = self.tmp / "logs" / "backup_state.json"
+        lock_file = self.tmp / "logs" / "ops_resilience.lock"
         env_file = self.tmp / "empty.env"
         env_file.write_text("", encoding="utf-8")
         self._make_db(db)
@@ -125,6 +126,8 @@ class OpsSmokeTests(unittest.TestCase):
                 str(log_file),
                 "--state-file",
                 str(state_file),
+                "--lock-file",
+                str(lock_file),
             ],
             cwd=REPO_ROOT,
             env={"PIVOT_DB": str(db)},
@@ -149,6 +152,7 @@ class OpsSmokeTests(unittest.TestCase):
         self._create_snapshot(snapshots, "20260218_110000", complete=True)
         self._create_snapshot(snapshots, "20260218_120000", complete=False)
         log_file = self.tmp / "logs" / "restore.log"
+        lock_file = self.tmp / "logs" / "ops_resilience.lock"
         env_file = self.tmp / "empty.env"
         env_file.write_text("", encoding="utf-8")
 
@@ -162,6 +166,8 @@ class OpsSmokeTests(unittest.TestCase):
                 str(backup_root),
                 "--log-file",
                 str(log_file),
+                "--lock-file",
+                str(lock_file),
                 "--dry-run",
             ],
             cwd=REPO_ROOT,
