@@ -4247,7 +4247,7 @@
             const rvLabel = Number.isFinite(rv) ? `${volInfo.label} (${formatNumber(rv, 2)}%)` : volInfo.label;
             const ivLabel = Number.isFinite(vix) ? `${ivRv} (VIX ${formatNumber(vix, 2)})` : ivRv;
 
-            const sourceLabel = gammaSource === 'IBKR' ? 'IBKR' : 'Proxy';
+            const sourceLabel = gammaSource === 'IBKR' ? 'IBKR' : gammaSource === 'Yahoo' ? 'Yahoo' : 'Proxy';
             state.lastGammaMode = `${gammaMode} (${sourceLabel})`;
             state.lastPlaybook = playbook;
             state.lastVolRegime = rvLabel;
@@ -4972,11 +4972,13 @@
                 const expiryMode = document.getElementById('gamma-expiry-select')?.value || 'front';
                 const apiUrl = `${getApiOrigin()}/api/gamma?symbol=${encodeURIComponent(symbol)}&expiry=${encodeURIComponent(expiryMode)}&limit=60`;
                 const data = await fetchJson(apiUrl, 6000);
-                if (data?.gammaFlip) {
+                const hasGammaFlip = Number.isFinite(data?.gammaFlip);
+                const hasStats = !!data?.stats;
+                if (hasGammaFlip || hasStats) {
                     state.gammaFetchError = null;
                     return {
-                        source: data.source || 'IBKR',
-                        gammaFlip: data.gammaFlip,
+                        source: data.source || 'Proxy',
+                        gammaFlip: hasGammaFlip ? data.gammaFlip : null,
                         walls: {
                             callWall: data.callWall,
                             putWall: data.putWall,
@@ -4987,7 +4989,7 @@
                         expiryMode: data.expiryMode || expiryMode,
                     };
                 }
-                state.gammaFetchError = 'Gamma response missing gammaFlip';
+                state.gammaFetchError = 'Gamma response missing stats';
             } catch (error) {
                 console.warn('Gamma fetch failed', error);
                 state.gammaFetchError = error?.detailMessage || error?.message || 'Gamma feed unavailable';

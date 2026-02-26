@@ -58,6 +58,7 @@ const symbolMap = new Map([
   ['SP500', '^GSPC'],
   ['ES', 'ES=F'],
 ]);
+const YAHOO_HOSTS = ['query1.finance.yahoo.com', 'query2.finance.yahoo.com'];
 
 const cache = new Map();
 const levelConversionSnapshotCache = new Map();
@@ -598,6 +599,314 @@ function mapSymbol(rawSymbol) {
   return symbolMap.get(symbol) || symbol;
 }
 
+function mapOptionsSymbol(rawSymbol) {
+  const symbol = (rawSymbol || 'SPY').toUpperCase().trim();
+  if (
+    symbol === 'SPX' ||
+    symbol === 'US500' ||
+    symbol === 'US 500' ||
+    symbol === 'S&P500' ||
+    symbol === 'S&P 500' ||
+    symbol === 'SP500' ||
+    symbol === '^GSPC' ||
+    symbol === 'ES' ||
+    symbol === 'ES=F'
+  ) {
+    return 'SPY';
+  }
+  return symbol;
+}
+
+function isMonthlyExpiry(expiryYmd) {
+  const value = String(expiryYmd || '');
+  if (!/^\d{8}$/.test(value)) return false;
+  const year = Number(value.slice(0, 4));
+  const month = Number(value.slice(4, 6));
+  const day = Number(value.slice(6, 8));
+  const dt = new Date(Date.UTC(year, month - 1, day));
+  const weekday = dt.getUTCDay();
+  return weekday === 5 && day >= 15 && day <= 21;
+}
+
+function pickOptionsExpiry(expirations, mode) {
+  const normalized = Array.from(
+    new Set(
+      (Array.isArray(expirations) ? expirations : [])
+        .map((item) => String(item))
+        .filter((item) => /^\d{8}$/.test(item))
+    )
+  ).sort();
+  if (!normalized.length) return null;
+
+  const today = formatYmd(Math.floor(Date.now() / 1000), 'America/New_York').replace(/-/g, '');
+  const safeMode = String(mode || 'front').toLowerCase();
+
+  if (safeMode === '0dte') {
+    return normalized.includes(today) ? today : normalized[0];
+  }
+
+  if (safeMode === 'monthly') {
+    const monthly = normalized.filter((exp) => isMonthlyExpiry(exp) && exp >= today);
+    if (monthly.length) return monthly[0];
+  }
+
+  if (safeMode === 'all') {
+    return normalized[0];
+  }
+
+  const front = normalized.find((exp) => exp >= today);
+  return front || normalized[0];
+}
+
+function normalizeYahooContracts(contracts) {
+  if (!Array.isArray(contracts)) return [];
+  return contracts
+    .map((contract) => ({
+      strike: toNumber(contract?.strike, null),
+      iv: toNumber(contract?.impliedVolatility, null),
+      oi: Math.max(0, toNumber(contract?.openInterest, 0)),
+    }))
+    .filter((contract) => Number.isFinite(contract.strike));
+}
+
+function selectClosestContracts(contracts, spot, limit) {
+  const safeLimit = Math.max(1, Math.min(300, Number(limit) || 60));
+  if (!Array.isArray(contracts) || contracts.length <= safeLimit || !Number.isFinite(spot)) {
+    return Array.isArray(contracts) ? contracts : [];
+  }
+  return [...contracts]
+    .sort((left, right) => Math.abs(left.strike - spot) - Math.abs(right.strike - spot))
+    .slice(0, safeLimit);
+}
+
+function nearestIvByStrike(contracts, spot) {
+  if (!Array.isArray(contracts) || !contracts.length || !Number.isFinite(spot)) return null;
+  let best = null;
+  for (const contract of contracts) {
+    if (!Number.isFinite(contract?.iv)) continue;
+    const distance = Math.abs(contract.strike - spot);
+    if (!best || distance < best.distance) {
+      best = { iv: contract.iv, distance };
+    }
+  }
+  return best ? best.iv : null;
+}
+
+function summarizeYahooOptionWindow(optionResult, limit) {
+  const selected = optionResult?.options?.[0] || {};
+  const quote = optionResult?.quote || {};
+  const spot =
+    toNumber(quote?.regularMarketPrice, null) ??
+    toNumber(quote?.regularMarketPreviousClose, null) ??
+    null;
+
+  const calls = selectClosestContracts(normalizeYahooContracts(selected.calls), spot, limit);
+  const puts = selectClosestContracts(normalizeYahooContracts(selected.puts), spot, limit);
+  const totalContracts = calls.length + puts.length;
+
+  let oiCall = 0;
+  let oiPut = 0;
+  let withIV = 0;
+  let withOI = 0;
+  let callWall = null;
+  let putWall = null;
+  const oiByStrike = new Map();
+
+  for (const call of calls) {
+    const oi = call.oi || 0;
+    oiCall += oi;
+    if (Number.isFinite(call.iv)) withIV += 1;
+    if (oi > 0) withOI += 1;
+    if (!callWall || oi > callWall.oi) {
+      callWall = { strike: call.strike, oi };
+    }
+    oiByStrike.set(call.strike, (oiByStrike.get(call.strike) || 0) + oi);
+  }
+
+  for (const put of puts) {
+    const oi = put.oi || 0;
+    oiPut += oi;
+    if (Number.isFinite(put.iv)) withIV += 1;
+    if (oi > 0) withOI += 1;
+    if (!putWall || oi > putWall.oi) {
+      putWall = { strike: put.strike, oi };
+    }
+    oiByStrike.set(put.strike, (oiByStrike.get(put.strike) || 0) + oi);
+  }
+
+  const totalOi = oiCall + oiPut;
+  const topOi = [...oiByStrike.values()]
+    .sort((left, right) => right - left)
+    .slice(0, 5)
+    .reduce((acc, value) => acc + value, 0);
+  const oiConcentration = totalOi > 0 ? (topOi / totalOi) * 100 : null;
+
+  let pin = null;
+  for (const [strike, oi] of oiByStrike.entries()) {
+    if (!pin || oi > pin.oi) {
+      pin = { strike, oi };
+    }
+  }
+
+  const atmCallIv = nearestIvByStrike(calls, spot);
+  const atmPutIv = nearestIvByStrike(puts, spot);
+  const atmIV =
+    Number.isFinite(atmCallIv) && Number.isFinite(atmPutIv)
+      ? (atmCallIv + atmPutIv) / 2
+      : Number.isFinite(atmCallIv)
+        ? atmCallIv
+        : Number.isFinite(atmPutIv)
+          ? atmPutIv
+          : null;
+
+  return {
+    spot,
+    totalContracts,
+    withIV,
+    withOI,
+    oiCall,
+    oiPut,
+    oiConcentration,
+    totalOi,
+    callWall,
+    putWall,
+    pin,
+    atmIV,
+    skew25d: null,
+  };
+}
+
+async function fetchYahooOptionsResult(symbol, expiryYmd = null) {
+  const errors = [];
+  let attempts = 0;
+  const dateQuery = expiryYmd ? `?date=${encodeURIComponent(String(expiryYmd))}` : '';
+  const targetUrls = YAHOO_HOSTS.map(
+    (host) => `https://${host}/v7/finance/options/${encodeURIComponent(symbol)}${dateQuery}`
+  );
+  const requestUrls = [];
+  for (const targetUrl of targetUrls) {
+    requestUrls.push({ label: 'direct', url: targetUrl });
+  }
+  for (const targetUrl of targetUrls) {
+    requestUrls.push({
+      label: 'allorigins',
+      url: `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`,
+    });
+  }
+
+  for (const request of requestUrls) {
+    try {
+      const result = await fetchWithRetry(request.url);
+      attempts += result.attempts;
+      const optionResult = result?.payload?.optionChain?.result?.[0];
+      if (optionResult) {
+        return { optionResult, attempts };
+      }
+      errors.push({
+        host: request.url,
+        source: request.label,
+        message: 'Invalid Yahoo options payload',
+        status: 0,
+      });
+    } catch (error) {
+      errors.push({
+        host: request.url,
+        source: request.label,
+        message: error?.message || String(error),
+        status: error?.statusCode || 0,
+      });
+    }
+  }
+
+  const message = errors.length ? JSON.stringify(errors) : 'Unknown Yahoo options error';
+  throw new Error(`Yahoo options failed: ${message}`);
+}
+
+function buildWallPayload(strike, oi, maxOi) {
+  if (!Number.isFinite(strike)) return null;
+  const safeOi = Math.max(0, toNumber(oi, 0));
+  return {
+    price: strike,
+    gex: 0,
+    strength: maxOi > 0 ? Math.round((safeOi / maxOi) * 100) : 0,
+  };
+}
+
+async function fetchYahooGammaFallback({ symbol, expiryMode = 'front', limit = 60 }) {
+  const optionSymbol = mapOptionsSymbol(symbol);
+  const firstFetch = await fetchYahooOptionsResult(optionSymbol);
+  const first = firstFetch.optionResult;
+  const expiries = (Array.isArray(first?.expirationDates) ? first.expirationDates : [])
+    .map((value) => String(value))
+    .filter((value) => /^\d{8}$/.test(value))
+    .sort();
+  const selectedExpiry = pickOptionsExpiry(expiries, expiryMode);
+
+  let selectedResult = first;
+  let attempts = firstFetch.attempts;
+  if (selectedExpiry && String(first?.expirationDate || '') !== selectedExpiry) {
+    const selectedFetch = await fetchYahooOptionsResult(optionSymbol, selectedExpiry);
+    selectedResult = selectedFetch.optionResult;
+    attempts += selectedFetch.attempts;
+  }
+
+  const summary = summarizeYahooOptionWindow(selectedResult, limit);
+  const today = formatYmd(Math.floor(Date.now() / 1000), 'America/New_York').replace(/-/g, '');
+  let zeroDteShare = null;
+  if (expiries.includes(today)) {
+    if (selectedExpiry === today && summary.totalOi > 0) {
+      zeroDteShare = 100;
+    } else if (selectedExpiry && selectedExpiry !== today) {
+      try {
+        const todayFetch = await fetchYahooOptionsResult(optionSymbol, today);
+        attempts += todayFetch.attempts;
+        const todaySummary = summarizeYahooOptionWindow(todayFetch.optionResult, limit);
+        const denom = summary.totalOi + todaySummary.totalOi;
+        if (denom > 0) {
+          zeroDteShare = (todaySummary.totalOi / denom) * 100;
+        }
+      } catch (_error) {
+        zeroDteShare = null;
+      }
+    }
+  }
+
+  const maxWallOi = Math.max(
+    toNumber(summary.callWall?.oi, 0),
+    toNumber(summary.putWall?.oi, 0),
+    toNumber(summary.pin?.oi, 0)
+  );
+
+  return {
+    source: 'Yahoo',
+    symbol: (symbol || 'SPY').toUpperCase().trim(),
+    spot: summary.spot,
+    expiryMode,
+    generatedAt: new Date().toISOString(),
+    gammaFlip: null,
+    callWall: buildWallPayload(summary.callWall?.strike, summary.callWall?.oi, maxWallOi),
+    putWall: buildWallPayload(summary.putWall?.strike, summary.putWall?.oi, maxWallOi),
+    pin: buildWallPayload(summary.pin?.strike, summary.pin?.oi, maxWallOi),
+    usedOpenInterest: true,
+    stats: {
+      totalContracts: summary.totalContracts,
+      withGreeks: summary.withIV,
+      withIV: summary.withIV,
+      withOI: summary.withOI,
+      oiCall: summary.oiCall,
+      oiPut: summary.oiPut,
+      oiConcentration: Number.isFinite(summary.oiConcentration) ? summary.oiConcentration : null,
+      zeroDteShare: Number.isFinite(zeroDteShare) ? zeroDteShare : null,
+      atmIV: summary.atmIV,
+      skew25d: summary.skew25d,
+      expiries,
+    },
+    fetch: {
+      attempts,
+    },
+  };
+}
+
 function fetchJson(url) {
   return new Promise((resolve, reject) => {
     const req = https.get(
@@ -767,7 +1076,7 @@ async function getYahooData({ symbol, range = '3mo', interval = '1d' }) {
     return { ...cached.data, fetch: { fromCache: true, attempts: 0 } };
   }
 
-  const hosts = ['query1.finance.yahoo.com', 'query2.finance.yahoo.com'];
+  const hosts = YAHOO_HOSTS;
   const errors = [];
   let payload = null;
   let attempts = 0;
@@ -1605,11 +1914,41 @@ const server = http.createServer(async (req, res) => {
       const symbol = url.searchParams.get('symbol') || 'SPX';
       const expiry = url.searchParams.get('expiry') || 'front';
       const limit = url.searchParams.get('limit') || '60';
+      const source = (url.searchParams.get('source') || 'auto').toLowerCase();
       const gammaUrl = `http://127.0.0.1:5001/gamma?symbol=${encodeURIComponent(
         symbol
       )}&expiry=${encodeURIComponent(expiry)}&limit=${encodeURIComponent(limit)}`;
 
-      const data = await fetchLocalJson(gammaUrl);
+      let data = null;
+      let bridgeError = null;
+      if (source !== 'yahoo') {
+        try {
+          data = await fetchLocalJson(gammaUrl);
+        } catch (error) {
+          bridgeError = error;
+          if (source === 'ibkr') {
+            throw error;
+          }
+        }
+      }
+
+      if (!data) {
+        try {
+          data = await fetchYahooGammaFallback({ symbol, expiryMode: expiry, limit });
+          if (bridgeError?.message) {
+            data.fallback = { mode: 'yahoo', reason: bridgeError.message };
+          }
+        } catch (fallbackError) {
+          if (bridgeError) {
+            throw {
+              statusCode: bridgeError?.statusCode || fallbackError?.statusCode || 502,
+              message: `IBKR gamma unavailable (${bridgeError?.message || 'error'}); Yahoo fallback unavailable (${fallbackError?.message || 'error'})`,
+            };
+          }
+          throw fallbackError;
+        }
+      }
+
       sendJson(res, 200, data);
     } catch (error) {
       sendProxyError(res, error, 'Gamma bridge unavailable');
