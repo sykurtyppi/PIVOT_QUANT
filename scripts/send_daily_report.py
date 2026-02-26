@@ -25,9 +25,12 @@ from pathlib import Path
 from typing import Any
 from urllib import error, request
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.append(str(ROOT))
+
 from ml.thresholds import directional_return_bps
 
-ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB = os.getenv("PIVOT_DB", str(ROOT / "data" / "pivot_events.sqlite"))
 DEFAULT_LOG_FILES = [
     ROOT / "logs" / "retrain.log",
