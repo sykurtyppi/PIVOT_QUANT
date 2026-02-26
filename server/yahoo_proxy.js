@@ -69,6 +69,7 @@ const RESPONSE_SECURITY_HEADERS = Object.freeze({
   'Referrer-Policy': 'no-referrer',
   'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
 });
+const FORM_URLENCODED = 'application/x-www-form-urlencoded';
 const ENV_FILE_VALUES = loadEnvMap(ENV_FILE);
 const SECURITY = buildSecurityConfig(process.env, ENV_FILE_VALUES);
 
@@ -138,21 +139,32 @@ function readSetting(procEnv, fileEnv, key, fallback = '') {
 }
 
 function buildSecurityConfig(procEnv = process.env, fileEnv = {}) {
-  const authUser = readSetting(procEnv, fileEnv, 'DASH_AUTH_USER', '').trim();
-  const authPass = readSetting(procEnv, fileEnv, 'DASH_AUTH_PASS', '').trim();
+  const authPassword = readSetting(
+    procEnv,
+    fileEnv,
+    'DASH_AUTH_PASSWORD',
+    readSetting(procEnv, fileEnv, 'DASH_AUTH_PASS', '')
+  ).trim();
   const authEnabledFlag = parseBool(readSetting(procEnv, fileEnv, 'DASH_AUTH_ENABLED', ''), false);
-  const authCredentialsConfigured = authUser.length > 0 && authPass.length > 0;
+  const authCredentialsConfigured = authPassword.length > 0;
   return {
     authEnabled: authEnabledFlag || authCredentialsConfigured,
     authCredentialsConfigured,
-    authUser,
-    authPass,
-    authRealm: readSetting(procEnv, fileEnv, 'DASH_AUTH_REALM', 'PivotQuant Dashboard'),
+    authPassword,
+    authCookieName: readSetting(procEnv, fileEnv, 'DASH_AUTH_COOKIE_NAME', 'pq_dash_auth').trim() || 'pq_dash_auth',
+    authCookieTtlSec: Math.max(
+      300,
+      Number(readSetting(procEnv, fileEnv, 'DASH_AUTH_COOKIE_TTL_SEC', '2592000')) || 2592000
+    ),
+    authSessionPath: '/',
+    authPageTitle: readSetting(procEnv, fileEnv, 'DASH_AUTH_PAGE_TITLE', 'PivotQuant Dashboard Access'),
+    authPageSubtitle: readSetting(procEnv, fileEnv, 'DASH_AUTH_PAGE_SUBTITLE', 'Enter password to continue.'),
     authBypassLocal: parseBool(readSetting(procEnv, fileEnv, 'DASH_AUTH_LOCAL_BYPASS', 'true'), true),
     writeEndpointsLocalOnly: parseBool(
       readSetting(procEnv, fileEnv, 'DASH_WRITE_ENDPOINTS_LOCAL_ONLY', 'true'),
       true
     ),
+    authCookieSecure: parseBool(readSetting(procEnv, fileEnv, 'DASH_AUTH_COOKIE_SECURE', 'true'), true),
   };
 }
 
@@ -186,6 +198,14 @@ function isLoopbackRequest(req) {
   return forwardedFor.length === 0;
 }
 
+function requestIsSecure(req) {
+  if (Boolean(req?.socket?.encrypted)) return true;
+  const forwardedProtoRaw = String(req?.headers?.['x-forwarded-proto'] || '');
+  if (!forwardedProtoRaw) return false;
+  const forwardedProto = forwardedProtoRaw.split(',')[0].trim().toLowerCase();
+  return forwardedProto === 'https';
+}
+
 function safeEqual(left, right) {
   const leftBuf = Buffer.from(String(left || ''), 'utf8');
   const rightBuf = Buffer.from(String(right || ''), 'utf8');
@@ -195,51 +215,220 @@ function safeEqual(left, right) {
   return crypto.timingSafeEqual(leftBuf, rightBuf);
 }
 
-function parseBasicAuth(req) {
-  const header = String(req?.headers?.authorization || '');
-  if (!header.startsWith('Basic ')) return null;
-  const encoded = header.slice(6).trim();
-  if (!encoded) return null;
-  try {
-    const decoded = Buffer.from(encoded, 'base64').toString('utf8');
-    const splitAt = decoded.indexOf(':');
-    if (splitAt < 0) return null;
-    return {
-      user: decoded.slice(0, splitAt),
-      pass: decoded.slice(splitAt + 1),
-    };
-  } catch (_error) {
-    return null;
+function parseCookies(req) {
+  const cookieHeader = String(req?.headers?.cookie || '');
+  const out = {};
+  if (!cookieHeader) return out;
+  const pairs = cookieHeader.split(';');
+  for (const pair of pairs) {
+    const idx = pair.indexOf('=');
+    if (idx <= 0) continue;
+    const key = pair.slice(0, idx).trim();
+    const value = pair.slice(idx + 1).trim();
+    if (!key) continue;
+    out[key] = value;
   }
+  return out;
+}
+
+function parseTokenParts(token) {
+  const raw = String(token || '').trim();
+  if (!raw) return null;
+  const parts = raw.split('.');
+  if (parts.length !== 3) return null;
+  const exp = Number(parts[0]);
+  const nonce = parts[1];
+  const sig = parts[2];
+  if (!Number.isFinite(exp) || !nonce || !sig) return null;
+  return { exp, nonce, sig, payload: `${exp}.${nonce}` };
+}
+
+function signPayload(payload, secret) {
+  return crypto.createHmac('sha256', secret).update(payload).digest('base64url');
+}
+
+function createSessionToken(secret, ttlSec) {
+  const exp = Math.floor(Date.now() / 1000) + Math.max(300, Number(ttlSec) || 2592000);
+  const nonce = crypto.randomBytes(18).toString('base64url');
+  const payload = `${exp}.${nonce}`;
+  const sig = signPayload(payload, secret);
+  return `${payload}.${sig}`;
+}
+
+function hasValidSession(req) {
+  if (!SECURITY.authEnabled) return true;
+  if (!SECURITY.authCredentialsConfigured) return false;
+  const cookies = parseCookies(req);
+  const token = cookies[SECURITY.authCookieName];
+  const parts = parseTokenParts(token);
+  if (!parts) return false;
+  const now = Math.floor(Date.now() / 1000);
+  if (parts.exp < now) return false;
+  const expectedSig = signPayload(parts.payload, SECURITY.authPassword);
+  return safeEqual(parts.sig, expectedSig);
+}
+
+function encodeHtml(text) {
+  return String(text || '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+function renderLoginPage(nextPath, message = '') {
+  const safeNext = nextPath && nextPath.startsWith('/') ? nextPath : '/';
+  const safeMessage = message ? `<div class="msg">${encodeHtml(message)}</div>` : '';
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${encodeHtml(SECURITY.authPageTitle)}</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif; background: #0b0f1a; color: #e2e8f0; display: grid; place-items: center; min-height: 100vh; }
+    .card { width: min(92vw, 420px); background: #0f172a; border: 1px solid rgba(148,163,184,.2); border-radius: 14px; padding: 20px; box-shadow: 0 10px 40px rgba(0,0,0,.35); }
+    h1 { margin: 0 0 6px; font-size: 20px; }
+    p { margin: 0 0 16px; color: #94a3b8; font-size: 13px; }
+    label { display: block; font-size: 12px; color: #94a3b8; margin-bottom: 6px; }
+    input { width: 100%; box-sizing: border-box; border-radius: 10px; border: 1px solid rgba(148,163,184,.3); background: #0b1222; color: #e2e8f0; padding: 10px 12px; font-size: 14px; }
+    button { margin-top: 12px; width: 100%; border: 0; border-radius: 10px; padding: 10px 12px; font-size: 14px; font-weight: 600; color: #081024; background: linear-gradient(135deg,#60a5fa,#22d3ee); cursor: pointer; }
+    .msg { margin-bottom: 12px; font-size: 12px; color: #fca5a5; }
+  </style>
+</head>
+<body>
+  <form class="card" method="POST" action="/auth/login">
+    <h1>${encodeHtml(SECURITY.authPageTitle)}</h1>
+    <p>${encodeHtml(SECURITY.authPageSubtitle)}</p>
+    ${safeMessage}
+    <input type="hidden" name="next" value="${encodeHtml(safeNext)}" />
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" required autofocus />
+    <button type="submit">Continue</button>
+  </form>
+</body>
+</html>`;
+}
+
+function sendLoginPage(res, nextPath, message = '', statusCode = 200) {
+  res.writeHead(
+    statusCode,
+    withSecurityHeaders({
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'no-store',
+    })
+  );
+  res.end(renderLoginPage(nextPath, message));
+}
+
+function parseFormBody(body) {
+  const params = new URLSearchParams(String(body || ''));
+  return {
+    password: String(params.get('password') || ''),
+    next: String(params.get('next') || '/'),
+  };
+}
+
+function setSessionCookieHeaders(res, req, token) {
+  const secure = SECURITY.authCookieSecure && requestIsSecure(req);
+  const cookieParts = [
+    `${SECURITY.authCookieName}=${token}`,
+    `Path=${SECURITY.authSessionPath}`,
+    `Max-Age=${SECURITY.authCookieTtlSec}`,
+    'HttpOnly',
+    'SameSite=Lax',
+  ];
+  if (secure) {
+    cookieParts.push('Secure');
+  }
+  res.setHeader('Set-Cookie', cookieParts.join('; '));
+}
+
+function clearSessionCookieHeaders(res, req) {
+  const cookieParts = [
+    `${SECURITY.authCookieName}=`,
+    `Path=${SECURITY.authSessionPath}`,
+    'Max-Age=0',
+    'HttpOnly',
+    'SameSite=Lax',
+  ];
+  if (SECURITY.authCookieSecure && requestIsSecure(req)) {
+    cookieParts.push('Secure');
+  }
+  res.setHeader('Set-Cookie', cookieParts.join('; '));
+}
+
+async function handleAuthRoutes(req, res, url) {
+  const isAuthPath = url.pathname === '/auth/login' || url.pathname === '/auth/logout';
+  if (!isAuthPath) return false;
+  if (!SECURITY.authEnabled) {
+    sendJson(res, 404, { error: 'Not found' });
+    return true;
+  }
+  if (url.pathname === '/auth/logout') {
+    if (req.method !== 'POST') {
+      methodNotAllowed(res, 'POST');
+      return true;
+    }
+    clearSessionCookieHeaders(res, req);
+    sendJson(res, 200, { status: 'ok' });
+    return true;
+  }
+  if (url.pathname === '/auth/login') {
+    if (req.method === 'GET') {
+      const nextPath = url.searchParams.get('next') || '/';
+      sendLoginPage(res, nextPath);
+      return true;
+    }
+    if (req.method !== 'POST') {
+      methodNotAllowed(res, 'POST');
+      return true;
+    }
+    const contentType = String(req.headers['content-type'] || '').toLowerCase();
+    if (!contentType.includes(FORM_URLENCODED)) {
+      sendLoginPage(res, '/', 'Unsupported form encoding.', 400);
+      return true;
+    }
+    const body = await readBody(req, 8 * 1024);
+    const form = parseFormBody(body);
+    const nextPath = form.next && form.next.startsWith('/') ? form.next : '/';
+    if (!safeEqual(form.password, SECURITY.authPassword)) {
+      sendLoginPage(res, nextPath, 'Invalid password.', 401);
+      return true;
+    }
+    const token = createSessionToken(SECURITY.authPassword, SECURITY.authCookieTtlSec);
+    setSessionCookieHeaders(res, req, token);
+    res.writeHead(
+      302,
+      withSecurityHeaders({
+        Location: nextPath,
+        'Cache-Control': 'no-store',
+      })
+    );
+    res.end();
+    return true;
+  }
+  return false;
 }
 
 function isAuthorizedRequest(req) {
   if (!SECURITY.authEnabled) return true;
   if (!SECURITY.authCredentialsConfigured) return false;
-  const creds = parseBasicAuth(req);
-  if (!creds) return false;
-  return safeEqual(creds.user, SECURITY.authUser) && safeEqual(creds.pass, SECURITY.authPass);
+  return hasValidSession(req);
 }
 
-function sendAuthChallenge(res) {
-  res.writeHead(
-    401,
-    withSecurityHeaders({
-      'Content-Type': 'application/json; charset=utf-8',
-      'WWW-Authenticate': `Basic realm="${SECURITY.authRealm}"`,
-      'Cache-Control': 'no-store',
-    })
-  );
-  res.end(
-    JSON.stringify(
-      {
-        error: 'Authentication required',
-        message: 'Provide valid dashboard credentials.',
-      },
-      null,
-      2
-    )
-  );
+function normalizeMethod(req) {
+  return String(req.method || 'GET').toUpperCase();
+}
+
+function methodAllowed(req, expected) {
+  const method = normalizeMethod(req);
+  if (expected === 'GET') {
+    return method === 'GET' || method === 'HEAD';
+  }
+  return method === expected;
 }
 
 function methodNotAllowed(res, allowedMethod) {
@@ -247,6 +436,44 @@ function methodNotAllowed(res, allowedMethod) {
     error: 'Method not allowed',
     allowed: allowedMethod,
   });
+}
+
+function isApiPath(pathname) {
+  return typeof pathname === 'string' && pathname.startsWith('/api/');
+}
+
+function shouldUseLoginPage(req, url) {
+  if (isApiPath(url.pathname)) return false;
+  const accept = String(req.headers.accept || '').toLowerCase();
+  return accept.includes('text/html') || url.pathname === '/' || url.pathname === '/production_pivot_dashboard.html';
+}
+
+function redirectToLogin(res, url) {
+  const nextPath = `${url.pathname}${url.search || ''}`;
+  const location = `/auth/login?next=${encodeURIComponent(nextPath)}`;
+  res.writeHead(
+    302,
+    withSecurityHeaders({
+      Location: location,
+      'Cache-Control': 'no-store',
+    })
+  );
+  res.end();
+}
+
+function sendUnauthorizedJson(res) {
+  sendJson(res, 401, {
+    error: 'Authentication required',
+    message: 'Sign in with the dashboard password.',
+  });
+}
+
+function sendLoginRequired(res, req, url) {
+  if (shouldUseLoginPage(req, url)) {
+    redirectToLogin(res, url);
+    return;
+  }
+  sendUnauthorizedJson(res);
 }
 
 function tryParseJson(text, defaultValue = null) {
@@ -1302,15 +1529,27 @@ const server = http.createServer(async (req, res) => {
       status: 'ok',
       auth_enabled: SECURITY.authEnabled,
       auth_credentials_configured: SECURITY.authCredentialsConfigured,
+      auth_method: 'password_cookie',
       write_endpoints_local_only: SECURITY.writeEndpointsLocalOnly,
     });
     return;
   }
 
+  if (await handleAuthRoutes(req, res, url)) {
+    return;
+  }
+
   if (SECURITY.authEnabled) {
+    if (!SECURITY.authCredentialsConfigured) {
+      sendJson(res, 500, {
+        error: 'Authentication misconfigured',
+        message: 'DASH_AUTH_PASSWORD is required when DASH_AUTH_ENABLED=true',
+      });
+      return;
+    }
     const localBypassAllowed = SECURITY.authBypassLocal && requestIsLocal;
     if (!localBypassAllowed && !isAuthorizedRequest(req)) {
-      sendAuthChallenge(res);
+      sendLoginRequired(res, req, url);
       return;
     }
   }
@@ -1324,7 +1563,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/api/market') {
-    if (req.method !== 'GET') {
+    if (!methodAllowed(req, 'GET')) {
       methodNotAllowed(res, 'GET');
       return;
     }
@@ -1358,7 +1597,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/api/gamma') {
-    if (req.method !== 'GET') {
+    if (!methodAllowed(req, 'GET')) {
       methodNotAllowed(res, 'GET');
       return;
     }
@@ -1379,7 +1618,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/api/ib/market') {
-    if (req.method !== 'GET') {
+    if (!methodAllowed(req, 'GET')) {
       methodNotAllowed(res, 'GET');
       return;
     }
@@ -1400,7 +1639,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/api/ib/spot') {
-    if (req.method !== 'GET') {
+    if (!methodAllowed(req, 'GET')) {
       methodNotAllowed(res, 'GET');
       return;
     }
@@ -1416,7 +1655,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/api/ml/metrics') {
-    if (req.method !== 'GET') {
+    if (!methodAllowed(req, 'GET')) {
       methodNotAllowed(res, 'GET');
       return;
     }
@@ -1442,7 +1681,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/api/ml/health') {
-    if (req.method !== 'GET') {
+    if (!methodAllowed(req, 'GET')) {
       methodNotAllowed(res, 'GET');
       return;
     }
@@ -1456,7 +1695,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/api/live/health') {
-    if (req.method !== 'GET') {
+    if (!methodAllowed(req, 'GET')) {
       methodNotAllowed(res, 'GET');
       return;
     }
@@ -1470,7 +1709,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/api/ops/status') {
-    if (req.method !== 'GET') {
+    if (!methodAllowed(req, 'GET')) {
       methodNotAllowed(res, 'GET');
       return;
     }
@@ -1487,8 +1726,8 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/api/ml/reload') {
-    if (req.method !== 'POST') {
-      sendJson(res, 405, { error: 'Method not allowed' });
+    if (!methodAllowed(req, 'POST')) {
+      methodNotAllowed(res, 'POST');
       return;
     }
     try {
@@ -1501,8 +1740,8 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/api/ml/score') {
-    if (req.method !== 'POST') {
-      sendJson(res, 405, { error: 'Method not allowed' });
+    if (!methodAllowed(req, 'POST')) {
+      methodNotAllowed(res, 'POST');
       return;
     }
     try {
@@ -1517,7 +1756,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/api/events') {
-    if (req.method !== 'POST') {
+    if (!methodAllowed(req, 'POST')) {
       methodNotAllowed(res, 'POST');
       return;
     }
@@ -1534,7 +1773,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/api/bars') {
-    if (req.method !== 'POST') {
+    if (!methodAllowed(req, 'POST')) {
       methodNotAllowed(res, 'POST');
       return;
     }
@@ -1551,7 +1790,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/api/daily-candles') {
-    if (req.method !== 'GET') {
+    if (!methodAllowed(req, 'GET')) {
       methodNotAllowed(res, 'GET');
       return;
     }
@@ -1570,8 +1809,8 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/api/levels/convert') {
-    if (req.method !== 'POST') {
-      sendJson(res, 405, { error: 'Method not allowed' });
+    if (!methodAllowed(req, 'POST')) {
+      methodNotAllowed(res, 'POST');
       return;
     }
     try {
@@ -1670,7 +1909,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/api/levels') {
-    if (req.method !== 'GET') {
+    if (!methodAllowed(req, 'GET')) {
       methodNotAllowed(res, 'GET');
       return;
     }
@@ -1689,21 +1928,21 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/static/lightweight-charts.js') {
-    if (req.method !== 'GET') {
+    if (!methodAllowed(req, 'GET')) {
       methodNotAllowed(res, 'GET');
       return;
     }
     if (fs.existsSync(LOCAL_CHART_PATH)) {
       sendJs(res, LOCAL_CHART_PATH);
     } else {
-      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.writeHead(404, withSecurityHeaders({ 'Content-Type': 'text/plain' }));
       res.end('lightweight-charts not installed');
     }
     return;
   }
 
   if (url.pathname === '/' || url.pathname === '/production_pivot_dashboard.html') {
-    if (req.method !== 'GET') {
+    if (!methodAllowed(req, 'GET')) {
       methodNotAllowed(res, 'GET');
       return;
     }

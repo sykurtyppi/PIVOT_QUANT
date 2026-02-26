@@ -301,12 +301,12 @@ class OpsSmokeTests(unittest.TestCase):
     def test_dashboard_proxy_public_auth_and_endpoint_hardening_present(self) -> None:
         proxy_source = (REPO_ROOT / "server" / "yahoo_proxy.js").read_text(encoding="utf-8")
         self.assertIn("DASH_AUTH_ENABLED", proxy_source)
-        self.assertIn("DASH_AUTH_USER", proxy_source)
-        self.assertIn("DASH_AUTH_PASS", proxy_source)
+        self.assertIn("DASH_AUTH_PASSWORD", proxy_source)
         self.assertIn("DASH_WRITE_ENDPOINTS_LOCAL_ONLY", proxy_source)
         self.assertIn("WRITE_ENDPOINTS", proxy_source)
-        self.assertIn("sendAuthChallenge", proxy_source)
-        self.assertIn("WWW-Authenticate", proxy_source)
+        self.assertIn("handleAuthRoutes", proxy_source)
+        self.assertIn("url.pathname === '/auth/login'", proxy_source)
+        self.assertIn("auth_method: 'password_cookie'", proxy_source)
         self.assertIn("x-forwarded-for", proxy_source)
         self.assertIn("url.pathname === '/health'", proxy_source)
 
