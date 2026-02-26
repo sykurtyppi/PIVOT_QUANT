@@ -2089,6 +2089,7 @@
             mlMetricsTimer: null,
             mlServiceStatus: 'checking',
             mlServiceMessage: 'Checking ML service health.',
+            mlScoreWriteBlocked: false,
             collectorServiceStatus: 'checking',
             collectorServiceMessage: 'Checking live collector health.',
             mlCoverageSupported: true,
@@ -5101,6 +5102,9 @@
             if (!events?.length) {
                 return { ok: true, inserted: 0 };
             }
+            if (state.mlScoreWriteBlocked) {
+                return { ok: true, inserted: 0, skipped: true };
+            }
             const apiUrl = `${getApiOrigin()}/api/events`;
             try {
                 const payload = await postJson(apiUrl, { events }, 8000);
@@ -5140,6 +5144,19 @@
                     signal: controller ? controller.signal : undefined,
                 });
                 if (!response.ok) {
+                    if (response.status === 403) {
+                        state.mlScoreWriteBlocked = true;
+                        setMlServiceState('degraded', 'Remote read-only mode: score endpoint blocked by policy.');
+                        updateMlPanel(null);
+                        return;
+                    }
+                    if (response.status === 401) {
+                        state.mlScoreWriteBlocked = false;
+                        setMlServiceState('offline', 'Dashboard auth session expired. Sign in again.');
+                        updateMlPanel(null);
+                        return;
+                    }
+                    state.mlScoreWriteBlocked = false;
                     setMlServiceState('offline', `Score endpoint HTTP ${response.status}`);
                     updateMlPanel(null);
                     return;
@@ -5153,6 +5170,7 @@
                     updateMlPanel(null);
                     return;
                 }
+                state.mlScoreWriteBlocked = false;
                 panelPayload.preview = Boolean(event.preview);
                 panelPayload.preview_level = event.level_type;
                 panelPayload.preview_distance_bps = event.distance_bps;
@@ -5168,6 +5186,23 @@
                 trackMlScore(panelPayload);
             } catch (error) {
                 console.warn('ML score failed', error);
+                const status = Number(error?.status || 0);
+                if (status === 403) {
+                    state.mlScoreWriteBlocked = true;
+                    setMlServiceState(
+                        'degraded',
+                        error?.detailMessage || 'Remote read-only mode: score endpoint blocked by policy.'
+                    );
+                    updateMlPanel(null);
+                    return;
+                }
+                if (status === 401) {
+                    state.mlScoreWriteBlocked = false;
+                    setMlServiceState('offline', 'Dashboard auth session expired. Sign in again.');
+                    updateMlPanel(null);
+                    return;
+                }
+                state.mlScoreWriteBlocked = false;
                 const reason = error?.name === 'AbortError'
                     ? 'ML score timeout (2.5s)'
                     : (error?.message || 'Unknown ML score error');
@@ -5598,6 +5633,8 @@
                     ? 'ML Online'
                     : status === 'offline'
                         ? 'ML Offline'
+                        : status === 'degraded'
+                            ? 'ML Read-Only'
                         : 'ML Checking';
                 if (message) {
                     pill.title = message;
@@ -5609,6 +5646,8 @@
             if (prevStatus !== 'checking' && prevStatus !== status) {
                 if (status === 'offline') {
                     showToast('ML scoring service is unreachable. Predictions paused.', 'warning', { title: 'ML Offline' });
+                } else if (status === 'degraded') {
+                    showToast('ML scoring is read-only from this remote session.', 'info', { title: 'ML Read-Only' });
                 } else if (status === 'online' && prevStatus === 'offline') {
                     showToast('ML scoring service reconnected.', 'success', { title: 'ML Online' });
                 }
@@ -5894,6 +5933,9 @@
                 } else if (state.mlServiceStatus === 'checking') {
                     status.textContent = 'Checking ML service';
                     detail.textContent = 'Waiting for ML health response';
+                } else if (state.mlServiceStatus === 'degraded') {
+                    status.textContent = 'ML scoring restricted';
+                    detail.textContent = state.mlServiceMessage || 'Read-only mode: scoring endpoint is blocked.';
                 } else {
                     status.textContent = 'Waiting for touch';
                     detail.textContent = 'No ML score yet. Monitoring preview/touch events.';
@@ -6063,7 +6105,11 @@
             try {
                 const payload = await fetchJson(apiUrl, 5000);
                 state.mlMeta = payload?.manifest || null;
-                setMlServiceState('online');
+                if (state.mlScoreWriteBlocked) {
+                    setMlServiceState('degraded', state.mlServiceMessage || 'Remote read-only mode: score endpoint blocked by policy.');
+                } else {
+                    setMlServiceState('online');
+                }
                 updateMlMetaFields(state.mlMeta);
                 updateHealthWidget();
             } catch (error) {
