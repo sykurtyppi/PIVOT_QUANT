@@ -150,7 +150,7 @@
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(172px, 1fr));
             gap: 10px;
-            align-items: end;
+            align-items: start;
         }
 
         .controls-advanced {
@@ -219,6 +219,17 @@
             color: var(--muted);
         }
 
+        .control.control-data {
+            align-items: flex-start;
+        }
+
+        .control-actions-inline {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
         .control-note {
             font-size: 10px;
             color: var(--muted);
@@ -256,6 +267,12 @@
             padding: 9px 12px;
             border-radius: 10px;
             cursor: pointer;
+        }
+
+        .control-actions-inline #refresh-btn {
+            border-radius: 999px;
+            padding: 8px 14px;
+            min-width: 132px;
         }
 
         .control button.secondary-btn {
@@ -829,7 +846,7 @@
         }
 
         .refresh-meta {
-            margin-top: 6px;
+            margin-top: 2px;
             font-size: 11px;
             color: var(--muted);
             min-height: 16px;
@@ -839,14 +856,16 @@
         }
 
         .advanced-chip {
-            margin-top: 6px;
-            align-self: flex-start;
+            margin-top: 0;
+            align-self: auto;
+            display: inline-flex;
+            align-items: center;
             border: 1px solid rgba(148, 163, 184, 0.24);
             background: rgba(15, 23, 42, 0.58);
             color: var(--muted);
             border-radius: 999px;
-            padding: 4px 9px;
-            font-size: 11px;
+            padding: 8px 11px;
+            font-size: 12px;
             font-weight: 600;
             cursor: pointer;
             transition: border-color 0.15s, color 0.15s, background 0.15s;
@@ -1564,11 +1583,13 @@
                     <label for="session-select">Trading Session</label>
                     <select id="session-select"></select>
                 </div>
-                <div class="control">
+                <div class="control control-data">
                     <label for="refresh-btn">Data</label>
-                    <button id="refresh-btn" type="button">Refresh Data</button>
+                    <div class="control-actions-inline">
+                        <button id="refresh-btn" type="button">Refresh Data</button>
+                        <button id="advanced-chip" class="advanced-chip" type="button" aria-controls="advanced-controls" aria-expanded="false">Advanced (0)</button>
+                    </div>
                     <div id="refresh-meta" class="refresh-meta">Last sync: --</div>
-                    <button id="advanced-chip" class="advanced-chip" type="button" aria-controls="advanced-controls" aria-expanded="false">Advanced (0)</button>
                 </div>
             </div>
 
