@@ -35,6 +35,52 @@ tail -f logs/launchd.out.log logs/launchd.err.log logs/dashboard.log logs/ml_ser
 - `http://<AIR_LAN_IP>:3000`
 - `http://<AIR_LOCAL_HOSTNAME>.local:3000`
 
+## 3b) Public URL sharing via Tailscale Funnel (hardened)
+
+If you want an always-shareable internet URL, add auth first:
+
+```bash
+cd /Users/tristanalejandro/PIVOT_QUANT
+grep -q '^DASH_AUTH_ENABLED=' .env && sed -i '' 's/^DASH_AUTH_ENABLED=.*/DASH_AUTH_ENABLED=true/' .env || echo 'DASH_AUTH_ENABLED=true' >> .env
+grep -q '^DASH_AUTH_USER=' .env && sed -i '' 's/^DASH_AUTH_USER=.*/DASH_AUTH_USER=viewer/' .env || echo 'DASH_AUTH_USER=viewer' >> .env
+grep -q '^DASH_AUTH_PASS=' .env && sed -i '' 's/^DASH_AUTH_PASS=.*/DASH_AUTH_PASS=replace_with_long_random_password/' .env || echo 'DASH_AUTH_PASS=replace_with_long_random_password' >> .env
+grep -q '^DASH_WRITE_ENDPOINTS_LOCAL_ONLY=' .env && sed -i '' 's/^DASH_WRITE_ENDPOINTS_LOCAL_ONLY=.*/DASH_WRITE_ENDPOINTS_LOCAL_ONLY=true/' .env || echo 'DASH_WRITE_ENDPOINTS_LOCAL_ONLY=true' >> .env
+```
+
+Restart dashboard service so settings apply:
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.pivotquant.dashboard
+```
+
+Quick verification:
+
+```bash
+# local bypass should still work
+curl -fsS http://127.0.0.1:3000/health | python3 -m json.tool
+
+# external/LAN requests should return 401 without credentials
+curl -i http://$(hostname -s).local:3000/ | head -n 10
+```
+
+Enable Funnel and get the public URL:
+
+```bash
+tailscale funnel --bg 3000
+tailscale funnel status
+```
+
+Disable Funnel:
+
+```bash
+tailscale funnel --https=443 off
+```
+
+Notes:
+- Friends must use `DASH_AUTH_USER` / `DASH_AUTH_PASS`.
+- With `DASH_WRITE_ENDPOINTS_LOCAL_ONLY=true`, external viewers cannot hit write/mutation endpoints.
+- Keep the password long and rotate it if shared widely.
+
 ## 4) If launchctl reports `Bootstrap failed: 5`
 
 Run this exactly on the host:

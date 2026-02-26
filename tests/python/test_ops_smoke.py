@@ -298,6 +298,18 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(len(payload["levels"]), 2)
         self.assertAlmostEqual(float(payload["levels"][0]["value"]), 5000.0, places=8)
 
+    def test_dashboard_proxy_public_auth_and_endpoint_hardening_present(self) -> None:
+        proxy_source = (REPO_ROOT / "server" / "yahoo_proxy.js").read_text(encoding="utf-8")
+        self.assertIn("DASH_AUTH_ENABLED", proxy_source)
+        self.assertIn("DASH_AUTH_USER", proxy_source)
+        self.assertIn("DASH_AUTH_PASS", proxy_source)
+        self.assertIn("DASH_WRITE_ENDPOINTS_LOCAL_ONLY", proxy_source)
+        self.assertIn("WRITE_ENDPOINTS", proxy_source)
+        self.assertIn("sendAuthChallenge", proxy_source)
+        self.assertIn("WWW-Authenticate", proxy_source)
+        self.assertIn("x-forwarded-for", proxy_source)
+        self.assertIn("url.pathname === '/health'", proxy_source)
+
     def test_session_routine_contract_present(self) -> None:
         installer = (REPO_ROOT / "scripts" / "install_session_routine_launch_agent.sh").read_text(
             encoding="utf-8"

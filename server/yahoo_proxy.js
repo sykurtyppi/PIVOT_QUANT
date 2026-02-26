@@ -2,6 +2,7 @@ import http from 'http';
 import https from 'https';
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { buildConversionSnapshot, convertLevels, normalizeInstrument } from './level_converter.js';
 
@@ -61,6 +62,15 @@ const symbolMap = new Map([
 const cache = new Map();
 const levelConversionSnapshotCache = new Map();
 const levelConversionResultCache = new Map();
+const WRITE_ENDPOINTS = new Set(['/api/ml/reload', '/api/ml/score', '/api/events', '/api/bars']);
+const RESPONSE_SECURITY_HEADERS = Object.freeze({
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+  'Referrer-Policy': 'no-referrer',
+  'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+});
+const ENV_FILE_VALUES = loadEnvMap(ENV_FILE);
+const SECURITY = buildSecurityConfig(process.env, ENV_FILE_VALUES);
 
 /**
  * LRU cache eviction: remove expired entries first, then oldest if over limit.
@@ -107,6 +117,136 @@ function writeTimedCache(map, key, data, ttlMs, maxSize) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseBool(value, fallback = false) {
+  if (value == null || value === '') return fallback;
+  const normalized = String(value).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  return fallback;
+}
+
+function readSetting(procEnv, fileEnv, key, fallback = '') {
+  if (typeof procEnv?.[key] === 'string' && procEnv[key] !== '') {
+    return procEnv[key];
+  }
+  if (typeof fileEnv?.[key] === 'string' && fileEnv[key] !== '') {
+    return fileEnv[key];
+  }
+  return fallback;
+}
+
+function buildSecurityConfig(procEnv = process.env, fileEnv = {}) {
+  const authUser = readSetting(procEnv, fileEnv, 'DASH_AUTH_USER', '').trim();
+  const authPass = readSetting(procEnv, fileEnv, 'DASH_AUTH_PASS', '').trim();
+  const authEnabledFlag = parseBool(readSetting(procEnv, fileEnv, 'DASH_AUTH_ENABLED', ''), false);
+  const authCredentialsConfigured = authUser.length > 0 && authPass.length > 0;
+  return {
+    authEnabled: authEnabledFlag || authCredentialsConfigured,
+    authCredentialsConfigured,
+    authUser,
+    authPass,
+    authRealm: readSetting(procEnv, fileEnv, 'DASH_AUTH_REALM', 'PivotQuant Dashboard'),
+    authBypassLocal: parseBool(readSetting(procEnv, fileEnv, 'DASH_AUTH_LOCAL_BYPASS', 'true'), true),
+    writeEndpointsLocalOnly: parseBool(
+      readSetting(procEnv, fileEnv, 'DASH_WRITE_ENDPOINTS_LOCAL_ONLY', 'true'),
+      true
+    ),
+  };
+}
+
+function withSecurityHeaders(headers = {}) {
+  return {
+    ...RESPONSE_SECURITY_HEADERS,
+    ...headers,
+  };
+}
+
+function normalizeRemoteAddress(value) {
+  if (typeof value !== 'string') return '';
+  if (value.startsWith('::ffff:')) {
+    return value.slice(7);
+  }
+  return value;
+}
+
+function isLoopbackAddress(addr) {
+  const normalized = normalizeRemoteAddress(addr);
+  return normalized === '127.0.0.1' || normalized === '::1';
+}
+
+function isLoopbackRequest(req) {
+  const remoteAddress = req?.socket?.remoteAddress || '';
+  if (!isLoopbackAddress(remoteAddress)) {
+    return false;
+  }
+  // Funnel/Serve traffic often arrives through a local proxy with forwarded headers.
+  const forwardedFor = String(req?.headers?.['x-forwarded-for'] || '').trim();
+  return forwardedFor.length === 0;
+}
+
+function safeEqual(left, right) {
+  const leftBuf = Buffer.from(String(left || ''), 'utf8');
+  const rightBuf = Buffer.from(String(right || ''), 'utf8');
+  if (leftBuf.length !== rightBuf.length) {
+    return false;
+  }
+  return crypto.timingSafeEqual(leftBuf, rightBuf);
+}
+
+function parseBasicAuth(req) {
+  const header = String(req?.headers?.authorization || '');
+  if (!header.startsWith('Basic ')) return null;
+  const encoded = header.slice(6).trim();
+  if (!encoded) return null;
+  try {
+    const decoded = Buffer.from(encoded, 'base64').toString('utf8');
+    const splitAt = decoded.indexOf(':');
+    if (splitAt < 0) return null;
+    return {
+      user: decoded.slice(0, splitAt),
+      pass: decoded.slice(splitAt + 1),
+    };
+  } catch (_error) {
+    return null;
+  }
+}
+
+function isAuthorizedRequest(req) {
+  if (!SECURITY.authEnabled) return true;
+  if (!SECURITY.authCredentialsConfigured) return false;
+  const creds = parseBasicAuth(req);
+  if (!creds) return false;
+  return safeEqual(creds.user, SECURITY.authUser) && safeEqual(creds.pass, SECURITY.authPass);
+}
+
+function sendAuthChallenge(res) {
+  res.writeHead(
+    401,
+    withSecurityHeaders({
+      'Content-Type': 'application/json; charset=utf-8',
+      'WWW-Authenticate': `Basic realm="${SECURITY.authRealm}"`,
+      'Cache-Control': 'no-store',
+    })
+  );
+  res.end(
+    JSON.stringify(
+      {
+        error: 'Authentication required',
+        message: 'Provide valid dashboard credentials.',
+      },
+      null,
+      2
+    )
+  );
+}
+
+function methodNotAllowed(res, allowedMethod) {
+  sendJson(res, 405, {
+    error: 'Method not allowed',
+    allowed: allowedMethod,
+  });
 }
 
 function tryParseJson(text, defaultValue = null) {
@@ -584,11 +724,10 @@ async function getLevelConversionSnapshot(mode) {
 }
 
 function sendJson(res, statusCode, payload) {
-  res.writeHead(statusCode, {
+  res.writeHead(statusCode, withSecurityHeaders({
     'Content-Type': 'application/json; charset=utf-8',
-    'Access-Control-Allow-Origin': '*',
     'Cache-Control': 'no-store',
-  });
+  }));
   res.end(JSON.stringify(payload, null, 2));
 }
 
@@ -614,16 +753,16 @@ function sendProxyError(res, error, fallbackError, fallbackStatus = 502) {
 function sendFile(res, filePath) {
   fs.readFile(filePath, (error, data) => {
     if (error) {
-      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.writeHead(404, withSecurityHeaders({ 'Content-Type': 'text/plain' }));
       res.end('Not found');
       return;
     }
-    res.writeHead(200, {
+    res.writeHead(200, withSecurityHeaders({
       'Content-Type': 'text/html; charset=utf-8',
       'Cache-Control': 'no-store',
       Pragma: 'no-cache',
       Expires: '0',
-    });
+    }));
     res.end(data);
   });
 }
@@ -631,15 +770,14 @@ function sendFile(res, filePath) {
 function sendJs(res, filePath) {
   fs.readFile(filePath, (error, data) => {
     if (error) {
-      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.writeHead(404, withSecurityHeaders({ 'Content-Type': 'text/plain' }));
       res.end('Not found');
       return;
     }
-    res.writeHead(200, {
+    res.writeHead(200, withSecurityHeaders({
       'Content-Type': 'application/javascript; charset=utf-8',
       'Cache-Control': 'no-store',
-      'Access-Control-Allow-Origin': '*',
-    });
+    }));
     res.end(data);
   });
 }
@@ -1155,9 +1293,41 @@ function queryLevelStatsFromExports(symbol, _limit) {
 }
 
 const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url || '/', `http://${req.headers.host}`);
+  const hostHeader = req.headers.host || `127.0.0.1:${PORT}`;
+  const url = new URL(req.url || '/', `http://${hostHeader}`);
+  const requestIsLocal = isLoopbackRequest(req);
+
+  if (url.pathname === '/health') {
+    sendJson(res, 200, {
+      status: 'ok',
+      auth_enabled: SECURITY.authEnabled,
+      auth_credentials_configured: SECURITY.authCredentialsConfigured,
+      write_endpoints_local_only: SECURITY.writeEndpointsLocalOnly,
+    });
+    return;
+  }
+
+  if (SECURITY.authEnabled) {
+    const localBypassAllowed = SECURITY.authBypassLocal && requestIsLocal;
+    if (!localBypassAllowed && !isAuthorizedRequest(req)) {
+      sendAuthChallenge(res);
+      return;
+    }
+  }
+
+  if (SECURITY.writeEndpointsLocalOnly && WRITE_ENDPOINTS.has(url.pathname) && !requestIsLocal) {
+    sendJson(res, 403, {
+      error: 'Forbidden',
+      message: 'This endpoint is restricted to local requests.',
+    });
+    return;
+  }
 
   if (url.pathname === '/api/market') {
+    if (req.method !== 'GET') {
+      methodNotAllowed(res, 'GET');
+      return;
+    }
     try {
       const source = (url.searchParams.get('source') || 'yahoo').toLowerCase();
       const symbol = url.searchParams.get('symbol');
@@ -1188,6 +1358,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/api/gamma') {
+    if (req.method !== 'GET') {
+      methodNotAllowed(res, 'GET');
+      return;
+    }
     try {
       const symbol = url.searchParams.get('symbol') || 'SPX';
       const expiry = url.searchParams.get('expiry') || 'front';
@@ -1205,6 +1379,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/api/ib/market') {
+    if (req.method !== 'GET') {
+      methodNotAllowed(res, 'GET');
+      return;
+    }
     try {
       const symbol = url.searchParams.get('symbol') || 'SPX';
       const interval = url.searchParams.get('interval') || '1d';
@@ -1222,6 +1400,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/api/ib/spot') {
+    if (req.method !== 'GET') {
+      methodNotAllowed(res, 'GET');
+      return;
+    }
     try {
       const symbol = url.searchParams.get('symbol') || 'SPX';
       const ibUrl = `http://127.0.0.1:5001/spot?symbol=${encodeURIComponent(symbol)}`;
@@ -1234,6 +1416,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/api/ml/metrics') {
+    if (req.method !== 'GET') {
+      methodNotAllowed(res, 'GET');
+      return;
+    }
     try {
       const metrics = readJsonFile(METRICS_FILE);
       const calib = readJsonFile(CALIB_FILE);
@@ -1256,6 +1442,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/api/ml/health') {
+    if (req.method !== 'GET') {
+      methodNotAllowed(res, 'GET');
+      return;
+    }
     try {
       const data = await fetchLocalJson('http://127.0.0.1:5003/health');
       sendJson(res, 200, data);
@@ -1266,6 +1456,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/api/live/health') {
+    if (req.method !== 'GET') {
+      methodNotAllowed(res, 'GET');
+      return;
+    }
     try {
       const data = await fetchLocalJson('http://127.0.0.1:5004/health');
       sendJson(res, 200, data);
@@ -1276,6 +1470,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/api/ops/status') {
+    if (req.method !== 'GET') {
+      methodNotAllowed(res, 'GET');
+      return;
+    }
     try {
       const data = await queryOpsStatus();
       sendJson(res, 200, data);
@@ -1319,6 +1517,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/api/events') {
+    if (req.method !== 'POST') {
+      methodNotAllowed(res, 'POST');
+      return;
+    }
     try {
       const body = await readBody(req);
       const payload = body ? JSON.parse(body) : {};
@@ -1332,6 +1534,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/api/bars') {
+    if (req.method !== 'POST') {
+      methodNotAllowed(res, 'POST');
+      return;
+    }
     try {
       const body = await readBody(req);
       const payload = body ? JSON.parse(body) : {};
@@ -1345,6 +1551,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/api/daily-candles') {
+    if (req.method !== 'GET') {
+      methodNotAllowed(res, 'GET');
+      return;
+    }
     try {
       const symbol = url.searchParams.get('symbol') || 'SPY';
       const limit = Math.min(Number(url.searchParams.get('limit') || 200), 500);
@@ -1460,6 +1670,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/api/levels') {
+    if (req.method !== 'GET') {
+      methodNotAllowed(res, 'GET');
+      return;
+    }
     try {
       const symbol = url.searchParams.get('symbol') || 'SPX';
       const limit = Math.min(Number(url.searchParams.get('limit') || 50), 200);
@@ -1475,6 +1689,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/static/lightweight-charts.js') {
+    if (req.method !== 'GET') {
+      methodNotAllowed(res, 'GET');
+      return;
+    }
     if (fs.existsSync(LOCAL_CHART_PATH)) {
       sendJs(res, LOCAL_CHART_PATH);
     } else {
@@ -1485,17 +1703,25 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/' || url.pathname === '/production_pivot_dashboard.html') {
+    if (req.method !== 'GET') {
+      methodNotAllowed(res, 'GET');
+      return;
+    }
     sendFile(res, DASHBOARD_FILE);
     return;
   }
 
-  res.writeHead(404, { 'Content-Type': 'text/plain' });
+  res.writeHead(404, withSecurityHeaders({ 'Content-Type': 'text/plain' }));
   res.end('Not found');
 });
 
 server.listen(PORT, HOST, () => {
   /* eslint-disable-next-line no-console */
   console.log(`Pivot dashboard server running at http://${HOST}:${PORT}`);
+  /* eslint-disable-next-line no-console */
+  console.log(
+    `[security] auth_enabled=${SECURITY.authEnabled} auth_credentials_configured=${SECURITY.authCredentialsConfigured} auth_local_bypass=${SECURITY.authBypassLocal} write_endpoints_local_only=${SECURITY.writeEndpointsLocalOnly}`
+  );
 });
 
 // --- Graceful shutdown & crash guards ---
