@@ -460,7 +460,7 @@ def main() -> None:
     if args.csv and records:
         export_csv(records, args.csv_path)
 
-    horizons = [args.horizon] if args.horizon else [5, 15, 60]
+    horizons = [args.horizon] if args.horizon else [5, 15, 30, 60]
     for h in horizons:
         metrics = compute_metrics(
             records,

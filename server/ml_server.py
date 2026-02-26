@@ -34,6 +34,11 @@ LEGACY_CANDIDATE_MANIFEST = "manifest_latest.json"
 HOST = os.getenv("ML_SERVER_BIND", "127.0.0.1")
 PORT = int(os.getenv("ML_SERVER_PORT", "5003"))
 STALE_MODEL_HOURS = int(os.getenv("STALE_MODEL_HOURS", "48"))
+ML_SHADOW_HORIZONS = {
+    int(h.strip())
+    for h in os.getenv("ML_SHADOW_HORIZONS", "30").split(",")
+    if h.strip().isdigit()
+}
 PREDICTION_LOG_DB = Path(os.getenv(
     "PREDICTION_LOG_DB",
     str(ROOT / "data" / "pivot_events.sqlite"),
@@ -174,11 +179,11 @@ def _log_prediction(event: dict, result: dict) -> None:
                 ts_prediction INTEGER NOT NULL,
                 model_version TEXT, feature_version TEXT,
                 best_horizon INTEGER, abstain INTEGER NOT NULL DEFAULT 0,
-                signal_5m TEXT, signal_15m TEXT, signal_60m TEXT,
-                prob_reject_5m REAL, prob_reject_15m REAL, prob_reject_60m REAL,
-                prob_break_5m REAL, prob_break_15m REAL, prob_break_60m REAL,
-                threshold_reject_5m REAL, threshold_reject_15m REAL, threshold_reject_60m REAL,
-                threshold_break_5m REAL, threshold_break_15m REAL, threshold_break_60m REAL,
+                signal_5m TEXT, signal_15m TEXT, signal_30m TEXT, signal_60m TEXT,
+                prob_reject_5m REAL, prob_reject_15m REAL, prob_reject_30m REAL, prob_reject_60m REAL,
+                prob_break_5m REAL, prob_break_15m REAL, prob_break_30m REAL, prob_break_60m REAL,
+                threshold_reject_5m REAL, threshold_reject_15m REAL, threshold_reject_30m REAL, threshold_reject_60m REAL,
+                threshold_break_5m REAL, threshold_break_15m REAL, threshold_break_30m REAL, threshold_break_60m REAL,
                 quality_flags TEXT,
                 is_preview INTEGER NOT NULL DEFAULT 0,
                 UNIQUE(event_id, model_version)
@@ -192,6 +197,16 @@ def _log_prediction(event: dict, result: dict) -> None:
                 "ALTER TABLE prediction_log "
                 "ADD COLUMN is_preview INTEGER NOT NULL DEFAULT 0"
             )
+        compat_cols = {
+            "signal_30m": "TEXT",
+            "prob_reject_30m": "REAL",
+            "prob_break_30m": "REAL",
+            "threshold_reject_30m": "REAL",
+            "threshold_break_30m": "REAL",
+        }
+        for col_name, col_type in compat_cols.items():
+            if col_name not in pred_cols:
+                conn.execute(f"ALTER TABLE prediction_log ADD COLUMN {col_name} {col_type}")
 
         scores = result.get("scores", {})
         signals = result.get("signals", {})
@@ -202,13 +217,13 @@ def _log_prediction(event: dict, result: dict) -> None:
             """INSERT OR IGNORE INTO prediction_log (
                 event_id, ts_prediction, model_version, feature_version,
                 best_horizon, abstain,
-                signal_5m, signal_15m, signal_60m,
-                prob_reject_5m, prob_reject_15m, prob_reject_60m,
-                prob_break_5m, prob_break_15m, prob_break_60m,
-                threshold_reject_5m, threshold_reject_15m, threshold_reject_60m,
-                threshold_break_5m, threshold_break_15m, threshold_break_60m,
+                signal_5m, signal_15m, signal_30m, signal_60m,
+                prob_reject_5m, prob_reject_15m, prob_reject_30m, prob_reject_60m,
+                prob_break_5m, prob_break_15m, prob_break_30m, prob_break_60m,
+                threshold_reject_5m, threshold_reject_15m, threshold_reject_30m, threshold_reject_60m,
+                threshold_break_5m, threshold_break_15m, threshold_break_30m, threshold_break_60m,
                 quality_flags, is_preview
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 event_id,
                 int(time.time() * 1000),
@@ -218,18 +233,23 @@ def _log_prediction(event: dict, result: dict) -> None:
                 1 if result.get("abstain") else 0,
                 signals.get("signal_5m"),
                 signals.get("signal_15m"),
+                signals.get("signal_30m"),
                 signals.get("signal_60m"),
                 scores.get("prob_reject_5m"),
                 scores.get("prob_reject_15m"),
+                scores.get("prob_reject_30m"),
                 scores.get("prob_reject_60m"),
                 scores.get("prob_break_5m"),
                 scores.get("prob_break_15m"),
+                scores.get("prob_break_30m"),
                 scores.get("prob_break_60m"),
                 thresholds.get("threshold_reject_5m"),
                 thresholds.get("threshold_reject_15m"),
+                thresholds.get("threshold_reject_30m"),
                 thresholds.get("threshold_reject_60m"),
                 thresholds.get("threshold_break_5m"),
                 thresholds.get("threshold_break_15m"),
+                thresholds.get("threshold_break_30m"),
                 thresholds.get("threshold_break_60m"),
                 json.dumps(result.get("quality_flags", [])),
                 is_preview,
@@ -388,8 +408,11 @@ def _score_event(event: dict):
         set(registry.models.get("reject", {}).keys())
         .union(registry.models.get("break", {}).keys())
     )
+    scored_horizons = [h for h in all_horizons if h not in ML_SHADOW_HORIZONS]
+    if not scored_horizons:
+        scored_horizons = list(all_horizons)
 
-    for horizon in all_horizons:
+    for horizon in scored_horizons:
         pr = scores.get(f"prob_reject_{horizon}m")
         pb = scores.get(f"prob_break_{horizon}m")
         if pr is None and pb is None:
@@ -467,7 +490,10 @@ def _score_event(event: dict):
             best_horizon = horizon
 
     # ── Abstain flag: true when no horizon has a directional signal ──
-    has_signal = any(v in ("reject", "break") for v in signals.values())
+    has_signal = any(
+        signals.get(f"signal_{h}m") in ("reject", "break")
+        for h in scored_horizons
+    )
 
     return {
         "status": "degraded" if missing else "ok",

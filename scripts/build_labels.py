@@ -7,7 +7,7 @@ import sqlite3
 from typing import Iterable
 
 DEFAULT_DB = os.getenv("PIVOT_DB", "data/pivot_events.sqlite")
-DEFAULT_HORIZONS = [5, 15, 60]
+DEFAULT_HORIZONS = [5, 15, 30, 60]
 
 
 def connect(db_path: str) -> sqlite3.Connection:

@@ -330,6 +330,19 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn('ENV_FILE="${ROOT_DIR}/.env"', retrain_script)
         self.assertIn("load_env_file()", retrain_script)
         self.assertIn('load_env_file "${ENV_FILE}"', retrain_script)
+        self.assertIn("--horizons 5 15 30 60 --incremental", retrain_script)
+
+    def test_30m_shadow_horizon_contract_present(self) -> None:
+        ml_server = (REPO_ROOT / "server" / "ml_server.py").read_text(encoding="utf-8")
+        self.assertIn("ML_SHADOW_HORIZONS", ml_server)
+        self.assertIn("signal_30m", ml_server)
+        self.assertIn("prob_reject_30m", ml_server)
+        self.assertIn("threshold_break_30m", ml_server)
+
+        migrate_db = (REPO_ROOT / "scripts" / "migrate_db.py").read_text(encoding="utf-8")
+        self.assertIn("LATEST_SCHEMA_VERSION = 5", migrate_db)
+        self.assertIn("migration_5_prediction_log_shadow_30m", migrate_db)
+        self.assertIn("signal_30m", migrate_db)
 
     def test_model_governance_skips_regression_gates_when_support_is_low(self) -> None:
         module = load_module("model_governance", REPO_ROOT / "scripts" / "model_governance.py")

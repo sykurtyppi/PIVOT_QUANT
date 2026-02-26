@@ -50,6 +50,16 @@ REGULAR_SESSION_OPEN_ET = dtime(9, 30)
 REGULAR_SESSION_CLOSE_ET = dtime(16, 0)
 SESSION_STALE_WARN_HOURS = float(os.getenv("ML_STALENESS_WARN_SESSION_HOURS", "13"))
 SESSION_STALE_KILL_HOURS = float(os.getenv("ML_STALENESS_KILL_SESSION_HOURS", "19.5"))
+REPORT_HORIZONS = [
+    int(h.strip())
+    for h in os.getenv("ML_REPORT_HORIZONS", "5,15,30,60").split(",")
+    if h.strip().isdigit()
+]
+SHADOW_HORIZONS = {
+    int(h.strip())
+    for h in os.getenv("ML_SHADOW_HORIZONS", "30").split(",")
+    if h.strip().isdigit()
+}
 
 # NYSE full-closure holidays (update annually).
 # Source: https://www.nyse.com/markets/hours-calendars
@@ -289,12 +299,15 @@ def fetch_labeled_records(
             lp.abstain,
             lp.signal_5m,
             lp.signal_15m,
+            lp.signal_30m,
             lp.signal_60m,
             lp.prob_reject_5m,
             lp.prob_reject_15m,
+            lp.prob_reject_30m,
             lp.prob_reject_60m,
             lp.prob_break_5m,
             lp.prob_break_15m,
+            lp.prob_break_30m,
             lp.prob_break_60m,
             te.symbol,
             te.ts_event,
@@ -353,12 +366,15 @@ def fetch_latest_predictions(
             lp.abstain,
             lp.signal_5m,
             lp.signal_15m,
+            lp.signal_30m,
             lp.signal_60m,
             lp.prob_reject_5m,
             lp.prob_reject_15m,
+            lp.prob_reject_30m,
             lp.prob_reject_60m,
             lp.prob_break_5m,
             lp.prob_break_15m,
+            lp.prob_break_30m,
             lp.prob_break_60m,
             te.symbol,
             te.ts_event,
@@ -877,6 +893,9 @@ def render_report(
         f"- Wall-Clock Staleness: {f'{stale_hours_wall:.1f}h' if stale_hours_wall is not None else '--'}"
     )
     lines.append(f"- Health State: **{health.upper()}**")
+    if SHADOW_HORIZONS:
+        shadow = ", ".join(f"{h}m" for h in sorted(SHADOW_HORIZONS))
+        lines.append(f"- Shadow Horizons: {shadow} (scored/reported, excluded from best-horizon selection)")
     lines.append("")
     lines.append("## Headline Counts")
     lines.append("")
@@ -1024,7 +1043,8 @@ def main() -> None:
         predictions = fetch_latest_predictions(conn, start_ms, end_ms, args.include_preview)
         labeled_records = fetch_labeled_records(conn, start_ms, end_ms, args.include_preview)
 
-        bundles = [build_horizon_metrics(labeled_records, h) for h in (5, 15, 60)]
+        horizons = REPORT_HORIZONS or [5, 15, 30, 60]
+        bundles = [build_horizon_metrics(labeled_records, h) for h in horizons]
         regime_summary = compute_regime_summary(predictions)
 
         persist_daily_metrics(conn, report_day.strftime("%Y-%m-%d"), regime_summary, bundles)

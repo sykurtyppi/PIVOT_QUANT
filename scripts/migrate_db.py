@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Callable
 
 DEFAULT_DB = os.getenv("PIVOT_DB", "data/pivot_events.sqlite")
-LATEST_SCHEMA_VERSION = 4
+LATEST_SCHEMA_VERSION = 5
 
 
 TOUCH_EVENT_SQL = """
@@ -219,18 +219,23 @@ def migration_3_prediction_log(conn: sqlite3.Connection) -> None:
             abstain INTEGER NOT NULL DEFAULT 0,
             signal_5m TEXT,
             signal_15m TEXT,
+            signal_30m TEXT,
             signal_60m TEXT,
             prob_reject_5m REAL,
             prob_reject_15m REAL,
+            prob_reject_30m REAL,
             prob_reject_60m REAL,
             prob_break_5m REAL,
             prob_break_15m REAL,
+            prob_break_30m REAL,
             prob_break_60m REAL,
             threshold_reject_5m REAL,
             threshold_reject_15m REAL,
+            threshold_reject_30m REAL,
             threshold_reject_60m REAL,
             threshold_break_5m REAL,
             threshold_break_15m REAL,
+            threshold_break_30m REAL,
             threshold_break_60m REAL,
             quality_flags TEXT,
             is_preview INTEGER NOT NULL DEFAULT 0,
@@ -267,11 +272,37 @@ def migration_4_prediction_log_compat(conn: sqlite3.Connection) -> None:
         )
 
 
+def migration_5_prediction_log_shadow_30m(conn: sqlite3.Connection) -> None:
+    tables = {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    if "prediction_log" not in tables:
+        return
+
+    pred_cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(prediction_log)").fetchall()
+    }
+    add_if_missing = {
+        "signal_30m": "TEXT",
+        "prob_reject_30m": "REAL",
+        "prob_break_30m": "REAL",
+        "threshold_reject_30m": "REAL",
+        "threshold_break_30m": "REAL",
+    }
+    for col_name, col_type in add_if_missing.items():
+        if col_name not in pred_cols:
+            conn.execute(f"ALTER TABLE prediction_log ADD COLUMN {col_name} {col_type}")
+
+
 MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (1, "base_schema_tables", migration_1_base_tables),
     (2, "columns_and_indexes", migration_2_columns_and_indexes),
     (3, "prediction_log", migration_3_prediction_log),
     (4, "prediction_log_compat", migration_4_prediction_log_compat),
+    (5, "prediction_log_shadow_30m", migration_5_prediction_log_shadow_30m),
 ]
 
 

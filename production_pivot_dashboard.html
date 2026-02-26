@@ -1729,6 +1729,18 @@
                         <div class="stat-label" title="21-period Exponential Moving Average — intermediate trend indicator">EMA 21</div>
                         <div id="ema21-value" class="stat-value">--</div>
                     </div>
+                    <div class="stat">
+                        <div class="stat-label" title="50-period EMA (shown on chart only when price is near it)">EMA 50</div>
+                        <div id="ema50-value" class="stat-value">--</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-label" title="100-period EMA (shown on chart only when price is near it)">EMA 100</div>
+                        <div id="ema100-value" class="stat-value">--</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-label" title="200-period EMA (shown on chart only when price is near it)">EMA 200</div>
+                        <div id="ema200-value" class="stat-value">--</div>
+                    </div>
                 </div>
                 <div class="session-card">
                     <div class="session-line session-line-primary">Trading Day: <span id="session-date">--</span></div>
@@ -1761,6 +1773,9 @@
                             <button class="chip-toggle is-on" id="toggle-gamma-walls" type="button">Gamma</button>
                             <button class="chip-toggle is-on" id="toggle-ema9" type="button">EMA 9</button>
                             <button class="chip-toggle is-on" id="toggle-ema21" type="button">EMA 21</button>
+                            <button class="chip-toggle is-on" id="toggle-ema50" type="button">EMA 50</button>
+                            <button class="chip-toggle is-on" id="toggle-ema100" type="button">EMA 100</button>
+                            <button class="chip-toggle is-on" id="toggle-ema200" type="button">EMA 200</button>
                             <button class="chip-toggle is-on" id="toggle-vwap" type="button">VWAP</button>
                             <button class="chip-toggle" id="fit-chart" type="button">Fit</button>
                         </div>
@@ -2015,6 +2030,7 @@
             exportZoneBps: 2,
             advancedControlsOpen: false,
         });
+        const ADAPTIVE_EMA_PROXIMITY_BPS = 40;
 
         const state = {
             chart: null,
@@ -2025,6 +2041,9 @@
             pivotLines: [],
             ema9Series: null,
             ema21Series: null,
+            ema50Series: null,
+            ema100Series: null,
+            ema200Series: null,
             vwapSeries: null,
             gammaLines: [],
             candles: [],
@@ -2056,6 +2075,9 @@
             gammaFetchError: null,
             lastEma9: null,
             lastEma21: null,
+            lastEma50: null,
+            lastEma100: null,
+            lastEma200: null,
             lastVwap: null,
             spotTimer: null,
             intradayTimer: null,
@@ -2111,6 +2133,9 @@
                 gammaWalls: true,
                 ema9: true,
                 ema21: true,
+                ema50: true,
+                ema100: true,
+                ema200: true,
                 vwap: true,
             },
             lastGammaMode: '--',
@@ -2556,10 +2581,30 @@
             button.setAttribute('aria-pressed', enabled ? 'true' : 'false');
         }
 
+        function isEmaWithinProximity(emaValue) {
+            if (!Number.isFinite(emaValue)) return false;
+            const price = Number.isFinite(state.referencePrice)
+                ? state.referencePrice
+                : (state.candles.length ? state.candles[state.candles.length - 1].close : null);
+            if (!Number.isFinite(price) || price <= 0) return false;
+            const distBps = Math.abs((price - emaValue) / price) * 1e4;
+            return distBps <= ADAPTIVE_EMA_PROXIMITY_BPS;
+        }
+
+        function updateAdaptiveEmaVisibility() {
+            const showEma50 = state.uiVisibility.ema50 && isEmaWithinProximity(state.lastEma50);
+            const showEma100 = state.uiVisibility.ema100 && isEmaWithinProximity(state.lastEma100);
+            const showEma200 = state.uiVisibility.ema200 && isEmaWithinProximity(state.lastEma200);
+            setSeriesVisible(state.ema50Series, showEma50);
+            setSeriesVisible(state.ema100Series, showEma100);
+            setSeriesVisible(state.ema200Series, showEma200);
+        }
+
         function applyChartVisibility() {
             setSeriesVisible(state.ema9Series, state.uiVisibility.ema9);
             setSeriesVisible(state.ema21Series, state.uiVisibility.ema21);
             setSeriesVisible(state.vwapSeries, state.uiVisibility.vwap);
+            updateAdaptiveEmaVisibility();
 
             state.pivotLines.forEach((line) => setSeriesVisible(line, state.uiVisibility.pivots));
             state.gammaLines.forEach((line) => setSeriesVisible(line, state.uiVisibility.gammaWalls));
@@ -2571,6 +2616,9 @@
                 { id: 'toggle-gamma-walls', key: 'gammaWalls' },
                 { id: 'toggle-ema9', key: 'ema9' },
                 { id: 'toggle-ema21', key: 'ema21' },
+                { id: 'toggle-ema50', key: 'ema50' },
+                { id: 'toggle-ema100', key: 'ema100' },
+                { id: 'toggle-ema200', key: 'ema200' },
                 { id: 'toggle-vwap', key: 'vwap' },
             ];
 
@@ -3180,6 +3228,30 @@
                 priceLineVisible: false,
                 lastValueVisible: true,
                 title: 'EMA 21',
+            });
+
+            state.ema50Series = addLine(state.chart, {
+                color: '#f59e0b',
+                lineWidth: 2,
+                priceLineVisible: false,
+                lastValueVisible: false,
+                title: 'EMA 50',
+            });
+
+            state.ema100Series = addLine(state.chart, {
+                color: '#a78bfa',
+                lineWidth: 2,
+                priceLineVisible: false,
+                lastValueVisible: false,
+                title: 'EMA 100',
+            });
+
+            state.ema200Series = addLine(state.chart, {
+                color: '#ef4444',
+                lineWidth: 2,
+                priceLineVisible: false,
+                lastValueVisible: false,
+                title: 'EMA 200',
             });
 
             state.vwapSeries = addLine(state.chart, {
@@ -4104,6 +4176,7 @@
             updatePivotTable(levels);
             updateKeyLevels(levels, price);
             updateDecisionStrip();
+            updateAdaptiveEmaVisibility();
 
             // Touch detection (has its own 10-min cooldown)
             void maybeLogTouches(levels, price);
@@ -6219,11 +6292,23 @@
 
                 const ema9Series = calculateEMA(state.candles, 9);
                 const ema21Series = calculateEMA(state.candles, 21);
+                const ema50Series = calculateEMA(state.candles, 50);
+                const ema100Series = calculateEMA(state.candles, 100);
+                const ema200Series = calculateEMA(state.candles, 200);
                 if (state.ema9Series) {
                     state.ema9Series.setData(ema9Series);
                 }
                 if (state.ema21Series) {
                     state.ema21Series.setData(ema21Series);
+                }
+                if (state.ema50Series) {
+                    state.ema50Series.setData(ema50Series);
+                }
+                if (state.ema100Series) {
+                    state.ema100Series.setData(ema100Series);
+                }
+                if (state.ema200Series) {
+                    state.ema200Series.setData(ema200Series);
                 }
 
                 const vwapSeries = calculateVWAP(state.candles, state.timeZone);
@@ -6233,11 +6318,20 @@
 
                 const ema9Value = ema9Series.length ? ema9Series[ema9Series.length - 1].value : null;
                 const ema21Value = ema21Series.length ? ema21Series[ema21Series.length - 1].value : null;
+                const ema50Value = ema50Series.length ? ema50Series[ema50Series.length - 1].value : null;
+                const ema100Value = ema100Series.length ? ema100Series[ema100Series.length - 1].value : null;
+                const ema200Value = ema200Series.length ? ema200Series[ema200Series.length - 1].value : null;
                 const vwapValue = vwapSeries.length ? vwapSeries[vwapSeries.length - 1].value : null;
                 document.getElementById('ema9-value').textContent = formatNumber(ema9Value);
                 document.getElementById('ema21-value').textContent = formatNumber(ema21Value);
+                document.getElementById('ema50-value').textContent = formatNumber(ema50Value);
+                document.getElementById('ema100-value').textContent = formatNumber(ema100Value);
+                document.getElementById('ema200-value').textContent = formatNumber(ema200Value);
                 state.lastEma9 = ema9Value;
                 state.lastEma21 = ema21Value;
+                state.lastEma50 = ema50Value;
+                state.lastEma100 = ema100Value;
+                state.lastEma200 = ema200Value;
                 state.lastVwap = vwapValue;
 
                 const barSyncKey = `${symbol}_${interval}_${state.candles.length}`;

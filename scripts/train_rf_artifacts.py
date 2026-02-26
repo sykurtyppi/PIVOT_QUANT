@@ -258,7 +258,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Train RF artifacts for inference server.")
     parser.add_argument("--db", default=DEFAULT_DUCKDB)
     parser.add_argument("--view", default=DEFAULT_VIEW)
-    parser.add_argument("--horizons", default="5,15,60")
+    parser.add_argument("--horizons", default="5,15,30,60")
     parser.add_argument("--targets", default="reject,break")
     parser.add_argument("--calibration", choices=["auto", "isotonic", "sigmoid", "none"], default="auto")
     parser.add_argument("--calib-days", type=int, default=3)

@@ -194,7 +194,7 @@ ops_set \
 # Uses 5m bars from Yahoo (supports longer ranges than 1m's 7-day limit).
 run_step "backfill" "${PYTHON}" scripts/backfill_events.py --symbols "${RETRAIN_SYMBOLS}" --range 7d --interval 5m --source yahoo
 
-run_step "build_labels"    "${PYTHON}" scripts/build_labels.py --horizons 5 15 60 --incremental
+run_step "build_labels"    "${PYTHON}" scripts/build_labels.py --horizons 5 15 30 60 --incremental
 run_step "export_parquet"  "${PYTHON}" scripts/export_parquet.py
 run_step "duckdb_view"     "${PYTHON}" scripts/build_duckdb_view.py
 run_step "train_artifacts" "${PYTHON}" scripts/train_rf_artifacts.py

@@ -652,10 +652,26 @@ def compute_impact_stats(db_path: str, report_day: date, include_preview: bool =
             return result
 
         pred_cols = {r[1] for r in conn.execute("PRAGMA table_info(prediction_log)").fetchall()}
+        signal_horizons = sorted(
+            int(m.group(1))
+            for col in pred_cols
+            for m in [re.fullmatch(r"signal_(\d+)m", col)]
+            if m
+        )
+        if not signal_horizons:
+            signal_horizons = [5, 15, 60]
         has_preview = "is_preview" in pred_cols
         preview_filter = ""
         if has_preview and not include_preview:
             preview_filter = "AND COALESCE(lp.is_preview, 0) = 0"
+        signal_select = ",\n                ".join(
+            (
+                f"lp.signal_{h}m"
+                if f"signal_{h}m" in pred_cols
+                else f"NULL AS signal_{h}m"
+            )
+            for h in signal_horizons
+        )
 
         start_ms, end_ms = et_day_bounds_ms(report_day)
         rows = conn.execute(
@@ -676,9 +692,7 @@ def compute_impact_stats(db_path: str, report_day: date, include_preview: bool =
                 te.ts_event,
                 el.horizon_min,
                 el.return_bps,
-                lp.signal_5m,
-                lp.signal_15m,
-                lp.signal_60m
+                {signal_select}
             FROM event_labels el
             JOIN touch_events te ON te.event_id = el.event_id
             JOIN latest_pred lp ON lp.event_id = el.event_id
@@ -690,18 +704,14 @@ def compute_impact_stats(db_path: str, report_day: date, include_preview: bool =
 
         gross_vals: list[float] = []
         net_vals: list[float] = []
-        by_h: dict[int, list[tuple[float, float]]] = {5: [], 15: [], 60: []}
+        by_h: dict[int, list[tuple[float, float]]] = {h: [] for h in signal_horizons}
 
         for row in rows:
             horizon = int(row["horizon_min"])
-            if horizon == 5:
-                signal = (row["signal_5m"] or "").lower()
-            elif horizon == 15:
-                signal = (row["signal_15m"] or "").lower()
-            elif horizon == 60:
-                signal = (row["signal_60m"] or "").lower()
-            else:
+            signal_key = f"signal_{horizon}m"
+            if horizon not in signal_horizons or signal_key not in row.keys():
                 continue
+            signal = (row[signal_key] or "").lower()
 
             if signal not in {"reject", "break"}:
                 continue
@@ -794,7 +804,8 @@ def build_impact_lines(impact: dict[str, Any]) -> list[str]:
         lines.append(f"Net win rate: {win_rate * 100:.1f}%")
 
     by_horizon = impact.get("by_horizon", {})
-    for horizon in (5, 15, 60):
+    horizons = sorted(int(h) for h in by_horizon.keys()) if by_horizon else [5, 15, 60]
+    for horizon in horizons:
         h = by_horizon.get(horizon, {})
         n = h.get("n", 0)
         avg_net = h.get("avg_net")

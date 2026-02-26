@@ -184,7 +184,7 @@ audit_event "calibration_refit_started" "calibration refit cycle started" \
   --detail "method=${CALIB_METHOD}"
 
 if is_truthy "${CALIB_BUILD_LABELS}"; then
-  run_step "build_labels" "${PYTHON}" scripts/build_labels.py --horizons 5 15 60 --incremental
+  run_step "build_labels" "${PYTHON}" scripts/build_labels.py --horizons 5 15 30 60 --incremental
 else
   echo "[$(timestamp)] INFO build_labels skipped (CALIB_REFIT_BUILD_LABELS=false)" | tee -a "${LOG_DIR}/calibration_refit.log"
 fi

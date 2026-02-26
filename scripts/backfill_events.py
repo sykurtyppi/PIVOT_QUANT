@@ -1355,7 +1355,7 @@ def main() -> None:
     parser.add_argument("--write-bars", action="store_true", default=True)
     parser.add_argument("--write-events", action="store_true", default=True)
     parser.add_argument("--label", action="store_true", default=True)
-    parser.add_argument("--label-horizons", default="5,15,60")
+    parser.add_argument("--label-horizons", default="5,15,30,60")
     args = parser.parse_args()
 
     symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
