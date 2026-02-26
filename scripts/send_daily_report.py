@@ -25,6 +25,8 @@ from pathlib import Path
 from typing import Any
 from urllib import error, request
 
+from ml.thresholds import directional_return_bps
+
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB = os.getenv("PIVOT_DB", str(ROOT / "data" / "pivot_events.sqlite"))
 DEFAULT_LOG_FILES = [
@@ -692,6 +694,7 @@ def compute_impact_stats(db_path: str, report_day: date, include_preview: bool =
                 te.ts_event,
                 el.horizon_min,
                 el.return_bps,
+                te.touch_side,
                 {signal_select}
             FROM event_labels el
             JOIN touch_events te ON te.event_id = el.event_id
@@ -716,9 +719,13 @@ def compute_impact_stats(db_path: str, report_day: date, include_preview: bool =
             if signal not in {"reject", "break"}:
                 continue
 
-            gross = parse_float_or_none(row["return_bps"])
-            if gross is None:
+            raw_return = parse_float_or_none(row["return_bps"])
+            touch_side = parse_float_or_none(row["touch_side"])
+            if raw_return is None:
                 continue
+
+            directional = float(directional_return_bps([raw_return], [touch_side])[0])
+            gross = directional if signal == "reject" else -directional
             net = gross - total_cost
             gross_vals.append(gross)
             net_vals.append(net)
@@ -790,6 +797,7 @@ def build_impact_lines(impact: dict[str, Any]) -> list[str]:
         f"slippage={float(cost['slippage']):.2f}, "
         f"commission={float(cost['commission']):.2f} "
         f"(total={float(cost['total']):.2f})",
+        "Return accounting: direction-aware by signal (reject=touch-side, break=opposite-side).",
         f"Tradeable matured signals: {impact['signals']}",
     ]
 

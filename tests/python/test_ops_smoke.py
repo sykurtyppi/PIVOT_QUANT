@@ -14,6 +14,7 @@ import tarfile
 import tempfile
 import textwrap
 import unittest
+from datetime import date
 from pathlib import Path
 
 import numpy as np
@@ -262,6 +263,88 @@ class OpsSmokeTests(unittest.TestCase):
         log_text = (logs_dir / "report_delivery.log").read_text(encoding="utf-8")
         self.assertIn("DONE  daily_report_send", log_text)
         self.assertIn("report already sent", log_text)
+
+    def test_daily_report_impact_is_direction_aware(self) -> None:
+        db = self.tmp / "impact.sqlite"
+        conn = sqlite3.connect(str(db))
+        try:
+            conn.execute(
+                """
+                CREATE TABLE touch_events(
+                    event_id TEXT PRIMARY KEY,
+                    ts_event INTEGER,
+                    touch_side INTEGER
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE event_labels(
+                    event_id TEXT,
+                    horizon_min INTEGER,
+                    return_bps REAL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE prediction_log(
+                    event_id TEXT,
+                    ts_prediction INTEGER,
+                    signal_5m TEXT,
+                    is_preview INTEGER
+                )
+                """
+            )
+
+            send_daily_report = load_module(
+                "pq_send_daily_report_test",
+                REPO_ROOT / "scripts" / "send_daily_report.py",
+            )
+            report_day = date(2026, 2, 26)
+            start_ms, _ = send_daily_report.et_day_bounds_ms(report_day)
+
+            # Event 1: touch_side=-1 and reject with raw return -10 bps.
+            # Direction-aware reject PnL should be +10 bps gross.
+            conn.execute(
+                "INSERT INTO touch_events(event_id, ts_event, touch_side) VALUES (?, ?, ?)",
+                ("e1", start_ms + 60_000, -1),
+            )
+            conn.execute(
+                "INSERT INTO event_labels(event_id, horizon_min, return_bps) VALUES (?, ?, ?)",
+                ("e1", 5, -10.0),
+            )
+            conn.execute(
+                "INSERT INTO prediction_log(event_id, ts_prediction, signal_5m, is_preview) VALUES (?, ?, ?, ?)",
+                ("e1", start_ms + 61_000, "reject", 0),
+            )
+
+            # Event 2: touch_side=-1 and break with raw return +10 bps.
+            # Direction-aware break PnL should also be +10 bps gross.
+            conn.execute(
+                "INSERT INTO touch_events(event_id, ts_event, touch_side) VALUES (?, ?, ?)",
+                ("e2", start_ms + 120_000, -1),
+            )
+            conn.execute(
+                "INSERT INTO event_labels(event_id, horizon_min, return_bps) VALUES (?, ?, ?)",
+                ("e2", 5, +10.0),
+            )
+            conn.execute(
+                "INSERT INTO prediction_log(event_id, ts_prediction, signal_5m, is_preview) VALUES (?, ?, ?, ?)",
+                ("e2", start_ms + 121_000, "break", 0),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        impact = send_daily_report.compute_impact_stats(str(db), report_day, include_preview=False)
+        self.assertNotIn("error", impact)
+        self.assertEqual(impact["signals"], 2)
+        self.assertAlmostEqual(float(impact["avg_gross"]), 10.0, places=6)
+        # Cost defaults: 0.8 + 0.4 + 0.1 = 1.3 bps.
+        self.assertAlmostEqual(float(impact["avg_net"]), 8.7, places=6)
+        self.assertAlmostEqual(float(impact["win_rate_net"]), 1.0, places=6)
+        self.assertEqual(int(impact["by_horizon"][5]["n"]), 2)
 
     def test_level_converter_contract_and_route_present(self) -> None:
         proxy_source = (REPO_ROOT / "server" / "yahoo_proxy.js").read_text(encoding="utf-8")

@@ -270,8 +270,8 @@ def main() -> None:
     parser.add_argument(
         "--threshold-objective",
         choices=["f1", "utility_bps"],
-        default=os.getenv("RF_THRESHOLD_OBJECTIVE", "f1"),
-        help="Threshold objective: f1 (default) or utility_bps (cost-aware).",
+        default=os.getenv("RF_THRESHOLD_OBJECTIVE", "utility_bps"),
+        help="Threshold objective: utility_bps (default, cost-aware) or f1.",
     )
     parser.add_argument(
         "--threshold-precision-floor",

@@ -208,7 +208,7 @@ def main() -> None:
     parser.add_argument(
         "--threshold-objective",
         choices=["f1", "utility_bps"],
-        default=os.getenv("CALIB_REFIT_THRESHOLD_OBJECTIVE", os.getenv("RF_THRESHOLD_OBJECTIVE", "f1")),
+        default=os.getenv("CALIB_REFIT_THRESHOLD_OBJECTIVE", os.getenv("RF_THRESHOLD_OBJECTIVE", "utility_bps")),
     )
     parser.add_argument(
         "--threshold-min-signals",
