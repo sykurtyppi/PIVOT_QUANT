@@ -425,6 +425,83 @@ class OpsSmokeTests(unittest.TestCase):
         abs_path = Path("/tmp/pq_reconcile_abs.sqlite")
         self.assertEqual(reconcile_predictions.resolve_repo_path(str(abs_path)), abs_path)
 
+    def test_audit_log_prune_preserves_chain_with_anchor(self) -> None:
+        audit_log = load_module("pq_audit_log_retention_test", REPO_ROOT / "scripts" / "audit_log.py")
+        db = self.tmp / "audit.sqlite"
+        base_ts = 1_700_000_000_000
+
+        for idx in range(3):
+            result = audit_log.append_event(
+                db_path=db,
+                event_type="smoke_event",
+                source="ops_smoke",
+                actor="tester",
+                host="localhost",
+                message=f"event-{idx}",
+                details={"index": idx},
+                commit_hash="abc123",
+                ts_ms=base_ts + (idx * audit_log.MS_PER_DAY),
+            )
+            self.assertEqual(result["status"], "ok")
+
+        before = audit_log.verify_chain(db_path=db)
+        self.assertEqual(before["status"], "ok")
+        self.assertEqual(before["checked_events"], 3)
+        self.assertEqual(before.get("anchor_prev_hash"), "")
+
+        pruned = audit_log.prune_history(
+            db_path=db,
+            retention_days=1,
+            now_ts_ms=base_ts + (2 * audit_log.MS_PER_DAY),
+        )
+        self.assertEqual(pruned["status"], "ok")
+        self.assertEqual(int(pruned["deleted_rows"]), 1)
+        self.assertEqual(int(pruned["remaining_rows"]), 2)
+        self.assertEqual(int(pruned["anchor_event_id"]), 2)
+        self.assertTrue(str(pruned["anchor_prev_hash"]))
+
+        after = audit_log.verify_chain(db_path=db)
+        self.assertEqual(after["status"], "ok")
+        self.assertEqual(after["checked_events"], 2)
+        self.assertEqual(after.get("anchor_prev_hash"), pruned["anchor_prev_hash"])
+
+        tail = audit_log.fetch_tail(db_path=db, limit=10)
+        self.assertEqual([event["id"] for event in tail["events"]], [2, 3])
+
+    def test_audit_log_auto_prune_respects_interval(self) -> None:
+        audit_log = load_module("pq_audit_log_prune_interval_test", REPO_ROOT / "scripts" / "audit_log.py")
+        db = self.tmp / "audit_interval.sqlite"
+
+        conn = audit_log.connect_db(db)
+        try:
+            audit_log.ensure_schema(conn)
+
+            first = audit_log.maybe_prune_audit_prefix(
+                conn,
+                now_ts_ms=10_000,
+                retention_days=90,
+                prune_interval_ms=5_000,
+            )
+            second = audit_log.maybe_prune_audit_prefix(
+                conn,
+                now_ts_ms=12_000,
+                retention_days=90,
+                prune_interval_ms=5_000,
+            )
+            third = audit_log.maybe_prune_audit_prefix(
+                conn,
+                now_ts_ms=16_000,
+                retention_days=90,
+                prune_interval_ms=5_000,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        self.assertIsNotNone(first)
+        self.assertIsNone(second)
+        self.assertIsNotNone(third)
+
     def test_local_services_use_allowlist_cors(self) -> None:
         for rel in (
             "server/event_writer.py",

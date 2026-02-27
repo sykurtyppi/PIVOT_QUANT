@@ -18,6 +18,29 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB = Path(os.getenv("PIVOT_DB", str(ROOT / "data" / "pivot_events.sqlite")))
 MAX_TAIL_LIMIT = 500
+MS_PER_DAY = 24 * 60 * 60 * 1000
+
+
+def _env_int(name: str, default: int, *, minimum: int | None = None) -> int:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        value = default
+    else:
+        try:
+            value = int(raw)
+        except ValueError:
+            value = default
+    if minimum is not None and value < minimum:
+        value = minimum
+    return value
+
+
+DEFAULT_AUDIT_RETENTION_DAYS = _env_int("ML_AUDIT_RETENTION_DAYS", 90, minimum=1)
+DEFAULT_AUDIT_PRUNE_INTERVAL_MS = _env_int(
+    "ML_AUDIT_PRUNE_INTERVAL_MS",
+    MS_PER_DAY,
+    minimum=0,
+)
 
 
 def now_ms() -> int:
@@ -112,6 +135,149 @@ def _set_ops_status(conn: sqlite3.Connection, pairs: dict[str, str], ts: int | N
         )
 
 
+def _get_ops_status_value(conn: sqlite3.Connection, key: str) -> str:
+    row = conn.execute("SELECT value FROM ops_status WHERE key = ?", (key,)).fetchone()
+    if not row or row[0] is None:
+        return ""
+    return str(row[0])
+
+
+def _prune_audit_prefix(
+    conn: sqlite3.Connection,
+    *,
+    now_ts_ms: int,
+    retention_days: int,
+) -> dict[str, Any]:
+    if retention_days <= 0:
+        raise ValueError("retention_days must be > 0")
+
+    cutoff_ms = now_ts_ms - (retention_days * MS_PER_DAY)
+    first_keep = conn.execute(
+        """
+        SELECT id, prev_hash
+        FROM ops_audit_events
+        WHERE ts_ms >= ?
+        ORDER BY id ASC
+        LIMIT 1
+        """,
+        (cutoff_ms,),
+    ).fetchone()
+
+    if first_keep:
+        first_keep_id = int(first_keep[0])
+        anchor_prev_hash = str(first_keep[1] or "")
+        delete_cur = conn.execute("DELETE FROM ops_audit_events WHERE id < ?", (first_keep_id,))
+    else:
+        first_keep_id = 0
+        anchor_prev_hash = ""
+        delete_cur = conn.execute("DELETE FROM ops_audit_events")
+
+    deleted_rows = int(delete_cur.rowcount if delete_cur.rowcount is not None else 0)
+    remaining_rows = int(conn.execute("SELECT COUNT(*) FROM ops_audit_events").fetchone()[0])
+    _set_ops_status(
+        conn,
+        {
+            "audit_retention_days": str(retention_days),
+            "audit_prune_last_ms": str(now_ts_ms),
+            "audit_prune_cutoff_ms": str(cutoff_ms),
+            "audit_prune_deleted_rows": str(deleted_rows),
+            "audit_prune_remaining_rows": str(remaining_rows),
+            # When a prefix is pruned, chain verification must start from
+            # the retained head's prev_hash instead of the implicit empty hash.
+            "audit_chain_anchor_prev_hash": anchor_prev_hash,
+            "audit_chain_anchor_event_id": str(first_keep_id),
+            "audit_chain_anchor_set_ms": str(now_ts_ms),
+        },
+        now_ts_ms,
+    )
+    return {
+        "retention_days": retention_days,
+        "cutoff_ms": cutoff_ms,
+        "deleted_rows": deleted_rows,
+        "remaining_rows": remaining_rows,
+        "anchor_prev_hash": anchor_prev_hash,
+        "anchor_event_id": first_keep_id,
+    }
+
+
+def maybe_prune_audit_prefix(
+    conn: sqlite3.Connection,
+    *,
+    now_ts_ms: int,
+    retention_days: int,
+    prune_interval_ms: int,
+) -> dict[str, Any] | None:
+    if retention_days <= 0:
+        return None
+    last_prune_raw = _get_ops_status_value(conn, "audit_prune_last_ms")
+    try:
+        last_prune_ms = int(last_prune_raw)
+    except ValueError:
+        last_prune_ms = 0
+
+    if prune_interval_ms > 0 and last_prune_ms > 0 and (now_ts_ms - last_prune_ms) < prune_interval_ms:
+        return None
+    return _prune_audit_prefix(conn, now_ts_ms=now_ts_ms, retention_days=retention_days)
+
+
+def prune_history(
+    *,
+    db_path: Path,
+    retention_days: int,
+    now_ts_ms: int | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    if retention_days <= 0:
+        raise ValueError("retention_days must be > 0")
+    ts_now = now_ts_ms if now_ts_ms is not None else now_ms()
+    cutoff_ms = ts_now - (retention_days * MS_PER_DAY)
+
+    conn = connect_db(db_path)
+    try:
+        ensure_schema(conn)
+        first_keep = conn.execute(
+            """
+            SELECT id, prev_hash
+            FROM ops_audit_events
+            WHERE ts_ms >= ?
+            ORDER BY id ASC
+            LIMIT 1
+            """,
+            (cutoff_ms,),
+        ).fetchone()
+        if first_keep:
+            first_keep_id = int(first_keep[0])
+            anchor_prev_hash = str(first_keep[1] or "")
+            deleted_rows = int(
+                conn.execute("SELECT COUNT(*) FROM ops_audit_events WHERE id < ?", (first_keep_id,)).fetchone()[0]
+            )
+            remaining_rows = int(
+                conn.execute("SELECT COUNT(*) FROM ops_audit_events WHERE id >= ?", (first_keep_id,)).fetchone()[0]
+            )
+        else:
+            first_keep_id = 0
+            anchor_prev_hash = ""
+            deleted_rows = int(conn.execute("SELECT COUNT(*) FROM ops_audit_events").fetchone()[0])
+            remaining_rows = 0
+
+        summary = {
+            "retention_days": retention_days,
+            "cutoff_ms": cutoff_ms,
+            "deleted_rows": deleted_rows,
+            "remaining_rows": remaining_rows,
+            "anchor_prev_hash": anchor_prev_hash,
+            "anchor_event_id": first_keep_id,
+        }
+        if dry_run:
+            return {"status": "dry_run", **summary}
+
+        applied = _prune_audit_prefix(conn, now_ts_ms=ts_now, retention_days=retention_days)
+        conn.commit()
+        return {"status": "ok", **applied}
+    finally:
+        conn.close()
+
+
 def append_event(
     *,
     db_path: Path,
@@ -132,6 +298,13 @@ def append_event(
     conn = connect_db(db_path)
     try:
         ensure_schema(conn)
+        maintenance_ts = now_ms()
+        prune_result = maybe_prune_audit_prefix(
+            conn,
+            now_ts_ms=maintenance_ts,
+            retention_days=DEFAULT_AUDIT_RETENTION_DAYS,
+            prune_interval_ms=DEFAULT_AUDIT_PRUNE_INTERVAL_MS,
+        )
         prev_row = conn.execute(
             "SELECT id, event_hash FROM ops_audit_events ORDER BY id DESC LIMIT 1"
         ).fetchone()
@@ -186,7 +359,7 @@ def append_event(
             ts,
         )
         conn.commit()
-        return {
+        response = {
             "status": "ok",
             "event": {
                 "id": event_id,
@@ -202,6 +375,9 @@ def append_event(
                 "event_hash": event_hash,
             },
         }
+        if prune_result is not None:
+            response["prune"] = prune_result
+        return response
     finally:
         conn.close()
 
@@ -253,6 +429,7 @@ def verify_chain(*, db_path: Path) -> dict[str, Any]:
     conn = connect_db(db_path)
     try:
         ensure_schema(conn)
+        anchor_prev_hash = _get_ops_status_value(conn, "audit_chain_anchor_prev_hash")
         rows = conn.execute(
             """
             SELECT id, ts_ms, event_type, source, actor, host, commit_hash, message,
@@ -262,7 +439,7 @@ def verify_chain(*, db_path: Path) -> dict[str, Any]:
             """
         ).fetchall()
 
-        prev_hash = ""
+        prev_hash = anchor_prev_hash
         checked = 0
         for row in rows:
             event_id = int(row[0])
@@ -317,6 +494,7 @@ def verify_chain(*, db_path: Path) -> dict[str, Any]:
                     "checked_events": checked,
                     "error": f"chain mismatch at id={event_id}",
                     "event_id": event_id,
+                    "anchor_prev_hash": anchor_prev_hash,
                 }
 
             prev_hash = stored_event_hash
@@ -332,7 +510,7 @@ def verify_chain(*, db_path: Path) -> dict[str, Any]:
             ts,
         )
         conn.commit()
-        return {"status": "ok", "checked_events": checked}
+        return {"status": "ok", "checked_events": checked, "anchor_prev_hash": anchor_prev_hash}
     finally:
         conn.close()
 
@@ -358,6 +536,11 @@ def parse_args() -> argparse.Namespace:
     tail_cmd.add_argument("--limit", type=int, default=25)
 
     sub.add_parser("verify", help="Verify tamper-evident hash chain")
+
+    prune_cmd = sub.add_parser("prune", help="Prune old audit rows while preserving hash-chain anchor")
+    prune_cmd.add_argument("--retention-days", type=int, default=DEFAULT_AUDIT_RETENTION_DAYS)
+    prune_cmd.add_argument("--now-ms", type=int, default=0)
+    prune_cmd.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
 
@@ -414,6 +597,16 @@ def main() -> int:
         result = verify_chain(db_path=db_path)
         print(json.dumps(result, indent=2))
         return 0 if result.get("status") == "ok" else 1
+
+    if args.command == "prune":
+        result = prune_history(
+            db_path=db_path,
+            retention_days=int(args.retention_days),
+            now_ts_ms=int(args.now_ms) if args.now_ms else None,
+            dry_run=bool(args.dry_run),
+        )
+        print(json.dumps(result, indent=2))
+        return 0
 
     raise ValueError(f"Unknown command: {args.command}")
 
