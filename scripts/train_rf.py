@@ -58,15 +58,19 @@ def build_feature_dataframe(df):
     return pd.DataFrame(rows, index=df.index)
 
 
-def generate_splits(dates, train_days, calib_days, test_days, max_folds):
+def generate_splits(dates, train_days, calib_days, test_days, max_folds, stride_days=None):
     splits = []
+    if stride_days is None:
+        stride_days = test_days
+    if stride_days <= 0:
+        raise ValueError("stride_days must be > 0")
     start = 0
     while start + train_days + calib_days + test_days <= len(dates):
         train = dates[start : start + train_days]
         calib = dates[start + train_days : start + train_days + calib_days]
         test = dates[start + train_days + calib_days : start + train_days + calib_days + test_days]
         splits.append((train, calib, test))
-        start += test_days
+        start += stride_days
         if max_folds and len(splits) >= max_folds:
             break
     return splits
@@ -348,6 +352,9 @@ def main() -> None:
     parser.add_argument("--calib-days", type=int, default=5)
     parser.add_argument("--test-days", type=int, default=5)
     parser.add_argument("--max-folds", type=int, default=12)
+    parser.add_argument(
+        "--split-mode", choices=["rolling", "strict"], default="rolling",
+        help="rolling=test-day stride, strict=non-overlapping train+calib+test windows")
     parser.add_argument("--min-events", type=int, default=200)
     parser.add_argument("--calibration", choices=["auto", "isotonic", "sigmoid", "none"], default="auto")
     parser.add_argument("--n-estimators", type=int, default=300)
@@ -426,7 +433,14 @@ def main() -> None:
         )
         return
 
-    splits = generate_splits(dates, args.train_days, args.calib_days, args.test_days, args.max_folds)
+    stride_days = (
+        args.test_days
+        if args.split_mode == "rolling"
+        else (args.train_days + args.calib_days + args.test_days)
+    )
+    splits = generate_splits(
+        dates, args.train_days, args.calib_days, args.test_days, args.max_folds, stride_days=stride_days
+    )
     if not splits:
         print("No splits generated. Check window sizes.")
         return
