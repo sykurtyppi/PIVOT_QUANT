@@ -346,6 +346,95 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertAlmostEqual(float(impact["win_rate_net"]), 1.0, places=6)
         self.assertEqual(int(impact["by_horizon"][5]["n"]), 2)
 
+    def test_build_labels_unknown_side_excursions_are_symmetric(self) -> None:
+        build_labels = load_module(
+            "pq_build_labels_symmetry_test",
+            REPO_ROOT / "scripts" / "build_labels.py",
+        )
+        bars = [
+            {"high": 101.0, "low": 99.0, "close": 100.0},
+            {"high": 102.0, "low": 99.5, "close": 100.5},
+        ]
+        mfe_bps, mae_bps = build_labels.compute_mfe_mae(bars, 100.0, None)
+        self.assertAlmostEqual(float(mfe_bps), 200.0, places=6)
+        self.assertAlmostEqual(float(mae_bps), -200.0, places=6)
+
+    def test_build_labels_break_sustain_one_triggers_on_first_bar(self) -> None:
+        build_labels = load_module(
+            "pq_build_labels_sustain_test",
+            REPO_ROOT / "scripts" / "build_labels.py",
+        )
+        bars = [
+            {"close": 99.8, "high": 100.1, "low": 99.7, "ts": 1},
+            {"close": 99.7, "high": 99.9, "low": 99.6, "ts": 2},
+        ]
+        reject, brk, resolution = build_labels.label_event(
+            bars=bars,
+            touch_price=100.0,
+            level_price=100.0,
+            touch_side=1,
+            reject_bps=10.0,
+            break_bps=10.0,
+            sustain_bars=1,
+        )
+        self.assertEqual(reject, 0)
+        self.assertEqual(brk, 1)
+        self.assertEqual(resolution, 0)
+
+        reject2, brk2, resolution2 = build_labels.label_event(
+            bars=bars,
+            touch_price=100.0,
+            level_price=100.0,
+            touch_side=1,
+            reject_bps=10.0,
+            break_bps=10.0,
+            sustain_bars=2,
+        )
+        self.assertEqual(reject2, 0)
+        self.assertEqual(brk2, 1)
+        self.assertEqual(resolution2, 1)
+
+    def test_ml_score_payload_rejects_oversized_batches(self) -> None:
+        prior_limit = os.environ.get("ML_SCORE_MAX_BATCH_EVENTS")
+        os.environ["ML_SCORE_MAX_BATCH_EVENTS"] = "2"
+        try:
+            ml_server = load_module(
+                "pq_ml_server_batch_guard_test",
+                REPO_ROOT / "server" / "ml_server.py",
+            )
+        finally:
+            if prior_limit is None:
+                os.environ.pop("ML_SCORE_MAX_BATCH_EVENTS", None)
+            else:
+                os.environ["ML_SCORE_MAX_BATCH_EVENTS"] = prior_limit
+
+        with self.assertRaises(Exception) as ctx:
+            ml_server._validate_score_payload({"events": [{}, {}, {}]})
+        err = ctx.exception
+        self.assertEqual(getattr(err, "status_code", None), 413)
+        self.assertIn("Max allowed: 2", getattr(err, "detail", ""))
+
+    def test_reconcile_predictions_paths_resolve_from_repo_root(self) -> None:
+        reconcile_predictions = load_module(
+            "pq_reconcile_paths_test",
+            REPO_ROOT / "scripts" / "reconcile_predictions.py",
+        )
+        rel = reconcile_predictions.resolve_repo_path("data/pivot_events.sqlite")
+        self.assertEqual(rel, REPO_ROOT / "data" / "pivot_events.sqlite")
+
+        abs_path = Path("/tmp/pq_reconcile_abs.sqlite")
+        self.assertEqual(reconcile_predictions.resolve_repo_path(str(abs_path)), abs_path)
+
+    def test_local_services_use_allowlist_cors(self) -> None:
+        for rel in (
+            "server/event_writer.py",
+            "server/live_event_collector.py",
+            "server/ibkr_gamma_bridge.py",
+        ):
+            src = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            self.assertIn("ML_CORS_ORIGINS", src)
+            self.assertNotIn('Access-Control-Allow-Origin", "*"', src)
+
     def test_level_converter_contract_and_route_present(self) -> None:
         proxy_source = (REPO_ROOT / "server" / "yahoo_proxy.js").read_text(encoding="utf-8")
         self.assertIn("/api/levels/convert", proxy_source)

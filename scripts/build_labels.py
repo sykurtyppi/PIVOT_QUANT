@@ -56,7 +56,7 @@ def compute_mfe_mae(
     For touch_side == 1 (above level, expecting rejection upward):
       MFE = max upward move (positive bps value)
       MAE = max adverse downward move (negative bps value)
-    For unknown side: use absolute max excursion.
+    For unknown side: use symmetric absolute excursion.
     """
     max_fav = 0.0
     max_adv = 0.0
@@ -70,8 +70,10 @@ def compute_mfe_mae(
             max_fav = max(max_fav, -down_bps)
             max_adv = min(max_adv, -up_bps)
         else:
-            max_fav = max(max_fav, up_bps, -down_bps)
-            max_adv = min(max_adv, down_bps, -up_bps)
+            # Unknown side: treat excursion magnitude symmetrically.
+            max_abs_excursion = max(abs(up_bps), abs(down_bps))
+            max_fav = max(max_fav, max_abs_excursion)
+            max_adv = min(max_adv, -max_abs_excursion)
     return max_fav, max_adv
 
 
@@ -88,49 +90,42 @@ def label_event(
     brk = 0
     resolution = None
 
+    sustain_target = max(1, int(sustain_bars))
     reject_idx = None
     break_idx = None
 
     if touch_side in (1, -1):
         reject_dir = 1 if touch_side == 1 else -1
         break_dir = -reject_dir
+        break_streak = 0
         for idx, bar in enumerate(bars):
             dist = (bar["close"] - level_price) / level_price * 1e4
             if reject_idx is None and dist * reject_dir >= reject_bps:
                 reject_idx = idx
-            if break_idx is None:
-                if dist * break_dir >= break_bps:
-                    streak = 1
-                else:
-                    streak = 0
-                if streak:
-                    for j in range(idx + 1, len(bars)):
-                        next_dist = (bars[j]["close"] - level_price) / level_price * 1e4
-                        if next_dist * break_dir >= break_bps:
-                            streak += 1
-                        else:
-                            break
-                        if streak >= sustain_bars:
-                            break_idx = j
-                            break
+
+            if dist * break_dir >= break_bps:
+                break_streak += 1
+            else:
+                break_streak = 0
+
+            if break_idx is None and break_streak >= sustain_target:
+                break_idx = idx
             if reject_idx is not None and break_idx is not None:
                 break
     else:
+        break_streak = 0
         for idx, bar in enumerate(bars):
             dist = (bar["close"] - level_price) / level_price * 1e4
             if reject_idx is None and abs(dist) >= reject_bps:
                 reject_idx = idx
-            if break_idx is None:
-                streak = 0
-                for j in range(idx, len(bars)):
-                    next_dist = (bars[j]["close"] - level_price) / level_price * 1e4
-                    if abs(next_dist) >= break_bps:
-                        streak += 1
-                    else:
-                        streak = 0
-                    if streak >= sustain_bars:
-                        break_idx = j
-                        break
+
+            if abs(dist) >= break_bps:
+                break_streak += 1
+            else:
+                break_streak = 0
+
+            if break_idx is None and break_streak >= sustain_target:
+                break_idx = idx
             if reject_idx is not None and break_idx is not None:
                 break
 

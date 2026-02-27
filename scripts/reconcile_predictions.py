@@ -21,7 +21,15 @@ import sqlite3
 import sys
 from pathlib import Path
 
-DEFAULT_DB = os.getenv("PIVOT_DB", "data/pivot_events.sqlite")
+ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_DB = os.getenv("PIVOT_DB", str(ROOT / "data" / "pivot_events.sqlite"))
+
+
+def resolve_repo_path(raw_path: str) -> Path:
+    path = Path(raw_path).expanduser()
+    if not path.is_absolute():
+        path = ROOT / path
+    return path
 
 
 def connect(db_path: str) -> sqlite3.Connection:
@@ -373,12 +381,14 @@ def export_csv(records: list[dict], output_path: str) -> None:
     if not records:
         print("No records to export.")
         return
+    out_path = resolve_repo_path(output_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = list(records[0].keys())
-    with open(output_path, "w", newline="") as f:
+    with out_path.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(records)
-    print(f"Exported {len(records)} records to {output_path}")
+    print(f"Exported {len(records)} records to {out_path}")
 
 
 def main() -> None:
@@ -406,7 +416,7 @@ def main() -> None:
                         help="Round-trip commissions/fees in bps")
     args = parser.parse_args()
 
-    db_path = Path(args.db)
+    db_path = resolve_repo_path(args.db)
     if not db_path.exists():
         print(f"Database not found: {db_path}")
         sys.exit(1)

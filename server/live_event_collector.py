@@ -83,6 +83,7 @@ SCORE_TIMEOUT_SEC = max(1, int(os.getenv("LIVE_COLLECTOR_SCORE_TIMEOUT_SEC", "6"
 GAMMA_REFRESH_SEC = max(30, int(os.getenv("LIVE_COLLECTOR_GAMMA_REFRESH_SEC", "300")))
 GAMMA_RETRY_SEC = max(30, int(os.getenv("LIVE_COLLECTOR_GAMMA_RETRY_SEC", "1800")))
 INTERVAL_SEC = _interval_to_seconds(INTERVAL)
+_DEFAULT_CORS_ORIGINS = "http://127.0.0.1:3000,http://localhost:3000"
 
 if SOURCE not in ("auto", "ibkr", "yahoo"):
     raise ValueError(f"LIVE_COLLECTOR_SOURCE must be auto/ibkr/yahoo, got: {SOURCE}")
@@ -101,6 +102,24 @@ _state: Dict[str, Any] = {
     "cycles": 0,
     "symbols": {},
 }
+
+
+def _parse_allowed_origins() -> List[str]:
+    origins = [
+        origin.strip()
+        for origin in os.getenv("ML_CORS_ORIGINS", _DEFAULT_CORS_ORIGINS).split(",")
+        if origin.strip()
+    ]
+    return origins or ["http://127.0.0.1:3000"]
+
+
+ALLOWED_ORIGINS = _parse_allowed_origins()
+
+
+def _cors_origin(request_origin: str | None) -> str:
+    if request_origin and request_origin in ALLOWED_ORIGINS:
+        return request_origin
+    return ALLOWED_ORIGINS[0]
 
 
 def _connect_db() -> sqlite3.Connection:
@@ -317,9 +336,19 @@ class _HealthHandler(BaseHTTPRequestHandler):
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status_code)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Origin", _cors_origin(self.headers.get("Origin")))
+        self.send_header("Vary", "Origin")
         self.end_headers()
         self.wfile.write(body)
+
+    def do_OPTIONS(self) -> None:  # noqa: N802
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", _cors_origin(self.headers.get("Origin")))
+        self.send_header("Vary", "Origin")
+        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.send_header("Access-Control-Max-Age", "600")
+        self.end_headers()
 
     def do_GET(self) -> None:  # noqa: N802
         if self.path not in ("/", "/health"):

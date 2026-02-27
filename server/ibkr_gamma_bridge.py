@@ -23,9 +23,28 @@ IB_WEIGHT_MONTHLY = float(os.getenv("IB_WEIGHT_MONTHLY", "0.35"))
 IB_WEIGHT_OTHER = float(os.getenv("IB_WEIGHT_OTHER", "0.2"))
 IB_USE_RTH = os.getenv("IB_USE_RTH", "1") != "0"
 IB_DATA_TYPE = os.getenv("IB_DATA_TYPE", "").strip()
+_DEFAULT_CORS_ORIGINS = "http://127.0.0.1:3000,http://localhost:3000"
 
 ib = IB()
 ib_lock = threading.Lock()
+
+
+def _parse_allowed_origins() -> list[str]:
+    origins = [
+        origin.strip()
+        for origin in os.getenv("ML_CORS_ORIGINS", _DEFAULT_CORS_ORIGINS).split(",")
+        if origin.strip()
+    ]
+    return origins or ["http://127.0.0.1:3000"]
+
+
+ALLOWED_ORIGINS = _parse_allowed_origins()
+
+
+def _cors_origin(request_origin: str | None) -> str:
+    if request_origin and request_origin in ALLOWED_ORIGINS:
+        return request_origin
+    return ALLOWED_ORIGINS[0]
 
 
 def _is_finite(value):
@@ -408,7 +427,8 @@ class GammaHandler(BaseHTTPRequestHandler):
         try:
             self.send_response(status_code)
             self.send_header("Content-Type", "application/json")
-            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Origin", _cors_origin(self.headers.get("Origin")))
+            self.send_header("Vary", "Origin")
             self.end_headers()
             self.wfile.write(body)
             return True
@@ -416,6 +436,15 @@ class GammaHandler(BaseHTTPRequestHandler):
             # Client closed the socket before we could write the response.
             # This is harmless; avoid noisy traceback spam.
             return False
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", _cors_origin(self.headers.get("Origin")))
+        self.send_header("Vary", "Origin")
+        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.send_header("Access-Control-Max-Age", "600")
+        self.end_headers()
 
     def do_GET(self):
         parsed = urlparse(self.path)

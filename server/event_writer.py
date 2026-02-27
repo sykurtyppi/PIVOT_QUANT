@@ -20,6 +20,25 @@ DB_PATH = os.getenv("PIVOT_DB", "data/pivot_events.sqlite")
 HOST = os.getenv("EVENT_WRITER_BIND", "127.0.0.1")
 PORT = int(os.getenv("EVENT_WRITER_PORT", "5002"))
 _SCHEMA_READY = False
+_DEFAULT_CORS_ORIGINS = "http://127.0.0.1:3000,http://localhost:3000"
+
+
+def _parse_allowed_origins() -> list[str]:
+    origins = [
+        origin.strip()
+        for origin in os.getenv("ML_CORS_ORIGINS", _DEFAULT_CORS_ORIGINS).split(",")
+        if origin.strip()
+    ]
+    return origins or ["http://127.0.0.1:3000"]
+
+
+ALLOWED_ORIGINS = _parse_allowed_origins()
+
+
+def _cors_origin(request_origin: str | None) -> str:
+    if request_origin and request_origin in ALLOWED_ORIGINS:
+        return request_origin
+    return ALLOWED_ORIGINS[0]
 
 
 def connect():
@@ -275,9 +294,19 @@ class WriterHandler(BaseHTTPRequestHandler):
         response = json.dumps(payload).encode("utf-8")
         self.send_response(status_code)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Origin", _cors_origin(self.headers.get("Origin")))
+        self.send_header("Vary", "Origin")
         self.end_headers()
         self.wfile.write(response)
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", _cors_origin(self.headers.get("Origin")))
+        self.send_header("Vary", "Origin")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.send_header("Access-Control-Max-Age", "600")
+        self.end_headers()
 
     def do_GET(self):
         parsed = urlparse(self.path)

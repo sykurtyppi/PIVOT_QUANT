@@ -45,6 +45,7 @@ PREDICTION_LOG_DB = Path(os.getenv(
     "PREDICTION_LOG_DB",
     str(ROOT / "data" / "pivot_events.sqlite"),
 ))
+SCORE_MAX_BATCH_EVENTS = max(1, int(os.getenv("ML_SCORE_MAX_BATCH_EVENTS", "256")))
 
 allowed_origins = [
     origin.strip()
@@ -512,25 +513,60 @@ def _score_event(event: dict):
     }
 
 
+def _validate_score_payload(payload: object) -> tuple[str, dict | list[dict]]:
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Payload must be a JSON object.")
+
+    if "event" in payload:
+        event = payload["event"]
+        if not isinstance(event, dict):
+            raise HTTPException(status_code=400, detail="'event' must be a JSON object.")
+        return "single", event
+
+    if "events" in payload:
+        events = payload["events"]
+        if not isinstance(events, list):
+            raise HTTPException(status_code=400, detail="'events' must be a JSON array.")
+        if len(events) > SCORE_MAX_BATCH_EVENTS:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Too many events in batch ({len(events)}). Max allowed: {SCORE_MAX_BATCH_EVENTS}.",
+            )
+        if any(not isinstance(ev, dict) for ev in events):
+            raise HTTPException(status_code=400, detail="Each item in 'events' must be a JSON object.")
+        return "batch", events
+
+    raise HTTPException(status_code=400, detail="Payload must include 'event' or 'events'.")
+
+
 @app.post("/score")
 async def score(request: Request):
     has_models = any(horizons for horizons in registry.available().values())
     if registry.manifest is None or not has_models:
         raise HTTPException(status_code=503, detail="Models not loaded. Train artifacts first.")
-    payload = await request.json()
-    if "event" in payload:
-        event = payload["event"]
+    try:
+        payload = await request.json()
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON payload: {exc.msg}") from exc
+
+    mode, normalized = _validate_score_payload(payload)
+
+    if mode == "single":
+        event = normalized
         result = _score_event(event)
         _log_prediction(event, result)
         return JSONResponse(result)
-    if "events" in payload:
+
+    if mode == "batch":
+        events = normalized
         results = []
-        for ev in payload["events"]:
+        for ev in events:
             res = _score_event(ev)
             _log_prediction(ev, res)
             results.append(res)
         return JSONResponse({"results": results})
-    raise HTTPException(status_code=400, detail="Payload must include 'event' or 'events'.")
+
+    raise HTTPException(status_code=400, detail="Unsupported score payload mode.")
 
 
 def run():
