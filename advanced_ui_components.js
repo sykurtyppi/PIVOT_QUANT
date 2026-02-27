@@ -133,34 +133,9 @@ window.AdvancedUIComponents = (() => {
      * Create volatility × regime matrix
      */
     function createVolatilityMatrix(data, regime, timeframe) {
-        const matrix = document.createElement('div');
-        matrix.className = 'volatility-matrix';
-
-        // Mock volatility data for demonstration
-        const volatilityData = generateMockVolatilityData(data);
-        const volSplits = window.AdvancedAnalytics.splitByVolatility(data, volatilityData);
-
-        const matrixHTML = `
-            <div class="matrix-header">
-                <h4>📊 Volatility × ${regime} Analysis</h4>
-                <div class="matrix-subtitle">${timeframe} timeframe</div>
-            </div>
-            <div class="matrix-grid">
-                ${createVolatilityRow('Low Vol', volSplits.Low, regime)}
-                ${createVolatilityRow('Normal Vol', volSplits.Normal, regime)}
-                ${createVolatilityRow('High Vol', volSplits.High, regime)}
-            </div>
-            <div class="matrix-legend">
-                <span class="legend-item">
-                    <span class="cell-sample sufficient"></span> n_eff ≥ 10
-                </span>
-                <span class="legend-item">
-                    <span class="cell-sample insufficient"></span> n_eff < 10 (grayed)
-                </span>
-            </div>
-        `;
-
-        matrix.innerHTML = matrixHTML;
+        const matrix = document.createElement("div");
+        matrix.className = "volatility-matrix disabled";
+        matrix.textContent = `Volatility analysis disabled: mock data removed.`;
         return matrix;
     }
 
@@ -210,34 +185,9 @@ window.AdvancedUIComponents = (() => {
      * Create walk-forward summary panel
      */
     function createWalkForwardSummary(_data, _regime) {
-        const panel = document.createElement('div');
-        panel.className = 'walk-forward-summary';
-
-        // Mock walk-forward analysis for each level
-        const levels = ['R3', 'R2', 'R1', 'PIVOT', 'S1', 'S2', 'S3'];
-        const walkForwardResults = {};
-
-        levels.forEach(level => {
-            // Generate mock time series data
-            const timeSeries = generateMockTimeSeries(level, 200);
-            const stability = window.AdvancedAnalytics.calculateWalkForwardStability(timeSeries, 60, 20);
-            walkForwardResults[level] = stability;
-        });
-
-        const summaryHTML = `
-            <div class="summary-header">
-                <h4>📈 Walk-Forward Analysis Summary</h4>
-                <div class="summary-subtitle">60-bar windows, 20-bar steps</div>
-            </div>
-            <div class="summary-grid">
-                ${levels.map(level => createWalkForwardRow(level, walkForwardResults[level])).join('')}
-            </div>
-            <div class="summary-note">
-                Sparklines show lift evolution over rolling windows. Stability based on lift variance.
-            </div>
-        `;
-
-        panel.innerHTML = summaryHTML;
+        const panel = document.createElement("div");
+        panel.className = "walk-forward-summary disabled";
+        panel.textContent = "Walk-forward summary disabled: mock data removed.";
         return panel;
     }
 
