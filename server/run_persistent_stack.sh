@@ -5,6 +5,13 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOG_DIR="${ROOT_DIR}/logs"
 mkdir -p "${LOG_DIR}"
 
+if [[ -f "${ROOT_DIR}/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "${ROOT_DIR}/.env"
+  set +a
+fi
+
 detect_lan_ip() {
   local iface ip
   iface="$(route get default 2>/dev/null | awk '/interface:/{print $2; exit}')"

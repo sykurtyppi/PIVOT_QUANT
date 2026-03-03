@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Callable
 
 DEFAULT_DB = os.getenv("PIVOT_DB", "data/pivot_events.sqlite")
-LATEST_SCHEMA_VERSION = 5
+LATEST_SCHEMA_VERSION = 6
 
 
 TOUCH_EVENT_SQL = """
@@ -297,12 +297,47 @@ def migration_5_prediction_log_shadow_30m(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE prediction_log ADD COLUMN {col_name} {col_type}")
 
 
+def migration_6_gamma_snapshots(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS gamma_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol TEXT NOT NULL,
+            snapshot_date TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'marketdata.app',
+            ts_collected_ms INTEGER NOT NULL,
+            spot REAL,
+            gamma_flip REAL,
+            call_wall REAL,
+            put_wall REAL,
+            pin REAL,
+            atm_iv REAL,
+            skew_25d REAL,
+            oi_call REAL,
+            oi_put REAL,
+            oi_concentration_top5 REAL,
+            zero_dte_share REAL,
+            total_contracts INTEGER,
+            with_greeks INTEGER,
+            with_iv INTEGER,
+            with_oi INTEGER,
+            used_open_interest INTEGER DEFAULT 0,
+            payload_json TEXT,
+            UNIQUE(symbol, snapshot_date, source)
+        );"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_gamma_snapshots_symbol_date "
+        "ON gamma_snapshots(symbol, snapshot_date);"
+    )
+
+
 MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (1, "base_schema_tables", migration_1_base_tables),
     (2, "columns_and_indexes", migration_2_columns_and_indexes),
     (3, "prediction_log", migration_3_prediction_log),
     (4, "prediction_log_compat", migration_4_prediction_log_compat),
     (5, "prediction_log_shadow_30m", migration_5_prediction_log_shadow_30m),
+    (6, "gamma_snapshots", migration_6_gamma_snapshots),
 ]
 
 

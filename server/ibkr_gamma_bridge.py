@@ -457,6 +457,7 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None):
     ivs = data.get("iv", [])
     ois = data.get("openInterest", [])
     deltas = data.get("delta", [])
+    expiries = data.get("expiration", [])
     underlyings = data.get("underlyingPrice", [])
 
     if not strikes or not gammas:
@@ -480,8 +481,12 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None):
     with_oi = 0
     oi_call = 0.0
     oi_put = 0.0
+    oi_by_strike = {}
+    zero_dte_oi = 0.0
+    expiries_seen = set()
     iv_samples = []
     multiplier = 100.0
+    today_utc = datetime.now(timezone.utc).date()
 
     for i in range(len(strikes)):
         strike = strikes[i]
@@ -497,6 +502,7 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None):
         iv = ivs[i] if i < len(ivs) else None
         oi = ois[i] if i < len(ois) else None
         delta = deltas[i] if i < len(deltas) else None
+        expiry_raw = expiries[i] if i < len(expiries) else None
 
         if gamma is None:
             continue
@@ -510,6 +516,7 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None):
         size = float(oi) if oi is not None else 1.0
         if oi is not None:
             with_oi += 1
+            oi_by_strike[strike] = oi_by_strike.get(strike, 0.0) + size
 
         # GEX = gamma * OI * multiplier * spot^2
         # Puts contribute negative GEX
@@ -524,6 +531,15 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None):
             oi_call += size
         else:
             oi_put += size
+        if expiry_raw:
+            expiry_text = str(expiry_raw)[:10]
+            expiries_seen.add(expiry_text)
+            if oi is not None:
+                try:
+                    if datetime.strptime(expiry_text, "%Y-%m-%d").date() == today_utc:
+                        zero_dte_oi += size
+                except Exception:
+                    pass
 
     if not gex_by_strike:
         raise ValueError("marketdata.app returned options chain but no usable gamma data")
@@ -582,6 +598,9 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None):
     skew = (put_iv - call_iv) if (put_iv is not None and call_iv is not None) else None
 
     total_oi = oi_call + oi_put
+    top_oi = sum(sorted(oi_by_strike.values(), reverse=True)[:5]) if oi_by_strike else 0.0
+    oi_concentration = round((top_oi / total_oi) * 100, 2) if total_oi else None
+    zero_dte_share = round((zero_dte_oi / total_oi) * 100, 2) if total_oi else None
 
     return {
         "source": "marketdata.app",
@@ -601,11 +620,11 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None):
             "withOI": with_oi,
             "oiCall": oi_call,
             "oiPut": oi_put,
-            "oiConcentration": 0,
-            "zeroDteShare": 0,
+            "oiConcentration": oi_concentration,
+            "zeroDteShare": zero_dte_share,
             "atmIV": atm_iv,
             "skew25d": skew,
-            "expiries": [],
+            "expiries": sorted(expiries_seen),
         },
     }
 

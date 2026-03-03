@@ -85,8 +85,8 @@ GAMMA_RETRY_SEC = max(30, int(os.getenv("LIVE_COLLECTOR_GAMMA_RETRY_SEC", "1800"
 INTERVAL_SEC = _interval_to_seconds(INTERVAL)
 _DEFAULT_CORS_ORIGINS = "http://127.0.0.1:3000,http://localhost:3000"
 
-if SOURCE not in ("auto", "ibkr", "yahoo"):
-    raise ValueError(f"LIVE_COLLECTOR_SOURCE must be auto/ibkr/yahoo, got: {SOURCE}")
+if SOURCE not in ("auto", "ibkr", "yahoo", "marketdata"):
+    raise ValueError(f"LIVE_COLLECTOR_SOURCE must be auto/ibkr/yahoo/marketdata, got: {SOURCE}")
 
 _state_lock = threading.Lock()
 _stop_event = threading.Event()

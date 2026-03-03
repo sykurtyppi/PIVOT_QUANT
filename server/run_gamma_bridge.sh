@@ -4,6 +4,13 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV_PY="${ROOT_DIR}/.venv/bin/python3"
 
+if [ -f "${ROOT_DIR}/.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "${ROOT_DIR}/.env"
+  set +a
+fi
+
 if [ -x "${VENV_PY}" ]; then
   exec "${VENV_PY}" "${ROOT_DIR}/server/ibkr_gamma_bridge.py"
 fi
