@@ -1,6 +1,8 @@
 import json
 import os
 import threading
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -23,6 +25,8 @@ IB_WEIGHT_MONTHLY = float(os.getenv("IB_WEIGHT_MONTHLY", "0.35"))
 IB_WEIGHT_OTHER = float(os.getenv("IB_WEIGHT_OTHER", "0.2"))
 IB_USE_RTH = os.getenv("IB_USE_RTH", "1") != "0"
 IB_DATA_TYPE = os.getenv("IB_DATA_TYPE", "").strip()
+MARKETDATA_APP_TOKEN = os.getenv("MARKETDATA_APP_TOKEN", "").strip()
+MARKETDATA_APP_BASE = "https://api.marketdata.app/v1"
 _DEFAULT_CORS_ORIGINS = "http://127.0.0.1:3000,http://localhost:3000"
 
 ib = IB()
@@ -421,6 +425,191 @@ def compute_gamma_walls(symbol, expiry_mode, limit):
     }
 
 
+def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None):
+    """Compute gamma walls from marketdata.app options chain — fallback when IBKR
+    returns Error 10089 (missing options market-data subscription).
+
+    Returns the same payload shape as compute_gamma_walls() so the dashboard
+    can consume it transparently.
+    """
+    if not MARKETDATA_APP_TOKEN:
+        raise ValueError("MARKETDATA_APP_TOKEN not set — cannot use marketdata.app fallback")
+
+    sr = strike_range or IB_STRIKE_RANGE
+    ms = max_strikes or IB_MAX_STRIKES
+
+    # Fetch the options chain for the symbol
+    url = f"{MARKETDATA_APP_BASE}/options/chain/{symbol.upper()}/"
+    req = urllib.request.Request(url, headers={"Authorization": f"Token {MARKETDATA_APP_TOKEN}"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        data = json.loads(resp.read())
+
+    if data.get("s") != "ok":
+        raise ValueError(
+            f"marketdata.app options chain error for {symbol}: "
+            f"{data.get('errmsg', data.get('s', 'unknown'))}"
+        )
+
+    # Extract arrays from the response
+    strikes = data.get("strike", [])
+    sides = data.get("side", [])
+    gammas = data.get("gamma", [])
+    ivs = data.get("iv", [])
+    ois = data.get("openInterest", [])
+    deltas = data.get("delta", [])
+    underlyings = data.get("underlyingPrice", [])
+
+    if not strikes or not gammas:
+        raise ValueError("marketdata.app returned options chain with no strike/gamma data")
+
+    # Determine spot from the underlying prices in the chain
+    spot_candidates = [p for p in underlyings if p is not None]
+    if not spot_candidates:
+        raise ValueError("marketdata.app returned no underlying price in options chain")
+    spot = float(spot_candidates[0])
+
+    # Filter strikes within range
+    lower = spot * (1 - sr)
+    upper = spot * (1 + sr)
+
+    gex_by_strike = {}
+    max_abs = 0.0
+    total_contracts = 0
+    with_greeks = 0
+    with_iv = 0
+    with_oi = 0
+    oi_call = 0.0
+    oi_put = 0.0
+    iv_samples = []
+    multiplier = 100.0
+
+    for i in range(len(strikes)):
+        strike = strikes[i]
+        if strike is None:
+            continue
+        strike = float(strike)
+        if strike < lower or strike > upper:
+            continue
+
+        total_contracts += 1
+        side = (sides[i] or "").lower() if i < len(sides) else ""
+        gamma = gammas[i] if i < len(gammas) else None
+        iv = ivs[i] if i < len(ivs) else None
+        oi = ois[i] if i < len(ois) else None
+        delta = deltas[i] if i < len(deltas) else None
+
+        if gamma is None:
+            continue
+        gamma = float(gamma)
+        with_greeks += 1
+
+        if iv is not None:
+            with_iv += 1
+            iv_samples.append((strike, side, delta, float(iv)))
+
+        size = float(oi) if oi is not None else 1.0
+        if oi is not None:
+            with_oi += 1
+
+        # GEX = gamma * OI * multiplier * spot^2
+        # Puts contribute negative GEX
+        gex = gamma * size * multiplier * (spot ** 2)
+        if side == "put":
+            gex = -gex
+
+        gex_by_strike[strike] = gex_by_strike.get(strike, 0.0) + gex
+        max_abs = max(max_abs, abs(gex_by_strike[strike]))
+
+        if side == "call":
+            oi_call += size
+        else:
+            oi_put += size
+
+    if not gex_by_strike:
+        raise ValueError("marketdata.app returned options chain but no usable gamma data")
+
+    # Trim to max_strikes centered around spot
+    sorted_all = sorted(gex_by_strike.keys())
+    if len(sorted_all) > ms:
+        nearest_idx = min(range(len(sorted_all)), key=lambda j: abs(sorted_all[j] - spot))
+        half = ms // 2
+        start = max(0, nearest_idx - half)
+        end = min(len(sorted_all), start + ms)
+        keep = set(sorted_all[start:end])
+        gex_by_strike = {k: v for k, v in gex_by_strike.items() if k in keep}
+        max_abs = max(abs(v) for v in gex_by_strike.values()) if gex_by_strike else 0.0
+
+    # Compute gamma flip, call wall, put wall, pin
+    sorted_strikes = sorted(gex_by_strike.keys())
+    cumulative = 0.0
+    flip = None
+    last_sign = None
+
+    for strike in sorted_strikes:
+        cumulative += gex_by_strike[strike]
+        sign = 1 if cumulative > 0 else -1 if cumulative < 0 else 0
+        if last_sign is not None and sign != last_sign and sign != 0:
+            flip = strike
+            break
+        last_sign = sign
+
+    if flip is None:
+        flip = min(sorted_strikes, key=lambda s: abs(gex_by_strike[s]))
+
+    call_wall = max(sorted_strikes, key=lambda s: gex_by_strike[s])
+    put_wall = min(sorted_strikes, key=lambda s: gex_by_strike[s])
+    pin = max(sorted_strikes, key=lambda s: abs(gex_by_strike[s]))
+
+    def wall_payload(strike):
+        gex = gex_by_strike[strike]
+        strength = round(abs(gex) / max_abs * 100) if max_abs else 0
+        return {"price": strike, "gex": gex, "strength": strength}
+
+    # IV analysis
+    atm_iv = None
+    if iv_samples:
+        atm = min(iv_samples, key=lambda x: abs(x[0] - spot))
+        atm_iv = atm[3]
+
+    call_iv = None
+    put_iv = None
+    call_candidates = [s for s in iv_samples if s[1] == "call" and s[2] is not None]
+    put_candidates = [s for s in iv_samples if s[1] == "put" and s[2] is not None]
+    if call_candidates:
+        call_iv = min(call_candidates, key=lambda x: abs(float(x[2]) - 0.25))[3]
+    if put_candidates:
+        put_iv = min(put_candidates, key=lambda x: abs(float(x[2]) + 0.25))[3]
+    skew = (put_iv - call_iv) if (put_iv is not None and call_iv is not None) else None
+
+    total_oi = oi_call + oi_put
+
+    return {
+        "source": "marketdata.app",
+        "symbol": symbol.upper(),
+        "spot": spot,
+        "expiryMode": "front",
+        "generatedAt": datetime.utcnow().isoformat() + "Z",
+        "gammaFlip": flip,
+        "callWall": wall_payload(call_wall),
+        "putWall": wall_payload(put_wall),
+        "pin": wall_payload(pin),
+        "usedOpenInterest": with_oi > 0,
+        "stats": {
+            "totalContracts": total_contracts,
+            "withGreeks": with_greeks,
+            "withIV": with_iv,
+            "withOI": with_oi,
+            "oiCall": oi_call,
+            "oiPut": oi_put,
+            "oiConcentration": 0,
+            "zeroDteShare": 0,
+            "atmIV": atm_iv,
+            "skew25d": skew,
+            "expiries": [],
+        },
+    }
+
+
 class GammaHandler(BaseHTTPRequestHandler):
     def _send_json(self, status_code, payload):
         body = json.dumps(payload).encode("utf-8")
@@ -453,13 +642,37 @@ class GammaHandler(BaseHTTPRequestHandler):
             symbol = params.get("symbol", ["SPX"])[0]
             expiry = params.get("expiry", [IB_EXPIRY_MODE])[0]
             limit = int(params.get("limit", [str(IB_MAX_STRIKES)])[0])
+            source = params.get("source", ["auto"])[0]
 
-            with ib_lock:
+            # Try IBKR first (unless explicitly requesting marketdata)
+            ibkr_err = None
+            if source != "marketdata":
+                with ib_lock:
+                    try:
+                        payload = compute_gamma_walls(symbol, expiry, limit)
+                        self._send_json(200, payload)
+                        return
+                    except Exception as exc:
+                        ibkr_err = str(exc)
+
+            # Fallback to marketdata.app when IBKR fails or when explicitly requested
+            if MARKETDATA_APP_TOKEN:
                 try:
-                    payload = compute_gamma_walls(symbol, expiry, limit)
+                    payload = fetch_gamma_marketdata(symbol)
+                    if ibkr_err:
+                        payload["ibkrFallbackReason"] = ibkr_err
                     self._send_json(200, payload)
-                except Exception as exc:
-                    self._send_json(502, {"error": "Gamma fetch failed", "message": str(exc)})
+                    return
+                except Exception as mda_exc:
+                    combined = f"IBKR: {ibkr_err or 'skipped'}; marketdata.app: {mda_exc}"
+                    self._send_json(502, {"error": "Gamma fetch failed", "message": combined})
+                    return
+
+            # No fallback available
+            self._send_json(502, {
+                "error": "Gamma fetch failed",
+                "message": ibkr_err or "No gamma source available",
+            })
             return
 
         if parsed.path == "/spot":
