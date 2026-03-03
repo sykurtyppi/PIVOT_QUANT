@@ -12,7 +12,7 @@ import time
 import traceback
 import hashlib
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Iterable
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -39,6 +39,8 @@ NY_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone.utc
 GAMMA_BRIDGE_URL = os.getenv("GAMMA_BRIDGE_URL", "http://127.0.0.1:5001/gamma")
 GAMMA_IV_RV_HIGH_RATIO = float(os.getenv("GAMMA_IV_RV_HIGH_RATIO", "1.15"))
 GAMMA_IV_RV_LOW_RATIO = float(os.getenv("GAMMA_IV_RV_LOW_RATIO", "0.85"))
+MARKETDATA_APP_TOKEN = os.getenv("MARKETDATA_APP_TOKEN", "").strip()
+MARKETDATA_APP_BASE = "https://api.marketdata.app/v1"
 
 
 def now_ms() -> int:
@@ -279,6 +281,8 @@ def fetch_market(symbol: str, interval: str, range_str: str, source: str) -> tup
     if source == "ibkr":
         url = f"http://127.0.0.1:5001/market?symbol={symbol}&range={range_str}&interval={interval}"
         return fetch_json(url), "IBKR"
+    if source == "marketdata":
+        return fetch_market_marketdata(symbol, interval, range_str)
     if source == "yahoo":
         proxy_url = (
             "http://127.0.0.1:3000/api/market"
@@ -303,6 +307,73 @@ def fetch_market(symbol: str, interval: str, range_str: str, source: str) -> tup
 
     data, src = fetch_market(symbol, interval, range_str, "yahoo")
     return data, src
+
+
+def range_to_from_date(range_str: str) -> str:
+    """Convert a range string (e.g. '9mo') to a YYYY-MM-DD from-date relative to today."""
+    _days_map = {
+        "1d": 1, "5d": 5, "7d": 7, "10d": 10,
+        "1mo": 30, "3mo": 90, "6mo": 180, "9mo": 270, "1y": 365,
+    }
+    days = _days_map.get(range_str, 90)
+    from_dt = datetime.now(timezone.utc) - timedelta(days=days)
+    return from_dt.strftime("%Y-%m-%d")
+
+
+def fetch_market_marketdata(symbol: str, interval: str, range_str: str) -> tuple[dict, str]:
+    """Fetch OHLCV candles from marketdata.app — supports up to 1y of 1m history."""
+    if not MARKETDATA_APP_TOKEN:
+        raise ValueError("MARKETDATA_APP_TOKEN not set in environment")
+    resolution_map = {
+        "1m": "1", "5m": "5", "15m": "15", "30m": "30",
+        "60m": "60", "1h": "60", "1d": "D", "1wk": "W",
+    }
+    resolution = resolution_map.get(interval, "1")
+    from_date = range_to_from_date(range_str)
+    to_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    url = (
+        f"{MARKETDATA_APP_BASE}/stocks/candles/{resolution}/{symbol.upper()}/"
+        f"?from={from_date}&to={to_date}"
+    )
+    req = Request(url, headers={"Authorization": f"Token {MARKETDATA_APP_TOKEN}"})
+    with urlopen(req, timeout=60) as resp:
+        data = json.loads(resp.read())
+    if data.get("s") != "ok":
+        raise ValueError(
+            f"marketdata.app error for {symbol}: {data.get('errmsg', data.get('s', 'unknown'))}"
+        )
+    timestamps = data.get("t") or []
+    opens = data.get("o") or []
+    highs = data.get("h") or []
+    lows = data.get("l") or []
+    closes = data.get("c") or []
+    volumes = data.get("v") or []
+    candles: list[dict] = []
+    for i, ts in enumerate(timestamps):
+        try:
+            o, h, l, c = opens[i], highs[i], lows[i], closes[i]
+            if any(v is None for v in (o, h, l, c)):
+                continue
+            v = volumes[i] if i < len(volumes) and volumes[i] is not None else 0
+            candles.append({
+                "time": int(ts),
+                "open": float(o),
+                "high": float(h),
+                "low": float(l),
+                "close": float(c),
+                "volume": float(v),
+            })
+        except Exception:
+            continue
+    if not candles:
+        raise ValueError(
+            f"marketdata.app returned no candles for {symbol} ({from_date} to {to_date})"
+        )
+    log.info(
+        "marketdata.app: %d candles for %s (%s to %s)",
+        len(candles), symbol, from_date, to_date,
+    )
+    return {"symbol": symbol, "candles": candles}, "marketdata.app"
 
 
 def normalize_range_for_source(interval: str, range_str: str, source: str) -> str:
@@ -1348,7 +1419,7 @@ def main() -> None:
     parser.add_argument("--symbols", default="SPY", help="Comma-separated symbols")
     parser.add_argument("--interval", default="1m")
     parser.add_argument("--range", dest="range_str", default="5d")
-    parser.add_argument("--source", choices=["auto", "ibkr", "yahoo"], default="auto")
+    parser.add_argument("--source", choices=["auto", "ibkr", "yahoo", "marketdata"], default="auto")
     parser.add_argument("--threshold-bps", type=float, default=10)
     parser.add_argument("--cooldown-min", type=int, default=10)
     parser.add_argument("--atr-window", type=int, default=14)
