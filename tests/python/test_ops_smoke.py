@@ -15,7 +15,7 @@ import tarfile
 import tempfile
 import textwrap
 import unittest
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import numpy as np
@@ -512,6 +512,75 @@ class OpsSmokeTests(unittest.TestCase):
             src = (REPO_ROOT / rel).read_text(encoding="utf-8")
             self.assertIn("ML_CORS_ORIGINS", src)
             self.assertNotIn('Access-Control-Allow-Origin", "*"', src)
+
+    def test_backfill_gamma_context_falls_back_to_snapshots(self) -> None:
+        backfill = load_module(
+            "pq_backfill_gamma_snapshot_fallback_test",
+            REPO_ROOT / "scripts" / "backfill_events.py",
+        )
+
+        original_fetch_json = backfill.fetch_json
+        original_token = backfill.MARKETDATA_APP_TOKEN
+        backfill.MARKETDATA_APP_TOKEN = ""
+
+        def _bridge_down(*_args, **_kwargs):
+            raise RuntimeError("bridge unavailable")
+
+        backfill.fetch_json = _bridge_down
+        conn = sqlite3.connect(":memory:")
+        try:
+            conn.execute(
+                """
+                CREATE TABLE gamma_snapshots (
+                    symbol TEXT NOT NULL,
+                    snapshot_date TEXT NOT NULL,
+                    ts_collected_ms INTEGER NOT NULL,
+                    gamma_flip REAL,
+                    atm_iv REAL,
+                    oi_concentration_top5 REAL,
+                    zero_dte_share REAL,
+                    total_contracts INTEGER,
+                    with_greeks INTEGER,
+                    with_oi INTEGER,
+                    used_open_interest INTEGER
+                )
+                """
+            )
+            snapshot_date = datetime.now(backfill.NY_TZ).date().strftime("%Y-%m-%d")
+            conn.execute(
+                """
+                INSERT INTO gamma_snapshots(
+                    symbol, snapshot_date, ts_collected_ms, gamma_flip, atm_iv,
+                    oi_concentration_top5, zero_dte_share, total_contracts, with_greeks,
+                    with_oi, used_open_interest
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "SPY",
+                    snapshot_date,
+                    1_777_777_777_000,
+                    501.25,
+                    0.22,
+                    18.5,
+                    9.2,
+                    2000,
+                    1800,
+                    1700,
+                    1,
+                ),
+            )
+            conn.commit()
+
+            ctx = backfill.fetch_gamma_context("SPY", timeout=1, conn=conn)
+            self.assertIsNotNone(ctx)
+            self.assertEqual(ctx["source_name"], "gamma_snapshots")
+            self.assertAlmostEqual(float(ctx["gamma_flip"]), 501.25, places=6)
+            self.assertEqual(ctx["generated_at_date_et"].strftime("%Y-%m-%d"), snapshot_date)
+            self.assertAlmostEqual(float(ctx["atm_iv_pct"]), 22.0, places=6)
+        finally:
+            backfill.fetch_json = original_fetch_json
+            backfill.MARKETDATA_APP_TOKEN = original_token
+            conn.close()
 
     def test_level_converter_contract_and_route_present(self) -> None:
         proxy_source = (REPO_ROOT / "server" / "yahoo_proxy.js").read_text(encoding="utf-8")

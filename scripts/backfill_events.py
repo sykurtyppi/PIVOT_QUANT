@@ -34,6 +34,15 @@ try:
 except ImportError:  # pragma: no cover
     migrate_connection = None  # type: ignore
 
+try:
+    from collect_gamma_history import ensure_schema as ensure_gamma_snapshots_schema
+    from collect_gamma_history import summarize_chain as summarize_gamma_chain
+    from collect_gamma_history import upsert_snapshot as upsert_gamma_snapshot
+except Exception:  # pragma: no cover
+    ensure_gamma_snapshots_schema = None  # type: ignore
+    summarize_gamma_chain = None  # type: ignore
+    upsert_gamma_snapshot = None  # type: ignore
+
 DEFAULT_DB = os.getenv("PIVOT_DB", "data/pivot_events.sqlite")
 NY_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone.utc
 GAMMA_BRIDGE_URL = os.getenv("GAMMA_BRIDGE_URL", "http://127.0.0.1:5001/gamma")
@@ -41,6 +50,10 @@ GAMMA_IV_RV_HIGH_RATIO = float(os.getenv("GAMMA_IV_RV_HIGH_RATIO", "1.15"))
 GAMMA_IV_RV_LOW_RATIO = float(os.getenv("GAMMA_IV_RV_LOW_RATIO", "0.85"))
 MARKETDATA_APP_TOKEN = os.getenv("MARKETDATA_APP_TOKEN", "").strip()
 MARKETDATA_APP_BASE = "https://api.marketdata.app/v1"
+GAMMA_CONTEXT_MARKETDATA_TIMEOUT_SEC = int(os.getenv("GAMMA_CONTEXT_MARKETDATA_TIMEOUT_SEC", "12"))
+GAMMA_CONTEXT_MAX_SNAPSHOT_AGE_DAYS = int(os.getenv("GAMMA_CONTEXT_MAX_SNAPSHOT_AGE_DAYS", "3"))
+GAMMA_CONTEXT_STRIKE_RANGE_PCT = float(os.getenv("GAMMA_HISTORY_STRIKE_RANGE_PCT", "0.2"))
+GAMMA_CONTEXT_MAX_STRIKES = int(os.getenv("GAMMA_HISTORY_MAX_STRIKES", "120"))
 
 
 def now_ms() -> int:
@@ -439,11 +452,174 @@ def _derive_gamma_confidence(payload: dict) -> int | None:
     return max(0, min(100, int(round(avg_strength))))
 
 
-def fetch_gamma_context(symbol: str, timeout: int = 2) -> dict | None:
-    """Fetch one gamma snapshot from the local IBKR gamma bridge.
+def _to_atm_iv_pct(iv_value: float | None) -> float | None:
+    if iv_value is None:
+        return None
+    # marketdata/IB commonly return decimal IV (e.g. 0.22), convert to percent.
+    return iv_value * 100.0 if iv_value <= 5 else iv_value
 
-    Returns normalized numeric context used to enrich generated touch events.
-    If bridge data is unavailable, returns None (non-fatal).
+
+def _snapshot_confidence(
+    total_contracts: int | None,
+    with_greeks: int | None,
+    with_oi: int | None,
+    used_open_interest: int | None,
+) -> int | None:
+    greeks = int(with_greeks or 0)
+    if greeks <= 0:
+        return None
+    confidence = 70
+    if int(with_oi or 0) > 0:
+        confidence += 15
+    if int(used_open_interest or 0) > 0:
+        confidence += 10
+    total = int(total_contracts or 0)
+    if total > 0 and (greeks / total) >= 0.5:
+        confidence += 5
+    return max(0, min(100, confidence))
+
+
+def _context_from_snapshot_row(symbol: str, row: sqlite3.Row) -> dict | None:
+    gamma_flip = _to_float(row["gamma_flip"])
+    if gamma_flip is None:
+        return None
+    generated_at_ms = int(row["ts_collected_ms"] or 0) if row["ts_collected_ms"] is not None else None
+    snapshot_date = None
+    raw_snapshot_date = row["snapshot_date"]
+    if raw_snapshot_date:
+        try:
+            snapshot_date = datetime.strptime(str(raw_snapshot_date), "%Y-%m-%d").date()
+        except ValueError:
+            snapshot_date = None
+    return {
+        "symbol": symbol.upper(),
+        "gamma_flip": gamma_flip,
+        "gamma_confidence": _snapshot_confidence(
+            row["total_contracts"],
+            row["with_greeks"],
+            row["with_oi"],
+            row["used_open_interest"],
+        ),
+        "oi_concentration_top5": _to_float(row["oi_concentration_top5"]),
+        "zero_dte_share": _to_float(row["zero_dte_share"]),
+        "atm_iv_pct": _to_atm_iv_pct(_to_float(row["atm_iv"])),
+        "generated_at_ms": generated_at_ms,
+        "generated_at_date_et": snapshot_date,
+        "source_name": "gamma_snapshots",
+    }
+
+
+def _fetch_gamma_context_from_snapshots(
+    symbol: str,
+    conn: sqlite3.Connection | None,
+) -> dict | None:
+    if conn is None:
+        return None
+    try:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT
+                snapshot_date,
+                ts_collected_ms,
+                gamma_flip,
+                atm_iv,
+                oi_concentration_top5,
+                zero_dte_share,
+                total_contracts,
+                with_greeks,
+                with_oi,
+                used_open_interest
+            FROM gamma_snapshots
+            WHERE symbol = ?
+              AND gamma_flip IS NOT NULL
+            ORDER BY snapshot_date DESC, ts_collected_ms DESC
+            LIMIT 1
+            """,
+            (symbol.upper(),),
+        ).fetchone()
+    except Exception:
+        return None
+    if row is None:
+        return None
+    context = _context_from_snapshot_row(symbol, row)
+    if context is None:
+        return None
+    snapshot_date = context.get("generated_at_date_et")
+    if snapshot_date is None:
+        return None
+    if (datetime.now(NY_TZ).date() - snapshot_date).days > GAMMA_CONTEXT_MAX_SNAPSHOT_AGE_DAYS:
+        return None
+    return context
+
+
+def _fetch_gamma_context_marketdata_live(
+    symbol: str,
+    timeout: int,
+    conn: sqlite3.Connection | None,
+) -> dict | None:
+    if not MARKETDATA_APP_TOKEN or summarize_gamma_chain is None:
+        return None
+    url = f"{MARKETDATA_APP_BASE}/options/chain/{symbol.upper()}/?expiration=all"
+    req = Request(
+        url,
+        headers={
+            "Authorization": f"Token {MARKETDATA_APP_TOKEN}",
+            "User-Agent": "PivotQuantBackfill/1.0",
+        },
+    )
+    try:
+        with urlopen(req, timeout=timeout) as resp:
+            payload = json.loads(resp.read())
+        if payload.get("s") != "ok":
+            return None
+        snapshot_date = datetime.now(NY_TZ).date()
+        snap = summarize_gamma_chain(
+            symbol=symbol.upper(),
+            snapshot_date=snapshot_date,
+            chain=payload,
+            strike_range_pct=GAMMA_CONTEXT_STRIKE_RANGE_PCT,
+            max_strikes=GAMMA_CONTEXT_MAX_STRIKES,
+        )
+        if (
+            conn is not None
+            and ensure_gamma_snapshots_schema is not None
+            and upsert_gamma_snapshot is not None
+        ):
+            ensure_gamma_snapshots_schema(conn)
+            upsert_gamma_snapshot(conn, snap)
+            conn.commit()
+        return {
+            "symbol": symbol.upper(),
+            "gamma_flip": _to_float(snap.get("gamma_flip")),
+            "gamma_confidence": _snapshot_confidence(
+                snap.get("total_contracts"),
+                snap.get("with_greeks"),
+                snap.get("with_oi"),
+                snap.get("used_open_interest"),
+            ),
+            "oi_concentration_top5": _to_float(snap.get("oi_concentration_top5")),
+            "zero_dte_share": _to_float(snap.get("zero_dte_share")),
+            "atm_iv_pct": _to_atm_iv_pct(_to_float(snap.get("atm_iv"))),
+            "generated_at_ms": int(snap.get("ts_collected_ms") or 0) or None,
+            "generated_at_date_et": snapshot_date,
+            "source_name": "marketdata_live",
+        }
+    except Exception:
+        return None
+
+
+def fetch_gamma_context(
+    symbol: str,
+    timeout: int = 2,
+    conn: sqlite3.Connection | None = None,
+) -> dict | None:
+    """Fetch one gamma snapshot.
+
+    Priority:
+      1) local gamma bridge
+      2) recent row in gamma_snapshots table
+      3) marketdata.app live chain snapshot (expiration=all)
     """
     base_url = (os.getenv("GAMMA_BRIDGE_URL") or GAMMA_BRIDGE_URL).strip()
     sep = "&" if "?" in base_url else "?"
@@ -451,30 +627,38 @@ def fetch_gamma_context(symbol: str, timeout: int = 2) -> dict | None:
     try:
         payload = fetch_json(url, timeout=timeout, retries=0)
     except Exception:
-        return None
+        payload = None
 
-    gamma_flip = _to_float(payload.get("gammaFlip"))
-    if gamma_flip is None:
-        return None
+    if payload is not None:
+        gamma_flip = _to_float(payload.get("gammaFlip"))
+        if gamma_flip is not None:
+            generated_at_ms = _parse_generated_at_ms(payload.get("generatedAt"))
+            atm_iv_raw = _to_float((payload.get("stats") or {}).get("atmIV"))
+            return {
+                "symbol": symbol.upper(),
+                "gamma_flip": gamma_flip,
+                "gamma_confidence": _derive_gamma_confidence(payload),
+                "oi_concentration_top5": _to_float((payload.get("stats") or {}).get("oiConcentration")),
+                "zero_dte_share": _to_float((payload.get("stats") or {}).get("zeroDteShare")),
+                "atm_iv_pct": _to_atm_iv_pct(atm_iv_raw),
+                "generated_at_ms": generated_at_ms,
+                "generated_at_date_et": (
+                    datetime.fromtimestamp(generated_at_ms / 1000, tz=NY_TZ).date()
+                    if generated_at_ms is not None
+                    else None
+                ),
+                "source_name": "ibkr_bridge",
+            }
 
-    generated_at_ms = _parse_generated_at_ms(payload.get("generatedAt"))
-    atm_iv_raw = _to_float((payload.get("stats") or {}).get("atmIV"))
-    context = {
-        "symbol": symbol.upper(),
-        "gamma_flip": gamma_flip,
-        "gamma_confidence": _derive_gamma_confidence(payload),
-        "oi_concentration_top5": _to_float((payload.get("stats") or {}).get("oiConcentration")),
-        "zero_dte_share": _to_float((payload.get("stats") or {}).get("zeroDteShare")),
-        # IB returns impliedVol as a decimal (e.g. 0.22). Convert to % for IV/RV comparison.
-        "atm_iv_pct": atm_iv_raw * 100 if atm_iv_raw is not None else None,
-        "generated_at_ms": generated_at_ms,
-        "generated_at_date_et": (
-            datetime.fromtimestamp(generated_at_ms / 1000, tz=NY_TZ).date()
-            if generated_at_ms is not None
-            else None
-        ),
-    }
-    return context
+    snapshot_context = _fetch_gamma_context_from_snapshots(symbol=symbol, conn=conn)
+    if snapshot_context is not None:
+        return snapshot_context
+
+    return _fetch_gamma_context_marketdata_live(
+        symbol=symbol,
+        timeout=max(timeout, GAMMA_CONTEXT_MARKETDATA_TIMEOUT_SEC),
+        conn=conn,
+    )
 
 
 def et_date(epoch_seconds: int):
@@ -1457,11 +1641,12 @@ def main() -> None:
                 log.warning("No candles for %s. Skipping.", symbol)
                 continue
 
-            gamma_context = fetch_gamma_context(symbol)
+            gamma_context = fetch_gamma_context(symbol, conn=conn)
             if gamma_context:
                 log.info(
-                    "%s: gamma context loaded (flip=%.2f, date=%s)",
+                    "%s: gamma context loaded from %s (flip=%.2f, date=%s)",
                     symbol,
+                    gamma_context.get("source_name", "unknown"),
                     gamma_context["gamma_flip"],
                     gamma_context.get("generated_at_date_et"),
                 )
