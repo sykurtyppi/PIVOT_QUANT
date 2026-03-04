@@ -651,8 +651,18 @@ def fetch_gamma_context(
             }
 
     snapshot_context = _fetch_gamma_context_from_snapshots(symbol=symbol, conn=conn)
+    today_et = datetime.now(NY_TZ).date()
     if snapshot_context is not None:
-        return snapshot_context
+        snapshot_date = snapshot_context.get("generated_at_date_et")
+        if snapshot_date == today_et:
+            return snapshot_context
+        # Snapshot exists but is stale; try live refresh before falling back.
+        live_context = _fetch_gamma_context_marketdata_live(
+            symbol=symbol,
+            timeout=max(timeout, GAMMA_CONTEXT_MARKETDATA_TIMEOUT_SEC),
+            conn=conn,
+        )
+        return live_context or snapshot_context
 
     return _fetch_gamma_context_marketdata_live(
         symbol=symbol,

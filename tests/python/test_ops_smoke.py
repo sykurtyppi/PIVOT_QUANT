@@ -15,7 +15,7 @@ import tarfile
 import tempfile
 import textwrap
 import unittest
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -579,6 +579,92 @@ class OpsSmokeTests(unittest.TestCase):
             self.assertAlmostEqual(float(ctx["atm_iv_pct"]), 22.0, places=6)
         finally:
             backfill.fetch_json = original_fetch_json
+            backfill.MARKETDATA_APP_TOKEN = original_token
+            conn.close()
+
+    def test_backfill_gamma_context_prefers_live_when_snapshot_is_stale(self) -> None:
+        backfill = load_module(
+            "pq_backfill_gamma_live_refresh_test",
+            REPO_ROOT / "scripts" / "backfill_events.py",
+        )
+
+        original_fetch_json = backfill.fetch_json
+        original_live_fetch = backfill._fetch_gamma_context_marketdata_live
+        original_token = backfill.MARKETDATA_APP_TOKEN
+        backfill.MARKETDATA_APP_TOKEN = "dummy_token"
+
+        def _bridge_down(*_args, **_kwargs):
+            raise RuntimeError("bridge unavailable")
+
+        today = datetime.now(backfill.NY_TZ).date()
+        stale_day = today - timedelta(days=1)
+
+        def _fake_live_fetch(*, symbol, timeout, conn):
+            return {
+                "symbol": symbol.upper(),
+                "gamma_flip": 512.0,
+                "gamma_confidence": 92,
+                "oi_concentration_top5": 22.0,
+                "zero_dte_share": 11.0,
+                "atm_iv_pct": 24.0,
+                "generated_at_ms": 1_777_777_888_000,
+                "generated_at_date_et": today,
+                "source_name": "marketdata_live",
+            }
+
+        backfill.fetch_json = _bridge_down
+        backfill._fetch_gamma_context_marketdata_live = _fake_live_fetch
+        conn = sqlite3.connect(":memory:")
+        try:
+            conn.execute(
+                """
+                CREATE TABLE gamma_snapshots (
+                    symbol TEXT NOT NULL,
+                    snapshot_date TEXT NOT NULL,
+                    ts_collected_ms INTEGER NOT NULL,
+                    gamma_flip REAL,
+                    atm_iv REAL,
+                    oi_concentration_top5 REAL,
+                    zero_dte_share REAL,
+                    total_contracts INTEGER,
+                    with_greeks INTEGER,
+                    with_oi INTEGER,
+                    used_open_interest INTEGER
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO gamma_snapshots(
+                    symbol, snapshot_date, ts_collected_ms, gamma_flip, atm_iv,
+                    oi_concentration_top5, zero_dte_share, total_contracts, with_greeks,
+                    with_oi, used_open_interest
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "SPY",
+                    stale_day.strftime("%Y-%m-%d"),
+                    1_777_777_777_000,
+                    501.25,
+                    0.22,
+                    18.5,
+                    9.2,
+                    2000,
+                    1800,
+                    1700,
+                    1,
+                ),
+            )
+            conn.commit()
+
+            ctx = backfill.fetch_gamma_context("SPY", timeout=1, conn=conn)
+            self.assertIsNotNone(ctx)
+            self.assertEqual(ctx["source_name"], "marketdata_live")
+            self.assertAlmostEqual(float(ctx["gamma_flip"]), 512.0, places=6)
+            self.assertEqual(ctx["generated_at_date_et"], today)
+        finally:
+            backfill.fetch_json = original_fetch_json
+            backfill._fetch_gamma_context_marketdata_live = original_live_fetch
             backfill.MARKETDATA_APP_TOKEN = original_token
             conn.close()
 
