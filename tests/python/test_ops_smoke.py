@@ -15,7 +15,7 @@ import tarfile
 import tempfile
 import textwrap
 import unittest
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
@@ -857,6 +857,146 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(int(snap["with_greeks"]), 0)
         self.assertGreater(int(snap["with_oi"]), 0)
         self.assertIsNotNone(snap["oi_concentration_top5"])
+
+    def test_enrich_touch_events_uses_carry_and_does_not_null_overwrite(self) -> None:
+        db = self.tmp / "enrich_gamma.sqlite"
+        conn = sqlite3.connect(str(db))
+        try:
+            conn.execute(
+                """
+                CREATE TABLE touch_events (
+                    symbol TEXT NOT NULL,
+                    ts_event INTEGER NOT NULL,
+                    touch_price REAL,
+                    rv_30 REAL,
+                    gamma_flip REAL,
+                    gamma_mode INTEGER,
+                    gamma_flip_dist_bps REAL,
+                    gamma_confidence INTEGER,
+                    oi_concentration_top5 REAL,
+                    zero_dte_share REAL,
+                    iv_rv_state INTEGER,
+                    data_quality REAL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE gamma_snapshots (
+                    symbol TEXT NOT NULL,
+                    snapshot_date TEXT NOT NULL,
+                    ts_collected_ms INTEGER NOT NULL,
+                    gamma_flip REAL,
+                    oi_concentration_top5 REAL,
+                    zero_dte_share REAL,
+                    atm_iv REAL,
+                    total_contracts INTEGER,
+                    with_greeks INTEGER,
+                    with_oi INTEGER,
+                    used_open_interest INTEGER
+                )
+                """
+            )
+
+            event_day = date(2026, 3, 4)
+            event_ts = int(datetime(2026, 3, 4, 12, 0, tzinfo=timezone.utc).timestamp() * 1000)
+            yesterday = (event_day - timedelta(days=1)).strftime("%Y-%m-%d")
+
+            # SPY row should get gamma/IV from carry.
+            conn.execute(
+                """
+                INSERT INTO touch_events(
+                    symbol, ts_event, touch_price, rv_30, gamma_flip, gamma_mode,
+                    gamma_flip_dist_bps, gamma_confidence, oi_concentration_top5,
+                    zero_dte_share, iv_rv_state, data_quality
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("SPY", event_ts, 590.0, 20.0, None, None, None, None, None, None, None, None),
+            )
+            # QQQ row has no snapshot/carry, so overwrite must not clear existing fields.
+            conn.execute(
+                """
+                INSERT INTO touch_events(
+                    symbol, ts_event, touch_price, rv_30, gamma_flip, gamma_mode,
+                    gamma_flip_dist_bps, gamma_confidence, oi_concentration_top5,
+                    zero_dte_share, iv_rv_state, data_quality
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("QQQ", event_ts, 500.0, 25.0, 400.0, 1, 2500.0, 2, 10.0, 0.3, 1, 0.5),
+            )
+
+            # Same-day snapshot has OI context but no greeks/IV.
+            conn.execute(
+                """
+                INSERT INTO gamma_snapshots(
+                    symbol, snapshot_date, ts_collected_ms, gamma_flip, oi_concentration_top5,
+                    zero_dte_share, atm_iv, total_contracts, with_greeks, with_oi, used_open_interest
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("SPY", "2026-03-04", 1_777_778_111_000, None, 16.4, 0.0, None, 7806, 0, 7806, 1),
+            )
+            # Prior-day snapshot has valid greeks and should be used as carry.
+            conn.execute(
+                """
+                INSERT INTO gamma_snapshots(
+                    symbol, snapshot_date, ts_collected_ms, gamma_flip, oi_concentration_top5,
+                    zero_dte_share, atm_iv, total_contracts, with_greeks, with_oi, used_open_interest
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("SPY", yesterday, 1_777_777_111_000, 587.0, 12.7, 0.0, 0.21, 11992, 11992, 11992, 1),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        proc = run_cmd(
+            [
+                PYTHON,
+                "scripts/enrich_touch_events_from_gamma.py",
+                "--db",
+                str(db),
+                "--start-date",
+                "2026-03-04",
+                "--end-date",
+                "2026-03-04",
+                "--overwrite",
+            ],
+            cwd=REPO_ROOT,
+        )
+        self.assertEqual(proc.returncode, 0, msg=f"{proc.stdout}\n{proc.stderr}")
+
+        payload = json.loads(proc.stdout)
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(int(payload["matched_rows"]), 2)
+        self.assertEqual(int(payload["updated_rows"]), 1)
+
+        conn = sqlite3.connect(str(db))
+        try:
+            spy = conn.execute(
+                """
+                SELECT gamma_flip, iv_rv_state, oi_concentration_top5, zero_dte_share
+                FROM touch_events
+                WHERE symbol = 'SPY'
+                """
+            ).fetchone()
+            self.assertIsNotNone(spy)
+            self.assertAlmostEqual(float(spy[0]), 587.0, places=6)
+            self.assertEqual(int(spy[1]), 0)
+            self.assertAlmostEqual(float(spy[2]), 16.4, places=6)
+            self.assertAlmostEqual(float(spy[3]), 0.0, places=6)
+
+            qqq = conn.execute(
+                """
+                SELECT gamma_flip, iv_rv_state
+                FROM touch_events
+                WHERE symbol = 'QQQ'
+                """
+            ).fetchone()
+            self.assertIsNotNone(qqq)
+            self.assertAlmostEqual(float(qqq[0]), 400.0, places=6)
+            self.assertEqual(int(qqq[1]), 1)
+        finally:
+            conn.close()
 
     def test_level_converter_contract_and_route_present(self) -> None:
         proxy_source = (REPO_ROOT / "server" / "yahoo_proxy.js").read_text(encoding="utf-8")
