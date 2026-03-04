@@ -10,6 +10,7 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
+from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -44,23 +45,34 @@ def fetch_marketdata_chain(
     snapshot_date: date,
     timeout_sec: int,
 ) -> dict:
+    def _request(url: str) -> dict:
+        req = Request(
+            url,
+            headers={
+                "Authorization": f"Token {MARKETDATA_APP_TOKEN}",
+                "User-Agent": "PivotQuantGammaHistory/1.0",
+            },
+        )
+        with urlopen(req, timeout=timeout_sec) as resp:
+            payload = json.loads(resp.read())
+        if payload.get("s") != "ok":
+            raise RuntimeError(
+                f"marketdata.app chain error for {symbol} {snapshot_date}: "
+                f"{payload.get('errmsg', payload.get('s', 'unknown'))}"
+            )
+        return payload
+
     params = {"date": snapshot_date.strftime("%Y-%m-%d")}
     url = f"{MARKETDATA_APP_BASE}/options/chain/{symbol.upper()}/?{urlencode(params)}"
-    req = Request(
-        url,
-        headers={
-            "Authorization": f"Token {MARKETDATA_APP_TOKEN}",
-            "User-Agent": "PivotQuantGammaHistory/1.0",
-        },
-    )
-    with urlopen(req, timeout=timeout_sec) as resp:
-        payload = json.loads(resp.read())
-    if payload.get("s") != "ok":
-        raise RuntimeError(
-            f"marketdata.app chain error for {symbol} {snapshot_date}: "
-            f"{payload.get('errmsg', payload.get('s', 'unknown'))}"
-        )
-    return payload
+    try:
+        return _request(url)
+    except HTTPError as exc:
+        # Same-day date queries can fail with 400 for some accounts.
+        # Fall back to the live chain endpoint so today's snapshot can still persist.
+        if exc.code != 400:
+            raise
+        live_url = f"{MARKETDATA_APP_BASE}/options/chain/{symbol.upper()}/?expiration=all"
+        return _request(live_url)
 
 
 def _to_float(value) -> float | None:
@@ -94,8 +106,8 @@ def summarize_chain(
     expiries = chain.get("expiration") or []
     underlyings = chain.get("underlyingPrice") or []
 
-    if not strikes or not gammas:
-        raise RuntimeError(f"chain has no strike/gamma data for {symbol} {snapshot_date}")
+    if not strikes:
+        raise RuntimeError(f"chain has no strike data for {symbol} {snapshot_date}")
 
     spot_candidates = [_to_float(v) for v in underlyings]
     spot_candidates = [v for v in spot_candidates if v is not None]
@@ -162,35 +174,36 @@ def summarize_chain(
             gex = -gex
         gex_by_strike[strike] = gex_by_strike.get(strike, 0.0) + gex
 
-    if not gex_by_strike:
-        raise RuntimeError(f"no usable gamma contracts for {symbol} {snapshot_date}")
-
-    ordered = sorted(gex_by_strike.keys())
-    if len(ordered) > max_strikes:
-        nearest_idx = min(range(len(ordered)), key=lambda j: abs(ordered[j] - spot))
-        half = max_strikes // 2
-        start = max(0, nearest_idx - half)
-        end = min(len(ordered), start + max_strikes)
-        keep = set(ordered[start:end])
-        gex_by_strike = {k: v for k, v in gex_by_strike.items() if k in keep}
-        ordered = sorted(gex_by_strike.keys())
-
-    cumulative = 0.0
-    last_sign: int | None = None
     gamma_flip = None
-    for strike in ordered:
-        cumulative += gex_by_strike[strike]
-        sign = 1 if cumulative > 0 else -1 if cumulative < 0 else 0
-        if last_sign is not None and sign != 0 and sign != last_sign:
-            gamma_flip = strike
-            break
-        last_sign = sign
-    if gamma_flip is None:
-        gamma_flip = min(ordered, key=lambda s: abs(gex_by_strike[s]))
+    call_wall = None
+    put_wall = None
+    pin = None
+    ordered = sorted(gex_by_strike.keys())
+    if ordered:
+        if len(ordered) > max_strikes:
+            nearest_idx = min(range(len(ordered)), key=lambda j: abs(ordered[j] - spot))
+            half = max_strikes // 2
+            start = max(0, nearest_idx - half)
+            end = min(len(ordered), start + max_strikes)
+            keep = set(ordered[start:end])
+            gex_by_strike = {k: v for k, v in gex_by_strike.items() if k in keep}
+            ordered = sorted(gex_by_strike.keys())
 
-    call_wall = max(ordered, key=lambda s: gex_by_strike[s])
-    put_wall = min(ordered, key=lambda s: gex_by_strike[s])
-    pin = max(ordered, key=lambda s: abs(gex_by_strike[s]))
+        cumulative = 0.0
+        last_sign: int | None = None
+        for strike in ordered:
+            cumulative += gex_by_strike[strike]
+            sign = 1 if cumulative > 0 else -1 if cumulative < 0 else 0
+            if last_sign is not None and sign != 0 and sign != last_sign:
+                gamma_flip = strike
+                break
+            last_sign = sign
+        if gamma_flip is None:
+            gamma_flip = min(ordered, key=lambda s: abs(gex_by_strike[s]))
+
+        call_wall = max(ordered, key=lambda s: gex_by_strike[s])
+        put_wall = min(ordered, key=lambda s: gex_by_strike[s])
+        pin = max(ordered, key=lambda s: abs(gex_by_strike[s]))
 
     atm_iv = None
     if iv_samples:

@@ -668,6 +668,101 @@ class OpsSmokeTests(unittest.TestCase):
             backfill.MARKETDATA_APP_TOKEN = original_token
             conn.close()
 
+    def test_backfill_gamma_context_uses_snapshot_without_gamma_flip(self) -> None:
+        backfill = load_module(
+            "pq_backfill_gamma_partial_snapshot_test",
+            REPO_ROOT / "scripts" / "backfill_events.py",
+        )
+
+        original_fetch_json = backfill.fetch_json
+        original_token = backfill.MARKETDATA_APP_TOKEN
+        backfill.MARKETDATA_APP_TOKEN = ""
+
+        def _bridge_down(*_args, **_kwargs):
+            raise RuntimeError("bridge unavailable")
+
+        backfill.fetch_json = _bridge_down
+        conn = sqlite3.connect(":memory:")
+        try:
+            conn.execute(
+                """
+                CREATE TABLE gamma_snapshots (
+                    symbol TEXT NOT NULL,
+                    snapshot_date TEXT NOT NULL,
+                    ts_collected_ms INTEGER NOT NULL,
+                    gamma_flip REAL,
+                    atm_iv REAL,
+                    oi_concentration_top5 REAL,
+                    zero_dte_share REAL,
+                    total_contracts INTEGER,
+                    with_greeks INTEGER,
+                    with_oi INTEGER,
+                    used_open_interest INTEGER
+                )
+                """
+            )
+            snapshot_date = datetime.now(backfill.NY_TZ).date().strftime("%Y-%m-%d")
+            conn.execute(
+                """
+                INSERT INTO gamma_snapshots(
+                    symbol, snapshot_date, ts_collected_ms, gamma_flip, atm_iv,
+                    oi_concentration_top5, zero_dte_share, total_contracts, with_greeks,
+                    with_oi, used_open_interest
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "SPY",
+                    snapshot_date,
+                    1_777_777_999_000,
+                    None,
+                    0.19,
+                    17.0,
+                    8.5,
+                    2100,
+                    0,
+                    1800,
+                    1,
+                ),
+            )
+            conn.commit()
+
+            ctx = backfill.fetch_gamma_context("SPY", timeout=1, conn=conn)
+            self.assertIsNotNone(ctx)
+            self.assertEqual(ctx["source_name"], "gamma_snapshots")
+            self.assertIsNone(ctx["gamma_flip"])
+            self.assertAlmostEqual(float(ctx["atm_iv_pct"]), 19.0, places=6)
+            self.assertAlmostEqual(float(ctx["oi_concentration_top5"]), 17.0, places=6)
+        finally:
+            backfill.fetch_json = original_fetch_json
+            backfill.MARKETDATA_APP_TOKEN = original_token
+            conn.close()
+
+    def test_collect_gamma_history_allows_partial_chain_without_greeks(self) -> None:
+        collector = load_module(
+            "pq_collect_gamma_partial_chain_test",
+            REPO_ROOT / "scripts" / "collect_gamma_history.py",
+        )
+        snap = collector.summarize_chain(
+            symbol="SPY",
+            snapshot_date=date(2026, 3, 4),
+            chain={
+                "strike": [580, 585, 590],
+                "side": ["call", "put", "call"],
+                "gamma": [None, None, None],
+                "iv": [0.2, 0.21, 0.22],
+                "openInterest": [1000, 900, 800],
+                "delta": [0.25, -0.25, 0.4],
+                "expiration": ["2026-03-04", "2026-03-04", "2026-03-11"],
+                "underlyingPrice": [587.0, 587.0, 587.0],
+            },
+            strike_range_pct=0.6,
+            max_strikes=200,
+        )
+        self.assertIsNone(snap["gamma_flip"])
+        self.assertEqual(int(snap["with_greeks"]), 0)
+        self.assertGreater(int(snap["with_oi"]), 0)
+        self.assertIsNotNone(snap["oi_concentration_top5"])
+
     def test_level_converter_contract_and_route_present(self) -> None:
         proxy_source = (REPO_ROOT / "server" / "yahoo_proxy.js").read_text(encoding="utf-8")
         self.assertIn("/api/levels/convert", proxy_source)

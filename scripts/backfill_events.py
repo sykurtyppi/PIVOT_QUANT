@@ -481,7 +481,10 @@ def _snapshot_confidence(
 
 def _context_from_snapshot_row(symbol: str, row: sqlite3.Row) -> dict | None:
     gamma_flip = _to_float(row["gamma_flip"])
-    if gamma_flip is None:
+    oi_concentration_top5 = _to_float(row["oi_concentration_top5"])
+    zero_dte_share = _to_float(row["zero_dte_share"])
+    atm_iv_pct = _to_atm_iv_pct(_to_float(row["atm_iv"]))
+    if gamma_flip is None and oi_concentration_top5 is None and zero_dte_share is None and atm_iv_pct is None:
         return None
     generated_at_ms = int(row["ts_collected_ms"] or 0) if row["ts_collected_ms"] is not None else None
     snapshot_date = None
@@ -500,9 +503,9 @@ def _context_from_snapshot_row(symbol: str, row: sqlite3.Row) -> dict | None:
             row["with_oi"],
             row["used_open_interest"],
         ),
-        "oi_concentration_top5": _to_float(row["oi_concentration_top5"]),
-        "zero_dte_share": _to_float(row["zero_dte_share"]),
-        "atm_iv_pct": _to_atm_iv_pct(_to_float(row["atm_iv"])),
+        "oi_concentration_top5": oi_concentration_top5,
+        "zero_dte_share": zero_dte_share,
+        "atm_iv_pct": atm_iv_pct,
         "generated_at_ms": generated_at_ms,
         "generated_at_date_et": snapshot_date,
         "source_name": "gamma_snapshots",
@@ -532,7 +535,6 @@ def _fetch_gamma_context_from_snapshots(
                 used_open_interest
             FROM gamma_snapshots
             WHERE symbol = ?
-              AND gamma_flip IS NOT NULL
             ORDER BY snapshot_date DESC, ts_collected_ms DESC
             LIMIT 1
             """,
@@ -1653,11 +1655,13 @@ def main() -> None:
 
             gamma_context = fetch_gamma_context(symbol, conn=conn)
             if gamma_context:
+                gamma_flip_val = gamma_context.get("gamma_flip")
+                gamma_flip_txt = f"{gamma_flip_val:.2f}" if gamma_flip_val is not None else "n/a"
                 log.info(
-                    "%s: gamma context loaded from %s (flip=%.2f, date=%s)",
+                    "%s: gamma context loaded from %s (flip=%s, date=%s)",
                     symbol,
                     gamma_context.get("source_name", "unknown"),
-                    gamma_context["gamma_flip"],
+                    gamma_flip_txt,
                     gamma_context.get("generated_at_date_et"),
                 )
             else:
