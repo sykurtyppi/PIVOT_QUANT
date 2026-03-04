@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import importlib.util
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -597,8 +598,12 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("threshold_break_30m", ml_server)
 
         migrate_db = (REPO_ROOT / "scripts" / "migrate_db.py").read_text(encoding="utf-8")
-        self.assertIn("LATEST_SCHEMA_VERSION = 5", migrate_db)
+        match = re.search(r"LATEST_SCHEMA_VERSION\s*=\s*(\d+)", migrate_db)
+        self.assertIsNotNone(match, msg="migrate_db.py must declare LATEST_SCHEMA_VERSION")
+        self.assertGreaterEqual(int(match.group(1)), 6)
         self.assertIn("migration_5_prediction_log_shadow_30m", migrate_db)
+        self.assertIn("migration_6_gamma_snapshots", migrate_db)
+        self.assertIn("gamma_snapshots", migrate_db)
         self.assertIn("signal_30m", migrate_db)
 
     def test_30m_shadow_horizon_runtime_behavior(self) -> None:
