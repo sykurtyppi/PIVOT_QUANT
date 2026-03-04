@@ -54,6 +54,10 @@ GAMMA_CONTEXT_MARKETDATA_TIMEOUT_SEC = int(os.getenv("GAMMA_CONTEXT_MARKETDATA_T
 GAMMA_CONTEXT_MAX_SNAPSHOT_AGE_DAYS = int(os.getenv("GAMMA_CONTEXT_MAX_SNAPSHOT_AGE_DAYS", "3"))
 GAMMA_CONTEXT_STRIKE_RANGE_PCT = float(os.getenv("GAMMA_HISTORY_STRIKE_RANGE_PCT", "0.2"))
 GAMMA_CONTEXT_MAX_STRIKES = int(os.getenv("GAMMA_HISTORY_MAX_STRIKES", "120"))
+GAMMA_CONTEXT_CARRY_MAX_DAYS = int(os.getenv("GAMMA_CONTEXT_CARRY_MAX_DAYS", "1"))
+GAMMA_CONTEXT_CARRY_CONFIDENCE_DECAY_PER_DAY = int(
+    os.getenv("GAMMA_CONTEXT_CARRY_CONFIDENCE_DECAY_PER_DAY", "20")
+)
 
 
 def now_ms() -> int:
@@ -611,6 +615,95 @@ def _fetch_gamma_context_marketdata_live(
         return None
 
 
+def _context_has_signal_fields(context: dict | None) -> bool:
+    if context is None:
+        return False
+    return context.get("gamma_flip") is not None or context.get("atm_iv_pct") is not None
+
+
+def _fetch_gamma_carry_context(
+    symbol: str,
+    conn: sqlite3.Connection | None,
+    max_age_days: int,
+) -> dict | None:
+    if conn is None or max_age_days < 0:
+        return None
+    try:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT
+                snapshot_date,
+                ts_collected_ms,
+                gamma_flip,
+                atm_iv,
+                oi_concentration_top5,
+                zero_dte_share,
+                total_contracts,
+                with_greeks,
+                with_oi,
+                used_open_interest
+            FROM gamma_snapshots
+            WHERE symbol = ?
+              AND (gamma_flip IS NOT NULL OR atm_iv IS NOT NULL)
+            ORDER BY snapshot_date DESC, ts_collected_ms DESC
+            LIMIT 1
+            """,
+            (symbol.upper(),),
+        ).fetchone()
+    except Exception:
+        return None
+    if row is None:
+        return None
+    context = _context_from_snapshot_row(symbol, row)
+    if context is None:
+        return None
+    d = context.get("generated_at_date_et")
+    if d is None:
+        return None
+    age_days = (datetime.now(NY_TZ).date() - d).days
+    if age_days < 0 or age_days > max_age_days:
+        return None
+    return context
+
+
+def _merge_context_with_carry(
+    base_context: dict | None,
+    carry_context: dict | None,
+    today_et: date,
+) -> dict | None:
+    if base_context is None:
+        return carry_context
+    if carry_context is None:
+        return base_context
+
+    merged = dict(base_context)
+    carry_date = carry_context.get("generated_at_date_et")
+    age_days = (today_et - carry_date).days if carry_date is not None else 0
+    if age_days < 0:
+        age_days = 0
+
+    used_carry = False
+    if merged.get("gamma_flip") is None and carry_context.get("gamma_flip") is not None:
+        merged["gamma_flip"] = carry_context.get("gamma_flip")
+        carry_conf = carry_context.get("gamma_confidence")
+        if carry_conf is not None:
+            decayed = int(carry_conf) - (age_days * GAMMA_CONTEXT_CARRY_CONFIDENCE_DECAY_PER_DAY)
+            merged["gamma_confidence"] = max(0, decayed)
+        elif merged.get("gamma_confidence") is None:
+            merged["gamma_confidence"] = None
+        used_carry = True
+
+    if merged.get("atm_iv_pct") is None and carry_context.get("atm_iv_pct") is not None:
+        merged["atm_iv_pct"] = carry_context.get("atm_iv_pct")
+        used_carry = True
+
+    if used_carry:
+        merged["source_name"] = f"{base_context.get('source_name', 'unknown')}+carry"
+        merged["carried_from_date_et"] = carry_date
+    return merged
+
+
 def fetch_gamma_context(
     symbol: str,
     timeout: int = 2,
@@ -654,23 +747,38 @@ def fetch_gamma_context(
 
     snapshot_context = _fetch_gamma_context_from_snapshots(symbol=symbol, conn=conn)
     today_et = datetime.now(NY_TZ).date()
+    carry_context = _fetch_gamma_carry_context(
+        symbol=symbol,
+        conn=conn,
+        max_age_days=GAMMA_CONTEXT_CARRY_MAX_DAYS,
+    )
     if snapshot_context is not None:
         snapshot_date = snapshot_context.get("generated_at_date_et")
         if snapshot_date == today_et:
-            return snapshot_context
+            if _context_has_signal_fields(snapshot_context):
+                return snapshot_context
+            # Snapshot for today exists but misses greeks/IV. Try live refresh.
+            live_context = _fetch_gamma_context_marketdata_live(
+                symbol=symbol,
+                timeout=max(timeout, GAMMA_CONTEXT_MARKETDATA_TIMEOUT_SEC),
+                conn=conn,
+            )
+            return _merge_context_with_carry(live_context or snapshot_context, carry_context, today_et)
+
         # Snapshot exists but is stale; try live refresh before falling back.
         live_context = _fetch_gamma_context_marketdata_live(
             symbol=symbol,
             timeout=max(timeout, GAMMA_CONTEXT_MARKETDATA_TIMEOUT_SEC),
             conn=conn,
         )
-        return live_context or snapshot_context
+        return _merge_context_with_carry(live_context or snapshot_context, carry_context, today_et)
 
-    return _fetch_gamma_context_marketdata_live(
+    live_context = _fetch_gamma_context_marketdata_live(
         symbol=symbol,
         timeout=max(timeout, GAMMA_CONTEXT_MARKETDATA_TIMEOUT_SEC),
         conn=conn,
     )
+    return _merge_context_with_carry(live_context, carry_context, today_et)
 
 
 def et_date(epoch_seconds: int):

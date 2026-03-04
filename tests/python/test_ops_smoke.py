@@ -737,6 +737,101 @@ class OpsSmokeTests(unittest.TestCase):
             backfill.MARKETDATA_APP_TOKEN = original_token
             conn.close()
 
+    def test_backfill_gamma_context_carries_recent_gamma_when_today_missing(self) -> None:
+        backfill = load_module(
+            "pq_backfill_gamma_carry_test",
+            REPO_ROOT / "scripts" / "backfill_events.py",
+        )
+
+        original_fetch_json = backfill.fetch_json
+        original_token = backfill.MARKETDATA_APP_TOKEN
+        backfill.MARKETDATA_APP_TOKEN = ""
+
+        def _bridge_down(*_args, **_kwargs):
+            raise RuntimeError("bridge unavailable")
+
+        backfill.fetch_json = _bridge_down
+        conn = sqlite3.connect(":memory:")
+        try:
+            conn.execute(
+                """
+                CREATE TABLE gamma_snapshots (
+                    symbol TEXT NOT NULL,
+                    snapshot_date TEXT NOT NULL,
+                    ts_collected_ms INTEGER NOT NULL,
+                    gamma_flip REAL,
+                    atm_iv REAL,
+                    oi_concentration_top5 REAL,
+                    zero_dte_share REAL,
+                    total_contracts INTEGER,
+                    with_greeks INTEGER,
+                    with_oi INTEGER,
+                    used_open_interest INTEGER
+                )
+                """
+            )
+            today = datetime.now(backfill.NY_TZ).date()
+            yesterday = today - timedelta(days=1)
+            # Today has only OI context (no greeks/IV).
+            conn.execute(
+                """
+                INSERT INTO gamma_snapshots(
+                    symbol, snapshot_date, ts_collected_ms, gamma_flip, atm_iv,
+                    oi_concentration_top5, zero_dte_share, total_contracts, with_greeks,
+                    with_oi, used_open_interest
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "SPY",
+                    today.strftime("%Y-%m-%d"),
+                    1_777_778_111_000,
+                    None,
+                    None,
+                    15.0,
+                    7.0,
+                    8000,
+                    0,
+                    7800,
+                    1,
+                ),
+            )
+            # Yesterday has valid greeks.
+            conn.execute(
+                """
+                INSERT INTO gamma_snapshots(
+                    symbol, snapshot_date, ts_collected_ms, gamma_flip, atm_iv,
+                    oi_concentration_top5, zero_dte_share, total_contracts, with_greeks,
+                    with_oi, used_open_interest
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "SPY",
+                    yesterday.strftime("%Y-%m-%d"),
+                    1_777_777_111_000,
+                    587.0,
+                    0.21,
+                    12.0,
+                    5.0,
+                    12000,
+                    11900,
+                    11900,
+                    1,
+                ),
+            )
+            conn.commit()
+
+            ctx = backfill.fetch_gamma_context("SPY", timeout=1, conn=conn)
+            self.assertIsNotNone(ctx)
+            self.assertEqual(ctx["source_name"], "gamma_snapshots+carry")
+            self.assertAlmostEqual(float(ctx["gamma_flip"]), 587.0, places=6)
+            self.assertAlmostEqual(float(ctx["atm_iv_pct"]), 21.0, places=6)
+            self.assertEqual(ctx["generated_at_date_et"], today)
+            self.assertEqual(ctx["carried_from_date_et"], yesterday)
+        finally:
+            backfill.fetch_json = original_fetch_json
+            backfill.MARKETDATA_APP_TOKEN = original_token
+            conn.close()
+
     def test_collect_gamma_history_allows_partial_chain_without_greeks(self) -> None:
         collector = load_module(
             "pq_collect_gamma_partial_chain_test",
