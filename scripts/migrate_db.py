@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Callable
 
 DEFAULT_DB = os.getenv("PIVOT_DB", "data/pivot_events.sqlite")
-LATEST_SCHEMA_VERSION = 6
+LATEST_SCHEMA_VERSION = 7
 
 
 TOUCH_EVENT_SQL = """
@@ -331,6 +331,30 @@ def migration_6_gamma_snapshots(conn: sqlite3.Connection) -> None:
     )
 
 
+def migration_7_prediction_log_regime_policy(conn: sqlite3.Connection) -> None:
+    tables = {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    if "prediction_log" not in tables:
+        return
+
+    pred_cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(prediction_log)").fetchall()
+    }
+    add_if_missing = {
+        "regime_policy_mode": "TEXT",
+        "trade_regime": "TEXT",
+        "selected_policy": "TEXT",
+        "regime_policy_json": "TEXT",
+    }
+    for col_name, col_type in add_if_missing.items():
+        if col_name not in pred_cols:
+            conn.execute(f"ALTER TABLE prediction_log ADD COLUMN {col_name} {col_type}")
+
+
 MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (1, "base_schema_tables", migration_1_base_tables),
     (2, "columns_and_indexes", migration_2_columns_and_indexes),
@@ -338,6 +362,7 @@ MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (4, "prediction_log_compat", migration_4_prediction_log_compat),
     (5, "prediction_log_shadow_30m", migration_5_prediction_log_shadow_30m),
     (6, "gamma_snapshots", migration_6_gamma_snapshots),
+    (7, "prediction_log_regime_policy", migration_7_prediction_log_regime_policy),
 ]
 
 

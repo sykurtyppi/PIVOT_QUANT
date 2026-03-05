@@ -14,6 +14,7 @@ import sys
 import tarfile
 import tempfile
 import textwrap
+import time
 import unittest
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -1078,6 +1079,9 @@ class OpsSmokeTests(unittest.TestCase):
     def test_30m_shadow_horizon_contract_present(self) -> None:
         ml_server = (REPO_ROOT / "server" / "ml_server.py").read_text(encoding="utf-8")
         self.assertIn("ML_SHADOW_HORIZONS", ml_server)
+        self.assertIn("ML_REGIME_POLICY_MODE", ml_server)
+        self.assertIn("regime_policy", ml_server)
+        self.assertIn("_compute_trade_regime", ml_server)
         self.assertIn("signal_30m", ml_server)
         self.assertIn("prob_reject_30m", ml_server)
         self.assertIn("threshold_break_30m", ml_server)
@@ -1091,11 +1095,13 @@ class OpsSmokeTests(unittest.TestCase):
         migrate_db = (REPO_ROOT / "scripts" / "migrate_db.py").read_text(encoding="utf-8")
         match = re.search(r"LATEST_SCHEMA_VERSION\s*=\s*(\d+)", migrate_db)
         self.assertIsNotNone(match, msg="migrate_db.py must declare LATEST_SCHEMA_VERSION")
-        self.assertGreaterEqual(int(match.group(1)), 6)
+        self.assertGreaterEqual(int(match.group(1)), 7)
         self.assertIn("migration_5_prediction_log_shadow_30m", migrate_db)
         self.assertIn("migration_6_gamma_snapshots", migrate_db)
+        self.assertIn("migration_7_prediction_log_regime_policy", migrate_db)
         self.assertIn("gamma_snapshots", migrate_db)
         self.assertIn("signal_30m", migrate_db)
+        self.assertIn("regime_policy_json", migrate_db)
 
     def test_30m_shadow_horizon_runtime_behavior(self) -> None:
         ml_server = load_module("ml_server_shadow_runtime", REPO_ROOT / "server" / "ml_server.py")
@@ -1154,6 +1160,290 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(result["signals"].get("signal_15m"), "no_edge")
         self.assertEqual(result["signals"].get("signal_60m"), "no_edge")
         self.assertTrue(result["abstain"])
+
+    def test_regime_policy_shadow_and_active_runtime_behavior(self) -> None:
+        ml_server = load_module("ml_server_regime_policy_runtime", REPO_ROOT / "server" / "ml_server.py")
+
+        class DummyModel:
+            classes_ = np.array([0, 1])
+
+            def __init__(self, prob: float) -> None:
+                self.prob = prob
+
+            def predict_proba(self, _df):
+                return np.array([[1.0 - self.prob, self.prob]], dtype=float)
+
+        ml_server.build_feature_row = lambda event: {
+            "x": 1.0,
+            "regime_type": event.get("regime_type"),
+            "rv_regime": event.get("rv_regime"),
+            "or_size_atr": event.get("or_size_atr"),
+            "or_breakout": event.get("or_breakout"),
+            "overnight_gap_atr": event.get("overnight_gap_atr"),
+            "gamma_mode": event.get("gamma_mode"),
+            "distance_atr_ratio": event.get("distance_atr_ratio"),
+        }
+        ml_server.collect_missing = lambda _features: []
+        ml_server.ML_SHADOW_HORIZONS = set()
+        ml_server.ML_REGIME_THRESHOLD_MAX_DELTA = 0.05
+        ml_server.ML_REGIME_COMPRESSION_REJECT_DELTA = -0.02
+        ml_server.ML_REGIME_COMPRESSION_BREAK_DELTA = 0.02
+        ml_server.ML_REGIME_EXPANSION_REJECT_DELTA = 0.02
+        ml_server.ML_REGIME_EXPANSION_BREAK_DELTA = -0.02
+
+        def set_registry(*, reject_prob: float, break_prob: float) -> None:
+            ml_server.registry.models = {
+                "reject": {
+                    5: {
+                        "feature_columns": ["x"],
+                        "pipeline": DummyModel(reject_prob),
+                        "calibration": "sigmoid",
+                    }
+                },
+                "break": {
+                    5: {
+                        "feature_columns": ["x"],
+                        "pipeline": DummyModel(break_prob),
+                        "calibration": "sigmoid",
+                    }
+                },
+            }
+            ml_server.registry.thresholds = {"reject": {5: 0.5}, "break": {5: 0.5}}
+            ml_server.registry.manifest = {"version": "vtest", "trained_end_ts": int(time.time() * 1000)}
+
+        # Compression event: baseline says break, regime policy says reject.
+        set_registry(reject_prob=0.49, break_prob=0.51)
+        compression_event = {
+            "event_id": "regime_shadow_compression",
+            "regime_type": 3,
+            "rv_regime": 1,
+            "or_size_atr": 0.2,
+            "or_breakout": 0,
+            "overnight_gap_atr": 0.05,
+            "gamma_mode": 1,
+        }
+
+        ml_server.ML_REGIME_POLICY_MODE = "shadow"
+        shadow_result = ml_server._score_event(compression_event)
+        self.assertEqual(shadow_result["signals"].get("signal_5m"), "break")
+        self.assertEqual(
+            shadow_result["regime_policy"]["regime"]["signals"].get("signal_5m"),
+            "reject",
+        )
+        self.assertEqual(shadow_result["regime_policy"]["selected_policy"], "baseline")
+        self.assertIn("REGIME_POLICY_DIVERGENCE", shadow_result["quality_flags"])
+
+        ml_server.ML_REGIME_POLICY_MODE = "active"
+        active_result = ml_server._score_event(compression_event)
+        self.assertEqual(active_result["signals"].get("signal_5m"), "reject")
+        self.assertEqual(active_result["regime_policy"]["selected_policy"], "regime_active")
+        self.assertEqual(active_result["regime_policy"]["trade_regime"], "compression")
+        self.assertAlmostEqual(
+            float(active_result["thresholds"]["threshold_reject_5m"]),
+            0.48,
+            places=6,
+        )
+        self.assertAlmostEqual(
+            float(active_result["thresholds"]["threshold_break_5m"]),
+            0.52,
+            places=6,
+        )
+
+        # Compression + ultra ATR zone applies an additional cautious overlay.
+        ultra_compression_event = {
+            "event_id": "regime_active_compression_ultra",
+            "regime_type": 3,
+            "rv_regime": 1,
+            "or_size_atr": 0.2,
+            "or_breakout": 0,
+            "overnight_gap_atr": 0.05,
+            "gamma_mode": 1,
+            "distance_atr_ratio": 0.03,
+        }
+        ultra_result = ml_server._score_event(ultra_compression_event)
+        self.assertEqual(ultra_result["regime_policy"]["atr_zone"], "ultra")
+        self.assertTrue(bool(ultra_result["regime_policy"]["atr_overlay"]["applied"]))
+        self.assertAlmostEqual(
+            float(ultra_result["thresholds"]["threshold_reject_5m"]),
+            0.50,
+            places=6,
+        )
+        self.assertAlmostEqual(
+            float(ultra_result["thresholds"]["threshold_break_5m"]),
+            0.51,
+            places=6,
+        )
+        self.assertEqual(ultra_result["signals"].get("signal_5m"), "break")
+
+        # Expansion event: baseline says reject, regime policy says break.
+        set_registry(reject_prob=0.51, break_prob=0.49)
+        expansion_event = {
+            "event_id": "regime_active_expansion",
+            "regime_type": 4,
+            "rv_regime": 3,
+            "or_size_atr": 0.9,
+            "or_breakout": 1,
+            "overnight_gap_atr": 0.7,
+            "gamma_mode": -1,
+        }
+        expansion_result = ml_server._score_event(expansion_event)
+        self.assertEqual(expansion_result["signals"].get("signal_5m"), "break")
+        self.assertEqual(expansion_result["regime_policy"]["trade_regime"], "expansion")
+
+        # Unknown regime in active mode falls back to baseline.
+        neutral_event = {
+            "event_id": "regime_active_neutral",
+            "regime_type": None,
+            "rv_regime": None,
+            "or_size_atr": None,
+            "or_breakout": None,
+            "overnight_gap_atr": None,
+            "gamma_mode": None,
+        }
+        neutral_result = ml_server._score_event(neutral_event)
+        self.assertEqual(neutral_result["signals"].get("signal_5m"), "reject")
+        self.assertEqual(neutral_result["regime_policy"]["trade_regime"], "neutral")
+        self.assertEqual(neutral_result["regime_policy"]["selected_policy"], "baseline")
+
+    def test_ml_prediction_log_persists_regime_policy_fields(self) -> None:
+        db = self.tmp / "predlog_regime.sqlite"
+        prev_db = os.environ.get("PREDICTION_LOG_DB")
+        os.environ["PREDICTION_LOG_DB"] = str(db)
+        try:
+            ml_server = load_module("ml_server_regime_log_runtime", REPO_ROOT / "server" / "ml_server.py")
+        finally:
+            if prev_db is None:
+                os.environ.pop("PREDICTION_LOG_DB", None)
+            else:
+                os.environ["PREDICTION_LOG_DB"] = prev_db
+
+        event = {"event_id": "evt_regime_1"}
+        result = {
+            "model_version": "vtest",
+            "feature_version": "v3",
+            "best_horizon": 5,
+            "abstain": False,
+            "scores": {
+                "prob_reject_5m": 0.61,
+                "prob_break_5m": 0.22,
+            },
+            "signals": {
+                "signal_5m": "reject",
+            },
+            "thresholds": {
+                "threshold_reject_5m": 0.5,
+                "threshold_break_5m": 0.5,
+            },
+            "quality_flags": ["REGIME_POLICY_DIVERGENCE"],
+            "regime_policy": {
+                "mode": "shadow",
+                "trade_regime": "compression",
+                "selected_policy": "baseline",
+                "signal_diffs": {
+                    "signal_5m": {"baseline": "no_edge", "regime": "reject", "selected": "no_edge"}
+                },
+            },
+        }
+        ml_server._log_prediction(event, result)
+
+        conn = sqlite3.connect(str(db))
+        conn.row_factory = sqlite3.Row
+        try:
+            cols = {r["name"] for r in conn.execute("PRAGMA table_info(prediction_log)").fetchall()}
+            self.assertIn("regime_policy_mode", cols)
+            self.assertIn("trade_regime", cols)
+            self.assertIn("selected_policy", cols)
+            self.assertIn("regime_policy_json", cols)
+
+            row = conn.execute(
+                """
+                SELECT regime_policy_mode, trade_regime, selected_policy, regime_policy_json
+                FROM prediction_log
+                WHERE event_id = ?
+                """,
+                ("evt_regime_1",),
+            ).fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row["regime_policy_mode"], "shadow")
+            self.assertEqual(row["trade_regime"], "compression")
+            self.assertEqual(row["selected_policy"], "baseline")
+            policy_json = json.loads(row["regime_policy_json"])
+            self.assertEqual(policy_json.get("mode"), "shadow")
+        finally:
+            conn.close()
+
+    def test_report_regime_policy_summary_counts_divergence(self) -> None:
+        report = load_module(
+            "pq_daily_report_regime_policy_summary_test",
+            REPO_ROOT / "scripts" / "generate_daily_ml_report.py",
+        )
+        predictions = [
+            {
+                "event_id": "e1",
+                "regime_policy_mode": "shadow",
+                "trade_regime": "compression",
+                "selected_policy": "baseline",
+                "quality_flags": '["REGIME_POLICY_DIVERGENCE"]',
+                "regime_policy_json": json.dumps(
+                    {
+                        "atr_zone": "ultra",
+                        "atr_overlay": {"applied": True},
+                        "signal_diffs": {
+                            "signal_5m": {"baseline": "no_edge", "regime": "reject"},
+                            "signal_15m": {"baseline": "reject", "regime": "reject"},
+                        }
+                    }
+                ),
+            },
+            {
+                "event_id": "e2",
+                "regime_policy_mode": "shadow",
+                "trade_regime": "expansion",
+                "selected_policy": "baseline",
+                "quality_flags": "[]",
+                "regime_policy_json": json.dumps(
+                    {
+                        "atr_zone": "far",
+                        "atr_overlay": {"applied": False},
+                        "signal_diffs": {"signal_60m": {"baseline": "break", "regime": "break"}},
+                    }
+                ),
+            },
+            {
+                "event_id": "e3",
+                "regime_policy_mode": "active",
+                "trade_regime": "expansion",
+                "selected_policy": "regime_active",
+                "quality_flags": "[]",
+                "regime_policy_json": json.dumps(
+                    {
+                        "atr_zone": "near",
+                        "atr_overlay": {"applied": True},
+                        "signal_diffs": {"signal_15m": {"baseline": "reject", "regime": "break"}},
+                    }
+                ),
+            },
+        ]
+        summary = report.compute_regime_policy_summary(predictions)
+        self.assertEqual(int(summary["total_predictions"]), 3)
+        self.assertEqual(int(summary["with_payload"]), 3)
+        self.assertEqual(int(summary["mode_counts"]["shadow"]), 2)
+        self.assertEqual(int(summary["mode_counts"]["active"]), 1)
+        self.assertEqual(int(summary["trade_regime_counts"]["compression"]), 1)
+        self.assertEqual(int(summary["trade_regime_counts"]["expansion"]), 2)
+        self.assertEqual(int(summary["selected_policy_counts"]["baseline"]), 2)
+        self.assertEqual(int(summary["selected_policy_counts"]["regime_active"]), 1)
+        self.assertEqual(int(summary["atr_zone_counts"]["ultra"]), 1)
+        self.assertEqual(int(summary["atr_zone_counts"]["near"]), 1)
+        self.assertEqual(int(summary["atr_zone_counts"]["far"]), 1)
+        self.assertEqual(int(summary["atr_overlay_applied_count"]), 2)
+        self.assertEqual(int(summary["atr_overlay_applied_by_regime"]["compression"]), 1)
+        self.assertEqual(int(summary["atr_overlay_applied_by_regime"]["expansion"]), 1)
+        self.assertEqual(int(summary["divergence_count"]), 2)
+        self.assertEqual(int(summary["divergence_by_horizon"][5]), 1)
+        self.assertEqual(int(summary["divergence_by_horizon"][15]), 1)
+        self.assertEqual(int(summary["divergence_by_atr_zone"]["ultra"]), 1)
+        self.assertEqual(int(summary["divergence_by_atr_zone"]["near"]), 1)
 
     def test_model_governance_skips_regression_gates_when_support_is_low(self) -> None:
         module = load_module("model_governance", REPO_ROOT / "scripts" / "model_governance.py")

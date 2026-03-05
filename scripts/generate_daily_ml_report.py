@@ -265,6 +265,12 @@ def compute_precision_recall(actual: list[int], predicted_positive: list[bool]) 
     return precision, recall
 
 
+def _prediction_log_expr(pred_cols: set[str], col_name: str) -> str:
+    if col_name in pred_cols:
+        return f"lp.{col_name} AS {col_name}"
+    return f"NULL AS {col_name}"
+
+
 def fetch_labeled_records(
     conn: sqlite3.Connection,
     start_ms: int,
@@ -273,6 +279,11 @@ def fetch_labeled_records(
 ) -> list[dict[str, Any]]:
     pred_cols = {r[1] for r in conn.execute("PRAGMA table_info(prediction_log)").fetchall()}
     has_preview = "is_preview" in pred_cols
+    quality_flags_expr = _prediction_log_expr(pred_cols, "quality_flags")
+    regime_policy_mode_expr = _prediction_log_expr(pred_cols, "regime_policy_mode")
+    trade_regime_expr = _prediction_log_expr(pred_cols, "trade_regime")
+    selected_policy_expr = _prediction_log_expr(pred_cols, "selected_policy")
+    regime_policy_json_expr = _prediction_log_expr(pred_cols, "regime_policy_json")
     preview_filter = ""
     if has_preview and not include_preview:
         preview_filter = "AND COALESCE(lp.is_preview, 0) = 0"
@@ -309,6 +320,11 @@ def fetch_labeled_records(
             lp.prob_break_15m,
             lp.prob_break_30m,
             lp.prob_break_60m,
+            {quality_flags_expr},
+            {regime_policy_mode_expr},
+            {trade_regime_expr},
+            {selected_policy_expr},
+            {regime_policy_json_expr},
             te.symbol,
             te.ts_event,
             te.level_type,
@@ -340,6 +356,11 @@ def fetch_latest_predictions(
 ) -> list[dict[str, Any]]:
     pred_cols = {r[1] for r in conn.execute("PRAGMA table_info(prediction_log)").fetchall()}
     has_preview = "is_preview" in pred_cols
+    quality_flags_expr = _prediction_log_expr(pred_cols, "quality_flags")
+    regime_policy_mode_expr = _prediction_log_expr(pred_cols, "regime_policy_mode")
+    trade_regime_expr = _prediction_log_expr(pred_cols, "trade_regime")
+    selected_policy_expr = _prediction_log_expr(pred_cols, "selected_policy")
+    regime_policy_json_expr = _prediction_log_expr(pred_cols, "regime_policy_json")
     preview_filter = ""
     if has_preview and not include_preview:
         preview_filter = "AND COALESCE(lp.is_preview, 0) = 0"
@@ -376,6 +397,11 @@ def fetch_latest_predictions(
             lp.prob_break_15m,
             lp.prob_break_30m,
             lp.prob_break_60m,
+            {quality_flags_expr},
+            {regime_policy_mode_expr},
+            {trade_regime_expr},
+            {selected_policy_expr},
+            {regime_policy_json_expr},
             te.symbol,
             te.ts_event,
             te.level_type,
@@ -423,6 +449,121 @@ def compute_regime_summary(predictions: list[dict[str, Any]]) -> dict[str, int]:
             summary["range"] += 1
         elif regime == 4:
             summary["vol_expansion"] += 1
+    return summary
+
+
+def _parse_json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            return {}
+    return {}
+
+
+def _parse_json_list(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, list):
+                return parsed
+        except Exception:
+            return []
+    return []
+
+
+def compute_regime_policy_summary(predictions: list[dict[str, Any]]) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "total_predictions": len(predictions),
+        "with_payload": 0,
+        "mode_counts": {"off": 0, "shadow": 0, "active": 0, "unknown": 0},
+        "trade_regime_counts": {"compression": 0, "expansion": 0, "neutral": 0, "unknown": 0},
+        "selected_policy_counts": {"baseline": 0, "regime_active": 0, "unknown": 0},
+        "atr_zone_counts": {"ultra": 0, "near": 0, "mid": 0, "far": 0, "unknown": 0},
+        "atr_overlay_applied_count": 0,
+        "atr_overlay_applied_by_regime": {"compression": 0, "expansion": 0, "neutral": 0, "unknown": 0},
+        "divergence_count": 0,
+        "divergence_by_horizon": {5: 0, 15: 0, 30: 0, 60: 0},
+        "divergence_by_atr_zone": {"ultra": 0, "near": 0, "mid": 0, "far": 0, "unknown": 0},
+    }
+    seen_divergence_events: set[str] = set()
+    allowed_modes = {"off", "shadow", "active"}
+    allowed_regimes = {"compression", "expansion", "neutral"}
+    allowed_policies = {"baseline", "regime_active"}
+    allowed_atr_zones = {"ultra", "near", "mid", "far"}
+
+    for row in predictions:
+        event_id = str(row.get("event_id") or "")
+        mode = str(row.get("regime_policy_mode") or "unknown").strip().lower()
+        trade_regime = str(row.get("trade_regime") or "unknown").strip().lower()
+        selected_policy = str(row.get("selected_policy") or "unknown").strip().lower()
+        mode = mode if mode in allowed_modes else "unknown"
+        trade_regime = trade_regime if trade_regime in allowed_regimes else "unknown"
+        selected_policy = selected_policy if selected_policy in allowed_policies else "unknown"
+        summary["mode_counts"][mode] += 1
+        summary["trade_regime_counts"][trade_regime] += 1
+        summary["selected_policy_counts"][selected_policy] += 1
+
+        quality_flags = {
+            str(flag).strip()
+            for flag in _parse_json_list(row.get("quality_flags"))
+            if isinstance(flag, (str, int, float))
+        }
+
+        policy_payload = _parse_json_object(row.get("regime_policy_json"))
+        atr_zone = "unknown"
+        if policy_payload:
+            summary["with_payload"] += 1
+            atr_zone = str(policy_payload.get("atr_zone") or "unknown").strip().lower()
+            if atr_zone not in allowed_atr_zones:
+                atr_zone = "unknown"
+            atr_overlay = policy_payload.get("atr_overlay")
+            if isinstance(atr_overlay, dict) and bool(atr_overlay.get("applied")):
+                summary["atr_overlay_applied_count"] += 1
+                overlay_regime = trade_regime if trade_regime in allowed_regimes else "unknown"
+                summary["atr_overlay_applied_by_regime"][overlay_regime] += 1
+
+            signal_diffs = policy_payload.get("signal_diffs")
+            if isinstance(signal_diffs, dict):
+                row_has_diff = False
+                for key, payload in signal_diffs.items():
+                    if not isinstance(payload, dict):
+                        continue
+                    baseline_sig = payload.get("baseline")
+                    regime_sig = payload.get("regime")
+                    if baseline_sig == regime_sig:
+                        continue
+                    row_has_diff = True
+                    try:
+                        horizon = int(str(key).replace("signal_", "").replace("m", ""))
+                    except Exception:
+                        continue
+                    if horizon in summary["divergence_by_horizon"]:
+                        summary["divergence_by_horizon"][horizon] += 1
+                if row_has_diff and event_id and event_id not in seen_divergence_events:
+                    seen_divergence_events.add(event_id)
+                    summary["divergence_count"] += 1
+                    summary["divergence_by_atr_zone"][atr_zone] += 1
+
+        summary["atr_zone_counts"][atr_zone] += 1
+
+        if (
+            "REGIME_POLICY_DIVERGENCE" in quality_flags
+            and event_id
+            and event_id not in seen_divergence_events
+        ):
+            seen_divergence_events.add(event_id)
+            summary["divergence_count"] += 1
+            summary["divergence_by_atr_zone"][atr_zone] += 1
+
+    total = int(summary["total_predictions"] or 0)
+    summary["divergence_rate_pct"] = round((summary["divergence_count"] / total) * 100.0, 2) if total > 0 else 0.0
     return summary
 
 
@@ -850,6 +991,7 @@ def render_report(
     labeled_records: list[dict[str, Any]],
     bundles: list[MetricBundle],
     regime_summary: dict[str, int],
+    regime_policy_summary: dict[str, Any],
     manifest: dict[str, Any],
     conn: sqlite3.Connection,
 ) -> str:
@@ -907,6 +1049,60 @@ def render_report(
     lines.append("")
     lines.append(f"- RV Regime: low={regime_summary['rv_low']}, normal={regime_summary['rv_normal']}, high={regime_summary['rv_high']}, unknown={regime_summary['unknown']}")
     lines.append(f"- Day Regime: trend_up={regime_summary['trend_up']}, trend_down={regime_summary['trend_down']}, range={regime_summary['range']}, vol_expansion={regime_summary['vol_expansion']}")
+    lines.append("")
+
+    lines.append("## Regime Policy")
+    lines.append("")
+    lines.append(
+        f"- Policy modes: off={regime_policy_summary['mode_counts']['off']}, "
+        f"shadow={regime_policy_summary['mode_counts']['shadow']}, "
+        f"active={regime_policy_summary['mode_counts']['active']}, "
+        f"unknown={regime_policy_summary['mode_counts']['unknown']}"
+    )
+    lines.append(
+        f"- Trade regime buckets: compression={regime_policy_summary['trade_regime_counts']['compression']}, "
+        f"expansion={regime_policy_summary['trade_regime_counts']['expansion']}, "
+        f"neutral={regime_policy_summary['trade_regime_counts']['neutral']}, "
+        f"unknown={regime_policy_summary['trade_regime_counts']['unknown']}"
+    )
+    atr_zone_counts = regime_policy_summary.get("atr_zone_counts", {})
+    lines.append(
+        f"- ATR distance zones: ultra={atr_zone_counts.get('ultra', 0)}, "
+        f"near={atr_zone_counts.get('near', 0)}, mid={atr_zone_counts.get('mid', 0)}, "
+        f"far={atr_zone_counts.get('far', 0)}, unknown={atr_zone_counts.get('unknown', 0)}"
+    )
+    lines.append(
+        f"- Selected policy: baseline={regime_policy_summary['selected_policy_counts']['baseline']}, "
+        f"regime_active={regime_policy_summary['selected_policy_counts']['regime_active']}, "
+        f"unknown={regime_policy_summary['selected_policy_counts']['unknown']}"
+    )
+    atr_overlay_by_regime = regime_policy_summary.get("atr_overlay_applied_by_regime", {})
+    lines.append(
+        f"- ATR overlays applied: {regime_policy_summary.get('atr_overlay_applied_count', 0)} "
+        f"(compression={atr_overlay_by_regime.get('compression', 0)}, "
+        f"expansion={atr_overlay_by_regime.get('expansion', 0)}, "
+        f"neutral={atr_overlay_by_regime.get('neutral', 0)}, "
+        f"unknown={atr_overlay_by_regime.get('unknown', 0)})"
+    )
+    lines.append(
+        f"- Regime payload attached: {regime_policy_summary['with_payload']} / {regime_policy_summary['total_predictions']}"
+    )
+    lines.append(
+        f"- Shadow divergences: {regime_policy_summary['divergence_count']} "
+        f"({regime_policy_summary['divergence_rate_pct']:.2f}%)"
+    )
+    div_h = regime_policy_summary.get("divergence_by_horizon", {})
+    lines.append(
+        f"- Divergences by horizon: "
+        f"5m={div_h.get(5, 0)}, 15m={div_h.get(15, 0)}, 30m={div_h.get(30, 0)}, 60m={div_h.get(60, 0)}"
+    )
+    div_zone = regime_policy_summary.get("divergence_by_atr_zone", {})
+    lines.append(
+        f"- Divergences by ATR zone: "
+        f"ultra={div_zone.get('ultra', 0)}, near={div_zone.get('near', 0)}, "
+        f"mid={div_zone.get('mid', 0)}, far={div_zone.get('far', 0)}, "
+        f"unknown={div_zone.get('unknown', 0)}"
+    )
     lines.append("")
 
     lines.append("## Gamma Coverage")
@@ -1007,6 +1203,13 @@ def render_report(
             "- Resolve IBKR options market-data API permissions to restore gamma enrichment "
             "(bridge currently reports Error 10089)."
         )
+    if (
+        regime_policy_summary["mode_counts"]["shadow"] > 0
+        and regime_policy_summary["divergence_count"] == 0
+    ):
+        lines.append(
+            "- Regime policy is in shadow mode but no divergences were observed; verify regime inputs are populated."
+        )
     lines.append("")
 
     return "\n".join(lines)
@@ -1046,6 +1249,7 @@ def main() -> None:
         horizons = REPORT_HORIZONS or [5, 15, 30, 60]
         bundles = [build_horizon_metrics(labeled_records, h) for h in horizons]
         regime_summary = compute_regime_summary(predictions)
+        regime_policy_summary = compute_regime_policy_summary(predictions)
 
         persist_daily_metrics(conn, report_day.strftime("%Y-%m-%d"), regime_summary, bundles)
         manifest = parse_manifest()
@@ -1057,6 +1261,7 @@ def main() -> None:
             labeled_records=labeled_records,
             bundles=bundles,
             regime_summary=regime_summary,
+            regime_policy_summary=regime_policy_summary,
             manifest=manifest,
             conn=conn,
         )

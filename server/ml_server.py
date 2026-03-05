@@ -41,6 +41,53 @@ ML_SHADOW_HORIZONS = {
 }
 if not ML_SHADOW_HORIZONS:
     ML_SHADOW_HORIZONS = {30}
+ML_REGIME_POLICY_MODE = (os.getenv("ML_REGIME_POLICY_MODE", "shadow") or "shadow").strip().lower()
+if ML_REGIME_POLICY_MODE not in {"off", "shadow", "active"}:
+    ML_REGIME_POLICY_MODE = "shadow"
+ML_REGIME_THRESHOLD_MAX_DELTA = max(
+    0.0,
+    min(0.20, float(os.getenv("ML_REGIME_THRESHOLD_MAX_DELTA", "0.05"))),
+)
+ML_REGIME_COMPRESSION_REJECT_DELTA = float(os.getenv("ML_REGIME_COMPRESSION_REJECT_DELTA", "-0.02"))
+ML_REGIME_COMPRESSION_BREAK_DELTA = float(os.getenv("ML_REGIME_COMPRESSION_BREAK_DELTA", "0.02"))
+ML_REGIME_EXPANSION_REJECT_DELTA = float(os.getenv("ML_REGIME_EXPANSION_REJECT_DELTA", "0.02"))
+ML_REGIME_EXPANSION_BREAK_DELTA = float(os.getenv("ML_REGIME_EXPANSION_BREAK_DELTA", "-0.02"))
+ML_ATR_ZONE_ULTRA_MAX = max(
+    0.0,
+    min(0.50, float(os.getenv("ML_ATR_ZONE_ULTRA_MAX", "0.05"))),
+)
+ML_ATR_ZONE_NEAR_MAX = max(
+    ML_ATR_ZONE_ULTRA_MAX,
+    min(0.75, float(os.getenv("ML_ATR_ZONE_NEAR_MAX", "0.10"))),
+)
+ML_ATR_ZONE_MID_MAX = max(
+    ML_ATR_ZONE_NEAR_MAX,
+    min(1.50, float(os.getenv("ML_ATR_ZONE_MID_MAX", "0.20"))),
+)
+ML_ATR_COMPRESSION_ULTRA_REJECT_DELTA = float(
+    os.getenv("ML_ATR_COMPRESSION_ULTRA_REJECT_DELTA", "0.02")
+)
+ML_ATR_COMPRESSION_ULTRA_BREAK_DELTA = float(
+    os.getenv("ML_ATR_COMPRESSION_ULTRA_BREAK_DELTA", "-0.01")
+)
+ML_ATR_COMPRESSION_NEAR_REJECT_DELTA = float(
+    os.getenv("ML_ATR_COMPRESSION_NEAR_REJECT_DELTA", "-0.01")
+)
+ML_ATR_COMPRESSION_NEAR_BREAK_DELTA = float(
+    os.getenv("ML_ATR_COMPRESSION_NEAR_BREAK_DELTA", "0.01")
+)
+ML_ATR_EXPANSION_ULTRA_REJECT_DELTA = float(
+    os.getenv("ML_ATR_EXPANSION_ULTRA_REJECT_DELTA", "0.03")
+)
+ML_ATR_EXPANSION_ULTRA_BREAK_DELTA = float(
+    os.getenv("ML_ATR_EXPANSION_ULTRA_BREAK_DELTA", "-0.02")
+)
+ML_ATR_EXPANSION_NEAR_REJECT_DELTA = float(
+    os.getenv("ML_ATR_EXPANSION_NEAR_REJECT_DELTA", "0.01")
+)
+ML_ATR_EXPANSION_NEAR_BREAK_DELTA = float(
+    os.getenv("ML_ATR_EXPANSION_NEAR_BREAK_DELTA", "-0.01")
+)
 PREDICTION_LOG_DB = Path(os.getenv(
     "PREDICTION_LOG_DB",
     str(ROOT / "data" / "pivot_events.sqlite"),
@@ -187,6 +234,10 @@ def _log_prediction(event: dict, result: dict) -> None:
                 prob_break_5m REAL, prob_break_15m REAL, prob_break_30m REAL, prob_break_60m REAL,
                 threshold_reject_5m REAL, threshold_reject_15m REAL, threshold_reject_30m REAL, threshold_reject_60m REAL,
                 threshold_break_5m REAL, threshold_break_15m REAL, threshold_break_30m REAL, threshold_break_60m REAL,
+                regime_policy_mode TEXT,
+                trade_regime TEXT,
+                selected_policy TEXT,
+                regime_policy_json TEXT,
                 quality_flags TEXT,
                 is_preview INTEGER NOT NULL DEFAULT 0,
                 UNIQUE(event_id, model_version)
@@ -206,6 +257,10 @@ def _log_prediction(event: dict, result: dict) -> None:
             "prob_break_30m": "REAL",
             "threshold_reject_30m": "REAL",
             "threshold_break_30m": "REAL",
+            "regime_policy_mode": "TEXT",
+            "trade_regime": "TEXT",
+            "selected_policy": "TEXT",
+            "regime_policy_json": "TEXT",
         }
         for col_name, col_type in compat_cols.items():
             if col_name not in pred_cols:
@@ -214,6 +269,10 @@ def _log_prediction(event: dict, result: dict) -> None:
         scores = result.get("scores", {})
         signals = result.get("signals", {})
         thresholds = result.get("thresholds", {})
+        regime_policy = result.get("regime_policy", {}) or {}
+        regime_policy_mode = regime_policy.get("mode")
+        trade_regime = regime_policy.get("trade_regime")
+        selected_policy = regime_policy.get("selected_policy")
         is_preview = 1 if event.get("preview") else 0
 
         conn.execute(
@@ -225,8 +284,9 @@ def _log_prediction(event: dict, result: dict) -> None:
                 prob_break_5m, prob_break_15m, prob_break_30m, prob_break_60m,
                 threshold_reject_5m, threshold_reject_15m, threshold_reject_30m, threshold_reject_60m,
                 threshold_break_5m, threshold_break_15m, threshold_break_30m, threshold_break_60m,
+                regime_policy_mode, trade_regime, selected_policy, regime_policy_json,
                 quality_flags, is_preview
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 event_id,
                 int(time.time() * 1000),
@@ -254,6 +314,10 @@ def _log_prediction(event: dict, result: dict) -> None:
                 thresholds.get("threshold_break_15m"),
                 thresholds.get("threshold_break_30m"),
                 thresholds.get("threshold_break_60m"),
+                regime_policy_mode,
+                trade_regime,
+                selected_policy,
+                json.dumps(regime_policy, separators=(",", ":")) if regime_policy else None,
                 json.dumps(result.get("quality_flags", [])),
                 is_preview,
             ),
@@ -282,6 +346,13 @@ def health():
         "manifest": registry.manifest,
         "manifest_path": registry.manifest_path,
         "models": registry.available(),
+        "regime_policy_mode": ML_REGIME_POLICY_MODE,
+        "regime_threshold_max_delta": ML_REGIME_THRESHOLD_MAX_DELTA,
+        "atr_zone_bounds": {
+            "ultra_max": ML_ATR_ZONE_ULTRA_MAX,
+            "near_max": ML_ATR_ZONE_NEAR_MAX,
+            "mid_max": ML_ATR_ZONE_MID_MAX,
+        },
     }
     if _startup_error is not None:
         result["startup_error"] = _startup_error
@@ -334,6 +405,301 @@ def _check_feature_drift(features: dict, payload: dict) -> list[str]:
         elif p99 is not None and value > p99:
             drifted.append(col)
     return drifted
+
+
+def _to_int(value) -> int | None:
+    try:
+        if value is None:
+            return None
+        return int(value)
+    except Exception:
+        return None
+
+
+def _to_float(value) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def _clamp_threshold(value: float) -> float:
+    return max(0.01, min(0.99, float(value)))
+
+
+def _compute_trade_regime(event: dict, features: dict) -> dict:
+    """Compute a stable execution regime.
+
+    Buckets:
+      - compression: mean-reversion-friendly tape
+      - expansion: trend/breakout-friendly tape
+      - neutral: uncertain or mixed inputs (falls back to baseline policy)
+    """
+    regime_type = _to_int(event.get("regime_type"))
+    if regime_type is None:
+        regime_type = _to_int(features.get("regime_type"))
+    rv_regime = _to_int(event.get("rv_regime"))
+    if rv_regime is None:
+        rv_regime = _to_int(features.get("rv_regime"))
+    or_size_atr = _to_float(event.get("or_size_atr"))
+    if or_size_atr is None:
+        or_size_atr = _to_float(features.get("or_size_atr"))
+    or_breakout = _to_int(event.get("or_breakout"))
+    if or_breakout is None:
+        or_breakout = _to_int(features.get("or_breakout"))
+    overnight_gap_atr = _to_float(event.get("overnight_gap_atr"))
+    if overnight_gap_atr is None:
+        overnight_gap_atr = _to_float(features.get("overnight_gap_atr"))
+    gamma_mode = _to_int(event.get("gamma_mode"))
+    if gamma_mode is None:
+        gamma_mode = _to_int(features.get("gamma_mode"))
+
+    expansion_votes = 0
+    compression_votes = 0
+    drivers: list[str] = []
+
+    if regime_type in (1, 2, 4):
+        expansion_votes += 1
+        drivers.append(f"regime_type={regime_type}")
+    elif regime_type == 3:
+        compression_votes += 1
+        drivers.append("regime_type=range")
+
+    if rv_regime == 3:
+        expansion_votes += 1
+        drivers.append("rv_regime=high")
+    elif rv_regime == 1:
+        compression_votes += 1
+        drivers.append("rv_regime=low")
+
+    if or_breakout in (-1, 1):
+        expansion_votes += 1
+        drivers.append(f"or_breakout={or_breakout}")
+
+    if or_size_atr is not None:
+        if or_size_atr >= 0.7:
+            expansion_votes += 1
+            drivers.append("or_size_atr>=0.7")
+        elif or_size_atr <= 0.35:
+            compression_votes += 1
+            drivers.append("or_size_atr<=0.35")
+
+    if overnight_gap_atr is not None and abs(overnight_gap_atr) >= 0.5:
+        expansion_votes += 1
+        drivers.append("|gap_atr|>=0.5")
+
+    # Gamma is an enhancer only, never a required driver.
+    if gamma_mode == -1:
+        expansion_votes += 1
+        drivers.append("gamma_mode=neg")
+    elif gamma_mode == 1:
+        compression_votes += 1
+        drivers.append("gamma_mode=pos")
+
+    if expansion_votes >= max(2, compression_votes + 1):
+        bucket = "expansion"
+    elif compression_votes >= max(2, expansion_votes + 1):
+        bucket = "compression"
+    else:
+        bucket = "neutral"
+
+    return {
+        "bucket": bucket,
+        "expansion_votes": expansion_votes,
+        "compression_votes": compression_votes,
+        "drivers": drivers,
+    }
+
+
+def _adjust_threshold(base: float, delta: float) -> float:
+    safe_delta = max(-ML_REGIME_THRESHOLD_MAX_DELTA, min(ML_REGIME_THRESHOLD_MAX_DELTA, float(delta)))
+    return _clamp_threshold(base + safe_delta)
+
+
+def _compute_atr_distance_ratio(event: dict, features: dict) -> float | None:
+    dist_ratio = _to_float(features.get("distance_atr_ratio"))
+    if dist_ratio is not None:
+        return abs(dist_ratio)
+
+    atr_bps = _to_float(features.get("atr_bps"))
+    if atr_bps is None:
+        atr = _to_float(event.get("atr"))
+        touch_price = _to_float(event.get("touch_price"))
+        if atr is not None and atr > 0 and touch_price is not None and touch_price > 0:
+            atr_bps = atr / touch_price * 1e4
+    distance_bps = _to_float(event.get("distance_bps"))
+    if distance_bps is None:
+        distance_bps = _to_float(features.get("distance_bps"))
+    if atr_bps is None or atr_bps <= 0 or distance_bps is None:
+        return None
+    return abs(distance_bps / atr_bps)
+
+
+def _classify_atr_zone(distance_ratio: float | None) -> str:
+    if distance_ratio is None:
+        return "unknown"
+    value = abs(float(distance_ratio))
+    if value < ML_ATR_ZONE_ULTRA_MAX:
+        return "ultra"
+    if value < ML_ATR_ZONE_NEAR_MAX:
+        return "near"
+    if value < ML_ATR_ZONE_MID_MAX:
+        return "mid"
+    return "far"
+
+
+def _build_regime_thresholds(all_horizons: list[int], trade_regime: str) -> dict[str, dict[int, float]]:
+    thresholds = {"reject": {}, "break": {}}
+    for horizon in all_horizons:
+        base_reject = registry.get_threshold("reject", horizon)
+        base_break = registry.get_threshold("break", horizon)
+        if trade_regime == "compression":
+            thresholds["reject"][horizon] = _adjust_threshold(
+                base_reject, ML_REGIME_COMPRESSION_REJECT_DELTA
+            )
+            thresholds["break"][horizon] = _adjust_threshold(
+                base_break, ML_REGIME_COMPRESSION_BREAK_DELTA
+            )
+        elif trade_regime == "expansion":
+            thresholds["reject"][horizon] = _adjust_threshold(
+                base_reject, ML_REGIME_EXPANSION_REJECT_DELTA
+            )
+            thresholds["break"][horizon] = _adjust_threshold(
+                base_break, ML_REGIME_EXPANSION_BREAK_DELTA
+            )
+        else:
+            thresholds["reject"][horizon] = _clamp_threshold(base_reject)
+            thresholds["break"][horizon] = _clamp_threshold(base_break)
+    return thresholds
+
+
+def _atr_zone_threshold_deltas(trade_regime: str, atr_zone: str) -> tuple[float, float]:
+    if trade_regime == "compression":
+        if atr_zone == "ultra":
+            return (
+                ML_ATR_COMPRESSION_ULTRA_REJECT_DELTA,
+                ML_ATR_COMPRESSION_ULTRA_BREAK_DELTA,
+            )
+        if atr_zone == "near":
+            return (
+                ML_ATR_COMPRESSION_NEAR_REJECT_DELTA,
+                ML_ATR_COMPRESSION_NEAR_BREAK_DELTA,
+            )
+    elif trade_regime == "expansion":
+        if atr_zone == "ultra":
+            return (
+                ML_ATR_EXPANSION_ULTRA_REJECT_DELTA,
+                ML_ATR_EXPANSION_ULTRA_BREAK_DELTA,
+            )
+        if atr_zone == "near":
+            return (
+                ML_ATR_EXPANSION_NEAR_REJECT_DELTA,
+                ML_ATR_EXPANSION_NEAR_BREAK_DELTA,
+            )
+    return 0.0, 0.0
+
+
+def _apply_atr_zone_overlay(
+    threshold_map: dict[str, dict[int, float]],
+    all_horizons: list[int],
+    trade_regime: str,
+    atr_zone: str,
+) -> tuple[dict[str, dict[int, float]], dict[str, float | str | bool]]:
+    reject_delta, break_delta = _atr_zone_threshold_deltas(trade_regime, atr_zone)
+    applied = (reject_delta != 0.0 or break_delta != 0.0) and atr_zone in {"ultra", "near"}
+    if not applied:
+        return threshold_map, {
+            "applied": False,
+            "atr_zone": atr_zone,
+            "reject_delta": 0.0,
+            "break_delta": 0.0,
+        }
+
+    overlaid = {
+        "reject": {},
+        "break": {},
+    }
+    for horizon in all_horizons:
+        overlaid["reject"][horizon] = _adjust_threshold(
+            threshold_map["reject"].get(horizon, 0.5),
+            reject_delta,
+        )
+        overlaid["break"][horizon] = _adjust_threshold(
+            threshold_map["break"].get(horizon, 0.5),
+            break_delta,
+        )
+    return overlaid, {
+        "applied": True,
+        "atr_zone": atr_zone,
+        "reject_delta": float(reject_delta),
+        "break_delta": float(break_delta),
+    }
+
+
+def _classify_signals(
+    all_horizons: list[int],
+    scores: dict[str, float | None],
+    threshold_map: dict[str, dict[int, float]],
+) -> dict[str, str]:
+    signals: dict[str, str] = {}
+    for horizon in all_horizons:
+        pr = scores.get(f"prob_reject_{horizon}m")
+        pb = scores.get(f"prob_break_{horizon}m")
+        if pr is None and pb is None:
+            continue
+
+        reject_thresh = threshold_map["reject"].get(horizon, 0.5)
+        break_thresh = threshold_map["break"].get(horizon, 0.5)
+        pr = pr if pr is not None else 0.0
+        pb = pb if pb is not None else 0.0
+
+        if pb >= break_thresh:
+            signals[f"signal_{horizon}m"] = "break"
+        elif pr >= reject_thresh:
+            signals[f"signal_{horizon}m"] = "reject"
+        else:
+            signals[f"signal_{horizon}m"] = "no_edge"
+    return signals
+
+
+def _pick_best_horizon(
+    scored_horizons: list[int],
+    scores: dict[str, float | None],
+    signals: dict[str, str],
+    threshold_map: dict[str, dict[int, float]],
+) -> tuple[int | None, bool]:
+    best_horizon = None
+    best_score = None
+    for horizon in scored_horizons:
+        pr = scores.get(f"prob_reject_{horizon}m")
+        pb = scores.get(f"prob_break_{horizon}m")
+        if pr is None and pb is None:
+            continue
+        pr = pr if pr is not None else 0.0
+        pb = pb if pb is not None else 0.0
+
+        signal = signals.get(f"signal_{horizon}m")
+        reject_thresh = threshold_map["reject"].get(horizon, 0.5)
+        break_thresh = threshold_map["break"].get(horizon, 0.5)
+
+        if signal == "reject":
+            edge = (pr - reject_thresh) + 1.0
+        elif signal == "break":
+            edge = -(pb - break_thresh) - 1.0
+        else:
+            edge = pr - pb
+
+        if best_score is None or edge > best_score:
+            best_score = edge
+            best_horizon = horizon
+
+    has_signal = any(
+        signals.get(f"signal_{h}m") in ("reject", "break")
+        for h in scored_horizons
+    )
+    return best_horizon, not has_signal
 
 
 def _score_event(event: dict):
@@ -406,7 +772,6 @@ def _score_event(event: dict):
 
     # ── Signal classification per horizon ──
     # Uses optimal thresholds instead of hardcoded 0.5
-    signals = {}
     all_horizons = sorted(
         set(registry.models.get("reject", {}).keys())
         .union(registry.models.get("break", {}).keys())
@@ -415,25 +780,64 @@ def _score_event(event: dict):
     if not scored_horizons:
         scored_horizons = list(all_horizons)
 
-    for horizon in all_horizons:
-        pr = scores.get(f"prob_reject_{horizon}m")
-        pb = scores.get(f"prob_break_{horizon}m")
-        if pr is None and pb is None:
-            continue
+    threshold_baseline = {
+        "reject": {h: _clamp_threshold(registry.get_threshold("reject", h)) for h in all_horizons},
+        "break": {h: _clamp_threshold(registry.get_threshold("break", h)) for h in all_horizons},
+    }
+    regime_state = _compute_trade_regime(event=event, features=features)
+    atr_distance_ratio = _compute_atr_distance_ratio(event=event, features=features)
+    atr_zone = _classify_atr_zone(atr_distance_ratio)
+    threshold_regime_base = _build_regime_thresholds(
+        all_horizons=all_horizons,
+        trade_regime=regime_state["bucket"],
+    )
+    threshold_regime, atr_overlay_meta = _apply_atr_zone_overlay(
+        threshold_map=threshold_regime_base,
+        all_horizons=all_horizons,
+        trade_regime=regime_state["bucket"],
+        atr_zone=atr_zone,
+    )
+    baseline_signals = _classify_signals(
+        all_horizons=all_horizons,
+        scores=scores,
+        threshold_map=threshold_baseline,
+    )
+    regime_signals = _classify_signals(
+        all_horizons=all_horizons,
+        scores=scores,
+        threshold_map=threshold_regime,
+    )
 
-        reject_thresh = registry.get_threshold("reject", horizon)
-        break_thresh = registry.get_threshold("break", horizon)
+    selected_policy = "baseline"
+    selected_threshold_map = threshold_baseline
+    selected_signals = baseline_signals
+    if ML_REGIME_POLICY_MODE == "active" and regime_state["bucket"] in {"compression", "expansion"}:
+        selected_policy = "regime_active"
+        selected_threshold_map = threshold_regime
+        selected_signals = regime_signals
 
-        pr = pr if pr is not None else 0.0
-        pb = pb if pb is not None else 0.0
+    signal_diffs = {
+        f"signal_{h}m": {
+            "baseline": baseline_signals.get(f"signal_{h}m"),
+            "regime": regime_signals.get(f"signal_{h}m"),
+            "selected": selected_signals.get(f"signal_{h}m"),
+        }
+        for h in all_horizons
+        if (
+            baseline_signals.get(f"signal_{h}m") is not None
+            or regime_signals.get(f"signal_{h}m") is not None
+        )
+    }
+    if ML_REGIME_POLICY_MODE == "shadow":
+        changed = [
+            key
+            for key, payload in signal_diffs.items()
+            if payload.get("baseline") != payload.get("regime")
+        ]
+        if changed:
+            quality_flags.append("REGIME_POLICY_DIVERGENCE")
 
-        # Determine signal: break wins if both fire (it's the more dangerous outcome)
-        if pb >= break_thresh:
-            signals[f"signal_{horizon}m"] = "break"
-        elif pr >= reject_thresh:
-            signals[f"signal_{horizon}m"] = "reject"
-        else:
-            signals[f"signal_{horizon}m"] = "no_edge"
+    signals = selected_signals
 
     # ── Expected MFE/MAE: signal-conditional ──
     # Reject and break are independent binary classifiers (not mutually exclusive),
@@ -462,54 +866,66 @@ def _score_event(event: dict):
         scores[f"exp_mae_bps_{horizon}m"] = float(mae)
 
     # ── Best horizon selection (threshold-aware) ──
-    # Prefer horizons that have a directional signal, ranked by excess
-    # confidence above their threshold. Fall back to raw edge if no signal.
-    best_horizon = None
-    best_score = None
-    for horizon in scored_horizons:
-        pr = scores.get(f"prob_reject_{horizon}m")
-        pb = scores.get(f"prob_break_{horizon}m")
-        if pr is None and pb is None:
-            continue
-        pr = pr if pr is not None else 0.0
-        pb = pb if pb is not None else 0.0
-
-        signal = signals.get(f"signal_{horizon}m")
-        reject_thresh = registry.get_threshold("reject", horizon)
-        break_thresh = registry.get_threshold("break", horizon)
-
-        if signal == "reject":
-            # Excess confidence above reject threshold
-            edge = (pr - reject_thresh) + 1.0  # +1.0 to rank above no_edge
-        elif signal == "break":
-            # Break signal — negative edge (warns against the trade)
-            edge = -(pb - break_thresh) - 1.0
-        else:
-            # No signal — use raw reject-break spread as tiebreaker
-            edge = pr - pb
-
-        if best_score is None or edge > best_score:
-            best_score = edge
-            best_horizon = horizon
-
-    # ── Abstain flag: true when no horizon has a directional signal ──
-    has_signal = any(
-        signals.get(f"signal_{h}m") in ("reject", "break")
-        for h in scored_horizons
+    best_horizon, abstain = _pick_best_horizon(
+        scored_horizons=scored_horizons,
+        scores=scores,
+        signals=signals,
+        threshold_map=selected_threshold_map,
     )
+
+    baseline_best_horizon, baseline_abstain = _pick_best_horizon(
+        scored_horizons=scored_horizons,
+        scores=scores,
+        signals=baseline_signals,
+        threshold_map=threshold_baseline,
+    )
+    regime_best_horizon, regime_abstain = _pick_best_horizon(
+        scored_horizons=scored_horizons,
+        scores=scores,
+        signals=regime_signals,
+        threshold_map=threshold_regime,
+    )
+
+    for horizon in all_horizons:
+        thresholds_used[f"threshold_reject_{horizon}m"] = selected_threshold_map["reject"].get(horizon, 0.5)
+        thresholds_used[f"threshold_break_{horizon}m"] = selected_threshold_map["break"].get(horizon, 0.5)
 
     return {
         "status": "degraded" if missing else "ok",
         "scores": scores,
         "signals": signals,
         "thresholds": thresholds_used,
-        "abstain": not has_signal,
+        "abstain": abstain,
         "best_horizon": best_horizon,
         "model_version": registry.manifest.get("version") if registry.manifest else None,
         "feature_version": FEATURE_VERSION,
         "trained_end_ts": registry.manifest.get("trained_end_ts") if registry.manifest else None,
         "calibration": calibration,
         "quality_flags": quality_flags,
+        "regime_policy": {
+            "mode": ML_REGIME_POLICY_MODE,
+            "selected_policy": selected_policy,
+            "trade_regime": regime_state["bucket"],
+            "drivers": regime_state["drivers"],
+            "atr_zone": atr_zone,
+            "atr_distance_ratio": atr_distance_ratio,
+            "atr_overlay": atr_overlay_meta,
+            "votes": {
+                "expansion": regime_state["expansion_votes"],
+                "compression": regime_state["compression_votes"],
+            },
+            "baseline": {
+                "signals": baseline_signals,
+                "best_horizon": baseline_best_horizon,
+                "abstain": baseline_abstain,
+            },
+            "regime": {
+                "signals": regime_signals,
+                "best_horizon": regime_best_horizon,
+                "abstain": regime_abstain,
+            },
+            "signal_diffs": signal_diffs,
+        },
     }
 
 
