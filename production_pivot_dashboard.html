@@ -1885,6 +1885,18 @@
                         </div>
                     </div>
                     <div class="ml-horizon-card">
+                        <div class="ml-horizon-title">30m</div>
+                        <div class="ml-signal-label" id="ml-signal-30m">--</div>
+                        <div class="ml-horizon-row" title="Probability that price will reject from this level within 30 minutes">Reject: <span id="ml-reject-30m">--</span></div>
+                        <div class="ml-horizon-row" title="Probability that price will break through this level within 30 minutes">Break: <span id="ml-break-30m">--</span></div>
+                        <div class="ml-horizon-row" title="Expected Maximum Favorable Excursion — best-case profit potential in bps">Exp MFE: <span id="ml-mfe-30m">--</span></div>
+                        <div class="ml-horizon-row" title="Expected Maximum Adverse Excursion — worst-case drawdown potential in bps">Exp MAE: <span id="ml-mae-30m">--</span></div>
+                        <div class="ml-threshold-row">
+                            <span>Thr R: <span id="ml-thr-reject-30m">--</span></span>
+                            <span>Thr B: <span id="ml-thr-break-30m">--</span></span>
+                        </div>
+                    </div>
+                    <div class="ml-horizon-card">
                         <div class="ml-horizon-title">60m</div>
                         <div class="ml-signal-label" id="ml-signal-60m">--</div>
                         <div class="ml-horizon-row" title="Probability that price will reject from this level within 60 minutes">Reject: <span id="ml-reject-60m">--</span></div>
@@ -5530,7 +5542,7 @@
         }
 
         function resetMlHorizonCards() {
-            const horizons = [5, 15, 60];
+            const horizons = [5, 15, 30, 60];
             horizons.forEach((h, idx) => {
                 setMlText(`ml-reject-${h}m`, '--');
                 setMlText(`ml-break-${h}m`, '--');
@@ -6063,7 +6075,7 @@
                 ? `${previewTag} (degraded)`
                 : previewTag;
             status.textContent = statusLabel;
-            const horizons = [5, 15, 60];
+            const horizons = [5, 15, 30, 60];
             const missingBreak = horizons.some((h) => {
                 const r = scores[`prob_reject_${h}m`];
                 const b = scores[`prob_break_${h}m`];

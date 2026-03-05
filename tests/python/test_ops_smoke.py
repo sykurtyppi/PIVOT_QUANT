@@ -1082,6 +1082,12 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("prob_reject_30m", ml_server)
         self.assertIn("threshold_break_30m", ml_server)
 
+        dashboard = (REPO_ROOT / "production_pivot_dashboard.html").read_text(encoding="utf-8")
+        self.assertIn('id="ml-signal-30m"', dashboard)
+        self.assertIn('id="ml-reject-30m"', dashboard)
+        self.assertIn('id="ml-break-30m"', dashboard)
+        self.assertIn("const horizons = [5, 15, 30, 60];", dashboard)
+
         migrate_db = (REPO_ROOT / "scripts" / "migrate_db.py").read_text(encoding="utf-8")
         match = re.search(r"LATEST_SCHEMA_VERSION\s*=\s*(\d+)", migrate_db)
         self.assertIsNotNone(match, msg="migrate_db.py must declare LATEST_SCHEMA_VERSION")
