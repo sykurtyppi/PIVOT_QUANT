@@ -3,14 +3,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
+import random
 import sqlite3
 import sys
 import time
 from datetime import date, datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Iterable
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -21,6 +24,44 @@ DEFAULT_SYMBOLS = os.getenv("LIVE_COLLECTOR_SYMBOLS", "SPY")
 DEFAULT_RANGE_PCT = float(os.getenv("GAMMA_HISTORY_STRIKE_RANGE_PCT", "0.2"))
 DEFAULT_MAX_STRIKES = int(os.getenv("GAMMA_HISTORY_MAX_STRIKES", "120"))
 DEFAULT_TIMEOUT = int(os.getenv("GAMMA_HISTORY_HTTP_TIMEOUT_SEC", "60"))
+DEFAULT_HTTP_MAX_ATTEMPTS = max(1, int(os.getenv("GAMMA_HISTORY_HTTP_MAX_ATTEMPTS", "6")))
+DEFAULT_HTTP_RETRY_BASE_SEC = max(0.0, float(os.getenv("GAMMA_HISTORY_HTTP_RETRY_BASE_SEC", "1.0")))
+DEFAULT_HTTP_RETRY_MAX_SEC = max(
+    DEFAULT_HTTP_RETRY_BASE_SEC,
+    float(os.getenv("GAMMA_HISTORY_HTTP_RETRY_MAX_SEC", "30.0")),
+)
+DEFAULT_HTTP_RETRY_JITTER_SEC = max(0.0, float(os.getenv("GAMMA_HISTORY_HTTP_RETRY_JITTER_SEC", "0.25")))
+TRANSIENT_HTTP_CODES = {429, 500, 502, 503, 504}
+GAMMA_COMPUTE_FALLBACK = (
+    (os.getenv("GAMMA_COMPUTE_FALLBACK", "false") or "false").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+GAMMA_COMPUTE_FALLBACK_SOLVE_IV = (
+    (os.getenv("GAMMA_COMPUTE_FALLBACK_SOLVE_IV", "true") or "true").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+GAMMA_COMPUTE_FALLBACK_RISK_FREE_RATE = float(
+    os.getenv("GAMMA_COMPUTE_FALLBACK_RISK_FREE_RATE", "0.045")
+)
+GAMMA_COMPUTE_FALLBACK_DIVIDEND_YIELD = float(
+    os.getenv("GAMMA_COMPUTE_FALLBACK_DIVIDEND_YIELD", "0.0")
+)
+GAMMA_COMPUTE_FALLBACK_IV_MIN = max(
+    1e-4,
+    float(os.getenv("GAMMA_COMPUTE_FALLBACK_IV_MIN", "0.01")),
+)
+GAMMA_COMPUTE_FALLBACK_IV_MAX = max(
+    0.25,
+    float(os.getenv("GAMMA_COMPUTE_FALLBACK_IV_MAX", "5.0")),
+)
+GAMMA_COMPUTE_FALLBACK_MIN_DTE_DAYS = max(
+    1,
+    int(os.getenv("GAMMA_COMPUTE_FALLBACK_MIN_DTE_DAYS", "1")),
+)
+GAMMA_COMPUTE_FALLBACK_MAX_IV_ITERS = max(
+    10,
+    int(os.getenv("GAMMA_COMPUTE_FALLBACK_MAX_IV_ITERS", "80")),
+)
 
 try:
     from migrate_db import migrate_connection
@@ -40,27 +81,98 @@ def iter_trading_days(start_date: date, end_date: date) -> Iterable[date]:
         cur += timedelta(days=1)
 
 
+def _parse_retry_after_seconds(raw: object) -> float | None:
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    try:
+        seconds = float(text)
+        return max(0.0, seconds)
+    except ValueError:
+        pass
+    try:
+        dt = parsedate_to_datetime(text)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        delta = (dt.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds()
+        return max(0.0, delta)
+    except Exception:
+        return None
+
+
+def _retry_sleep_seconds(
+    attempt_idx: int,
+    retry_after_sec: float | None,
+    retry_base_sec: float,
+    retry_max_sec: float,
+    retry_jitter_sec: float,
+) -> float:
+    exponential = retry_base_sec * (2 ** max(0, attempt_idx))
+    wait = max(exponential, retry_after_sec or 0.0)
+    wait = min(wait, retry_max_sec)
+    if retry_jitter_sec > 0:
+        wait += random.uniform(0.0, retry_jitter_sec)
+    return max(0.0, wait)
+
+
 def fetch_marketdata_chain(
     symbol: str,
     snapshot_date: date,
     timeout_sec: int,
+    *,
+    max_attempts: int = DEFAULT_HTTP_MAX_ATTEMPTS,
+    retry_base_sec: float = DEFAULT_HTTP_RETRY_BASE_SEC,
+    retry_max_sec: float = DEFAULT_HTTP_RETRY_MAX_SEC,
+    retry_jitter_sec: float = DEFAULT_HTTP_RETRY_JITTER_SEC,
 ) -> dict:
     def _request(url: str) -> dict:
-        req = Request(
-            url,
-            headers={
-                "Authorization": f"Token {MARKETDATA_APP_TOKEN}",
-                "User-Agent": "PivotQuantGammaHistory/1.0",
-            },
-        )
-        with urlopen(req, timeout=timeout_sec) as resp:
-            payload = json.loads(resp.read())
-        if payload.get("s") != "ok":
-            raise RuntimeError(
-                f"marketdata.app chain error for {symbol} {snapshot_date}: "
-                f"{payload.get('errmsg', payload.get('s', 'unknown'))}"
+        for attempt in range(max_attempts):
+            req = Request(
+                url,
+                headers={
+                    "Authorization": f"Token {MARKETDATA_APP_TOKEN}",
+                    "User-Agent": "PivotQuantGammaHistory/1.0",
+                },
             )
-        return payload
+            try:
+                with urlopen(req, timeout=timeout_sec) as resp:
+                    payload = json.loads(resp.read())
+                if payload.get("s") != "ok":
+                    raise RuntimeError(
+                        f"marketdata.app chain error for {symbol} {snapshot_date}: "
+                        f"{payload.get('errmsg', payload.get('s', 'unknown'))}"
+                    )
+                return payload
+            except HTTPError as exc:
+                if attempt + 1 >= max_attempts or exc.code not in TRANSIENT_HTTP_CODES:
+                    raise
+                retry_after = _parse_retry_after_seconds(
+                    exc.headers.get("Retry-After") if getattr(exc, "headers", None) else None
+                )
+                wait = _retry_sleep_seconds(
+                    attempt_idx=attempt,
+                    retry_after_sec=retry_after,
+                    retry_base_sec=retry_base_sec,
+                    retry_max_sec=retry_max_sec,
+                    retry_jitter_sec=retry_jitter_sec,
+                )
+                if wait > 0:
+                    time.sleep(wait)
+            except (URLError, TimeoutError):
+                if attempt + 1 >= max_attempts:
+                    raise
+                wait = _retry_sleep_seconds(
+                    attempt_idx=attempt,
+                    retry_after_sec=None,
+                    retry_base_sec=retry_base_sec,
+                    retry_max_sec=retry_max_sec,
+                    retry_jitter_sec=retry_jitter_sec,
+                )
+                if wait > 0:
+                    time.sleep(wait)
+        raise RuntimeError(f"marketdata.app retry loop exhausted for {symbol} {snapshot_date}")
 
     params = {"date": snapshot_date.strftime("%Y-%m-%d")}
     url = f"{MARKETDATA_APP_BASE}/options/chain/{symbol.upper()}/?{urlencode(params)}"
@@ -90,6 +202,126 @@ def _safe_pct(num: float, den: float) -> float | None:
     return round((num / den) * 100.0, 4)
 
 
+def _norm_cdf(x: float) -> float:
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def _norm_pdf(x: float) -> float:
+    return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
+
+
+def _to_date(raw: object) -> date | None:
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    try:
+        return parse_yyyy_mm_dd(text[:10])
+    except Exception:
+        return None
+
+
+def _option_mid_price(
+    idx: int,
+    bids: list,
+    asks: list,
+    lasts: list,
+    marks: list,
+    closes: list,
+) -> float | None:
+    bid = _to_float(bids[idx] if idx < len(bids) else None)
+    ask = _to_float(asks[idx] if idx < len(asks) else None)
+    if bid is not None and ask is not None and bid > 0 and ask > 0 and ask >= bid:
+        mid = (bid + ask) / 2.0
+        if mid > 0:
+            return mid
+    for series in (marks, lasts, closes):
+        px = _to_float(series[idx] if idx < len(series) else None)
+        if px is not None and px > 0:
+            return px
+    return None
+
+
+def _bsm_price(
+    is_call: bool,
+    s: float,
+    k: float,
+    t: float,
+    r: float,
+    q: float,
+    sigma: float,
+) -> float | None:
+    if s <= 0 or k <= 0 or t <= 0 or sigma <= 0:
+        return None
+    sqrt_t = math.sqrt(t)
+    d1 = (math.log(s / k) + (r - q + 0.5 * sigma * sigma) * t) / (sigma * sqrt_t)
+    d2 = d1 - sigma * sqrt_t
+    disc_r = math.exp(-r * t)
+    disc_q = math.exp(-q * t)
+    if is_call:
+        return s * disc_q * _norm_cdf(d1) - k * disc_r * _norm_cdf(d2)
+    return k * disc_r * _norm_cdf(-d2) - s * disc_q * _norm_cdf(-d1)
+
+
+def _solve_implied_vol(
+    is_call: bool,
+    target_price: float,
+    s: float,
+    k: float,
+    t: float,
+    r: float,
+    q: float,
+) -> float | None:
+    if target_price <= 0 or s <= 0 or k <= 0 or t <= 0:
+        return None
+    intrinsic = max(0.0, s - k) if is_call else max(0.0, k - s)
+    if target_price < intrinsic:
+        return None
+
+    lo = GAMMA_COMPUTE_FALLBACK_IV_MIN
+    hi = GAMMA_COMPUTE_FALLBACK_IV_MAX
+    px_lo = _bsm_price(is_call, s, k, t, r, q, lo)
+    px_hi = _bsm_price(is_call, s, k, t, r, q, hi)
+    if px_lo is None or px_hi is None:
+        return None
+    if target_price < px_lo or target_price > px_hi:
+        return None
+
+    for _ in range(GAMMA_COMPUTE_FALLBACK_MAX_IV_ITERS):
+        mid = (lo + hi) / 2.0
+        px_mid = _bsm_price(is_call, s, k, t, r, q, mid)
+        if px_mid is None:
+            return None
+        err = px_mid - target_price
+        if abs(err) < 1e-5:
+            return mid
+        if err > 0:
+            hi = mid
+        else:
+            lo = mid
+    return (lo + hi) / 2.0
+
+
+def _bsm_gamma(
+    s: float,
+    k: float,
+    t: float,
+    r: float,
+    q: float,
+    sigma: float,
+) -> float | None:
+    if s <= 0 or k <= 0 or t <= 0 or sigma <= 0:
+        return None
+    sqrt_t = math.sqrt(t)
+    d1 = (math.log(s / k) + (r - q + 0.5 * sigma * sigma) * t) / (sigma * sqrt_t)
+    disc_q = math.exp(-q * t)
+    gamma = (disc_q * _norm_pdf(d1)) / (s * sigma * sqrt_t)
+    if not math.isfinite(gamma) or gamma <= 0:
+        return None
+    return gamma
+
+
 def summarize_chain(
     symbol: str,
     snapshot_date: date,
@@ -105,6 +337,11 @@ def summarize_chain(
     deltas = chain.get("delta") or []
     expiries = chain.get("expiration") or []
     underlyings = chain.get("underlyingPrice") or []
+    bids = chain.get("bid") or []
+    asks = chain.get("ask") or []
+    lasts = chain.get("last") or chain.get("lastPrice") or []
+    marks = chain.get("mid") or chain.get("mark") or []
+    closes = chain.get("close") or []
 
     if not strikes:
         raise RuntimeError(f"chain has no strike data for {symbol} {snapshot_date}")
@@ -124,6 +361,9 @@ def summarize_chain(
     with_greeks = 0
     with_iv = 0
     with_oi = 0
+    computed_greeks = 0
+    computed_from_iv = 0
+    computed_from_price = 0
     oi_call = 0.0
     oi_put = 0.0
     zero_dte_oi = 0.0
@@ -140,7 +380,8 @@ def summarize_chain(
 
         total_contracts += 1
         side = str((sides[i] if i < len(sides) else "") or "").lower()
-        gamma = _to_float(gammas[i] if i < len(gammas) else None)
+        gamma_provider = _to_float(gammas[i] if i < len(gammas) else None)
+        gamma = gamma_provider
         iv = _to_float(ivs[i] if i < len(ivs) else None)
         oi = _to_float(ois[i] if i < len(ois) else None)
         delta = _to_float(deltas[i] if i < len(deltas) else None)
@@ -165,9 +406,48 @@ def summarize_chain(
             except Exception:
                 pass
 
+        if gamma is not None:
+            with_greeks += 1
+        elif GAMMA_COMPUTE_FALLBACK and side in {"call", "put"}:
+            expiry_date = _to_date(expiry_raw)
+            if expiry_date is not None:
+                dte_days = (expiry_date - snapshot_date).days
+                if dte_days >= GAMMA_COMPUTE_FALLBACK_MIN_DTE_DAYS:
+                    t = dte_days / 365.0
+                    sigma = iv if (iv is not None and iv > 0) else None
+                    sigma_source = "iv" if sigma is not None else None
+                    if sigma is None and GAMMA_COMPUTE_FALLBACK_SOLVE_IV:
+                        option_px = _option_mid_price(i, bids, asks, lasts, marks, closes)
+                        if option_px is not None:
+                            sigma = _solve_implied_vol(
+                                is_call=(side == "call"),
+                                target_price=option_px,
+                                s=spot,
+                                k=strike,
+                                t=t,
+                                r=GAMMA_COMPUTE_FALLBACK_RISK_FREE_RATE,
+                                q=GAMMA_COMPUTE_FALLBACK_DIVIDEND_YIELD,
+                            )
+                            if sigma is not None:
+                                sigma_source = "price"
+                    if sigma is not None and sigma > 0:
+                        gamma = _bsm_gamma(
+                            s=spot,
+                            k=strike,
+                            t=t,
+                            r=GAMMA_COMPUTE_FALLBACK_RISK_FREE_RATE,
+                            q=GAMMA_COMPUTE_FALLBACK_DIVIDEND_YIELD,
+                            sigma=sigma,
+                        )
+                        if gamma is not None:
+                            computed_greeks += 1
+                            if sigma_source == "iv":
+                                computed_from_iv += 1
+                            elif sigma_source == "price":
+                                computed_from_price += 1
+
         if gamma is None:
             continue
-        with_greeks += 1
         size = oi if oi is not None else 1.0
         gex = gamma * size * multiplier * (spot ** 2)
         if side == "put":
@@ -251,6 +531,11 @@ def summarize_chain(
                 "spot": spot,
                 "contracts": len(strikes),
                 "filtered_contracts": total_contracts,
+                "compute_fallback_enabled": bool(GAMMA_COMPUTE_FALLBACK),
+                "computed_gamma_count": computed_greeks,
+                "computed_gamma_from_iv": computed_from_iv,
+                "computed_gamma_from_price": computed_from_price,
+                "provider_gamma_count": with_greeks,
             },
             separators=(",", ":"),
         ),
@@ -358,6 +643,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--end-date", help="End date (YYYY-MM-DD)")
     parser.add_argument("--date", help="Single snapshot date (YYYY-MM-DD)")
     parser.add_argument("--timeout-sec", type=int, default=DEFAULT_TIMEOUT)
+    parser.add_argument("--http-max-attempts", type=int, default=DEFAULT_HTTP_MAX_ATTEMPTS)
+    parser.add_argument("--http-retry-base-sec", type=float, default=DEFAULT_HTTP_RETRY_BASE_SEC)
+    parser.add_argument("--http-retry-max-sec", type=float, default=DEFAULT_HTTP_RETRY_MAX_SEC)
+    parser.add_argument("--http-retry-jitter-sec", type=float, default=DEFAULT_HTTP_RETRY_JITTER_SEC)
     parser.add_argument("--strike-range-pct", type=float, default=DEFAULT_RANGE_PCT)
     parser.add_argument("--max-strikes", type=int, default=DEFAULT_MAX_STRIKES)
     parser.add_argument("--skip-existing", action="store_true", default=False)
@@ -383,6 +672,10 @@ def main() -> None:
     symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
     if not symbols:
         raise SystemExit("No symbols provided")
+    max_attempts = max(1, int(args.http_max_attempts))
+    retry_base_sec = max(0.0, float(args.http_retry_base_sec))
+    retry_max_sec = max(retry_base_sec, float(args.http_retry_max_sec))
+    retry_jitter_sec = max(0.0, float(args.http_retry_jitter_sec))
 
     db_path = Path(args.db)
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -404,7 +697,15 @@ def main() -> None:
                     skipped += 1
                     continue
                 try:
-                    chain = fetch_marketdata_chain(symbol, d, timeout_sec=args.timeout_sec)
+                    chain = fetch_marketdata_chain(
+                        symbol,
+                        d,
+                        timeout_sec=args.timeout_sec,
+                        max_attempts=max_attempts,
+                        retry_base_sec=retry_base_sec,
+                        retry_max_sec=retry_max_sec,
+                        retry_jitter_sec=retry_jitter_sec,
+                    )
                     snap = summarize_chain(
                         symbol=symbol,
                         snapshot_date=d,

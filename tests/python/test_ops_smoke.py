@@ -859,6 +859,106 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertGreater(int(snap["with_oi"]), 0)
         self.assertIsNotNone(snap["oi_concentration_top5"])
 
+    def test_collect_gamma_history_can_compute_fallback_gamma(self) -> None:
+        collector = load_module(
+            "pq_collect_gamma_compute_fallback_test",
+            REPO_ROOT / "scripts" / "collect_gamma_history.py",
+        )
+        original_fallback = collector.GAMMA_COMPUTE_FALLBACK
+        original_solver = collector.GAMMA_COMPUTE_FALLBACK_SOLVE_IV
+        try:
+            collector.GAMMA_COMPUTE_FALLBACK = True
+            collector.GAMMA_COMPUTE_FALLBACK_SOLVE_IV = False
+            snap = collector.summarize_chain(
+                symbol="SPY",
+                snapshot_date=date(2026, 3, 4),
+                chain={
+                    "strike": [560, 585, 610],
+                    "side": ["call", "put", "call"],
+                    "gamma": [None, None, None],
+                    "iv": [0.22, 0.21, 0.20],
+                    "openInterest": [1000, 1200, 900],
+                    "delta": [0.45, -0.45, 0.25],
+                    "expiration": ["2026-03-18", "2026-03-18", "2026-03-18"],
+                    "underlyingPrice": [587.0, 587.0, 587.0],
+                },
+                strike_range_pct=0.6,
+                max_strikes=200,
+            )
+        finally:
+            collector.GAMMA_COMPUTE_FALLBACK = original_fallback
+            collector.GAMMA_COMPUTE_FALLBACK_SOLVE_IV = original_solver
+
+        self.assertIsNotNone(snap["gamma_flip"])
+        self.assertEqual(int(snap["with_greeks"]), 0)
+        payload = json.loads(snap["payload_json"])
+        self.assertGreater(int(payload.get("computed_gamma_count", 0)), 0)
+        self.assertGreater(int(payload.get("computed_gamma_from_iv", 0)), 0)
+
+    def test_collect_gamma_history_retries_429_then_succeeds(self) -> None:
+        collector = load_module(
+            "pq_collect_gamma_retry_429_test",
+            REPO_ROOT / "scripts" / "collect_gamma_history.py",
+        )
+
+        class _FakeResp:
+            def __init__(self, payload: dict) -> None:
+                self._raw = json.dumps(payload).encode("utf-8")
+
+            def read(self) -> bytes:
+                return self._raw
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> bool:
+                return False
+
+        attempts = {"count": 0}
+        sleep_calls: list[float] = []
+        original_urlopen = collector.urlopen
+        original_sleep = collector.time.sleep
+        try:
+            def _fake_urlopen(req, timeout=0):
+                attempts["count"] += 1
+                if attempts["count"] < 3:
+                    raise collector.HTTPError(
+                        req.full_url,
+                        429,
+                        "Too Many Requests",
+                        {"Retry-After": "0"},
+                        None,
+                    )
+                return _FakeResp(
+                    {
+                        "s": "ok",
+                        "strike": [587.0],
+                        "side": ["call"],
+                        "gamma": [0.01],
+                        "underlyingPrice": [587.0],
+                    }
+                )
+
+            collector.urlopen = _fake_urlopen
+            collector.time.sleep = lambda seconds: sleep_calls.append(float(seconds))
+            payload = collector.fetch_marketdata_chain(
+                "SPY",
+                date(2026, 3, 6),
+                timeout_sec=5,
+                max_attempts=4,
+                retry_base_sec=0.001,
+                retry_max_sec=0.001,
+                retry_jitter_sec=0.0,
+            )
+        finally:
+            collector.urlopen = original_urlopen
+            collector.time.sleep = original_sleep
+
+        self.assertEqual(payload.get("s"), "ok")
+        self.assertEqual(attempts["count"], 3)
+        self.assertEqual(len(sleep_calls), 2)
+        self.assertTrue(all(abs(seconds - 0.001) < 1e-9 for seconds in sleep_calls))
+
     def test_enrich_touch_events_uses_carry_and_does_not_null_overwrite(self) -> None:
         db = self.tmp / "enrich_gamma.sqlite"
         conn = sqlite3.connect(str(db))
