@@ -1545,6 +1545,185 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(int(summary["divergence_by_atr_zone"]["ultra"]), 1)
         self.assertEqual(int(summary["divergence_by_atr_zone"]["near"]), 1)
 
+    def test_weekend_deep_audit_generates_markdown_with_core_sections(self) -> None:
+        db = self.tmp / "weekend_audit.sqlite"
+        conn = sqlite3.connect(str(db))
+        try:
+            conn.execute(
+                """
+                CREATE TABLE touch_events(
+                    event_id TEXT PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    ts_event INTEGER NOT NULL,
+                    gamma_mode INTEGER,
+                    gamma_flip REAL,
+                    rv_regime INTEGER,
+                    regime_type INTEGER
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE event_labels(
+                    event_id TEXT NOT NULL,
+                    horizon_min INTEGER NOT NULL,
+                    reject INTEGER,
+                    break INTEGER,
+                    return_bps REAL,
+                    mfe_bps REAL,
+                    mae_bps REAL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE prediction_log(
+                    event_id TEXT NOT NULL,
+                    ts_prediction INTEGER NOT NULL,
+                    is_preview INTEGER NOT NULL DEFAULT 0,
+                    regime_policy_mode TEXT,
+                    trade_regime TEXT,
+                    selected_policy TEXT,
+                    regime_policy_json TEXT,
+                    signal_5m TEXT,
+                    signal_15m TEXT,
+                    signal_30m TEXT,
+                    signal_60m TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE gamma_snapshots(
+                    symbol TEXT NOT NULL,
+                    snapshot_date TEXT NOT NULL,
+                    ts_collected_ms INTEGER NOT NULL,
+                    with_greeks INTEGER,
+                    with_iv INTEGER,
+                    with_oi INTEGER,
+                    gamma_flip REAL,
+                    oi_concentration_top5 REAL,
+                    zero_dte_share REAL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE daily_ml_metrics(
+                    report_date TEXT NOT NULL,
+                    horizon_min INTEGER NOT NULL,
+                    brier_reject REAL,
+                    brier_break REAL,
+                    ece_reject REAL,
+                    ece_break REAL,
+                    avg_return_bps REAL
+                )
+                """
+            )
+
+            ts_event = int(datetime(2026, 3, 6, 15, 0, tzinfo=timezone.utc).timestamp() * 1000)
+            ts_pred = ts_event + 30_000
+            conn.execute(
+                """
+                INSERT INTO touch_events(event_id, symbol, ts_event, gamma_mode, gamma_flip, rv_regime, regime_type)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("evt_weekend_1", "SPY", ts_event, -1, 705.0, 2, 3),
+            )
+            conn.execute(
+                """
+                INSERT INTO event_labels(event_id, horizon_min, reject, break, return_bps, mfe_bps, mae_bps)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("evt_weekend_1", 5, 1, 0, 12.0, 18.0, -6.0),
+            )
+            conn.execute(
+                """
+                INSERT INTO prediction_log(
+                    event_id, ts_prediction, is_preview, regime_policy_mode, trade_regime,
+                    selected_policy, regime_policy_json, signal_5m, signal_15m, signal_30m, signal_60m
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "evt_weekend_1",
+                    ts_pred,
+                    0,
+                    "shadow",
+                    "compression",
+                    "baseline",
+                    json.dumps(
+                        {
+                            "atr_zone": "near",
+                            "signal_diffs": {
+                                "signal_5m": {
+                                    "baseline": "break",
+                                    "regime": "reject",
+                                }
+                            },
+                        }
+                    ),
+                    "reject",
+                    "no_edge",
+                    "no_edge",
+                    "no_edge",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO gamma_snapshots(
+                    symbol, snapshot_date, ts_collected_ms, with_greeks, with_iv, with_oi,
+                    gamma_flip, oi_concentration_top5, zero_dte_share
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("SPY", "2026-03-05", 1_777_800_000_000, 7966, 7966, 7966, 705.0, 16.05, 0.0),
+            )
+            conn.execute(
+                """
+                INSERT INTO gamma_snapshots(
+                    symbol, snapshot_date, ts_collected_ms, with_greeks, with_iv, with_oi,
+                    gamma_flip, oi_concentration_top5, zero_dte_share
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("SPY", "2026-03-06", 1_777_890_000_000, 0, 0, 508, None, 17.95, 0.0),
+            )
+            conn.execute(
+                """
+                INSERT INTO daily_ml_metrics(
+                    report_date, horizon_min, brier_reject, brier_break, ece_reject, ece_break, avg_return_bps
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("2026-03-06", 5, 0.21, 0.09, 0.11, 0.07, 5.2),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        out_md = self.tmp / "weekend_deep_audit.md"
+        proc = run_cmd(
+            [
+                PYTHON,
+                "scripts/weekend_deep_audit.py",
+                "--db",
+                str(db),
+                "--symbol",
+                "SPY",
+                "--start-date",
+                "2026-03-06",
+                "--end-date",
+                "2026-03-06",
+                "--output",
+                str(out_md),
+            ],
+            cwd=REPO_ROOT,
+        )
+        self.assertEqual(proc.returncode, 0, msg=f"{proc.stdout}\n{proc.stderr}")
+        text = out_md.read_text(encoding="utf-8")
+        self.assertIn("## Gamma Freshness & Carry", text)
+        self.assertIn("carry_prev_day", text)
+        self.assertIn("## Regime Policy Attribution", text)
+        self.assertIn("## Calibration Stability (daily_ml_metrics)", text)
+        self.assertIn("Horizon 5m divergences: 1", text)
+
     def test_model_governance_skips_regression_gates_when_support_is_low(self) -> None:
         module = load_module("model_governance", REPO_ROOT / "scripts" / "model_governance.py")
         gates = module.GateConfig(
