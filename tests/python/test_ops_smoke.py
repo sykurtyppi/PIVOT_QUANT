@@ -1451,6 +1451,64 @@ class OpsSmokeTests(unittest.TestCase):
             places=6,
         )
 
+    def test_feature_drift_respects_min_count_and_ignore_columns(self) -> None:
+        ml_server = load_module("ml_server_feature_drift_runtime", REPO_ROOT / "server" / "ml_server.py")
+
+        class DummyModel:
+            classes_ = np.array([0, 1])
+
+            def __init__(self, prob: float) -> None:
+                self.prob = prob
+
+            def predict_proba(self, _df):
+                return np.array([[1.0 - self.prob, self.prob]], dtype=float)
+
+        ml_server.build_feature_row = lambda _event: {
+            "x": 1.0,
+            "hist_sample_size": 100.0,
+            "overnight_gap_atr": -0.6,
+        }
+        ml_server.collect_missing = lambda _features: []
+        ml_server.ML_SHADOW_HORIZONS = set()
+        ml_server.ML_FEATURE_DRIFT_IGNORE_COLUMNS = {"hist_sample_size"}
+        ml_server.ML_FEATURE_DRIFT_MIN_FEATURES = 2
+
+        feature_bounds = {
+            "hist_sample_size": {"p1": 0.0, "p99": 94.0},
+            "overnight_gap_atr": {"p1": -0.5, "p99": 1.0},
+        }
+        ml_server.registry.models = {
+            "reject": {
+                5: {
+                    "feature_columns": ["x", "hist_sample_size", "overnight_gap_atr"],
+                    "pipeline": DummyModel(0.62),
+                    "calibration": "sigmoid",
+                    "feature_bounds": feature_bounds,
+                }
+            },
+            "break": {
+                5: {
+                    "feature_columns": ["x", "hist_sample_size", "overnight_gap_atr"],
+                    "pipeline": DummyModel(0.21),
+                    "calibration": "sigmoid",
+                    "feature_bounds": feature_bounds,
+                }
+            },
+        }
+        ml_server.registry.thresholds = {"reject": {5: 0.5}, "break": {5: 0.5}}
+        ml_server.registry.manifest = {"version": "vtest", "trained_end_ts": int(time.time() * 1000)}
+
+        high_threshold_result = ml_server._score_event({"event_id": "drift_gate_high_threshold"})
+        self.assertEqual(high_threshold_result["scores"]["drifted_features_reject_5m"], ["overnight_gap_atr"])
+        self.assertEqual(high_threshold_result["scores"]["drifted_features_break_5m"], ["overnight_gap_atr"])
+        self.assertNotIn("FEATURE_DRIFT_reject_5m", high_threshold_result["quality_flags"])
+        self.assertNotIn("FEATURE_DRIFT_break_5m", high_threshold_result["quality_flags"])
+
+        ml_server.ML_FEATURE_DRIFT_MIN_FEATURES = 1
+        low_threshold_result = ml_server._score_event({"event_id": "drift_gate_low_threshold"})
+        self.assertIn("FEATURE_DRIFT_reject_5m", low_threshold_result["quality_flags"])
+        self.assertIn("FEATURE_DRIFT_break_5m", low_threshold_result["quality_flags"])
+
     def test_ml_prediction_log_persists_regime_policy_fields(self) -> None:
         db = self.tmp / "predlog_regime.sqlite"
         prev_db = os.environ.get("PREDICTION_LOG_DB")

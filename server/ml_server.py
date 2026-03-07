@@ -88,6 +88,18 @@ ML_ATR_EXPANSION_NEAR_REJECT_DELTA = float(
 ML_ATR_EXPANSION_NEAR_BREAK_DELTA = float(
     os.getenv("ML_ATR_EXPANSION_NEAR_BREAK_DELTA", "-0.01")
 )
+ML_FEATURE_DRIFT_MIN_FEATURES = max(
+    1,
+    int(os.getenv("ML_FEATURE_DRIFT_MIN_FEATURES", "2")),
+)
+ML_FEATURE_DRIFT_IGNORE_COLUMNS = {
+    col.strip()
+    for col in os.getenv(
+        "ML_FEATURE_DRIFT_IGNORE_COLUMNS",
+        "hist_sample_size,regime_type",
+    ).split(",")
+    if col.strip()
+}
 ML_REGIME_GUARD_EXPANSION_NEAR_MODE = (
     os.getenv("ML_REGIME_GUARD_EXPANSION_NEAR_MODE", "shadow") or "shadow"
 ).strip().lower()
@@ -369,6 +381,10 @@ def health():
             "near_max": ML_ATR_ZONE_NEAR_MAX,
             "mid_max": ML_ATR_ZONE_MID_MAX,
         },
+        "feature_drift": {
+            "min_features": ML_FEATURE_DRIFT_MIN_FEATURES,
+            "ignore_columns": sorted(ML_FEATURE_DRIFT_IGNORE_COLUMNS),
+        },
         "regime_guardrails": {
             "expansion_near": {
                 "mode": ML_REGIME_GUARD_EXPANSION_NEAR_MODE,
@@ -419,6 +435,8 @@ def _check_feature_drift(features: dict, payload: dict) -> list[str]:
         return []
     drifted = []
     for col, limits in bounds.items():
+        if col in ML_FEATURE_DRIFT_IGNORE_COLUMNS:
+            continue
         value = features.get(col)
         if value is None or not isinstance(value, (int, float)):
             continue
@@ -832,10 +850,11 @@ def _score_event(event: dict):
             # ── Feature drift detection (#7) ──
             drifted = _check_feature_drift(features, payload)
             if drifted:
+                scores[f"drifted_features_{target}_{horizon}m"] = drifted
+            if drifted and len(drifted) >= ML_FEATURE_DRIFT_MIN_FEATURES:
                 flag = f"FEATURE_DRIFT_{target}_{horizon}m"
                 if flag not in quality_flags:
                     quality_flags.append(flag)
-                scores[f"drifted_features_{target}_{horizon}m"] = drifted
 
             # ── Uncalibrated model flag (#8) ──
             calib_method = payload.get("calibration", "none")
