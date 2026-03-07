@@ -88,6 +88,22 @@ ML_ATR_EXPANSION_NEAR_REJECT_DELTA = float(
 ML_ATR_EXPANSION_NEAR_BREAK_DELTA = float(
     os.getenv("ML_ATR_EXPANSION_NEAR_BREAK_DELTA", "-0.01")
 )
+ML_REGIME_GUARD_EXPANSION_NEAR_MODE = (
+    os.getenv("ML_REGIME_GUARD_EXPANSION_NEAR_MODE", "shadow") or "shadow"
+).strip().lower()
+if ML_REGIME_GUARD_EXPANSION_NEAR_MODE not in {"off", "shadow", "active"}:
+    ML_REGIME_GUARD_EXPANSION_NEAR_MODE = "shadow"
+ML_REGIME_GUARD_EXPANSION_NEAR_STRATEGY = (
+    os.getenv("ML_REGIME_GUARD_EXPANSION_NEAR_STRATEGY", "no_trade") or "no_trade"
+).strip().lower()
+if ML_REGIME_GUARD_EXPANSION_NEAR_STRATEGY not in {"no_trade", "tighten"}:
+    ML_REGIME_GUARD_EXPANSION_NEAR_STRATEGY = "no_trade"
+ML_REGIME_GUARD_EXPANSION_NEAR_REJECT_DELTA = float(
+    os.getenv("ML_REGIME_GUARD_EXPANSION_NEAR_REJECT_DELTA", "0.03")
+)
+ML_REGIME_GUARD_EXPANSION_NEAR_BREAK_DELTA = float(
+    os.getenv("ML_REGIME_GUARD_EXPANSION_NEAR_BREAK_DELTA", "0.03")
+)
 PREDICTION_LOG_DB = Path(os.getenv(
     "PREDICTION_LOG_DB",
     str(ROOT / "data" / "pivot_events.sqlite"),
@@ -352,6 +368,14 @@ def health():
             "ultra_max": ML_ATR_ZONE_ULTRA_MAX,
             "near_max": ML_ATR_ZONE_NEAR_MAX,
             "mid_max": ML_ATR_ZONE_MID_MAX,
+        },
+        "regime_guardrails": {
+            "expansion_near": {
+                "mode": ML_REGIME_GUARD_EXPANSION_NEAR_MODE,
+                "strategy": ML_REGIME_GUARD_EXPANSION_NEAR_STRATEGY,
+                "reject_delta": ML_REGIME_GUARD_EXPANSION_NEAR_REJECT_DELTA,
+                "break_delta": ML_REGIME_GUARD_EXPANSION_NEAR_BREAK_DELTA,
+            }
         },
     }
     if _startup_error is not None:
@@ -638,6 +662,56 @@ def _apply_atr_zone_overlay(
     }
 
 
+def _apply_expansion_near_guardrail(
+    threshold_map: dict[str, dict[int, float]],
+    all_horizons: list[int],
+    trade_regime: str,
+    atr_zone: str,
+) -> tuple[dict[str, dict[int, float]], dict[str, str | bool | float | None]]:
+    triggered = (
+        ML_REGIME_POLICY_MODE in {"shadow", "active"}
+        and trade_regime == "expansion"
+        and atr_zone == "near"
+        and ML_REGIME_GUARD_EXPANSION_NEAR_MODE in {"shadow", "active"}
+    )
+    meta: dict[str, str | bool | float | None] = {
+        "target": "expansion_near",
+        "mode": ML_REGIME_GUARD_EXPANSION_NEAR_MODE,
+        "strategy": ML_REGIME_GUARD_EXPANSION_NEAR_STRATEGY,
+        "triggered": triggered,
+        "applied": False,
+        "reject_delta": None,
+        "break_delta": None,
+    }
+    if not triggered:
+        return threshold_map, meta
+
+    guarded = {
+        "reject": {},
+        "break": {},
+    }
+    if ML_REGIME_GUARD_EXPANSION_NEAR_STRATEGY == "no_trade":
+        for horizon in all_horizons:
+            guarded["reject"][horizon] = 0.99
+            guarded["break"][horizon] = 0.99
+        return guarded, meta
+
+    reject_delta = ML_REGIME_GUARD_EXPANSION_NEAR_REJECT_DELTA
+    break_delta = ML_REGIME_GUARD_EXPANSION_NEAR_BREAK_DELTA
+    meta["reject_delta"] = float(reject_delta)
+    meta["break_delta"] = float(break_delta)
+    for horizon in all_horizons:
+        guarded["reject"][horizon] = _adjust_threshold(
+            threshold_map["reject"].get(horizon, 0.5),
+            reject_delta,
+        )
+        guarded["break"][horizon] = _adjust_threshold(
+            threshold_map["break"].get(horizon, 0.5),
+            break_delta,
+        )
+    return guarded, meta
+
+
 def _classify_signals(
     all_horizons: list[int],
     scores: dict[str, float | None],
@@ -807,6 +881,17 @@ def _score_event(event: dict):
         scores=scores,
         threshold_map=threshold_regime,
     )
+    threshold_guardrail, guardrail_meta = _apply_expansion_near_guardrail(
+        threshold_map=threshold_regime,
+        all_horizons=all_horizons,
+        trade_regime=regime_state["bucket"],
+        atr_zone=atr_zone,
+    )
+    guardrail_signals = _classify_signals(
+        all_horizons=all_horizons,
+        scores=scores,
+        threshold_map=threshold_guardrail,
+    )
 
     selected_policy = "baseline"
     selected_threshold_map = threshold_baseline
@@ -816,16 +901,28 @@ def _score_event(event: dict):
         selected_threshold_map = threshold_regime
         selected_signals = regime_signals
 
+    if (
+        bool(guardrail_meta.get("triggered"))
+        and ML_REGIME_GUARD_EXPANSION_NEAR_MODE == "active"
+        and ML_REGIME_POLICY_MODE == "active"
+    ):
+        selected_policy = f"guardrail_{ML_REGIME_GUARD_EXPANSION_NEAR_STRATEGY}"
+        selected_threshold_map = threshold_guardrail
+        selected_signals = guardrail_signals
+        guardrail_meta["applied"] = True
+
     signal_diffs = {
         f"signal_{h}m": {
             "baseline": baseline_signals.get(f"signal_{h}m"),
             "regime": regime_signals.get(f"signal_{h}m"),
+            "guardrail": guardrail_signals.get(f"signal_{h}m"),
             "selected": selected_signals.get(f"signal_{h}m"),
         }
         for h in all_horizons
         if (
             baseline_signals.get(f"signal_{h}m") is not None
             or regime_signals.get(f"signal_{h}m") is not None
+            or guardrail_signals.get(f"signal_{h}m") is not None
         )
     }
     if ML_REGIME_POLICY_MODE == "shadow":
@@ -836,6 +933,14 @@ def _score_event(event: dict):
         ]
         if changed:
             quality_flags.append("REGIME_POLICY_DIVERGENCE")
+    if bool(guardrail_meta.get("triggered")) and ML_REGIME_GUARD_EXPANSION_NEAR_MODE == "shadow":
+        changed_guardrail = [
+            key
+            for key, payload in signal_diffs.items()
+            if payload.get("selected") != payload.get("guardrail")
+        ]
+        if changed_guardrail:
+            quality_flags.append("REGIME_GUARDRAIL_DIVERGENCE")
 
     signals = selected_signals
 
@@ -885,6 +990,12 @@ def _score_event(event: dict):
         signals=regime_signals,
         threshold_map=threshold_regime,
     )
+    guardrail_best_horizon, guardrail_abstain = _pick_best_horizon(
+        scored_horizons=scored_horizons,
+        scores=scores,
+        signals=guardrail_signals,
+        threshold_map=threshold_guardrail,
+    )
 
     for horizon in all_horizons:
         thresholds_used[f"threshold_reject_{horizon}m"] = selected_threshold_map["reject"].get(horizon, 0.5)
@@ -923,6 +1034,12 @@ def _score_event(event: dict):
                 "signals": regime_signals,
                 "best_horizon": regime_best_horizon,
                 "abstain": regime_abstain,
+            },
+            "guardrail": {
+                "signals": guardrail_signals,
+                "best_horizon": guardrail_best_horizon,
+                "abstain": guardrail_abstain,
+                **guardrail_meta,
             },
             "signal_diffs": signal_diffs,
         },

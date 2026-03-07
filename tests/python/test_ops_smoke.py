@@ -1290,6 +1290,10 @@ class OpsSmokeTests(unittest.TestCase):
         ml_server.ML_REGIME_COMPRESSION_BREAK_DELTA = 0.02
         ml_server.ML_REGIME_EXPANSION_REJECT_DELTA = 0.02
         ml_server.ML_REGIME_EXPANSION_BREAK_DELTA = -0.02
+        ml_server.ML_REGIME_GUARD_EXPANSION_NEAR_MODE = "off"
+        ml_server.ML_REGIME_GUARD_EXPANSION_NEAR_STRATEGY = "no_trade"
+        ml_server.ML_REGIME_GUARD_EXPANSION_NEAR_REJECT_DELTA = 0.03
+        ml_server.ML_REGIME_GUARD_EXPANSION_NEAR_BREAK_DELTA = 0.03
 
         def set_registry(*, reject_prob: float, break_prob: float) -> None:
             ml_server.registry.models = {
@@ -1404,6 +1408,48 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(neutral_result["signals"].get("signal_5m"), "reject")
         self.assertEqual(neutral_result["regime_policy"]["trade_regime"], "neutral")
         self.assertEqual(neutral_result["regime_policy"]["selected_policy"], "baseline")
+
+        # Expansion + near guardrail stays observational in shadow mode.
+        set_registry(reject_prob=0.51, break_prob=0.52)
+        near_expansion_event = {
+            "event_id": "regime_expansion_near_guardrail",
+            "regime_type": 4,
+            "rv_regime": 3,
+            "or_size_atr": 0.9,
+            "or_breakout": 1,
+            "overnight_gap_atr": 0.7,
+            "gamma_mode": -1,
+            "distance_atr_ratio": 0.07,
+        }
+        ml_server.ML_REGIME_POLICY_MODE = "active"
+        ml_server.ML_REGIME_GUARD_EXPANSION_NEAR_MODE = "shadow"
+        guardrail_shadow = ml_server._score_event(near_expansion_event)
+        self.assertEqual(guardrail_shadow["signals"].get("signal_5m"), "break")
+        self.assertEqual(guardrail_shadow["regime_policy"]["selected_policy"], "regime_active")
+        self.assertTrue(bool(guardrail_shadow["regime_policy"]["guardrail"]["triggered"]))
+        self.assertFalse(bool(guardrail_shadow["regime_policy"]["guardrail"]["applied"]))
+        self.assertEqual(
+            guardrail_shadow["regime_policy"]["guardrail"]["signals"].get("signal_5m"),
+            "no_edge",
+        )
+        self.assertIn("REGIME_GUARDRAIL_DIVERGENCE", guardrail_shadow["quality_flags"])
+
+        # In active mode the same guardrail becomes enforceable and reversible.
+        ml_server.ML_REGIME_GUARD_EXPANSION_NEAR_MODE = "active"
+        guardrail_active = ml_server._score_event(near_expansion_event)
+        self.assertEqual(guardrail_active["signals"].get("signal_5m"), "no_edge")
+        self.assertEqual(guardrail_active["regime_policy"]["selected_policy"], "guardrail_no_trade")
+        self.assertTrue(bool(guardrail_active["regime_policy"]["guardrail"]["applied"]))
+        self.assertAlmostEqual(
+            float(guardrail_active["thresholds"]["threshold_reject_5m"]),
+            0.99,
+            places=6,
+        )
+        self.assertAlmostEqual(
+            float(guardrail_active["thresholds"]["threshold_break_5m"]),
+            0.99,
+            places=6,
+        )
 
     def test_ml_prediction_log_persists_regime_policy_fields(self) -> None:
         db = self.tmp / "predlog_regime.sqlite"
