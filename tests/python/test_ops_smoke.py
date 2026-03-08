@@ -1840,6 +1840,141 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("## Calibration Stability (daily_ml_metrics)", text)
         self.assertIn("Horizon 5m divergences: 1", text)
 
+    def test_weekly_policy_review_generates_markdown_with_core_sections(self) -> None:
+        db = self.tmp / "weekly_policy_review.sqlite"
+        conn = sqlite3.connect(str(db))
+        try:
+            conn.execute(
+                """
+                CREATE TABLE touch_events(
+                    event_id TEXT PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    ts_event INTEGER NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE event_labels(
+                    event_id TEXT NOT NULL,
+                    horizon_min INTEGER NOT NULL,
+                    return_bps REAL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE prediction_log(
+                    event_id TEXT NOT NULL,
+                    ts_prediction INTEGER NOT NULL,
+                    is_preview INTEGER NOT NULL DEFAULT 0,
+                    best_horizon INTEGER,
+                    abstain INTEGER NOT NULL DEFAULT 0,
+                    trade_regime TEXT,
+                    regime_policy_json TEXT,
+                    signal_5m TEXT,
+                    signal_15m TEXT,
+                    signal_30m TEXT,
+                    signal_60m TEXT
+                )
+                """
+            )
+
+            ts_event_1 = int(datetime(2026, 3, 6, 15, 0, tzinfo=timezone.utc).timestamp() * 1000)
+            ts_event_2 = int(datetime(2026, 3, 7, 15, 0, tzinfo=timezone.utc).timestamp() * 1000)
+            ts_pred_1 = ts_event_1 + 60_000
+            ts_pred_2 = ts_event_2 + 60_000
+
+            conn.execute(
+                "INSERT INTO touch_events(event_id, symbol, ts_event) VALUES (?, ?, ?)",
+                ("evt_weekly_1", "SPY", ts_event_1),
+            )
+            conn.execute(
+                "INSERT INTO touch_events(event_id, symbol, ts_event) VALUES (?, ?, ?)",
+                ("evt_weekly_2", "SPY", ts_event_2),
+            )
+            conn.execute(
+                "INSERT INTO event_labels(event_id, horizon_min, return_bps) VALUES (?, ?, ?)",
+                ("evt_weekly_1", 5, 8.0),
+            )
+            conn.execute(
+                "INSERT INTO event_labels(event_id, horizon_min, return_bps) VALUES (?, ?, ?)",
+                ("evt_weekly_2", 60, -4.0),
+            )
+            conn.execute(
+                """
+                INSERT INTO prediction_log(
+                    event_id, ts_prediction, is_preview, best_horizon, abstain,
+                    trade_regime, regime_policy_json, signal_5m, signal_15m, signal_30m, signal_60m
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "evt_weekly_1",
+                    ts_pred_1,
+                    0,
+                    5,
+                    0,
+                    "expansion",
+                    json.dumps({"atr_zone": "near", "guardrail": {"triggered": True, "applied": True, "mode": "active", "strategy": "no_trade"}}),
+                    "reject",
+                    "no_edge",
+                    "no_edge",
+                    "no_edge",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO prediction_log(
+                    event_id, ts_prediction, is_preview, best_horizon, abstain,
+                    trade_regime, regime_policy_json, signal_5m, signal_15m, signal_30m, signal_60m
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "evt_weekly_2",
+                    ts_pred_2,
+                    0,
+                    60,
+                    0,
+                    "compression",
+                    json.dumps({"atr_zone": "ultra", "guardrail": {"triggered": False, "applied": False, "mode": "active", "strategy": "no_trade"}}),
+                    "no_edge",
+                    "no_edge",
+                    "no_edge",
+                    "break",
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        out_md = self.tmp / "weekly_policy_review.md"
+        proc = run_cmd(
+            [
+                PYTHON,
+                "scripts/weekly_policy_review.py",
+                "--db",
+                str(db),
+                "--symbol",
+                "SPY",
+                "--source",
+                "live",
+                "--start-date",
+                "2026-03-06",
+                "--end-date",
+                "2026-03-08",
+                "--output",
+                str(out_md),
+            ],
+            cwd=REPO_ROOT,
+        )
+        self.assertEqual(proc.returncode, 0, msg=f"{proc.stdout}\n{proc.stderr}")
+        text = out_md.read_text(encoding="utf-8")
+        self.assertIn("## Policy Comparison (Baseline vs Guardrail vs No-5m)", text)
+        self.assertIn("## Cost Sweep", text)
+        self.assertIn("## Stratified PnL (Regime x ATR Zone x Horizon)", text)
+        self.assertIn("## Daily Expectancy", text)
+        self.assertIn("## Trade Share by Horizon (Baseline Trades)", text)
+
     def test_model_governance_skips_regression_gates_when_support_is_low(self) -> None:
         module = load_module("model_governance", REPO_ROOT / "scripts" / "model_governance.py")
         gates = module.GateConfig(
