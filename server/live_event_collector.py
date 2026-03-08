@@ -9,7 +9,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Set
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -80,6 +80,8 @@ SCORE_ENABLED = _env_bool("LIVE_COLLECTOR_SCORE_ENABLED", True)
 SCORE_API_URL = os.getenv("LIVE_COLLECTOR_SCORE_URL", "http://127.0.0.1:5003/score")
 SCORE_BATCH_SIZE = max(1, int(os.getenv("LIVE_COLLECTOR_SCORE_BATCH_SIZE", "64")))
 SCORE_TIMEOUT_SEC = max(1, int(os.getenv("LIVE_COLLECTOR_SCORE_TIMEOUT_SEC", "6")))
+SCORE_UNSCORED_LOOKBACK_DAYS = max(0, int(os.getenv("LIVE_COLLECTOR_SCORE_UNSCORED_LOOKBACK_DAYS", "3")))
+SCORE_UNSCORED_MAX_PER_CYCLE = max(0, int(os.getenv("LIVE_COLLECTOR_SCORE_UNSCORED_MAX_PER_CYCLE", "12")))
 GAMMA_REFRESH_SEC = max(30, int(os.getenv("LIVE_COLLECTOR_GAMMA_REFRESH_SEC", "300")))
 GAMMA_RETRY_SEC = max(30, int(os.getenv("LIVE_COLLECTOR_GAMMA_RETRY_SEC", "1800")))
 INTERVAL_SEC = _interval_to_seconds(INTERVAL)
@@ -128,6 +130,7 @@ def _connect_db() -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     conn.execute("PRAGMA busy_timeout=30000;")
+    conn.row_factory = sqlite3.Row
     if migrate_connection is not None:
         migrate_connection(conn, verbose=False)
     return conn
@@ -220,6 +223,43 @@ def _fetch_existing_event_ids(conn: sqlite3.Connection, event_ids: List[str]) ->
         rows = conn.execute(sql, chunk).fetchall()
         existing.update(row[0] for row in rows)
     return existing
+
+
+def _fetch_unscored_events(
+    conn: sqlite3.Connection,
+    *,
+    symbol: str,
+    min_ts_ms: int,
+    limit: int,
+    exclude_event_ids: Set[str] | None = None,
+) -> List[Dict[str, Any]]:
+    if limit <= 0:
+        return []
+    where = [
+        "te.symbol = ?",
+        "pl.event_id IS NULL",
+    ]
+    params: List[Any] = [symbol]
+    if min_ts_ms > 0:
+        where.append("te.ts_event >= ?")
+        params.append(min_ts_ms)
+    if exclude_event_ids:
+        placeholders = ",".join("?" for _ in exclude_event_ids)
+        where.append(f"te.event_id NOT IN ({placeholders})")
+        params.extend(sorted(exclude_event_ids))
+    params.append(int(limit))
+    sql = f"""
+        SELECT te.*
+        FROM touch_events te
+        LEFT JOIN prediction_log pl
+          ON pl.event_id = te.event_id
+         AND COALESCE(pl.is_preview, 0) = 0
+        WHERE {" AND ".join(where)}
+        ORDER BY te.ts_event DESC
+        LIMIT ?
+    """
+    rows = conn.execute(sql, params).fetchall()
+    return [dict(row) for row in rows]
 
 
 def _score_events(events: List[Dict[str, Any]]) -> None:
@@ -438,6 +478,32 @@ def main() -> None:
                         except Exception as score_exc:
                             cycle_errors.append(f"{symbol}:score:{score_exc}")
                             log.warning("Collector scoring failed for %s: %s", symbol, score_exc)
+
+                    # Also score a small backlog slice so retrain/backfill-created
+                    # events do not stay permanently unscored in prediction_log.
+                    if SCORE_ENABLED and SCORE_UNSCORED_MAX_PER_CYCLE > 0:
+                        lookback_ms = SCORE_UNSCORED_LOOKBACK_DAYS * 86_400_000
+                        min_ts_ms = max(0, int(time.time() * 1000) - lookback_ms)
+                        exclude_ids = {ev.get("event_id") for ev in new_events if ev.get("event_id")}
+                        backlog_events = _fetch_unscored_events(
+                            conn,
+                            symbol=symbol,
+                            min_ts_ms=min_ts_ms,
+                            limit=SCORE_UNSCORED_MAX_PER_CYCLE,
+                            exclude_event_ids=exclude_ids,
+                        )
+                        if backlog_events:
+                            try:
+                                _score_events(backlog_events)
+                                result["events_scored"] += len(backlog_events)
+                                total_scored += len(backlog_events)
+                            except Exception as score_gap_exc:
+                                cycle_errors.append(f"{symbol}:score_gap:{score_gap_exc}")
+                                log.warning(
+                                    "Collector backlog scoring failed for %s: %s",
+                                    symbol,
+                                    score_gap_exc,
+                                )
 
                     symbol_results.append(result)
                     total_bars += result["bars_inserted"]

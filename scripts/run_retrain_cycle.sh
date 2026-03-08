@@ -118,6 +118,12 @@ REPORT_PATH=""
 REPORT_OUTPUT=""
 NOTIFY_ON_RETRAIN="${ML_REPORT_NOTIFY_ON_RETRAIN:-false}"
 RUN_OPS_SMOKE_ON_RETRAIN="${ML_RUN_OPS_SMOKE_ON_RETRAIN:-true}"
+SCORE_UNSCORED_ON_RETRAIN="${RETRAIN_SCORE_UNSCORED_ON_RETRAIN:-true}"
+SCORE_UNSCORED_LOOKBACK_DAYS="${RETRAIN_SCORE_UNSCORED_LOOKBACK_DAYS:-7}"
+SCORE_UNSCORED_LIMIT="${RETRAIN_SCORE_UNSCORED_LIMIT:-600}"
+SCORE_UNSCORED_BATCH_SIZE="${RETRAIN_SCORE_UNSCORED_BATCH_SIZE:-64}"
+SCORE_UNSCORED_VERIFY_ON_RETRAIN="${RETRAIN_SCORE_UNSCORED_VERIFY_ON_RETRAIN:-true}"
+SCORE_UNSCORED_MAX_REMAINING="${RETRAIN_SCORE_UNSCORED_MAX_REMAINING:-0}"
 RELOAD_STATUS="not_attempted"
 
 ops_set() {
@@ -227,6 +233,32 @@ if [[ "${RELOAD_STATUS}" != "failed" ]]; then
   ops_set \
     --set "reload_last_status=ok" \
     --set "reload_last_at_ms=$(now_ms)"
+fi
+
+if is_truthy "${SCORE_UNSCORED_ON_RETRAIN}" && [[ "${RELOAD_STATUS}" == "ok" ]]; then
+  echo "[$(timestamp)] START score_unscored" | tee -a "${LOG_DIR}/retrain.log"
+  score_unscored_args=(
+    --db "${PIVOT_DB_PATH}"
+    --lookback-days "${SCORE_UNSCORED_LOOKBACK_DAYS}"
+    --limit "${SCORE_UNSCORED_LIMIT}"
+    --batch-size "${SCORE_UNSCORED_BATCH_SIZE}"
+    --score-url "http://127.0.0.1:5003/score"
+    --single-fallback-on-failure
+  )
+  if is_truthy "${SCORE_UNSCORED_VERIFY_ON_RETRAIN}"; then
+    score_unscored_args+=(--verify-after --max-remaining "${SCORE_UNSCORED_MAX_REMAINING}")
+  fi
+  if "${PYTHON}" scripts/score_unscored_touch_events.py \
+      "${score_unscored_args[@]}" \
+      >> "${LOG_DIR}/retrain.log" 2>&1; then
+    echo "[$(timestamp)] DONE  score_unscored" | tee -a "${LOG_DIR}/retrain.log"
+  else
+    echo "[$(timestamp)] WARN: score_unscored failed (continuing retrain)" | tee -a "${LOG_DIR}/retrain.log"
+  fi
+elif is_truthy "${SCORE_UNSCORED_ON_RETRAIN}"; then
+  echo "[$(timestamp)] INFO score_unscored skipped (reload status: ${RELOAD_STATUS})" | tee -a "${LOG_DIR}/retrain.log"
+else
+  echo "[$(timestamp)] INFO score_unscored skipped (RETRAIN_SCORE_UNSCORED_ON_RETRAIN=false)" | tee -a "${LOG_DIR}/retrain.log"
 fi
 
 echo "[$(timestamp)] Generating daily ML report..." | tee -a "${LOG_DIR}/retrain.log"

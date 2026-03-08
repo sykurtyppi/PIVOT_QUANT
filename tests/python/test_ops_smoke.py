@@ -18,6 +18,7 @@ import time
 import unittest
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from urllib.error import URLError
 
 import numpy as np
 
@@ -1175,6 +1176,274 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("load_env_file()", retrain_script)
         self.assertIn('load_env_file "${ENV_FILE}"', retrain_script)
         self.assertIn("--horizons 5 15 30 60 --incremental", retrain_script)
+        self.assertIn("score_unscored_touch_events.py", retrain_script)
+        self.assertIn("RETRAIN_SCORE_UNSCORED_VERIFY_ON_RETRAIN", retrain_script)
+        self.assertIn("RETRAIN_SCORE_UNSCORED_MAX_REMAINING", retrain_script)
+
+    def test_score_unscored_touch_events_runtime_behavior(self) -> None:
+        scorer = load_module(
+            "pq_score_unscored_touch_events_runtime_test",
+            REPO_ROOT / "scripts" / "score_unscored_touch_events.py",
+        )
+
+        db = self.tmp / "score_unscored.sqlite"
+        conn = sqlite3.connect(str(db))
+        try:
+            conn.execute(
+                """
+                CREATE TABLE touch_events(
+                    event_id TEXT PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    ts_event INTEGER NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE prediction_log(
+                    event_id TEXT NOT NULL,
+                    ts_prediction INTEGER NOT NULL,
+                    is_preview INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+            now_ms = int(time.time() * 1000)
+            rows = [
+                ("evt_scored", "SPY", now_ms - 60_000),
+                ("evt_missing_1", "SPY", now_ms - 120_000),
+                ("evt_missing_2", "SPY", now_ms - 180_000),
+            ]
+            conn.executemany(
+                "INSERT INTO touch_events(event_id, symbol, ts_event) VALUES (?, ?, ?)",
+                rows,
+            )
+            conn.execute(
+                "INSERT INTO prediction_log(event_id, ts_prediction, is_preview) VALUES (?, ?, ?)",
+                ("evt_scored", now_ms, 0),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        class _FakeResp:
+            def __init__(self, payload: dict) -> None:
+                self._raw = json.dumps(payload).encode("utf-8")
+
+            def read(self) -> bytes:
+                return self._raw
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> bool:
+                return False
+
+        posted_event_ids: list[str] = []
+        original_urlopen = scorer.urlopen
+        try:
+
+            def _fake_urlopen(req, timeout=0):  # noqa: ANN001
+                payload = json.loads(req.data.decode("utf-8"))
+                events = payload.get("events", [])
+                posted_event_ids.extend(ev.get("event_id") for ev in events if ev.get("event_id"))
+                return _FakeResp({"results": [{"status": "ok"} for _ in events]})
+
+            scorer.urlopen = _fake_urlopen
+            args = scorer.parse_args(
+                [
+                    "--db",
+                    str(db),
+                    "--symbols",
+                    "SPY",
+                    "--lookback-days",
+                    "30",
+                    "--limit",
+                    "10",
+                    "--batch-size",
+                    "2",
+                ]
+            )
+            result = scorer.run(args)
+        finally:
+            scorer.urlopen = original_urlopen
+
+        self.assertEqual(result.get("status"), "ok")
+        self.assertEqual(result.get("attempted"), 2)
+        self.assertEqual(result.get("scored_ok"), 2)
+        self.assertEqual(result.get("failed"), 0)
+        self.assertEqual(set(posted_event_ids), {"evt_missing_1", "evt_missing_2"})
+        self.assertNotIn("evt_scored", posted_event_ids)
+
+    def test_score_unscored_touch_events_single_fallback_and_verify(self) -> None:
+        scorer = load_module(
+            "pq_score_unscored_touch_events_fallback_test",
+            REPO_ROOT / "scripts" / "score_unscored_touch_events.py",
+        )
+
+        db = self.tmp / "score_unscored_fallback.sqlite"
+        conn = sqlite3.connect(str(db))
+        try:
+            conn.execute(
+                """
+                CREATE TABLE touch_events(
+                    event_id TEXT PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    ts_event INTEGER NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE prediction_log(
+                    event_id TEXT NOT NULL,
+                    ts_prediction INTEGER NOT NULL,
+                    is_preview INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+            now_ms = int(time.time() * 1000)
+            rows = [
+                ("evt_missing_a", "SPY", now_ms - 60_000),
+                ("evt_missing_b", "SPY", now_ms - 120_000),
+                ("evt_missing_c", "SPY", now_ms - 180_000),
+            ]
+            conn.executemany(
+                "INSERT INTO touch_events(event_id, symbol, ts_event) VALUES (?, ?, ?)",
+                rows,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        class _FakeResp:
+            def __init__(self, payload: dict) -> None:
+                self._raw = json.dumps(payload).encode("utf-8")
+
+            def read(self) -> bytes:
+                return self._raw
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> bool:
+                return False
+
+        posted_sizes: list[int] = []
+        original_urlopen = scorer.urlopen
+        try:
+
+            def _fake_urlopen(req, timeout=0):  # noqa: ANN001
+                payload = json.loads(req.data.decode("utf-8"))
+                events = payload.get("events", [])
+                posted_sizes.append(len(events))
+                if len(events) > 1:
+                    raise URLError("batch failed")
+                return _FakeResp({"results": [{"status": "ok"}]})
+
+            scorer.urlopen = _fake_urlopen
+            args = scorer.parse_args(
+                [
+                    "--db",
+                    str(db),
+                    "--symbols",
+                    "SPY",
+                    "--lookback-days",
+                    "30",
+                    "--limit",
+                    "10",
+                    "--batch-size",
+                    "3",
+                    "--max-attempts",
+                    "1",
+                ]
+            )
+            result = scorer.run(args)
+        finally:
+            scorer.urlopen = original_urlopen
+
+        # Batch request fails once; scorer should retry each event individually.
+        self.assertEqual(result.get("status"), "ok")
+        self.assertEqual(result.get("attempted"), 3)
+        self.assertEqual(result.get("scored_ok"), 3)
+        self.assertEqual(result.get("failed"), 0)
+        self.assertEqual(result.get("single_fallback_attempted"), 3)
+        self.assertEqual(result.get("single_fallback_scored"), 3)
+        self.assertEqual(result.get("single_fallback_failed"), 0)
+        self.assertIn(3, posted_sizes)
+        self.assertGreaterEqual(posted_sizes.count(1), 3)
+
+    def test_score_unscored_touch_events_verify_threshold_enforced(self) -> None:
+        scorer = load_module(
+            "pq_score_unscored_touch_events_verify_threshold_test",
+            REPO_ROOT / "scripts" / "score_unscored_touch_events.py",
+        )
+
+        db = self.tmp / "score_unscored_verify.sqlite"
+        conn = sqlite3.connect(str(db))
+        try:
+            conn.execute(
+                """
+                CREATE TABLE touch_events(
+                    event_id TEXT PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    ts_event INTEGER NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE prediction_log(
+                    event_id TEXT NOT NULL,
+                    ts_prediction INTEGER NOT NULL,
+                    is_preview INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+            now_ms = int(time.time() * 1000)
+            conn.execute(
+                "INSERT INTO touch_events(event_id, symbol, ts_event) VALUES (?, ?, ?)",
+                ("evt_missing_z", "SPY", now_ms - 60_000),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        original_urlopen = scorer.urlopen
+        try:
+
+            def _always_fail(req, timeout=0):  # noqa: ANN001
+                raise URLError("service unavailable")
+
+            scorer.urlopen = _always_fail
+            args = scorer.parse_args(
+                [
+                    "--db",
+                    str(db),
+                    "--symbols",
+                    "SPY",
+                    "--lookback-days",
+                    "30",
+                    "--limit",
+                    "10",
+                    "--batch-size",
+                    "1",
+                    "--max-attempts",
+                    "1",
+                    "--verify-after",
+                    "--max-remaining",
+                    "0",
+                    "--no-single-fallback-on-failure",
+                ]
+            )
+            result = scorer.run(args)
+        finally:
+            scorer.urlopen = original_urlopen
+
+        self.assertEqual(result.get("status"), "error")
+        self.assertEqual(result.get("attempted"), 1)
+        self.assertEqual(result.get("failed"), 1)
+        self.assertEqual(result.get("remaining_unscored"), 1)
+        self.assertEqual(result.get("max_remaining"), 0)
 
     def test_30m_shadow_horizon_contract_present(self) -> None:
         ml_server = (REPO_ROOT / "server" / "ml_server.py").read_text(encoding="utf-8")
@@ -1879,6 +2148,21 @@ class OpsSmokeTests(unittest.TestCase):
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE daily_ml_metrics(
+                    report_date TEXT NOT NULL,
+                    horizon_min INTEGER NOT NULL,
+                    sample_size INTEGER,
+                    brier_reject REAL,
+                    brier_break REAL,
+                    ece_reject REAL,
+                    ece_break REAL,
+                    auc_reject REAL,
+                    auc_break REAL
+                )
+                """
+            )
 
             ts_event_1 = int(datetime(2026, 3, 6, 15, 0, tzinfo=timezone.utc).timestamp() * 1000)
             ts_event_2 = int(datetime(2026, 3, 7, 15, 0, tzinfo=timezone.utc).timestamp() * 1000)
@@ -1943,6 +2227,33 @@ class OpsSmokeTests(unittest.TestCase):
                     "break",
                 ),
             )
+            conn.execute(
+                """
+                INSERT INTO daily_ml_metrics(
+                    report_date, horizon_min, sample_size, brier_reject, brier_break,
+                    ece_reject, ece_break, auc_reject, auc_break
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("2026-03-06", 5, 0, 0.22, 0.11, 0.13, 0.08, 0.60, 0.56),
+            )
+            conn.execute(
+                """
+                INSERT INTO daily_ml_metrics(
+                    report_date, horizon_min, sample_size, brier_reject, brier_break,
+                    ece_reject, ece_break, auc_reject, auc_break
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("2026-03-07", 5, 20, 0.24, 0.12, 0.15, 0.09, 0.61, 0.57),
+            )
+            conn.execute(
+                """
+                INSERT INTO daily_ml_metrics(
+                    report_date, horizon_min, sample_size, brier_reject, brier_break,
+                    ece_reject, ece_break, auc_reject, auc_break
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("2026-03-07", 60, 120, 0.18, 0.14, 0.08, 0.07, 0.69, 0.66),
+            )
             conn.commit()
         finally:
             conn.close()
@@ -1969,11 +2280,47 @@ class OpsSmokeTests(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 0, msg=f"{proc.stdout}\n{proc.stderr}")
         text = out_md.read_text(encoding="utf-8")
+        self.assertIn("- Policy Change Gate: ALLOW POLICY CHANGES (coverage SLA PASS)", text)
+        self.assertIn("## Prediction Coverage SLA", text)
+        self.assertIn("- Overall coverage: 100.00% (2/2)", text)
+        self.assertIn("- Coverage status: PASS", text)
         self.assertIn("## Policy Comparison (Baseline vs Guardrail vs No-5m)", text)
         self.assertIn("## Cost Sweep", text)
         self.assertIn("## Stratified PnL (Regime x ATR Zone x Horizon)", text)
         self.assertIn("## Daily Expectancy", text)
         self.assertIn("## Trade Share by Horizon (Baseline Trades)", text)
+        self.assertIn("## Calibration Health (AUC/Brier/ECE)", text)
+        self.assertIn("- Daily rows in window: 3", text)
+        self.assertIn("- Rows with `sample_size > 0`: 2", text)
+        self.assertIn("| 5m | 1 | 20 | 20.0 |", text)
+        self.assertIn("| 60m | 1 | 120 | 120.0 |", text)
+        self.assertIn("LOW_SUPPORT", text)
+        self.assertIn("- Low-support horizons: 5m(total=20)", text)
+
+        out_md_fail = self.tmp / "weekly_policy_review_fail.md"
+        proc_fail = run_cmd(
+            [
+                PYTHON,
+                "scripts/weekly_policy_review.py",
+                "--db",
+                str(db),
+                "--symbol",
+                "SPY",
+                "--source",
+                "preview",
+                "--start-date",
+                "2026-03-06",
+                "--end-date",
+                "2026-03-08",
+                "--output",
+                str(out_md_fail),
+            ],
+            cwd=REPO_ROOT,
+        )
+        self.assertEqual(proc_fail.returncode, 0, msg=f"{proc_fail.stdout}\n{proc_fail.stderr}")
+        text_fail = out_md_fail.read_text(encoding="utf-8")
+        self.assertIn("- Policy Change Gate: BLOCK POLICY CHANGES (coverage SLA FAIL)", text_fail)
+        self.assertIn("- Coverage status: FAIL", text_fail)
 
     def test_model_governance_skips_regression_gates_when_support_is_low(self) -> None:
         module = load_module("model_governance", REPO_ROOT / "scripts" / "model_governance.py")
