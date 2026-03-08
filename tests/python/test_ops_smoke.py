@@ -1451,6 +1451,18 @@ class OpsSmokeTests(unittest.TestCase):
             places=6,
         )
 
+        # no_trade guardrail is a hard block even when model confidence is extreme.
+        set_registry(reject_prob=0.9995, break_prob=0.9997)
+        guardrail_extreme = ml_server._score_event(
+            {
+                **near_expansion_event,
+                "event_id": "regime_expansion_near_guardrail_extreme",
+            }
+        )
+        self.assertEqual(guardrail_extreme["signals"].get("signal_5m"), "no_edge")
+        self.assertEqual(guardrail_extreme["regime_policy"]["selected_policy"], "guardrail_no_trade")
+        self.assertTrue(bool(guardrail_extreme["regime_policy"]["guardrail"]["applied"]))
+
     def test_feature_drift_respects_min_count_and_ignore_columns(self) -> None:
         ml_server = load_module("ml_server_feature_drift_runtime", REPO_ROOT / "server" / "ml_server.py")
 

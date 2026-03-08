@@ -911,6 +911,12 @@ def _score_event(event: dict):
         scores=scores,
         threshold_map=threshold_guardrail,
     )
+    # no_trade must be an absolute block, not a probabilistic threshold proxy.
+    if bool(guardrail_meta.get("triggered")) and ML_REGIME_GUARD_EXPANSION_NEAR_STRATEGY == "no_trade":
+        for horizon in all_horizons:
+            key = f"signal_{horizon}m"
+            if key in guardrail_signals:
+                guardrail_signals[key] = "no_edge"
 
     selected_policy = "baseline"
     selected_threshold_map = threshold_baseline
