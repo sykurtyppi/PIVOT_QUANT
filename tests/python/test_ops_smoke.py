@@ -2282,6 +2282,7 @@ class OpsSmokeTests(unittest.TestCase):
         text = out_md.read_text(encoding="utf-8")
         self.assertIn("- Policy Change Gate: ALLOW POLICY CHANGES (coverage SLA PASS)", text)
         self.assertIn("## Prediction Coverage SLA", text)
+        self.assertIn("- Timely prediction lag filter: <= 6.00 hours", text)
         self.assertIn("- Overall coverage: 100.00% (2/2)", text)
         self.assertIn("- Coverage status: PASS", text)
         self.assertIn("## Policy Comparison (Baseline vs Guardrail vs No-5m)", text)
@@ -2321,6 +2322,110 @@ class OpsSmokeTests(unittest.TestCase):
         text_fail = out_md_fail.read_text(encoding="utf-8")
         self.assertIn("- Policy Change Gate: BLOCK POLICY CHANGES (coverage SLA FAIL)", text_fail)
         self.assertIn("- Coverage status: FAIL", text_fail)
+
+    def test_weekly_policy_review_excludes_late_predictions_by_default_lag_filter(self) -> None:
+        db = self.tmp / "weekly_policy_review_lag.sqlite"
+        conn = sqlite3.connect(str(db))
+        try:
+            conn.execute(
+                """
+                CREATE TABLE touch_events(
+                    event_id TEXT PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    ts_event INTEGER NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE event_labels(
+                    event_id TEXT NOT NULL,
+                    horizon_min INTEGER NOT NULL,
+                    return_bps REAL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE prediction_log(
+                    event_id TEXT NOT NULL,
+                    ts_prediction INTEGER NOT NULL,
+                    is_preview INTEGER NOT NULL DEFAULT 0,
+                    best_horizon INTEGER,
+                    abstain INTEGER NOT NULL DEFAULT 0,
+                    trade_regime TEXT,
+                    regime_policy_json TEXT,
+                    signal_5m TEXT,
+                    signal_15m TEXT,
+                    signal_30m TEXT,
+                    signal_60m TEXT
+                )
+                """
+            )
+
+            ts_event = int(datetime(2026, 3, 6, 15, 0, tzinfo=timezone.utc).timestamp() * 1000)
+            ts_pred_late = ts_event + (8 * 3600 * 1000)  # 8h lag, exceeds default 6h filter.
+
+            conn.execute(
+                "INSERT INTO touch_events(event_id, symbol, ts_event) VALUES (?, ?, ?)",
+                ("evt_weekly_lag_1", "SPY", ts_event),
+            )
+            conn.execute(
+                "INSERT INTO event_labels(event_id, horizon_min, return_bps) VALUES (?, ?, ?)",
+                ("evt_weekly_lag_1", 15, 4.0),
+            )
+            conn.execute(
+                """
+                INSERT INTO prediction_log(
+                    event_id, ts_prediction, is_preview, best_horizon, abstain,
+                    trade_regime, regime_policy_json, signal_5m, signal_15m, signal_30m, signal_60m
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "evt_weekly_lag_1",
+                    ts_pred_late,
+                    0,
+                    15,
+                    0,
+                    "compression",
+                    json.dumps({"atr_zone": "near"}),
+                    "no_edge",
+                    "reject",
+                    "no_edge",
+                    "no_edge",
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        out_md = self.tmp / "weekly_policy_review_lag.md"
+        proc = run_cmd(
+            [
+                PYTHON,
+                "scripts/weekly_policy_review.py",
+                "--db",
+                str(db),
+                "--symbol",
+                "SPY",
+                "--source",
+                "live",
+                "--start-date",
+                "2026-03-06",
+                "--end-date",
+                "2026-03-06",
+                "--output",
+                str(out_md),
+            ],
+            cwd=REPO_ROOT,
+        )
+        self.assertEqual(proc.returncode, 0, msg=f"{proc.stdout}\n{proc.stderr}")
+        text = out_md.read_text(encoding="utf-8")
+        self.assertIn("- Timely prediction lag filter: <= 6.00 hours", text)
+        self.assertIn("- Overall coverage: 0.00% (0/1)", text)
+        self.assertIn("- Coverage status: FAIL", text)
+        self.assertIn("- Policy Change Gate: BLOCK POLICY CHANGES (coverage SLA FAIL)", text)
+        self.assertIn("- Events (latest prediction per event): 0", text)
 
     def test_model_governance_skips_regression_gates_when_support_is_low(self) -> None:
         module = load_module("model_governance", REPO_ROOT / "scripts" / "model_governance.py")

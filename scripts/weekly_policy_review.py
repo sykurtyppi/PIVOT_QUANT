@@ -19,6 +19,7 @@ except ImportError:  # pragma: no cover
 ET_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone.utc
 DEFAULT_DB = os.getenv("PIVOT_DB", "data/pivot_events.sqlite")
 DEFAULT_OUTPUT = "logs/reports/weekly_policy_review_latest.md"
+DEFAULT_MAX_PRED_LAG_HOURS = float(os.getenv("ML_WEEKLY_REVIEW_MAX_PRED_LAG_HOURS", "6"))
 DEFAULT_COST_BPS = float(os.getenv("ML_COST_SPREAD_BPS", "0.8")) + float(
     os.getenv("ML_COST_SLIPPAGE_BPS", "0.4")
 ) + float(os.getenv("ML_COST_COMMISSION_BPS", "0.1"))
@@ -82,6 +83,12 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=99.0,
         help="Prediction coverage SLA threshold (percent)",
+    )
+    parser.add_argument(
+        "--max-pred-lag-hours",
+        type=float,
+        default=DEFAULT_MAX_PRED_LAG_HOURS,
+        help="Max prediction lag from event time in hours for weekly metrics (default: 6)",
     )
     parser.add_argument("--output", default=DEFAULT_OUTPUT, help="Markdown output path")
     return parser.parse_args()
@@ -222,28 +229,43 @@ def load_scored_events(
     start_ms: int,
     end_ms: int,
     source: str,
+    max_pred_lag_hours: float,
 ) -> list[ScoredEvent]:
     src_filter = source_filter_sql(conn, source)
+    max_pred_lag_ms = int(float(max_pred_lag_hours) * 3600 * 1000)
     rows = conn.execute(
         f"""
-        WITH latest_pred AS (
+        WITH scoped_touch AS (
+            SELECT
+                te.event_id,
+                te.ts_event
+            FROM touch_events te
+            WHERE te.symbol = ?
+              AND te.ts_event >= ?
+              AND te.ts_event < ?
+        ),
+        latest_pred AS (
             SELECT *
             FROM (
                 SELECT
                     pl.*,
+                    st.ts_event AS ts_event_ms,
                     ROW_NUMBER() OVER (
                         PARTITION BY pl.event_id
                         ORDER BY pl.ts_prediction DESC
                     ) AS rn
-                FROM prediction_log pl
+                FROM scoped_touch st
+                JOIN prediction_log pl ON pl.event_id = st.event_id
                 WHERE 1 = 1
                   {src_filter}
+                  AND (pl.ts_prediction - st.ts_event) >= 0
+                  AND (pl.ts_prediction - st.ts_event) <= ?
             )
             WHERE rn = 1
         )
         SELECT
-            te.event_id,
-            te.ts_event,
+            st.event_id,
+            st.ts_event,
             lp.best_horizon,
             lp.abstain,
             lp.trade_regime,
@@ -254,15 +276,13 @@ def load_scored_events(
             lp.signal_60m,
             el.return_bps
         FROM latest_pred lp
-        JOIN touch_events te ON te.event_id = lp.event_id
+        JOIN scoped_touch st ON st.event_id = lp.event_id
         JOIN event_labels el ON el.event_id = lp.event_id AND el.horizon_min = lp.best_horizon
-        WHERE te.symbol = ?
-          AND te.ts_event >= ?
-          AND te.ts_event < ?
+        WHERE 1 = 1
           AND lp.best_horizon IS NOT NULL
-        ORDER BY te.ts_event ASC
+        ORDER BY st.ts_event ASC
         """,
-        (symbol.upper(), start_ms, end_ms),
+        (symbol.upper(), start_ms, end_ms, max_pred_lag_ms),
     ).fetchall()
 
     out: list[ScoredEvent] = []
@@ -326,13 +346,16 @@ def load_prediction_coverage(
     start_ms: int,
     end_ms: int,
     source: str,
+    max_pred_lag_hours: float,
 ) -> dict[str, Any]:
     src_filter = source_filter_sql(conn, source)
+    max_pred_lag_ms = int(float(max_pred_lag_hours) * 3600 * 1000)
     rows = conn.execute(
         f"""
         WITH te AS (
             SELECT
                 te.event_id AS event_id,
+                te.ts_event AS ts_event_ms,
                 date(te.ts_event/1000, 'unixepoch') AS day
             FROM touch_events te
             WHERE te.symbol = ?
@@ -340,10 +363,13 @@ def load_prediction_coverage(
               AND te.ts_event < ?
         ),
         pred_ids AS (
-            SELECT DISTINCT pl.event_id
-            FROM prediction_log pl
-            WHERE pl.event_id IN (SELECT event_id FROM te)
+            SELECT DISTINCT te.event_id
+            FROM te
+            JOIN prediction_log pl ON pl.event_id = te.event_id
+            WHERE 1 = 1
               {src_filter}
+              AND (pl.ts_prediction - te.ts_event_ms) >= 0
+              AND (pl.ts_prediction - te.ts_event_ms) <= ?
         )
         SELECT
             te.day AS day,
@@ -353,7 +379,7 @@ def load_prediction_coverage(
         GROUP BY te.day
         ORDER BY te.day ASC
         """,
-        (symbol.upper(), start_ms, end_ms),
+        (symbol.upper(), start_ms, end_ms, max_pred_lag_ms),
     ).fetchall()
 
     day_rows: list[dict[str, Any]] = []
@@ -449,6 +475,7 @@ def build_report(
     has_daily_ml_metrics: bool,
     coverage_summary: dict[str, Any],
     coverage_sla_pct: float,
+    max_pred_lag_hours: float,
     calibration_min_support: int,
     base_cost_bps: float,
     cost_min: float,
@@ -488,6 +515,7 @@ def build_report(
 
     lines.append("## Prediction Coverage SLA")
     lines.append("")
+    lines.append(f"- Timely prediction lag filter: <= {float(max_pred_lag_hours):.2f} hours")
 
     if cov_touch_total <= 0:
         lines.append("- No touch events in selected window; coverage SLA not applicable.")
@@ -704,6 +732,7 @@ def main() -> None:
             start_ms=start_ms,
             end_ms=end_ms,
             source=args.source,
+            max_pred_lag_hours=float(args.max_pred_lag_hours),
         )
         calibration_rows, has_daily_ml_metrics = load_calibration_rows(
             conn,
@@ -716,6 +745,7 @@ def main() -> None:
             start_ms=start_ms,
             end_ms=end_ms,
             source=args.source,
+            max_pred_lag_hours=float(args.max_pred_lag_hours),
         )
     finally:
         conn.close()
@@ -730,6 +760,7 @@ def main() -> None:
         has_daily_ml_metrics=has_daily_ml_metrics,
         coverage_summary=coverage_summary,
         coverage_sla_pct=float(args.coverage_sla_pct),
+        max_pred_lag_hours=float(args.max_pred_lag_hours),
         calibration_min_support=int(args.calibration_min_support),
         base_cost_bps=float(args.cost_bps),
         cost_min=float(args.cost_min),
