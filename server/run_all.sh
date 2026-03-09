@@ -13,6 +13,7 @@ MONITOR_INTERVAL_SEC="${MONITOR_INTERVAL_SEC:-20}"
 MONITOR_HEALTH_TIMEOUT_SEC="${MONITOR_HEALTH_TIMEOUT_SEC:-4}"
 MONITOR_HEALTH_RETRIES="${MONITOR_HEALTH_RETRIES:-3}"
 MONITOR_HEALTH_RETRY_SLEEP_SEC="${MONITOR_HEALTH_RETRY_SLEEP_SEC:-1}"
+MONITOR_CONSECUTIVE_FAIL_LIMIT="${MONITOR_CONSECUTIVE_FAIL_LIMIT:-3}"
 PIVOT_DB="${PIVOT_DB:-${ROOT_DIR}/data/pivot_events.sqlite}"
 LIVE_COLLECTOR_ENABLED="${LIVE_COLLECTOR_ENABLED:-1}"
 LIVE_COLLECTOR_ACTIVE=0
@@ -291,6 +292,18 @@ quick_check_live_collector() {
 }
 
 monitor_stack() {
+  local ew_failures=0
+  local ml_failures=0
+  local dash_failures=0
+  local lc_failures=0
+
+  if ! [[ "${MONITOR_CONSECUTIVE_FAIL_LIMIT}" =~ ^[0-9]+$ ]]; then
+    MONITOR_CONSECUTIVE_FAIL_LIMIT=3
+  fi
+  if [[ "${MONITOR_CONSECUTIVE_FAIL_LIMIT}" -lt 1 ]]; then
+    MONITOR_CONSECUTIVE_FAIL_LIMIT=1
+  fi
+
   if [[ "${#PIDS[@]}" -eq 0 ]]; then
     echo "No new services were started by this supervisor. Monitoring existing stack (${MONITOR_INTERVAL_SEC}s interval)."
   else
@@ -298,12 +311,48 @@ monitor_stack() {
   fi
 
   while true; do
-    quick_check_service "event_writer" "5002" "http://127.0.0.1:5002/health" || die "event_writer health check failed"
+    if quick_check_service "event_writer" "5002" "http://127.0.0.1:5002/health"; then
+      ew_failures=0
+    else
+      ew_failures=$((ew_failures + 1))
+      echo "[WARN] event_writer health miss (${ew_failures}/${MONITOR_CONSECUTIVE_FAIL_LIMIT})"
+      if [[ "${ew_failures}" -ge "${MONITOR_CONSECUTIVE_FAIL_LIMIT}" ]]; then
+        die "event_writer health check failed"
+      fi
+    fi
+
     quick_check_service "gamma_bridge" "5001" || echo "[WARN] gamma_bridge not responding on 5001 (IBKR may be offline)"
-    quick_check_service "ml_server" "5003" "http://127.0.0.1:5003/health" || die "ml_server health check failed"
-    quick_check_service "dashboard" "3000" "http://127.0.0.1:3000/" || die "dashboard health check failed"
+
+    if quick_check_service "ml_server" "5003" "http://127.0.0.1:5003/health"; then
+      ml_failures=0
+    else
+      ml_failures=$((ml_failures + 1))
+      echo "[WARN] ml_server health miss (${ml_failures}/${MONITOR_CONSECUTIVE_FAIL_LIMIT})"
+      if [[ "${ml_failures}" -ge "${MONITOR_CONSECUTIVE_FAIL_LIMIT}" ]]; then
+        die "ml_server health check failed"
+      fi
+    fi
+
+    if quick_check_service "dashboard" "3000" "http://127.0.0.1:3000/"; then
+      dash_failures=0
+    else
+      dash_failures=$((dash_failures + 1))
+      echo "[WARN] dashboard health miss (${dash_failures}/${MONITOR_CONSECUTIVE_FAIL_LIMIT})"
+      if [[ "${dash_failures}" -ge "${MONITOR_CONSECUTIVE_FAIL_LIMIT}" ]]; then
+        die "dashboard health check failed"
+      fi
+    fi
+
     if [[ "${LIVE_COLLECTOR_ACTIVE}" -eq 1 ]]; then
-      quick_check_service "live_collector" "5004" "http://127.0.0.1:5004/health" || die "live_collector health check failed"
+      if quick_check_service "live_collector" "5004" "http://127.0.0.1:5004/health"; then
+        lc_failures=0
+      else
+        lc_failures=$((lc_failures + 1))
+        echo "[WARN] live_collector health miss (${lc_failures}/${MONITOR_CONSECUTIVE_FAIL_LIMIT})"
+        if [[ "${lc_failures}" -ge "${MONITOR_CONSECUTIVE_FAIL_LIMIT}" ]]; then
+          die "live_collector health check failed"
+        fi
+      fi
       quick_check_live_collector || echo "[WARN] live_collector status degraded"
     fi
 
