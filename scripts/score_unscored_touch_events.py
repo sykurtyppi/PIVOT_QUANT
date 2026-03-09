@@ -234,7 +234,14 @@ def _post_score_batch(
             if not isinstance(results, list):
                 raise RuntimeError("Score response missing 'results' list")
             return len(results), None
-        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, RuntimeError) as exc:
+        except (
+            HTTPError,
+            URLError,
+            TimeoutError,
+            json.JSONDecodeError,
+            RuntimeError,
+            OSError,
+        ) as exc:
             last_error = str(exc)
             if attempt >= attempts:
                 break
