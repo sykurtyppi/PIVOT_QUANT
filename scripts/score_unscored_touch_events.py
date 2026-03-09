@@ -205,6 +205,51 @@ def count_unscored_events(
     return int(row[0] if row else 0)
 
 
+def count_recently_scored_events(
+    conn: sqlite3.Connection,
+    *,
+    symbols: list[str],
+    start_date: str,
+    end_date: str,
+    lookback_days: int,
+    since_ts_ms: int,
+) -> int:
+    if not _has_table(conn, "touch_events") or not _has_table(conn, "prediction_log"):
+        return 0
+
+    where: list[str] = []
+    params: list[Any] = [int(since_ts_ms)]
+
+    if symbols:
+        placeholders = ",".join("?" for _ in symbols)
+        where.append(f"te.symbol IN ({placeholders})")
+        params.extend(symbols)
+
+    if start_date:
+        where.append("date(te.ts_event/1000,'unixepoch') >= ?")
+        params.append(start_date)
+    if end_date:
+        where.append("date(te.ts_event/1000,'unixepoch') <= ?")
+        params.append(end_date)
+    if not start_date and not end_date and lookback_days > 0:
+        min_ts_ms = int(time.time() * 1000) - lookback_days * 86_400_000
+        where.append("te.ts_event >= ?")
+        params.append(min_ts_ms)
+
+    where_sql = " AND ".join(where) if where else "1=1"
+    sql = f"""
+        SELECT COUNT(DISTINCT te.event_id)
+        FROM touch_events te
+        JOIN prediction_log pl
+          ON pl.event_id = te.event_id
+         AND COALESCE(pl.is_preview, 0) = 0
+         AND pl.ts_prediction >= ?
+        WHERE {where_sql}
+    """
+    row = conn.execute(sql, params).fetchone()
+    return int(row[0] if row else 0)
+
+
 def _post_score_batch(
     *,
     score_url: str,
@@ -311,12 +356,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
     scored_ok = 0
     failed = 0
+    refreshed_count: int | None = None
     last_error: str | None = None
     single_fallback_attempted = 0
     single_fallback_scored = 0
     single_fallback_failed = 0
     single_fallback_skipped_transport = 0
     batch_size = max(1, int(args.batch_size))
+    run_started_ms = int(time.time() * 1000)
 
     for offset in range(0, attempted, batch_size):
         batch = events[offset : offset + batch_size]
@@ -365,14 +412,25 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if bool(args.verify_after) or int(args.max_remaining) >= 0:
         conn_verify = connect(args.db)
         try:
-            remaining_unscored = count_unscored_events(
-                conn_verify,
-                symbols=symbols,
-                start_date=start_date,
-                end_date=end_date,
-                lookback_days=max(0, int(args.lookback_days)),
-                rescore_existing=bool(args.rescore_existing),
-            )
+            if bool(args.rescore_existing):
+                refreshed_count = count_recently_scored_events(
+                    conn_verify,
+                    symbols=symbols,
+                    start_date=start_date,
+                    end_date=end_date,
+                    lookback_days=max(0, int(args.lookback_days)),
+                    since_ts_ms=run_started_ms,
+                )
+                remaining_unscored = max(0, eligible_total - int(refreshed_count))
+            else:
+                remaining_unscored = count_unscored_events(
+                    conn_verify,
+                    symbols=symbols,
+                    start_date=start_date,
+                    end_date=end_date,
+                    lookback_days=max(0, int(args.lookback_days)),
+                    rescore_existing=False,
+                )
         finally:
             conn_verify.close()
 
@@ -395,6 +453,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "single_fallback_scored": single_fallback_scored,
         "single_fallback_failed": single_fallback_failed,
         "single_fallback_skipped_transport": single_fallback_skipped_transport,
+        "refreshed_count": refreshed_count,
         "remaining_unscored": remaining_unscored,
         "max_remaining": int(args.max_remaining),
         "dry_run": False,
