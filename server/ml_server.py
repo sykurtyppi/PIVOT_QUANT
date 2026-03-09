@@ -158,6 +158,17 @@ ML_ANALOG_MAX_CI_WIDTH = max(0.05, float(os.getenv("ML_ANALOG_MAX_CI_WIDTH", "0.
 ML_ANALOG_RECENCY_TAU_DAYS = max(
     0.1, float(os.getenv("ML_ANALOG_RECENCY_TAU_DAYS", "14"))
 )
+ML_ANALOG_RECENCY_FLOOR = max(
+    0.0, min(1.0, float(os.getenv("ML_ANALOG_RECENCY_FLOOR", "0.25")))
+)
+ML_ANALOG_SIM_WEIGHT_MODE = (
+    os.getenv("ML_ANALOG_SIM_WEIGHT_MODE", "inv1p") or "inv1p"
+).strip().lower()
+if ML_ANALOG_SIM_WEIGHT_MODE not in {"inv1p", "invdist"}:
+    ML_ANALOG_SIM_WEIGHT_MODE = "inv1p"
+ML_ANALOG_PRIOR_STRENGTH = max(
+    0.0, float(os.getenv("ML_ANALOG_PRIOR_STRENGTH", "8"))
+)
 ML_ANALOG_DISAGREEMENT_FLAG = max(
     0.0, min(1.0, float(os.getenv("ML_ANALOG_DISAGREEMENT_FLAG", "0.25")))
 )
@@ -415,6 +426,9 @@ class AnalogEngine:
             "min_pool": ML_ANALOG_MIN_POOL,
             "min_n": ML_ANALOG_MIN_N,
             "min_effective_n": ML_ANALOG_MIN_EFFECTIVE_N,
+            "sim_weight_mode": ML_ANALOG_SIM_WEIGHT_MODE,
+            "recency_floor": ML_ANALOG_RECENCY_FLOOR,
+            "prior_strength": ML_ANALOG_PRIOR_STRENGTH,
         }
 
     @staticmethod
@@ -593,12 +607,39 @@ class AnalogEngine:
         weighted_break = 0.0
         weight_sum = 0.0
         weight_sq_sum = 0.0
+        stage_reject_values = [
+            _to_float(row.get("reject"))
+            for row in stage_rows
+            if _to_float(row.get("reject")) is not None
+        ]
+        stage_break_values = [
+            _to_float(row.get("break"))
+            for row in stage_rows
+            if _to_float(row.get("break")) is not None
+        ]
+        reject_prior = (
+            float(sum(stage_reject_values) / len(stage_reject_values))
+            if stage_reject_values
+            else 0.5
+        )
+        break_prior = (
+            float(sum(stage_break_values) / len(stage_break_values))
+            if stage_break_values
+            else 0.5
+        )
         for item in top_k:
             row = item["row"]
             ts_event = _to_int(row.get("ts_event")) or event_ts
             age_days = max(0.0, (event_ts - ts_event) / 86_400_000.0)
-            sim_weight = 1.0 / (float(item["distance"]) + 1e-6)
-            recency_weight = math.exp(-age_days / ML_ANALOG_RECENCY_TAU_DAYS)
+            distance = float(item["distance"])
+            if ML_ANALOG_SIM_WEIGHT_MODE == "invdist":
+                sim_weight = 1.0 / (distance + 1e-6)
+            else:
+                sim_weight = 1.0 / (1.0 + distance)
+            recency_weight = max(
+                ML_ANALOG_RECENCY_FLOOR,
+                math.exp(-age_days / ML_ANALOG_RECENCY_TAU_DAYS),
+            )
             weight = sim_weight * recency_weight
             reject_value = _to_float(row.get("reject")) or 0.0
             break_value = _to_float(row.get("break")) or 0.0
@@ -622,11 +663,23 @@ class AnalogEngine:
         break_prob_raw = weighted_break / weight_sum
         n = len(top_k)
         n_eff = (weight_sum**2) / max(weight_sq_sum, 1e-9)
+        reject_prob_est = float(reject_prob_raw)
+        break_prob_est = float(break_prob_raw)
+        if ML_ANALOG_PRIOR_STRENGTH > 0:
+            denom = max(n_eff + ML_ANALOG_PRIOR_STRENGTH, 1e-9)
+            reject_prob_est = float(
+                (n_eff * reject_prob_est + ML_ANALOG_PRIOR_STRENGTH * reject_prior)
+                / denom
+            )
+            break_prob_est = float(
+                (n_eff * break_prob_est + ML_ANALOG_PRIOR_STRENGTH * break_prior)
+                / denom
+            )
         reject_ci_lo, reject_ci_hi, reject_ci_w = _weighted_interval(
-            reject_prob_raw, n_eff
+            reject_prob_est, n_eff
         )
         break_ci_lo, break_ci_hi, break_ci_w = _weighted_interval(
-            break_prob_raw, n_eff
+            break_prob_est, n_eff
         )
 
         reasons: list[str] = []
@@ -640,8 +693,8 @@ class AnalogEngine:
             reasons.append("ci_width")
 
         passed = len(reasons) == 0
-        reject_prob = reject_prob_raw if passed else None
-        break_prob = break_prob_raw if passed else None
+        reject_prob = reject_prob_est if passed else None
+        break_prob = break_prob_est if passed else None
 
         disagreement = None
         if reject_prob is not None and model_reject_prob is not None:
@@ -661,6 +714,10 @@ class AnalogEngine:
             "break_prob": break_prob,
             "reject_prob_raw": float(reject_prob_raw),
             "break_prob_raw": float(break_prob_raw),
+            "reject_prob_shrunk": float(reject_prob_est),
+            "break_prob_shrunk": float(break_prob_est),
+            "reject_prior": float(reject_prior),
+            "break_prior": float(break_prior),
             "reject_ci": [float(reject_ci_lo), float(reject_ci_hi)],
             "break_ci": [float(break_ci_lo), float(break_ci_hi)],
             "reject_ci_width": float(reject_ci_w),
@@ -1015,6 +1072,9 @@ def health():
             "max_mean_distance": ML_ANALOG_MAX_MEAN_DISTANCE,
             "max_ci_width": ML_ANALOG_MAX_CI_WIDTH,
             "recency_tau_days": ML_ANALOG_RECENCY_TAU_DAYS,
+            "recency_floor": ML_ANALOG_RECENCY_FLOOR,
+            "sim_weight_mode": ML_ANALOG_SIM_WEIGHT_MODE,
+            "prior_strength": ML_ANALOG_PRIOR_STRENGTH,
             "disagreement_flag": ML_ANALOG_DISAGREEMENT_FLAG,
             "blend_mode": ML_ANALOG_BLEND_MODE,
             "blend_weight_base": ML_ANALOG_BLEND_WEIGHT_BASE,
