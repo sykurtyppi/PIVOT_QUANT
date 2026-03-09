@@ -1179,6 +1179,12 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("score_unscored_touch_events.py", retrain_script)
         self.assertIn("RETRAIN_SCORE_UNSCORED_VERIFY_ON_RETRAIN", retrain_script)
         self.assertIn("RETRAIN_SCORE_UNSCORED_MAX_REMAINING", retrain_script)
+        self.assertIn("RETRAIN_SCORE_UNSCORED_TIMEOUT_SEC", retrain_script)
+        self.assertIn("RETRAIN_SCORE_UNSCORED_MAX_ATTEMPTS", retrain_script)
+        self.assertIn("RETRAIN_SCORE_UNSCORED_FAIL_ON_PARTIAL", retrain_script)
+        self.assertIn("--timeout-sec", retrain_script)
+        self.assertIn("--max-attempts", retrain_script)
+        self.assertIn("--fail-on-partial", retrain_script)
 
     def test_run_all_health_probe_retry_contract_present(self) -> None:
         run_all = (REPO_ROOT / "server" / "run_all.sh").read_text(encoding="utf-8")
@@ -1478,9 +1484,11 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("migration_5_prediction_log_shadow_30m", migrate_db)
         self.assertIn("migration_6_gamma_snapshots", migrate_db)
         self.assertIn("migration_7_prediction_log_regime_policy", migrate_db)
+        self.assertIn("migration_8_prediction_log_analog", migrate_db)
         self.assertIn("gamma_snapshots", migrate_db)
         self.assertIn("signal_30m", migrate_db)
         self.assertIn("regime_policy_json", migrate_db)
+        self.assertIn("analog_json", migrate_db)
 
     def test_30m_shadow_horizon_runtime_behavior(self) -> None:
         ml_server = load_module("ml_server_shadow_runtime", REPO_ROOT / "server" / "ml_server.py")
@@ -1800,6 +1808,103 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("FEATURE_DRIFT_reject_5m", low_threshold_result["quality_flags"])
         self.assertIn("FEATURE_DRIFT_break_5m", low_threshold_result["quality_flags"])
 
+    def test_analog_shadow_fields_and_disagreement_flag(self) -> None:
+        ml_server = load_module("ml_server_analog_shadow_runtime", REPO_ROOT / "server" / "ml_server.py")
+
+        class DummyModel:
+            classes_ = np.array([0, 1])
+
+            def __init__(self, prob: float) -> None:
+                self.prob = prob
+
+            def predict_proba(self, _df):
+                return np.array([[1.0 - self.prob, self.prob]], dtype=float)
+
+        now_ms = int(time.time() * 1000)
+        ml_server.build_feature_row = lambda event: {
+            "x": 1.0,
+            "distance_atr_ratio": event.get("distance_atr_ratio"),
+            "tod_bucket": ml_server._analog_tod_bucket(event.get("ts_event")),
+        }
+        ml_server.collect_missing = lambda _event: []
+        ml_server.ML_SHADOW_HORIZONS = set()
+        ml_server.ML_ANALOG_ENABLED = True
+        ml_server.ML_ANALOG_MIN_POOL = 10
+        ml_server.ML_ANALOG_MIN_N = 10
+        ml_server.ML_ANALOG_MIN_EFFECTIVE_N = 5.0
+        ml_server.ML_ANALOG_MAX_MEAN_DISTANCE = 3.0
+        ml_server.ML_ANALOG_MAX_CI_WIDTH = 0.8
+        ml_server.ML_ANALOG_DISAGREEMENT_FLAG = 0.25
+
+        ml_server.registry.models = {
+            "reject": {
+                5: {
+                    "feature_columns": ["x"],
+                    "pipeline": DummyModel(0.2),
+                    "calibration": "sigmoid",
+                }
+            },
+            "break": {
+                5: {
+                    "feature_columns": ["x"],
+                    "pipeline": DummyModel(0.2),
+                    "calibration": "sigmoid",
+                }
+            },
+        }
+        ml_server.registry.thresholds = {"reject": {5: 0.5}, "break": {5: 0.5}}
+        ml_server.registry.manifest = {"version": "vtest", "trained_end_ts": now_ms}
+
+        tod = ml_server._analog_tod_bucket(now_ms - 60_000)
+        rows = []
+        for idx in range(40):
+            rows.append(
+                {
+                    "event_id": f"hist_{idx}",
+                    "symbol": "SPY",
+                    "ts_event": now_ms - (idx + 5) * 60_000,
+                    "level_family": "support",
+                    "tod_bucket": tod,
+                    "regime_bucket": "compression",
+                    "gamma_mode": 1,
+                    "distance_bps": 2.0 + (idx % 5) * 0.2,
+                    "distance_atr_ratio": 0.08 + (idx % 5) * 0.01,
+                    "rv_30": 12.0 + (idx % 5) * 0.1,
+                    "or_size_atr": 0.25 + (idx % 5) * 0.01,
+                    "overnight_gap_atr": 0.1 + (idx % 5) * 0.01,
+                    "reject": 1.0 if idx < 30 else 0.0,
+                    "break": 0.0 if idx < 30 else 1.0,
+                }
+            )
+        ml_server.analog_engine.enabled = True
+        ml_server.analog_engine.error = None
+        ml_server.analog_engine.loaded_at_ms = now_ms
+        ml_server.analog_engine.rows_by_horizon = {5: rows}
+
+        result = ml_server._score_event(
+            {
+                "event_id": "analog_case_1",
+                "symbol": "SPY",
+                "ts_event": now_ms,
+                "level_type": "S1",
+                "distance_bps": 2.1,
+                "distance_atr_ratio": 0.09,
+                "rv_30": 12.2,
+                "or_size_atr": 0.27,
+                "overnight_gap_atr": 0.11,
+                "regime_type": 3,
+                "rv_regime": 1,
+                "gamma_mode": 1,
+            }
+        )
+
+        self.assertIn("analogs", result)
+        self.assertIn("5", result["analogs"]["horizons"])
+        self.assertIsNotNone(result["scores"]["analog_reject_5m"])
+        self.assertIsNotNone(result["scores"]["analog_break_5m"])
+        self.assertGreater(float(result["scores"]["analog_n_5m"]), 0.0)
+        self.assertIn("ANALOG_DISAGREE_5m", result["quality_flags"])
+
     def test_ml_prediction_log_persists_regime_policy_fields(self) -> None:
         db = self.tmp / "predlog_regime.sqlite"
         prev_db = os.environ.get("PREDICTION_LOG_DB")
@@ -1838,6 +1943,19 @@ class OpsSmokeTests(unittest.TestCase):
                     "signal_5m": {"baseline": "no_edge", "regime": "reject", "selected": "no_edge"}
                 },
             },
+            "analogs": {
+                "enabled": True,
+                "best_horizon": 5,
+                "best": {
+                    "status": "ok",
+                    "reject_prob": 0.66,
+                    "break_prob": 0.22,
+                    "n": 20,
+                    "reject_ci_width": 0.12,
+                    "break_ci_width": 0.09,
+                    "disagreement": 0.05,
+                },
+            },
         }
         ml_server._log_prediction(event, result)
 
@@ -1849,10 +1967,18 @@ class OpsSmokeTests(unittest.TestCase):
             self.assertIn("trade_regime", cols)
             self.assertIn("selected_policy", cols)
             self.assertIn("regime_policy_json", cols)
+            self.assertIn("analog_best_reject_prob", cols)
+            self.assertIn("analog_best_break_prob", cols)
+            self.assertIn("analog_best_n", cols)
+            self.assertIn("analog_best_ci_width", cols)
+            self.assertIn("analog_best_disagreement", cols)
+            self.assertIn("analog_json", cols)
 
             row = conn.execute(
                 """
-                SELECT regime_policy_mode, trade_regime, selected_policy, regime_policy_json
+                SELECT regime_policy_mode, trade_regime, selected_policy, regime_policy_json,
+                       analog_best_reject_prob, analog_best_break_prob, analog_best_n,
+                       analog_best_ci_width, analog_best_disagreement, analog_json
                 FROM prediction_log
                 WHERE event_id = ?
                 """,
@@ -1864,6 +1990,13 @@ class OpsSmokeTests(unittest.TestCase):
             self.assertEqual(row["selected_policy"], "baseline")
             policy_json = json.loads(row["regime_policy_json"])
             self.assertEqual(policy_json.get("mode"), "shadow")
+            self.assertAlmostEqual(float(row["analog_best_reject_prob"]), 0.66, places=6)
+            self.assertAlmostEqual(float(row["analog_best_break_prob"]), 0.22, places=6)
+            self.assertAlmostEqual(float(row["analog_best_n"]), 20.0, places=6)
+            self.assertAlmostEqual(float(row["analog_best_ci_width"]), 0.12, places=6)
+            self.assertAlmostEqual(float(row["analog_best_disagreement"]), 0.05, places=6)
+            analog_json = json.loads(row["analog_json"])
+            self.assertTrue(bool(analog_json.get("enabled")))
         finally:
             conn.close()
 
@@ -1939,6 +2072,155 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(int(summary["divergence_by_horizon"][15]), 1)
         self.assertEqual(int(summary["divergence_by_atr_zone"]["ultra"]), 1)
         self.assertEqual(int(summary["divergence_by_atr_zone"]["near"]), 1)
+
+    def test_report_analog_shadow_summary_and_deltas(self) -> None:
+        report = load_module(
+            "pq_daily_report_analog_summary_test",
+            REPO_ROOT / "scripts" / "generate_daily_ml_report.py",
+        )
+        records = []
+        rows = [
+            # event_id, actual_reject, model_reject, analog_reject, actual_break, model_break, analog_break, disagreement
+            ("a1", 1, 0.60, 0.90, 0, 0.40, 0.10, 0.30),
+            ("a2", 1, 0.55, 0.85, 0, 0.45, 0.15, 0.30),
+            ("a3", 0, 0.45, 0.10, 1, 0.55, 0.90, 0.35),
+            ("a4", 0, 0.40, 0.20, 1, 0.60, 0.80, 0.20),
+        ]
+        for event_id, ar, mr, aar, ab, mb, aab, disagreement in rows:
+            records.append(
+                {
+                    "event_id": event_id,
+                    "horizon_min": 5,
+                    "actual_reject": ar,
+                    "actual_break": ab,
+                    "prob_reject_5m": mr,
+                    "prob_break_5m": mb,
+                    "analog_json": json.dumps(
+                        {
+                            "horizons": {
+                                "5": {
+                                    "status": "ok",
+                                    "reject_prob": aar,
+                                    "break_prob": aab,
+                                    "n": 20,
+                                    "n_eff": 12,
+                                    "reject_ci_width": 0.10,
+                                    "break_ci_width": 0.12,
+                                    "disagreement": disagreement,
+                                }
+                            }
+                        }
+                    ),
+                }
+            )
+
+        summaries = report.compute_analog_shadow_summaries(records, [5])
+        self.assertEqual(len(summaries), 1)
+        s = summaries[0]
+        self.assertEqual(int(s.horizon), 5)
+        self.assertEqual(int(s.sample_size), 4)
+        self.assertEqual(int(s.analog_available_count), 4)
+        self.assertEqual(int(s.analog_quality_ok_count), 4)
+        self.assertAlmostEqual(float(s.mean_effective_neighbors or 0.0), 12.0, places=6)
+        self.assertAlmostEqual(float(s.mean_ci_width or 0.0), 0.12, places=6)
+        self.assertEqual(int(s.high_disagreement_count), 3)
+        self.assertIsNotNone(s.reject_brier_delta)
+        self.assertIsNotNone(s.break_brier_delta)
+        self.assertLess(float(s.reject_brier_delta or 0.0), 0.0)
+        self.assertLess(float(s.break_brier_delta or 0.0), 0.0)
+
+    def test_report_analog_promotion_gate_evaluates_thresholds(self) -> None:
+        report = load_module(
+            "pq_daily_report_analog_gate_test",
+            REPO_ROOT / "scripts" / "generate_daily_ml_report.py",
+        )
+        summaries = [
+            report.AnalogHorizonSummary(
+                horizon=5,
+                sample_size=200,
+                analog_available_count=120,
+                analog_quality_ok_count=110,
+                mean_neighbors=20.0,
+                mean_effective_neighbors=14.0,
+                mean_ci_width=0.18,
+                mean_disagreement=0.12,
+                high_disagreement_count=10,
+                high_disagreement_model_abs_error=0.33,
+                low_disagreement_model_abs_error=0.18,
+                model_reject_brier_matched=0.20,
+                analog_reject_brier=0.18,
+                reject_brier_delta=-0.02,
+                model_reject_ece_matched=0.10,
+                analog_reject_ece=0.08,
+                reject_ece_delta=-0.02,
+                model_break_brier_matched=0.22,
+                analog_break_brier=0.20,
+                break_brier_delta=-0.02,
+                model_break_ece_matched=0.11,
+                analog_break_ece=0.09,
+                break_ece_delta=-0.02,
+            ),
+            report.AnalogHorizonSummary(
+                horizon=15,
+                sample_size=180,
+                analog_available_count=100,
+                analog_quality_ok_count=95,
+                mean_neighbors=20.0,
+                mean_effective_neighbors=12.0,
+                mean_ci_width=0.20,
+                mean_disagreement=0.11,
+                high_disagreement_count=8,
+                high_disagreement_model_abs_error=0.31,
+                low_disagreement_model_abs_error=0.20,
+                model_reject_brier_matched=0.21,
+                analog_reject_brier=0.19,
+                reject_brier_delta=-0.02,
+                model_reject_ece_matched=0.11,
+                analog_reject_ece=0.09,
+                reject_ece_delta=-0.02,
+                model_break_brier_matched=0.20,
+                analog_break_brier=0.19,
+                break_brier_delta=-0.01,
+                model_break_ece_matched=0.10,
+                analog_break_ece=0.08,
+                break_ece_delta=-0.02,
+            ),
+        ]
+        gate = report.compute_analog_promotion_gate(summaries, [5, 15, 30, 60])
+        self.assertEqual(gate.status, "pass")
+        self.assertEqual(gate.passed_horizons, [5, 15])
+        self.assertEqual(gate.evaluated_horizons, [5, 15])
+        self.assertEqual(gate.required_horizons, 2)
+
+        degraded = list(summaries)
+        degraded[1] = report.AnalogHorizonSummary(
+            horizon=15,
+            sample_size=180,
+            analog_available_count=100,
+            analog_quality_ok_count=95,
+            mean_neighbors=20.0,
+            mean_effective_neighbors=12.0,
+            mean_ci_width=0.20,
+            mean_disagreement=0.11,
+            high_disagreement_count=8,
+            high_disagreement_model_abs_error=0.31,
+            low_disagreement_model_abs_error=0.20,
+            model_reject_brier_matched=0.21,
+            analog_reject_brier=0.24,
+            reject_brier_delta=0.03,
+            model_reject_ece_matched=0.11,
+            analog_reject_ece=0.13,
+            reject_ece_delta=0.02,
+            model_break_brier_matched=0.20,
+            analog_break_brier=0.23,
+            break_brier_delta=0.03,
+            model_break_ece_matched=0.10,
+            analog_break_ece=0.12,
+            break_ece_delta=0.02,
+        )
+        gate_fail = report.compute_analog_promotion_gate(degraded, [5, 15, 30, 60])
+        self.assertEqual(gate_fail.status, "fail")
+        self.assertIn("insufficient_passed_horizons", gate_fail.reasons)
 
     def test_weekend_deep_audit_generates_markdown_with_core_sections(self) -> None:
         db = self.tmp / "weekend_audit.sqlite"

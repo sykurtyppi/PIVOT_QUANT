@@ -1,14 +1,29 @@
 import json
 import logging
+import math
 import os
 import sqlite3
 import sys
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+try:
+    from zoneinfo import ZoneInfo
+except Exception:  # pragma: no cover
+    ZoneInfo = None  # type: ignore
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
 
 ROOT = Path(__file__).resolve().parents[1]
+ANALOG_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone.utc
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
@@ -121,6 +136,48 @@ PREDICTION_LOG_DB = Path(os.getenv(
     str(ROOT / "data" / "pivot_events.sqlite"),
 ))
 SCORE_MAX_BATCH_EVENTS = max(1, int(os.getenv("ML_SCORE_MAX_BATCH_EVENTS", "256")))
+ML_ANALOG_ENABLED = _env_bool("ML_ANALOG_ENABLED", True)
+ML_ANALOG_DB = Path(os.getenv("ML_ANALOG_DB", str(PREDICTION_LOG_DB)))
+ML_ANALOG_K = max(3, int(os.getenv("ML_ANALOG_K", "20")))
+ML_ANALOG_MAX_ROWS = max(500, int(os.getenv("ML_ANALOG_MAX_ROWS", "250000")))
+ML_ANALOG_MAX_CANDIDATES = max(50, int(os.getenv("ML_ANALOG_MAX_CANDIDATES", "1500")))
+ML_ANALOG_MIN_POOL = max(10, int(os.getenv("ML_ANALOG_MIN_POOL", "30")))
+ML_ANALOG_MIN_N = max(3, int(os.getenv("ML_ANALOG_MIN_N", "10")))
+ML_ANALOG_MIN_EFFECTIVE_N = max(2.0, float(os.getenv("ML_ANALOG_MIN_EFFECTIVE_N", "6")))
+ML_ANALOG_MIN_FEATURES = max(1, int(os.getenv("ML_ANALOG_MIN_FEATURES", "3")))
+ML_ANALOG_MIN_FEATURE_OVERLAP = max(
+    1, int(os.getenv("ML_ANALOG_MIN_FEATURE_OVERLAP", "3"))
+)
+ML_ANALOG_MIN_FEATURE_SUPPORT = max(
+    3, int(os.getenv("ML_ANALOG_MIN_FEATURE_SUPPORT", "20"))
+)
+ML_ANALOG_MAX_MEAN_DISTANCE = max(
+    0.1, float(os.getenv("ML_ANALOG_MAX_MEAN_DISTANCE", "2.5"))
+)
+ML_ANALOG_MAX_CI_WIDTH = max(0.05, float(os.getenv("ML_ANALOG_MAX_CI_WIDTH", "0.6")))
+ML_ANALOG_RECENCY_TAU_DAYS = max(
+    0.1, float(os.getenv("ML_ANALOG_RECENCY_TAU_DAYS", "14"))
+)
+ML_ANALOG_DISAGREEMENT_FLAG = max(
+    0.0, min(1.0, float(os.getenv("ML_ANALOG_DISAGREEMENT_FLAG", "0.25")))
+)
+ML_ANALOG_PROMOTION_GATE_PATH = Path(
+    os.getenv(
+        "ML_ANALOG_PROMOTION_GATE_PATH",
+        str(ROOT / "logs" / "reports" / "analog_promotion_gate_latest.json"),
+    )
+)
+ML_ANALOG_FEATURE_WEIGHTS = {
+    "distance_bps": max(0.0, float(os.getenv("ML_ANALOG_W_DISTANCE_BPS", "1.0"))),
+    "distance_atr_ratio": max(
+        0.0, float(os.getenv("ML_ANALOG_W_DISTANCE_ATR_RATIO", "1.2"))
+    ),
+    "rv_30": max(0.0, float(os.getenv("ML_ANALOG_W_RV_30", "0.8"))),
+    "or_size_atr": max(0.0, float(os.getenv("ML_ANALOG_W_OR_SIZE_ATR", "0.7"))),
+    "overnight_gap_atr": max(
+        0.0, float(os.getenv("ML_ANALOG_W_OVERNIGHT_GAP_ATR", "0.6"))
+    ),
+}
 
 allowed_origins = [
     origin.strip()
@@ -196,7 +253,478 @@ class ModelRegistry:
         }
 
 
+def _analog_level_family(level_type: object) -> str:
+    text = str(level_type or "")
+    if text.startswith("R"):
+        return "resistance"
+    if text.startswith("S"):
+        return "support"
+    if text == "GAMMA":
+        return "gamma"
+    return "pivot"
+
+
+def _analog_tod_bucket(ts_event_ms: int | None) -> str:
+    if not ts_event_ms:
+        return "unknown"
+    dt = datetime.fromtimestamp(ts_event_ms / 1000, tz=ANALOG_TZ)
+    hour = dt.hour
+    if hour < 10:
+        return "open"
+    if hour < 14:
+        return "mid"
+    if hour < 16:
+        return "power"
+    return "overnight"
+
+
+def _analog_regime_bucket(regime_type: int | None) -> str:
+    if regime_type in (1, 2, 4):
+        return "expansion"
+    if regime_type == 3:
+        return "compression"
+    return "neutral"
+
+
+def _weighted_interval(p: float, n_eff: float, z: float = 1.96) -> tuple[float, float, float]:
+    if n_eff <= 0:
+        return (0.0, 1.0, 1.0)
+    p = max(0.0, min(1.0, float(p)))
+    se = math.sqrt(max(0.0, p * (1.0 - p)) / max(n_eff, 1e-9))
+    lo = max(0.0, p - z * se)
+    hi = min(1.0, p + z * se)
+    return lo, hi, max(0.0, hi - lo)
+
+
+class AnalogEngine:
+    """Nearest-neighbor analogs for shadow diagnostics.
+
+    This engine never changes live decisions; it only surfaces context and
+    disagreement metrics alongside model probabilities.
+    """
+
+    def __init__(self, db_path: Path):
+        self.db_path = db_path
+        self.error: str | None = None
+        self.loaded_at_ms: int | None = None
+        self.rows_by_horizon: dict[int, list[dict[str, object]]] = {}
+        self.enabled = bool(ML_ANALOG_ENABLED)
+
+    def refresh(self) -> None:
+        self.error = None
+        self.rows_by_horizon = {}
+        self.loaded_at_ms = int(time.time() * 1000)
+        if not self.enabled:
+            return
+
+        conn = None
+        try:
+            conn = sqlite3.connect(str(self.db_path))
+            conn.row_factory = sqlite3.Row
+            sql = """
+                SELECT
+                    te.event_id,
+                    te.symbol,
+                    te.ts_event,
+                    te.level_type,
+                    te.regime_type,
+                    te.gamma_mode,
+                    te.distance_bps,
+                    te.atr,
+                    te.touch_price,
+                    te.rv_30,
+                    te.or_size_atr,
+                    te.overnight_gap_atr,
+                    el.horizon_min,
+                    el.reject,
+                    el.break
+                FROM touch_events te
+                JOIN event_labels el ON el.event_id = te.event_id
+                WHERE te.ts_event IS NOT NULL
+                  AND el.horizon_min IN (5, 15, 30, 60)
+                ORDER BY te.ts_event DESC
+                LIMIT ?
+            """
+            rows = conn.execute(sql, (int(ML_ANALOG_MAX_ROWS),)).fetchall()
+            out: dict[int, list[dict[str, object]]] = {5: [], 15: [], 30: [], 60: []}
+            for row in rows:
+                horizon = int(row["horizon_min"])
+                ts_event = int(row["ts_event"])
+                atr = _to_float(row["atr"])
+                touch_price = _to_float(row["touch_price"])
+                distance_bps = _to_float(row["distance_bps"])
+                atr_bps = None
+                if atr is not None and atr > 0 and touch_price is not None and touch_price > 0:
+                    atr_bps = atr / touch_price * 1e4
+                distance_atr_ratio = None
+                if (
+                    atr_bps is not None
+                    and atr_bps > 0
+                    and distance_bps is not None
+                ):
+                    distance_atr_ratio = distance_bps / atr_bps
+                out[horizon].append(
+                    {
+                        "event_id": row["event_id"],
+                        "symbol": row["symbol"],
+                        "ts_event": ts_event,
+                        "level_family": _analog_level_family(row["level_type"]),
+                        "tod_bucket": _analog_tod_bucket(ts_event),
+                        "regime_bucket": _analog_regime_bucket(_to_int(row["regime_type"])),
+                        "gamma_mode": _to_int(row["gamma_mode"]),
+                        "distance_bps": distance_bps,
+                        "distance_atr_ratio": _to_float(distance_atr_ratio),
+                        "rv_30": _to_float(row["rv_30"]),
+                        "or_size_atr": _to_float(row["or_size_atr"]),
+                        "overnight_gap_atr": _to_float(row["overnight_gap_atr"]),
+                        "reject": _to_float(row["reject"]),
+                        "break": _to_float(row["break"]),
+                    }
+                )
+            self.rows_by_horizon = out
+        except Exception as exc:  # pragma: no cover - defensive
+            self.error = str(exc)
+            self.rows_by_horizon = {}
+        finally:
+            if conn is not None:
+                conn.close()
+
+    def health(self) -> dict[str, object]:
+        return {
+            "enabled": self.enabled,
+            "db": str(self.db_path),
+            "loaded_at_ms": self.loaded_at_ms,
+            "error": self.error,
+            "rows": {str(h): len(rows) for h, rows in self.rows_by_horizon.items()},
+            "k": ML_ANALOG_K,
+            "max_candidates": ML_ANALOG_MAX_CANDIDATES,
+            "min_pool": ML_ANALOG_MIN_POOL,
+            "min_n": ML_ANALOG_MIN_N,
+            "min_effective_n": ML_ANALOG_MIN_EFFECTIVE_N,
+        }
+
+    @staticmethod
+    def _candidate_stages(
+        base_rows: list[dict[str, object]],
+        *,
+        level_family: str,
+        tod_bucket: str,
+        regime_bucket: str,
+        gamma_mode: int | None,
+    ) -> tuple[str, list[dict[str, object]]]:
+        def _gamma_ok(row_gamma: int | None) -> bool:
+            return gamma_mode is None or row_gamma is None or row_gamma == gamma_mode
+
+        stages = [
+            (
+                "strict",
+                lambda row: (
+                    row.get("level_family") == level_family
+                    and row.get("tod_bucket") == tod_bucket
+                    and row.get("regime_bucket") == regime_bucket
+                    and _gamma_ok(_to_int(row.get("gamma_mode")))
+                ),
+            ),
+            (
+                "no_gamma",
+                lambda row: (
+                    row.get("level_family") == level_family
+                    and row.get("tod_bucket") == tod_bucket
+                    and row.get("regime_bucket") == regime_bucket
+                ),
+            ),
+            (
+                "no_tod",
+                lambda row: (
+                    row.get("level_family") == level_family
+                    and row.get("regime_bucket") == regime_bucket
+                ),
+            ),
+            ("level_only", lambda row: row.get("level_family") == level_family),
+            ("symbol_only", lambda _row: True),
+        ]
+
+        fallback = list(base_rows)
+        fallback_name = "symbol_only"
+        for stage_name, predicate in stages:
+            subset = [row for row in base_rows if predicate(row)]
+            if len(subset) > len(fallback):
+                fallback = subset
+                fallback_name = stage_name
+            if len(subset) >= ML_ANALOG_MIN_POOL:
+                return stage_name, subset
+        return fallback_name, fallback
+
+    @staticmethod
+    def _distance_features(
+        query_features: dict[str, float | None],
+        candidates: list[dict[str, object]],
+    ) -> tuple[list[str], dict[str, tuple[float, float]]]:
+        selected: list[str] = []
+        stats: dict[str, tuple[float, float]] = {}
+        for name, weight in ML_ANALOG_FEATURE_WEIGHTS.items():
+            if weight <= 0:
+                continue
+            q_value = query_features.get(name)
+            if q_value is None:
+                continue
+            values = [_to_float(row.get(name)) for row in candidates]
+            values = [value for value in values if value is not None]
+            if len(values) < ML_ANALOG_MIN_FEATURE_SUPPORT:
+                continue
+            mean = float(sum(values) / len(values))
+            variance = float(sum((value - mean) ** 2 for value in values) / len(values))
+            std = max(math.sqrt(variance), 1e-6)
+            selected.append(name)
+            stats[name] = (mean, std)
+        return selected, stats
+
+    def _score_horizon(
+        self,
+        *,
+        rows: list[dict[str, object]],
+        query_event: dict[str, object],
+        query_features: dict[str, float | None],
+        model_reject_prob: float | None,
+        model_break_prob: float | None,
+    ) -> dict[str, object]:
+        event_ts = _to_int(query_event.get("ts_event")) or int(time.time() * 1000)
+        symbol = str(query_event.get("symbol") or "").strip()
+        level_family = _analog_level_family(query_event.get("level_type"))
+        tod_bucket = str(query_event.get("tod_bucket") or _analog_tod_bucket(event_ts))
+        regime_bucket = str(query_event.get("regime_bucket") or "neutral")
+        gamma_mode = _to_int(query_event.get("gamma_mode"))
+
+        base_rows: list[dict[str, object]] = []
+        for row in rows:
+            ts_event = _to_int(row.get("ts_event"))
+            if ts_event is None or ts_event >= event_ts:
+                continue
+            if symbol and str(row.get("symbol") or "") != symbol:
+                continue
+            base_rows.append(row)
+            if len(base_rows) >= ML_ANALOG_MAX_CANDIDATES:
+                break
+
+        if not base_rows:
+            return {
+                "status": "no_history",
+                "stage": "none",
+                "n": 0,
+                "n_eff": 0.0,
+                "reject_prob": None,
+                "break_prob": None,
+                "reasons": ["no_history"],
+            }
+
+        stage_name, stage_rows = self._candidate_stages(
+            base_rows,
+            level_family=level_family,
+            tod_bucket=tod_bucket,
+            regime_bucket=regime_bucket,
+            gamma_mode=gamma_mode,
+        )
+        feature_names, feature_stats = self._distance_features(query_features, stage_rows)
+        if len(feature_names) < ML_ANALOG_MIN_FEATURES:
+            return {
+                "status": "insufficient_features",
+                "stage": stage_name,
+                "n": len(stage_rows),
+                "n_eff": 0.0,
+                "reject_prob": None,
+                "break_prob": None,
+                "reasons": ["insufficient_feature_support"],
+            }
+
+        ranked: list[dict[str, object]] = []
+        for row in stage_rows:
+            overlap = 0
+            weighted_sq = 0.0
+            total_w = 0.0
+            for name in feature_names:
+                q_value = query_features.get(name)
+                c_value = _to_float(row.get(name))
+                if q_value is None or c_value is None:
+                    continue
+                mean, std = feature_stats[name]
+                qz = (q_value - mean) / std
+                cz = (c_value - mean) / std
+                weight = ML_ANALOG_FEATURE_WEIGHTS.get(name, 1.0)
+                weighted_sq += weight * (qz - cz) ** 2
+                total_w += weight
+                overlap += 1
+            if overlap < ML_ANALOG_MIN_FEATURE_OVERLAP or total_w <= 0:
+                continue
+            distance = math.sqrt(weighted_sq / total_w)
+            ranked.append({"row": row, "distance": distance})
+
+        if not ranked:
+            return {
+                "status": "insufficient_overlap",
+                "stage": stage_name,
+                "n": 0,
+                "n_eff": 0.0,
+                "reject_prob": None,
+                "break_prob": None,
+                "reasons": ["insufficient_feature_overlap"],
+            }
+
+        ranked.sort(key=lambda item: float(item["distance"]))
+        top_k = ranked[: min(ML_ANALOG_K, len(ranked))]
+        mean_distance = float(
+            sum(float(item["distance"]) for item in top_k) / max(len(top_k), 1)
+        )
+
+        weighted_reject = 0.0
+        weighted_break = 0.0
+        weight_sum = 0.0
+        weight_sq_sum = 0.0
+        for item in top_k:
+            row = item["row"]
+            ts_event = _to_int(row.get("ts_event")) or event_ts
+            age_days = max(0.0, (event_ts - ts_event) / 86_400_000.0)
+            sim_weight = 1.0 / (float(item["distance"]) + 1e-6)
+            recency_weight = math.exp(-age_days / ML_ANALOG_RECENCY_TAU_DAYS)
+            weight = sim_weight * recency_weight
+            reject_value = _to_float(row.get("reject")) or 0.0
+            break_value = _to_float(row.get("break")) or 0.0
+            weighted_reject += weight * reject_value
+            weighted_break += weight * break_value
+            weight_sum += weight
+            weight_sq_sum += weight ** 2
+
+        if weight_sum <= 0:
+            return {
+                "status": "insufficient_weight",
+                "stage": stage_name,
+                "n": 0,
+                "n_eff": 0.0,
+                "reject_prob": None,
+                "break_prob": None,
+                "reasons": ["invalid_weight_sum"],
+            }
+
+        reject_prob_raw = weighted_reject / weight_sum
+        break_prob_raw = weighted_break / weight_sum
+        n = len(top_k)
+        n_eff = (weight_sum**2) / max(weight_sq_sum, 1e-9)
+        reject_ci_lo, reject_ci_hi, reject_ci_w = _weighted_interval(
+            reject_prob_raw, n_eff
+        )
+        break_ci_lo, break_ci_hi, break_ci_w = _weighted_interval(
+            break_prob_raw, n_eff
+        )
+
+        reasons: list[str] = []
+        if n < ML_ANALOG_MIN_N:
+            reasons.append("min_n")
+        if n_eff < ML_ANALOG_MIN_EFFECTIVE_N:
+            reasons.append("min_effective_n")
+        if mean_distance > ML_ANALOG_MAX_MEAN_DISTANCE:
+            reasons.append("mean_distance")
+        if max(reject_ci_w, break_ci_w) > ML_ANALOG_MAX_CI_WIDTH:
+            reasons.append("ci_width")
+
+        passed = len(reasons) == 0
+        reject_prob = reject_prob_raw if passed else None
+        break_prob = break_prob_raw if passed else None
+
+        disagreement = None
+        if reject_prob is not None and model_reject_prob is not None:
+            disagreement = abs(float(model_reject_prob) - float(reject_prob))
+        if break_prob is not None and model_break_prob is not None:
+            disagreement_break = abs(float(model_break_prob) - float(break_prob))
+            disagreement = max(disagreement or 0.0, disagreement_break)
+
+        return {
+            "status": "ok" if passed else "insufficient_quality",
+            "stage": stage_name,
+            "features": feature_names,
+            "n": n,
+            "n_eff": float(n_eff),
+            "mean_distance": mean_distance,
+            "reject_prob": reject_prob,
+            "break_prob": break_prob,
+            "reject_prob_raw": float(reject_prob_raw),
+            "break_prob_raw": float(break_prob_raw),
+            "reject_ci": [float(reject_ci_lo), float(reject_ci_hi)],
+            "break_ci": [float(break_ci_lo), float(break_ci_hi)],
+            "reject_ci_width": float(reject_ci_w),
+            "break_ci_width": float(break_ci_w),
+            "disagreement": disagreement,
+            "reasons": reasons,
+        }
+
+    def score_event(
+        self,
+        *,
+        event: dict[str, object],
+        features: dict[str, object],
+        horizons: list[int],
+        trade_regime: str,
+        scores: dict[str, float | None],
+        best_horizon: int | None,
+    ) -> dict[str, object]:
+        summary: dict[str, object] = {
+            "enabled": self.enabled,
+            "error": self.error,
+            "loaded_at_ms": self.loaded_at_ms,
+            "horizons": {},
+            "best": None,
+        }
+        if not self.enabled:
+            return summary
+        if self.error:
+            summary["status"] = "degraded"
+            return summary
+
+        query_event = {
+            "symbol": event.get("symbol"),
+            "ts_event": event.get("ts_event"),
+            "level_type": event.get("level_type"),
+            "gamma_mode": event.get("gamma_mode"),
+            "tod_bucket": features.get("tod_bucket"),
+            "regime_bucket": trade_regime or _analog_regime_bucket(_to_int(event.get("regime_type"))),
+        }
+        query_features = {
+            "distance_bps": _to_float(event.get("distance_bps")),
+            "distance_atr_ratio": _to_float(features.get("distance_atr_ratio")),
+            "rv_30": _to_float(event.get("rv_30")),
+            "or_size_atr": _to_float(event.get("or_size_atr")),
+            "overnight_gap_atr": _to_float(event.get("overnight_gap_atr")),
+        }
+
+        horizons_out: dict[str, object] = {}
+        disagreement_max = None
+        for horizon in sorted(set(horizons)):
+            model_reject = _to_float(scores.get(f"prob_reject_{horizon}m"))
+            model_break = _to_float(scores.get(f"prob_break_{horizon}m"))
+            result = self._score_horizon(
+                rows=self.rows_by_horizon.get(horizon, []),
+                query_event=query_event,
+                query_features=query_features,
+                model_reject_prob=model_reject,
+                model_break_prob=model_break,
+            )
+            horizons_out[str(horizon)] = result
+            disagreement = _to_float(result.get("disagreement"))
+            if disagreement is not None:
+                disagreement_max = (
+                    disagreement
+                    if disagreement_max is None
+                    else max(disagreement_max, disagreement)
+                )
+
+        summary["horizons"] = horizons_out
+        summary["disagreement_max"] = disagreement_max
+        if best_horizon is not None:
+            summary["best"] = horizons_out.get(str(best_horizon))
+            summary["best_horizon"] = best_horizon
+        return summary
+
+
 registry = ModelRegistry()
+analog_engine = AnalogEngine(ML_ANALOG_DB)
 _startup_error: Optional[str] = None
 
 
@@ -205,6 +733,7 @@ async def lifespan(_app):
     global _startup_error
     try:
         registry.load()
+        analog_engine.refresh()
         _startup_error = None
     except Exception as exc:
         _startup_error = str(exc)
@@ -232,6 +761,28 @@ def _is_model_stale() -> bool:
         return False
     age_hours = (time.time() * 1000 - trained_end_ts) / (3600 * 1000)
     return age_hours > STALE_MODEL_HOURS
+
+
+def _read_analog_promotion_gate() -> dict[str, object]:
+    path = ML_ANALOG_PROMOTION_GATE_PATH
+    if not path.exists():
+        return {"status": "unknown", "path": str(path), "reason": "missing"}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # pragma: no cover - defensive
+        return {"status": "unknown", "path": str(path), "reason": f"parse_error:{exc}"}
+    if not isinstance(payload, dict):
+        return {"status": "unknown", "path": str(path), "reason": "invalid_payload"}
+    return {
+        "status": str(payload.get("status") or "unknown"),
+        "path": str(path),
+        "report_date": payload.get("report_date"),
+        "required_horizons": payload.get("required_horizons"),
+        "evaluated_horizons": payload.get("evaluated_horizons"),
+        "passed_horizons": payload.get("passed_horizons"),
+        "reasons": payload.get("reasons"),
+        "generated_at_ms": payload.get("generated_at_ms"),
+    }
 
 
 def _log_prediction(event: dict, result: dict) -> None:
@@ -266,6 +817,12 @@ def _log_prediction(event: dict, result: dict) -> None:
                 trade_regime TEXT,
                 selected_policy TEXT,
                 regime_policy_json TEXT,
+                analog_best_reject_prob REAL,
+                analog_best_break_prob REAL,
+                analog_best_n REAL,
+                analog_best_ci_width REAL,
+                analog_best_disagreement REAL,
+                analog_json TEXT,
                 quality_flags TEXT,
                 is_preview INTEGER NOT NULL DEFAULT 0,
                 UNIQUE(event_id, model_version)
@@ -289,6 +846,12 @@ def _log_prediction(event: dict, result: dict) -> None:
             "trade_regime": "TEXT",
             "selected_policy": "TEXT",
             "regime_policy_json": "TEXT",
+            "analog_best_reject_prob": "REAL",
+            "analog_best_break_prob": "REAL",
+            "analog_best_n": "REAL",
+            "analog_best_ci_width": "REAL",
+            "analog_best_disagreement": "REAL",
+            "analog_json": "TEXT",
         }
         for col_name, col_type in compat_cols.items():
             if col_name not in pred_cols:
@@ -301,6 +864,16 @@ def _log_prediction(event: dict, result: dict) -> None:
         regime_policy_mode = regime_policy.get("mode")
         trade_regime = regime_policy.get("trade_regime")
         selected_policy = regime_policy.get("selected_policy")
+        analogs = result.get("analogs", {}) or {}
+        analog_best = analogs.get("best", {}) if isinstance(analogs, dict) else {}
+        analog_best_ci_width = None
+        if isinstance(analog_best, dict):
+            reject_w = _to_float(analog_best.get("reject_ci_width"))
+            break_w = _to_float(analog_best.get("break_ci_width"))
+            if reject_w is not None and break_w is not None:
+                analog_best_ci_width = max(reject_w, break_w)
+            else:
+                analog_best_ci_width = reject_w if reject_w is not None else break_w
         is_preview = 1 if event.get("preview") else 0
 
         conn.execute(
@@ -313,8 +886,10 @@ def _log_prediction(event: dict, result: dict) -> None:
                 threshold_reject_5m, threshold_reject_15m, threshold_reject_30m, threshold_reject_60m,
                 threshold_break_5m, threshold_break_15m, threshold_break_30m, threshold_break_60m,
                 regime_policy_mode, trade_regime, selected_policy, regime_policy_json,
+                analog_best_reject_prob, analog_best_break_prob, analog_best_n,
+                analog_best_ci_width, analog_best_disagreement, analog_json,
                 quality_flags, is_preview
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 event_id,
                 int(time.time() * 1000),
@@ -346,6 +921,12 @@ def _log_prediction(event: dict, result: dict) -> None:
                 trade_regime,
                 selected_policy,
                 json.dumps(regime_policy, separators=(",", ":")) if regime_policy else None,
+                _to_float(analog_best.get("reject_prob") if isinstance(analog_best, dict) else None),
+                _to_float(analog_best.get("break_prob") if isinstance(analog_best, dict) else None),
+                _to_float(analog_best.get("n") if isinstance(analog_best, dict) else None),
+                analog_best_ci_width,
+                _to_float(analog_best.get("disagreement") if isinstance(analog_best, dict) else None),
+                json.dumps(analogs, separators=(",", ":")) if analogs else None,
                 json.dumps(result.get("quality_flags", [])),
                 is_preview,
             ),
@@ -393,6 +974,18 @@ def health():
                 "break_delta": ML_REGIME_GUARD_EXPANSION_NEAR_BREAK_DELTA,
             }
         },
+        "analogs": {
+            **analog_engine.health(),
+            "promotion_gate": _read_analog_promotion_gate(),
+            "min_features": ML_ANALOG_MIN_FEATURES,
+            "min_feature_overlap": ML_ANALOG_MIN_FEATURE_OVERLAP,
+            "min_feature_support": ML_ANALOG_MIN_FEATURE_SUPPORT,
+            "max_mean_distance": ML_ANALOG_MAX_MEAN_DISTANCE,
+            "max_ci_width": ML_ANALOG_MAX_CI_WIDTH,
+            "recency_tau_days": ML_ANALOG_RECENCY_TAU_DAYS,
+            "disagreement_flag": ML_ANALOG_DISAGREEMENT_FLAG,
+            "feature_weights": ML_ANALOG_FEATURE_WEIGHTS,
+        },
     }
     if _startup_error is not None:
         result["startup_error"] = _startup_error
@@ -409,11 +1002,13 @@ def reload_models():
     global _startup_error
     try:
         registry.load()
+        analog_engine.refresh()
         _startup_error = None
         return {
             "status": "ok",
             "models": registry.available(),
             "manifest": registry.manifest,
+            "analogs": analog_engine.health(),
         }
     except Exception as exc:
         _startup_error = str(exc)
@@ -1022,6 +1617,35 @@ def _score_event(event: dict):
         threshold_map=threshold_guardrail,
     )
 
+    analog_summary = analog_engine.score_event(
+        event=event,
+        features=features,
+        horizons=all_horizons,
+        trade_regime=regime_state["bucket"],
+        scores=scores,
+        best_horizon=best_horizon,
+    )
+    for horizon in all_horizons:
+        analog_h = (
+            analog_summary.get("horizons", {}).get(str(horizon), {})
+            if isinstance(analog_summary, dict)
+            else {}
+        )
+        scores[f"analog_reject_{horizon}m"] = _to_float(analog_h.get("reject_prob"))
+        scores[f"analog_break_{horizon}m"] = _to_float(analog_h.get("break_prob"))
+        scores[f"analog_n_{horizon}m"] = _to_float(analog_h.get("n"))
+        scores[f"analog_n_eff_{horizon}m"] = _to_float(analog_h.get("n_eff"))
+        scores[f"analog_ci_width_{horizon}m"] = max(
+            _to_float(analog_h.get("reject_ci_width")) or 0.0,
+            _to_float(analog_h.get("break_ci_width")) or 0.0,
+        )
+        scores[f"analog_disagreement_{horizon}m"] = _to_float(analog_h.get("disagreement"))
+        disagreement = _to_float(analog_h.get("disagreement"))
+        if disagreement is not None and disagreement >= ML_ANALOG_DISAGREEMENT_FLAG:
+            flag = f"ANALOG_DISAGREE_{horizon}m"
+            if flag not in quality_flags:
+                quality_flags.append(flag)
+
     for horizon in all_horizons:
         thresholds_used[f"threshold_reject_{horizon}m"] = selected_threshold_map["reject"].get(horizon, 0.5)
         thresholds_used[f"threshold_break_{horizon}m"] = selected_threshold_map["break"].get(horizon, 0.5)
@@ -1038,6 +1662,7 @@ def _score_event(event: dict):
         "trained_end_ts": registry.manifest.get("trained_end_ts") if registry.manifest else None,
         "calibration": calibration,
         "quality_flags": quality_flags,
+        "analogs": analog_summary,
         "regime_policy": {
             "mode": ML_REGIME_POLICY_MODE,
             "selected_policy": selected_policy,

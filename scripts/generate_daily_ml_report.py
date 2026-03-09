@@ -60,6 +60,26 @@ SHADOW_HORIZONS = {
     for h in os.getenv("ML_SHADOW_HORIZONS", "30").split(",")
     if h.strip().isdigit()
 }
+ANALOG_DISAGREEMENT_THRESHOLD = float(os.getenv("ML_ANALOG_DISAGREEMENT_FLAG", "0.25"))
+ANALOG_PROMOTION_MIN_AVAILABLE = int(os.getenv("ML_ANALOG_PROMOTION_MIN_AVAILABLE", "50"))
+ANALOG_PROMOTION_MIN_QUALITY_OK = int(os.getenv("ML_ANALOG_PROMOTION_MIN_QUALITY_OK", "30"))
+ANALOG_PROMOTION_MIN_EFFECTIVE_N = float(os.getenv("ML_ANALOG_PROMOTION_MIN_EFFECTIVE_N", "8"))
+ANALOG_PROMOTION_MAX_MEAN_CI_WIDTH = float(os.getenv("ML_ANALOG_PROMOTION_MAX_MEAN_CI_WIDTH", "0.35"))
+ANALOG_PROMOTION_MAX_BRIER_DELTA = float(os.getenv("ML_ANALOG_PROMOTION_MAX_BRIER_DELTA", "0.0"))
+ANALOG_PROMOTION_MAX_ECE_DELTA = float(os.getenv("ML_ANALOG_PROMOTION_MAX_ECE_DELTA", "0.0"))
+ANALOG_PROMOTION_MIN_HORIZONS = max(1, int(os.getenv("ML_ANALOG_PROMOTION_MIN_HORIZONS", "2")))
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+ANALOG_PROMOTION_REQUIRE_BOTH_TARGETS = _env_bool(
+    "ML_ANALOG_PROMOTION_REQUIRE_BOTH_TARGETS", True
+)
 
 # NYSE full-closure holidays (update annually).
 # Source: https://www.nyse.com/markets/hours-calendars
@@ -122,6 +142,43 @@ class MetricBundle:
     avg_mfe_bps: float | None
     avg_mae_bps: float | None
     confidence_misses: list[dict[str, Any]]
+
+
+@dataclass
+class AnalogHorizonSummary:
+    horizon: int
+    sample_size: int
+    analog_available_count: int
+    analog_quality_ok_count: int
+    mean_neighbors: float | None
+    mean_effective_neighbors: float | None
+    mean_ci_width: float | None
+    mean_disagreement: float | None
+    high_disagreement_count: int
+    high_disagreement_model_abs_error: float | None
+    low_disagreement_model_abs_error: float | None
+    model_reject_brier_matched: float | None
+    analog_reject_brier: float | None
+    reject_brier_delta: float | None
+    model_reject_ece_matched: float | None
+    analog_reject_ece: float | None
+    reject_ece_delta: float | None
+    model_break_brier_matched: float | None
+    analog_break_brier: float | None
+    break_brier_delta: float | None
+    model_break_ece_matched: float | None
+    analog_break_ece: float | None
+    break_ece_delta: float | None
+
+
+@dataclass
+class AnalogPromotionGate:
+    status: str
+    passed_horizons: list[int]
+    evaluated_horizons: list[int]
+    required_horizons: int
+    reasons: list[str]
+    thresholds: dict[str, Any]
 
 
 def connect(db_path: str) -> sqlite3.Connection:
@@ -284,6 +341,24 @@ def fetch_labeled_records(
     trade_regime_expr = _prediction_log_expr(pred_cols, "trade_regime")
     selected_policy_expr = _prediction_log_expr(pred_cols, "selected_policy")
     regime_policy_json_expr = _prediction_log_expr(pred_cols, "regime_policy_json")
+    analog_json_expr = _prediction_log_expr(pred_cols, "analog_json")
+    analog_best_reject_expr = _prediction_log_expr(pred_cols, "analog_best_reject_prob")
+    analog_best_break_expr = _prediction_log_expr(pred_cols, "analog_best_break_prob")
+    analog_best_n_expr = _prediction_log_expr(pred_cols, "analog_best_n")
+    analog_best_ci_width_expr = _prediction_log_expr(pred_cols, "analog_best_ci_width")
+    analog_best_disagreement_expr = _prediction_log_expr(pred_cols, "analog_best_disagreement")
+    analog_json_expr = _prediction_log_expr(pred_cols, "analog_json")
+    analog_best_reject_expr = _prediction_log_expr(pred_cols, "analog_best_reject_prob")
+    analog_best_break_expr = _prediction_log_expr(pred_cols, "analog_best_break_prob")
+    analog_best_n_expr = _prediction_log_expr(pred_cols, "analog_best_n")
+    analog_best_ci_width_expr = _prediction_log_expr(pred_cols, "analog_best_ci_width")
+    analog_best_disagreement_expr = _prediction_log_expr(pred_cols, "analog_best_disagreement")
+    analog_json_expr = _prediction_log_expr(pred_cols, "analog_json")
+    analog_best_reject_expr = _prediction_log_expr(pred_cols, "analog_best_reject_prob")
+    analog_best_break_expr = _prediction_log_expr(pred_cols, "analog_best_break_prob")
+    analog_best_n_expr = _prediction_log_expr(pred_cols, "analog_best_n")
+    analog_best_ci_width_expr = _prediction_log_expr(pred_cols, "analog_best_ci_width")
+    analog_best_disagreement_expr = _prediction_log_expr(pred_cols, "analog_best_disagreement")
     preview_filter = ""
     if has_preview and not include_preview:
         preview_filter = "AND COALESCE(lp.is_preview, 0) = 0"
@@ -325,6 +400,12 @@ def fetch_labeled_records(
             {trade_regime_expr},
             {selected_policy_expr},
             {regime_policy_json_expr},
+            {analog_json_expr},
+            {analog_best_reject_expr},
+            {analog_best_break_expr},
+            {analog_best_n_expr},
+            {analog_best_ci_width_expr},
+            {analog_best_disagreement_expr},
             te.symbol,
             te.ts_event,
             te.level_type,
@@ -361,6 +442,12 @@ def fetch_latest_predictions(
     trade_regime_expr = _prediction_log_expr(pred_cols, "trade_regime")
     selected_policy_expr = _prediction_log_expr(pred_cols, "selected_policy")
     regime_policy_json_expr = _prediction_log_expr(pred_cols, "regime_policy_json")
+    analog_json_expr = _prediction_log_expr(pred_cols, "analog_json")
+    analog_best_reject_expr = _prediction_log_expr(pred_cols, "analog_best_reject_prob")
+    analog_best_break_expr = _prediction_log_expr(pred_cols, "analog_best_break_prob")
+    analog_best_n_expr = _prediction_log_expr(pred_cols, "analog_best_n")
+    analog_best_ci_width_expr = _prediction_log_expr(pred_cols, "analog_best_ci_width")
+    analog_best_disagreement_expr = _prediction_log_expr(pred_cols, "analog_best_disagreement")
     preview_filter = ""
     if has_preview and not include_preview:
         preview_filter = "AND COALESCE(lp.is_preview, 0) = 0"
@@ -402,6 +489,12 @@ def fetch_latest_predictions(
             {trade_regime_expr},
             {selected_policy_expr},
             {regime_policy_json_expr},
+            {analog_json_expr},
+            {analog_best_reject_expr},
+            {analog_best_break_expr},
+            {analog_best_n_expr},
+            {analog_best_ci_width_expr},
+            {analog_best_disagreement_expr},
             te.symbol,
             te.ts_event,
             te.level_type,
@@ -782,6 +875,215 @@ def build_horizon_metrics(records: list[dict[str, Any]], horizon: int) -> Metric
     )
 
 
+def compute_analog_shadow_summaries(
+    records: list[dict[str, Any]],
+    horizons: list[int],
+) -> list[AnalogHorizonSummary]:
+    def _delta(current: float | None, baseline: float | None) -> float | None:
+        if current is None or baseline is None:
+            return None
+        return current - baseline
+
+    summaries: list[AnalogHorizonSummary] = []
+    for horizon in horizons:
+        subset = [r for r in records if int(r.get("horizon_min") or 0) == int(horizon)]
+        model_reject_key = f"prob_reject_{horizon}m"
+        model_break_key = f"prob_break_{horizon}m"
+
+        analog_available = 0
+        analog_quality_ok = 0
+        neighbor_counts: list[float] = []
+        effective_neighbor_counts: list[float] = []
+        ci_widths: list[float] = []
+        disagreements: list[float] = []
+        high_disagreement_model_abs_error: list[float] = []
+        low_disagreement_model_abs_error: list[float] = []
+
+        reject_actual: list[int] = []
+        model_reject_prob: list[float] = []
+        analog_reject_prob: list[float] = []
+        break_actual: list[int] = []
+        model_break_prob: list[float] = []
+        analog_break_prob: list[float] = []
+
+        for row in subset:
+            payload = _parse_json_object(row.get("analog_json"))
+            horizon_payload: dict[str, Any] = {}
+            horizon_map = payload.get("horizons")
+            if isinstance(horizon_map, dict):
+                candidate = horizon_map.get(str(horizon))
+                if isinstance(candidate, dict):
+                    horizon_payload = candidate
+            if not horizon_payload:
+                continue
+
+            analog_available += 1
+            status = str(horizon_payload.get("status") or "").strip().lower()
+            if status == "ok":
+                analog_quality_ok += 1
+
+            n_val = horizon_payload.get("n")
+            if isinstance(n_val, (int, float)):
+                neighbor_counts.append(float(n_val))
+            n_eff_val = horizon_payload.get("n_eff")
+            if isinstance(n_eff_val, (int, float)):
+                effective_neighbor_counts.append(float(n_eff_val))
+
+            reject_ci_width = horizon_payload.get("reject_ci_width")
+            break_ci_width = horizon_payload.get("break_ci_width")
+            ci_candidates: list[float] = []
+            if isinstance(reject_ci_width, (int, float)):
+                ci_candidates.append(float(reject_ci_width))
+            if isinstance(break_ci_width, (int, float)):
+                ci_candidates.append(float(break_ci_width))
+            if ci_candidates:
+                ci_widths.append(max(ci_candidates))
+
+            model_abs_components: list[float] = []
+            pr_model = row.get(model_reject_key)
+            pr_analog = horizon_payload.get("reject_prob")
+            ar = row.get("actual_reject")
+            if isinstance(pr_model, (int, float)) and isinstance(pr_analog, (int, float)) and ar in (0, 1):
+                model_reject_prob.append(float(pr_model))
+                analog_reject_prob.append(float(pr_analog))
+                reject_actual.append(int(ar))
+                model_abs_components.append(abs(float(pr_model) - int(ar)))
+
+            pb_model = row.get(model_break_key)
+            pb_analog = horizon_payload.get("break_prob")
+            ab = row.get("actual_break")
+            if isinstance(pb_model, (int, float)) and isinstance(pb_analog, (int, float)) and ab in (0, 1):
+                model_break_prob.append(float(pb_model))
+                analog_break_prob.append(float(pb_analog))
+                break_actual.append(int(ab))
+                model_abs_components.append(abs(float(pb_model) - int(ab)))
+
+            disagreement_value = horizon_payload.get("disagreement")
+            if isinstance(disagreement_value, (int, float)):
+                disagreement = float(disagreement_value)
+                disagreements.append(disagreement)
+                if model_abs_components:
+                    if disagreement >= ANALOG_DISAGREEMENT_THRESHOLD:
+                        high_disagreement_model_abs_error.append(statistics.fmean(model_abs_components))
+                    else:
+                        low_disagreement_model_abs_error.append(statistics.fmean(model_abs_components))
+
+        model_reject_brier = brier_score(reject_actual, model_reject_prob)
+        analog_reject_brier = brier_score(reject_actual, analog_reject_prob)
+        model_reject_ece = expected_calibration_error(reject_actual, model_reject_prob)
+        analog_reject_ece = expected_calibration_error(reject_actual, analog_reject_prob)
+        model_break_brier = brier_score(break_actual, model_break_prob)
+        analog_break_brier = brier_score(break_actual, analog_break_prob)
+        model_break_ece = expected_calibration_error(break_actual, model_break_prob)
+        analog_break_ece = expected_calibration_error(break_actual, analog_break_prob)
+
+        summaries.append(
+            AnalogHorizonSummary(
+                horizon=horizon,
+                sample_size=len(subset),
+                analog_available_count=analog_available,
+                analog_quality_ok_count=analog_quality_ok,
+                mean_neighbors=mean_or_none(neighbor_counts),
+                mean_effective_neighbors=mean_or_none(effective_neighbor_counts),
+                mean_ci_width=mean_or_none(ci_widths),
+                mean_disagreement=mean_or_none(disagreements),
+                high_disagreement_count=len(high_disagreement_model_abs_error),
+                high_disagreement_model_abs_error=mean_or_none(high_disagreement_model_abs_error),
+                low_disagreement_model_abs_error=mean_or_none(low_disagreement_model_abs_error),
+                model_reject_brier_matched=model_reject_brier,
+                analog_reject_brier=analog_reject_brier,
+                reject_brier_delta=_delta(analog_reject_brier, model_reject_brier),
+                model_reject_ece_matched=model_reject_ece,
+                analog_reject_ece=analog_reject_ece,
+                reject_ece_delta=_delta(analog_reject_ece, model_reject_ece),
+                model_break_brier_matched=model_break_brier,
+                analog_break_brier=analog_break_brier,
+                break_brier_delta=_delta(analog_break_brier, model_break_brier),
+                model_break_ece_matched=model_break_ece,
+                analog_break_ece=analog_break_ece,
+                break_ece_delta=_delta(analog_break_ece, model_break_ece),
+            )
+        )
+    return summaries
+
+
+def compute_analog_promotion_gate(
+    summaries: list[AnalogHorizonSummary],
+    horizons: list[int],
+) -> AnalogPromotionGate:
+    thresholds = {
+        "min_available": ANALOG_PROMOTION_MIN_AVAILABLE,
+        "min_quality_ok": ANALOG_PROMOTION_MIN_QUALITY_OK,
+        "min_effective_n": ANALOG_PROMOTION_MIN_EFFECTIVE_N,
+        "max_mean_ci_width": ANALOG_PROMOTION_MAX_MEAN_CI_WIDTH,
+        "max_brier_delta": ANALOG_PROMOTION_MAX_BRIER_DELTA,
+        "max_ece_delta": ANALOG_PROMOTION_MAX_ECE_DELTA,
+        "min_horizons": ANALOG_PROMOTION_MIN_HORIZONS,
+        "require_both_targets": ANALOG_PROMOTION_REQUIRE_BOTH_TARGETS,
+    }
+    by_horizon = {int(s.horizon): s for s in summaries}
+    evaluated: list[int] = []
+    passed: list[int] = []
+    reasons: list[str] = []
+
+    for horizon in horizons:
+        s = by_horizon.get(int(horizon))
+        if s is None:
+            continue
+        if s.analog_available_count < ANALOG_PROMOTION_MIN_AVAILABLE:
+            continue
+        evaluated.append(int(horizon))
+
+        horizon_reasons: list[str] = []
+        if s.analog_quality_ok_count < ANALOG_PROMOTION_MIN_QUALITY_OK:
+            horizon_reasons.append("quality_ok")
+        if s.mean_effective_neighbors is None or s.mean_effective_neighbors < ANALOG_PROMOTION_MIN_EFFECTIVE_N:
+            horizon_reasons.append("effective_n")
+        if s.mean_ci_width is None or s.mean_ci_width > ANALOG_PROMOTION_MAX_MEAN_CI_WIDTH:
+            horizon_reasons.append("ci_width")
+
+        reject_checks = [
+            s.reject_brier_delta is not None and s.reject_brier_delta <= ANALOG_PROMOTION_MAX_BRIER_DELTA,
+            s.reject_ece_delta is not None and s.reject_ece_delta <= ANALOG_PROMOTION_MAX_ECE_DELTA,
+        ]
+        break_checks = [
+            s.break_brier_delta is not None and s.break_brier_delta <= ANALOG_PROMOTION_MAX_BRIER_DELTA,
+            s.break_ece_delta is not None and s.break_ece_delta <= ANALOG_PROMOTION_MAX_ECE_DELTA,
+        ]
+        if ANALOG_PROMOTION_REQUIRE_BOTH_TARGETS:
+            if not all(reject_checks):
+                horizon_reasons.append("reject_delta")
+            if not all(break_checks):
+                horizon_reasons.append("break_delta")
+        else:
+            if not (all(reject_checks) or all(break_checks)):
+                horizon_reasons.append("delta")
+
+        if horizon_reasons:
+            reasons.append(f"{horizon}m:" + ",".join(horizon_reasons))
+            continue
+        passed.append(int(horizon))
+
+    if len(evaluated) < ANALOG_PROMOTION_MIN_HORIZONS:
+        reasons.append("insufficient_evaluated_horizons")
+    if len(passed) < ANALOG_PROMOTION_MIN_HORIZONS:
+        reasons.append("insufficient_passed_horizons")
+    status = (
+        "pass"
+        if len(evaluated) >= ANALOG_PROMOTION_MIN_HORIZONS
+        and len(passed) >= ANALOG_PROMOTION_MIN_HORIZONS
+        else "fail"
+    )
+    return AnalogPromotionGate(
+        status=status,
+        passed_horizons=sorted(passed),
+        evaluated_horizons=sorted(evaluated),
+        required_horizons=ANALOG_PROMOTION_MIN_HORIZONS,
+        reasons=reasons,
+        thresholds=thresholds,
+    )
+
+
 def persist_daily_metrics(
     conn: sqlite3.Connection,
     report_date: str,
@@ -990,6 +1292,8 @@ def render_report(
     predictions: list[dict[str, Any]],
     labeled_records: list[dict[str, Any]],
     bundles: list[MetricBundle],
+    analog_summaries: list[AnalogHorizonSummary],
+    analog_gate: AnalogPromotionGate,
     regime_summary: dict[str, int],
     regime_policy_summary: dict[str, Any],
     manifest: dict[str, Any],
@@ -1104,6 +1408,80 @@ def render_report(
         f"unknown={div_zone.get('unknown', 0)}"
     )
     lines.append("")
+
+    lines.append("## Analog Shadow Evaluation")
+    lines.append("")
+    lines.append(
+        f"- Disagreement threshold: `{ANALOG_DISAGREEMENT_THRESHOLD:.2f}` "
+        "(from `ML_ANALOG_DISAGREEMENT_FLAG`)"
+    )
+    lines.append(
+        f"- Promotion gate: **{analog_gate.status.upper()}** "
+        f"(required horizons={analog_gate.required_horizons}, "
+        f"evaluated={len(analog_gate.evaluated_horizons)}, passed={len(analog_gate.passed_horizons)})"
+    )
+    if analog_gate.evaluated_horizons:
+        lines.append(
+            f"- Gate horizons evaluated: {', '.join(f'{h}m' for h in analog_gate.evaluated_horizons)}"
+        )
+    if analog_gate.passed_horizons:
+        lines.append(
+            f"- Gate horizons passed: {', '.join(f'{h}m' for h in analog_gate.passed_horizons)}"
+        )
+    if analog_gate.reasons:
+        lines.append(f"- Gate reasons: {', '.join(analog_gate.reasons)}")
+    if not any(s.analog_available_count > 0 for s in analog_summaries):
+        lines.append("- No analog payloads observed in this report window.")
+        lines.append("")
+    else:
+        lines.append("| Horizon | Labeled N | Analog Rows | Quality OK | Mean N_eff | Mean CI Width | Mean Disagreement |")
+        lines.append("|---|---:|---:|---:|---:|---:|---:|")
+        for s in analog_summaries:
+            lines.append(
+                f"| {s.horizon}m | {s.sample_size} | "
+                f"{s.analog_available_count} ({pct(s.analog_available_count, s.sample_size):.1f}%) | "
+                f"{s.analog_quality_ok_count} ({pct(s.analog_quality_ok_count, s.analog_available_count):.1f}%) | "
+                f"{format_metric(s.mean_effective_neighbors, 2)} | "
+                f"{format_metric(s.mean_ci_width, 3)} | "
+                f"{format_metric(s.mean_disagreement, 3)} |"
+            )
+        lines.append("")
+
+        def _fmt_delta(v: float | None, digits: int = 3) -> str:
+            if v is None:
+                return "--"
+            return f"{v:+.{digits}f}"
+
+        lines.append(
+            "| Horizon | Brier R (Model) | Brier R (Analog) | Δ R | ECE R (Model) | ECE R (Analog) | Δ R | "
+            "Brier B (Model) | Brier B (Analog) | Δ B | ECE B (Model) | ECE B (Analog) | Δ B |"
+        )
+        lines.append(
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
+        )
+        for s in analog_summaries:
+            lines.append(
+                f"| {s.horizon}m | "
+                f"{format_metric(s.model_reject_brier_matched)} | {format_metric(s.analog_reject_brier)} | {_fmt_delta(s.reject_brier_delta)} | "
+                f"{format_metric(s.model_reject_ece_matched)} | {format_metric(s.analog_reject_ece)} | {_fmt_delta(s.reject_ece_delta)} | "
+                f"{format_metric(s.model_break_brier_matched)} | {format_metric(s.analog_break_brier)} | {_fmt_delta(s.break_brier_delta)} | "
+                f"{format_metric(s.model_break_ece_matched)} | {format_metric(s.analog_break_ece)} | {_fmt_delta(s.break_ece_delta)} |"
+            )
+        lines.append("")
+        for s in analog_summaries:
+            if s.high_disagreement_count <= 0:
+                continue
+            if (
+                s.high_disagreement_model_abs_error is None
+                or s.low_disagreement_model_abs_error is None
+            ):
+                continue
+            lines.append(
+                f"- {s.horizon}m model abs-error by disagreement: "
+                f"high={s.high_disagreement_model_abs_error:.3f}, "
+                f"low={s.low_disagreement_model_abs_error:.3f}"
+            )
+        lines.append("")
 
     lines.append("## Gamma Coverage")
     lines.append("")
@@ -1248,6 +1626,8 @@ def main() -> None:
 
         horizons = REPORT_HORIZONS or [5, 15, 30, 60]
         bundles = [build_horizon_metrics(labeled_records, h) for h in horizons]
+        analog_summaries = compute_analog_shadow_summaries(labeled_records, horizons)
+        analog_gate = compute_analog_promotion_gate(analog_summaries, horizons)
         regime_summary = compute_regime_summary(predictions)
         regime_policy_summary = compute_regime_policy_summary(predictions)
 
@@ -1260,6 +1640,8 @@ def main() -> None:
             predictions=predictions,
             labeled_records=labeled_records,
             bundles=bundles,
+            analog_summaries=analog_summaries,
+            analog_gate=analog_gate,
             regime_summary=regime_summary,
             regime_policy_summary=regime_policy_summary,
             manifest=manifest,
@@ -1270,8 +1652,22 @@ def main() -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
         report_path = out_dir / f"ml_daily_{report_day.strftime('%Y-%m-%d')}.md"
         latest_path = out_dir / "ml_daily_latest.md"
+        gate_payload = {
+            "report_date": report_day.strftime("%Y-%m-%d"),
+            "status": analog_gate.status,
+            "required_horizons": analog_gate.required_horizons,
+            "evaluated_horizons": analog_gate.evaluated_horizons,
+            "passed_horizons": analog_gate.passed_horizons,
+            "reasons": analog_gate.reasons,
+            "thresholds": analog_gate.thresholds,
+            "generated_at_ms": int(time.time() * 1000),
+        }
+        gate_path = out_dir / f"analog_promotion_gate_{report_day.strftime('%Y-%m-%d')}.json"
+        gate_latest_path = out_dir / "analog_promotion_gate_latest.json"
         report_path.write_text(content, encoding="utf-8")
         latest_path.write_text(content, encoding="utf-8")
+        gate_path.write_text(json.dumps(gate_payload, indent=2), encoding="utf-8")
+        gate_latest_path.write_text(json.dumps(gate_payload, indent=2), encoding="utf-8")
 
         if args.print_path:
             print(str(report_path))
