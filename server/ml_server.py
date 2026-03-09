@@ -167,6 +167,20 @@ ML_ANALOG_PROMOTION_GATE_PATH = Path(
         str(ROOT / "logs" / "reports" / "analog_promotion_gate_latest.json"),
     )
 )
+ML_ANALOG_BLEND_MODE = (os.getenv("ML_ANALOG_BLEND_MODE", "shadow") or "shadow").strip().lower()
+if ML_ANALOG_BLEND_MODE not in {"off", "shadow", "active"}:
+    ML_ANALOG_BLEND_MODE = "shadow"
+ML_ANALOG_BLEND_WEIGHT_BASE = max(
+    0.0, min(1.0, float(os.getenv("ML_ANALOG_BLEND_WEIGHT_BASE", "0.30")))
+)
+ML_ANALOG_BLEND_WEIGHT_MAX = max(
+    0.0, min(1.0, float(os.getenv("ML_ANALOG_BLEND_WEIGHT_MAX", "0.60")))
+)
+if ML_ANALOG_BLEND_WEIGHT_MAX < ML_ANALOG_BLEND_WEIGHT_BASE:
+    ML_ANALOG_BLEND_WEIGHT_MAX = ML_ANALOG_BLEND_WEIGHT_BASE
+ML_ANALOG_BLEND_N_EFF_REF = max(
+    1.0, float(os.getenv("ML_ANALOG_BLEND_N_EFF_REF", "20"))
+)
 ML_ANALOG_FEATURE_WEIGHTS = {
     "distance_bps": max(0.0, float(os.getenv("ML_ANALOG_W_DISTANCE_BPS", "1.0"))),
     "distance_atr_ratio": max(
@@ -785,6 +799,24 @@ def _read_analog_promotion_gate() -> dict[str, object]:
     }
 
 
+def _compute_analog_blend_weight(
+    *,
+    n_eff: float | None,
+    ci_width: float | None,
+) -> float:
+    if n_eff is None or n_eff <= 0:
+        return 0.0
+    eff_scale = min(1.0, float(n_eff) / ML_ANALOG_BLEND_N_EFF_REF)
+    if ci_width is None:
+        ci_scale = 1.0
+    elif ML_ANALOG_MAX_CI_WIDTH <= 0:
+        ci_scale = 1.0
+    else:
+        ci_scale = max(0.0, 1.0 - float(ci_width) / ML_ANALOG_MAX_CI_WIDTH)
+    weight = ML_ANALOG_BLEND_WEIGHT_BASE * eff_scale * ci_scale
+    return max(0.0, min(ML_ANALOG_BLEND_WEIGHT_MAX, weight))
+
+
 def _log_prediction(event: dict, result: dict) -> None:
     """Append a prediction record to the prediction_log table.
 
@@ -984,6 +1016,10 @@ def health():
             "max_ci_width": ML_ANALOG_MAX_CI_WIDTH,
             "recency_tau_days": ML_ANALOG_RECENCY_TAU_DAYS,
             "disagreement_flag": ML_ANALOG_DISAGREEMENT_FLAG,
+            "blend_mode": ML_ANALOG_BLEND_MODE,
+            "blend_weight_base": ML_ANALOG_BLEND_WEIGHT_BASE,
+            "blend_weight_max": ML_ANALOG_BLEND_WEIGHT_MAX,
+            "blend_n_eff_ref": ML_ANALOG_BLEND_N_EFF_REF,
             "feature_weights": ML_ANALOG_FEATURE_WEIGHTS,
         },
     }
@@ -1485,6 +1521,106 @@ def _score_event(event: dict):
         trade_regime=regime_state["bucket"],
         atr_zone=atr_zone,
     )
+    analog_gate = _read_analog_promotion_gate()
+    analog_summary = analog_engine.score_event(
+        event=event,
+        features=features,
+        horizons=all_horizons,
+        trade_regime=regime_state["bucket"],
+        scores=scores,
+        best_horizon=None,
+    )
+    gate_pass = str(analog_gate.get("status") or "").strip().lower() == "pass"
+    blend_info: dict[str, object] = {
+        "mode": ML_ANALOG_BLEND_MODE,
+        "gate_status": analog_gate.get("status"),
+        "gate_path": analog_gate.get("path"),
+        "gate_report_date": analog_gate.get("report_date"),
+        "gate_reasons": analog_gate.get("reasons"),
+        "allow_active_blend": gate_pass,
+        "applied_horizons": [],
+        "horizons": {},
+        "weight_base": ML_ANALOG_BLEND_WEIGHT_BASE,
+        "weight_max": ML_ANALOG_BLEND_WEIGHT_MAX,
+        "n_eff_ref": ML_ANALOG_BLEND_N_EFF_REF,
+    }
+    for horizon in all_horizons:
+        analog_h = (
+            analog_summary.get("horizons", {}).get(str(horizon), {})
+            if isinstance(analog_summary, dict)
+            else {}
+        )
+        model_reject = _to_float(scores.get(f"prob_reject_{horizon}m"))
+        model_break = _to_float(scores.get(f"prob_break_{horizon}m"))
+        analog_reject = _to_float(analog_h.get("reject_prob"))
+        analog_break = _to_float(analog_h.get("break_prob"))
+        n_eff = _to_float(analog_h.get("n_eff"))
+        ci_width = max(
+            _to_float(analog_h.get("reject_ci_width")) or 0.0,
+            _to_float(analog_h.get("break_ci_width")) or 0.0,
+        )
+        weight = 0.0
+        blend_reject = model_reject
+        blend_break = model_break
+        if (
+            str(analog_h.get("status") or "").strip().lower() == "ok"
+            and model_reject is not None
+            and model_break is not None
+            and analog_reject is not None
+            and analog_break is not None
+        ):
+            weight = _compute_analog_blend_weight(n_eff=n_eff, ci_width=ci_width)
+            blend_reject = (1.0 - weight) * model_reject + weight * analog_reject
+            blend_break = (1.0 - weight) * model_break + weight * analog_break
+
+        scores[f"analog_reject_{horizon}m"] = analog_reject
+        scores[f"analog_break_{horizon}m"] = analog_break
+        scores[f"analog_n_{horizon}m"] = _to_float(analog_h.get("n"))
+        scores[f"analog_n_eff_{horizon}m"] = n_eff
+        scores[f"analog_ci_width_{horizon}m"] = ci_width
+        disagreement = _to_float(analog_h.get("disagreement"))
+        scores[f"analog_disagreement_{horizon}m"] = disagreement
+        if disagreement is not None and disagreement >= ML_ANALOG_DISAGREEMENT_FLAG:
+            flag = f"ANALOG_DISAGREE_{horizon}m"
+            if flag not in quality_flags:
+                quality_flags.append(flag)
+
+        scores[f"blend_prob_reject_{horizon}m"] = blend_reject
+        scores[f"blend_prob_break_{horizon}m"] = blend_break
+        blend_info["horizons"][str(horizon)] = {
+            "weight": weight,
+            "applied": False,
+            "model_reject": model_reject,
+            "model_break": model_break,
+            "analog_reject": analog_reject,
+            "analog_break": analog_break,
+            "blended_reject": blend_reject,
+            "blended_break": blend_break,
+        }
+
+        if (
+            ML_ANALOG_BLEND_MODE == "active"
+            and gate_pass
+            and weight > 0
+            and blend_reject is not None
+            and blend_break is not None
+        ):
+            scores[f"prob_reject_{horizon}m"] = blend_reject
+            scores[f"prob_break_{horizon}m"] = blend_break
+            blend_info["horizons"][str(horizon)]["applied"] = True
+            cast_applied = blend_info.get("applied_horizons")
+            if isinstance(cast_applied, list):
+                cast_applied.append(horizon)
+
+    if ML_ANALOG_BLEND_MODE == "active" and not gate_pass:
+        quality_flags.append("ANALOG_BLEND_BLOCKED_GATE")
+    applied_horizons = blend_info.get("applied_horizons")
+    if (
+        ML_ANALOG_BLEND_MODE == "active"
+        and isinstance(applied_horizons, list)
+        and applied_horizons
+    ):
+        quality_flags.append("ANALOG_BLEND_ACTIVE")
     baseline_signals = _classify_signals(
         all_horizons=all_horizons,
         scores=scores,
@@ -1616,35 +1752,32 @@ def _score_event(event: dict):
         signals=guardrail_signals,
         threshold_map=threshold_guardrail,
     )
+    if isinstance(analog_summary, dict):
+        analog_summary["best_horizon"] = best_horizon
+        horizons_payload = analog_summary.get("horizons")
+        if isinstance(horizons_payload, dict) and best_horizon is not None:
+            analog_summary["best"] = horizons_payload.get(str(best_horizon))
 
-    analog_summary = analog_engine.score_event(
-        event=event,
-        features=features,
-        horizons=all_horizons,
-        trade_regime=regime_state["bucket"],
-        scores=scores,
-        best_horizon=best_horizon,
-    )
-    for horizon in all_horizons:
-        analog_h = (
-            analog_summary.get("horizons", {}).get(str(horizon), {})
-            if isinstance(analog_summary, dict)
-            else {}
-        )
-        scores[f"analog_reject_{horizon}m"] = _to_float(analog_h.get("reject_prob"))
-        scores[f"analog_break_{horizon}m"] = _to_float(analog_h.get("break_prob"))
-        scores[f"analog_n_{horizon}m"] = _to_float(analog_h.get("n"))
-        scores[f"analog_n_eff_{horizon}m"] = _to_float(analog_h.get("n_eff"))
-        scores[f"analog_ci_width_{horizon}m"] = max(
-            _to_float(analog_h.get("reject_ci_width")) or 0.0,
-            _to_float(analog_h.get("break_ci_width")) or 0.0,
-        )
-        scores[f"analog_disagreement_{horizon}m"] = _to_float(analog_h.get("disagreement"))
-        disagreement = _to_float(analog_h.get("disagreement"))
-        if disagreement is not None and disagreement >= ML_ANALOG_DISAGREEMENT_FLAG:
-            flag = f"ANALOG_DISAGREE_{horizon}m"
-            if flag not in quality_flags:
-                quality_flags.append(flag)
+    if ML_ANALOG_BLEND_MODE == "shadow":
+        diverged = False
+        for horizon in all_horizons:
+            model_reject = _to_float(scores.get(f"prob_reject_{horizon}m"))
+            shadow_reject = _to_float(scores.get(f"blend_prob_reject_{horizon}m"))
+            model_break = _to_float(scores.get(f"prob_break_{horizon}m"))
+            shadow_break = _to_float(scores.get(f"blend_prob_break_{horizon}m"))
+            if (
+                model_reject is not None
+                and shadow_reject is not None
+                and abs(model_reject - shadow_reject) > 1e-9
+            ) or (
+                model_break is not None
+                and shadow_break is not None
+                and abs(model_break - shadow_break) > 1e-9
+            ):
+                diverged = True
+                break
+        if diverged:
+            quality_flags.append("ANALOG_BLEND_DIVERGENCE")
 
     for horizon in all_horizons:
         thresholds_used[f"threshold_reject_{horizon}m"] = selected_threshold_map["reject"].get(horizon, 0.5)
@@ -1663,6 +1796,7 @@ def _score_event(event: dict):
         "calibration": calibration,
         "quality_flags": quality_flags,
         "analogs": analog_summary,
+        "analog_blend": blend_info,
         "regime_policy": {
             "mode": ML_REGIME_POLICY_MODE,
             "selected_policy": selected_policy,

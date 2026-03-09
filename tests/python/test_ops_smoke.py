@@ -1470,6 +1470,9 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("signal_30m", ml_server)
         self.assertIn("prob_reject_30m", ml_server)
         self.assertIn("threshold_break_30m", ml_server)
+        self.assertIn("ML_ANALOG_BLEND_MODE", ml_server)
+        self.assertIn("analog_blend", ml_server)
+        self.assertIn("promotion_gate", ml_server)
 
         dashboard = (REPO_ROOT / "production_pivot_dashboard.html").read_text(encoding="utf-8")
         self.assertIn('id="ml-signal-30m"', dashboard)
@@ -1904,6 +1907,109 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIsNotNone(result["scores"]["analog_break_5m"])
         self.assertGreater(float(result["scores"]["analog_n_5m"]), 0.0)
         self.assertIn("ANALOG_DISAGREE_5m", result["quality_flags"])
+
+    def test_analog_blend_active_respects_promotion_gate(self) -> None:
+        ml_server = load_module("ml_server_analog_blend_runtime", REPO_ROOT / "server" / "ml_server.py")
+
+        class DummyModel:
+            classes_ = np.array([0, 1])
+
+            def __init__(self, prob: float) -> None:
+                self.prob = prob
+
+            def predict_proba(self, _df):
+                return np.array([[1.0 - self.prob, self.prob]], dtype=float)
+
+        now_ms = int(time.time() * 1000)
+        ml_server.build_feature_row = lambda event: {
+            "x": 1.0,
+            "distance_atr_ratio": event.get("distance_atr_ratio"),
+            "tod_bucket": ml_server._analog_tod_bucket(event.get("ts_event")),
+        }
+        ml_server.collect_missing = lambda _event: []
+        ml_server.ML_SHADOW_HORIZONS = set()
+        ml_server.ML_ANALOG_ENABLED = True
+        ml_server.ML_ANALOG_MIN_POOL = 10
+        ml_server.ML_ANALOG_MIN_N = 10
+        ml_server.ML_ANALOG_MIN_EFFECTIVE_N = 5.0
+        ml_server.ML_ANALOG_MAX_MEAN_DISTANCE = 3.0
+        ml_server.ML_ANALOG_MAX_CI_WIDTH = 0.8
+        ml_server.ML_ANALOG_BLEND_MODE = "active"
+        ml_server.ML_ANALOG_BLEND_WEIGHT_BASE = 0.6
+        ml_server.ML_ANALOG_BLEND_WEIGHT_MAX = 0.6
+        ml_server.ML_ANALOG_BLEND_N_EFF_REF = 10.0
+
+        ml_server.registry.models = {
+            "reject": {
+                5: {
+                    "feature_columns": ["x"],
+                    "pipeline": DummyModel(0.2),
+                    "calibration": "sigmoid",
+                }
+            },
+            "break": {
+                5: {
+                    "feature_columns": ["x"],
+                    "pipeline": DummyModel(0.2),
+                    "calibration": "sigmoid",
+                }
+            },
+        }
+        ml_server.registry.thresholds = {"reject": {5: 0.5}, "break": {5: 0.5}}
+        ml_server.registry.manifest = {"version": "vtest", "trained_end_ts": now_ms}
+
+        tod = ml_server._analog_tod_bucket(now_ms - 60_000)
+        rows = []
+        for idx in range(40):
+            rows.append(
+                {
+                    "event_id": f"blend_hist_{idx}",
+                    "symbol": "SPY",
+                    "ts_event": now_ms - (idx + 5) * 60_000,
+                    "level_family": "support",
+                    "tod_bucket": tod,
+                    "regime_bucket": "compression",
+                    "gamma_mode": 1,
+                    "distance_bps": 2.0 + (idx % 5) * 0.2,
+                    "distance_atr_ratio": 0.08 + (idx % 5) * 0.01,
+                    "rv_30": 12.0 + (idx % 5) * 0.1,
+                    "or_size_atr": 0.25 + (idx % 5) * 0.01,
+                    "overnight_gap_atr": 0.1 + (idx % 5) * 0.01,
+                    "reject": 1.0 if idx < 30 else 0.0,
+                    "break": 0.0 if idx < 30 else 1.0,
+                }
+            )
+        ml_server.analog_engine.enabled = True
+        ml_server.analog_engine.error = None
+        ml_server.analog_engine.loaded_at_ms = now_ms
+        ml_server.analog_engine.rows_by_horizon = {5: rows}
+
+        base_event = {
+            "event_id": "blend_case",
+            "symbol": "SPY",
+            "ts_event": now_ms,
+            "level_type": "S1",
+            "distance_bps": 2.1,
+            "distance_atr_ratio": 0.09,
+            "rv_30": 12.2,
+            "or_size_atr": 0.27,
+            "overnight_gap_atr": 0.11,
+            "regime_type": 3,
+            "rv_regime": 1,
+            "gamma_mode": 1,
+        }
+
+        ml_server._read_analog_promotion_gate = lambda: {"status": "fail", "reasons": ["gate_fail"]}
+        blocked = ml_server._score_event({**base_event, "event_id": "blend_case_blocked"})
+        self.assertAlmostEqual(float(blocked["scores"]["prob_reject_5m"]), 0.2, places=6)
+        self.assertIn("ANALOG_BLEND_BLOCKED_GATE", blocked["quality_flags"])
+
+        ml_server._read_analog_promotion_gate = lambda: {"status": "pass", "reasons": []}
+        active = ml_server._score_event({**base_event, "event_id": "blend_case_active"})
+        self.assertGreater(float(active["scores"]["prob_reject_5m"]), 0.2)
+        self.assertIn("ANALOG_BLEND_ACTIVE", active["quality_flags"])
+        self.assertEqual(active["analog_blend"]["mode"], "active")
+        self.assertTrue(bool(active["analog_blend"]["allow_active_blend"]))
 
     def test_ml_prediction_log_persists_regime_policy_fields(self) -> None:
         db = self.tmp / "predlog_regime.sqlite"
