@@ -59,6 +59,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Return error when any batch/event failed to score",
     )
+    parser.add_argument(
+        "--rescore-existing",
+        action="store_true",
+        help=(
+            "Ignore existing prediction_log rows and rescore all matching touch_events "
+            "(INSERT OR IGNORE in ml_server prevents duplicate rows for the same event_id+model_version)."
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true", help="Only list how many events are eligible")
     return parser.parse_args(argv)
 
@@ -101,11 +109,12 @@ def fetch_unscored_events(
     end_date: str,
     lookback_days: int,
     limit: int,
+    rescore_existing: bool,
 ) -> list[dict[str, Any]]:
     if not _has_table(conn, "touch_events"):
         return []
 
-    if _has_table(conn, "prediction_log"):
+    if _has_table(conn, "prediction_log") and not rescore_existing:
         join_clause = (
             "LEFT JOIN prediction_log pl "
             "ON pl.event_id = te.event_id AND COALESCE(pl.is_preview, 0) = 0"
@@ -153,11 +162,12 @@ def count_unscored_events(
     start_date: str,
     end_date: str,
     lookback_days: int,
+    rescore_existing: bool,
 ) -> int:
     if not _has_table(conn, "touch_events"):
         return 0
 
-    if _has_table(conn, "prediction_log"):
+    if _has_table(conn, "prediction_log") and not rescore_existing:
         join_clause = (
             "LEFT JOIN prediction_log pl "
             "ON pl.event_id = te.event_id AND COALESCE(pl.is_preview, 0) = 0"
@@ -248,6 +258,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             start_date=start_date,
             end_date=end_date,
             lookback_days=max(0, int(args.lookback_days)),
+            rescore_existing=bool(args.rescore_existing),
         )
         events = fetch_unscored_events(
             conn,
@@ -256,6 +267,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             end_date=end_date,
             lookback_days=max(0, int(args.lookback_days)),
             limit=max(0, int(args.limit)),
+            rescore_existing=bool(args.rescore_existing),
         )
     finally:
         conn.close()
@@ -331,6 +343,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 start_date=start_date,
                 end_date=end_date,
                 lookback_days=max(0, int(args.lookback_days)),
+                rescore_existing=bool(args.rescore_existing),
             )
         finally:
             conn_verify.close()
@@ -356,6 +369,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "remaining_unscored": remaining_unscored,
         "max_remaining": int(args.max_remaining),
         "dry_run": False,
+        "rescore_existing": bool(args.rescore_existing),
         "symbols": symbols,
         "start_date": start_date or None,
         "end_date": end_date or None,
