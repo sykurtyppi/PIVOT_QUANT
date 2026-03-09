@@ -250,6 +250,21 @@ def _post_score_batch(
     return 0, last_error
 
 
+def _is_transport_outage_error(error_text: str | None) -> bool:
+    if not error_text:
+        return False
+    lowered = str(error_text).lower()
+    markers = (
+        "connection refused",
+        "connection reset",
+        "timed out",
+        "remote end closed connection",
+        "temporarily unavailable",
+        "broken pipe",
+    )
+    return any(marker in lowered for marker in markers)
+
+
 def run(args: argparse.Namespace) -> dict[str, Any]:
     symbols = _parse_symbols(args.symbols)
     start_date = _validate_date(args.start_date)
@@ -300,6 +315,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     single_fallback_attempted = 0
     single_fallback_scored = 0
     single_fallback_failed = 0
+    single_fallback_skipped_transport = 0
     batch_size = max(1, int(args.batch_size))
 
     for offset in range(0, attempted, batch_size):
@@ -317,6 +333,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         failed += batch_failed
         if error and batch_failed > 0:
             last_error = error
+            if _is_transport_outage_error(error):
+                # During transport outages, per-event fallback multiplies wait time
+                # without improving success rate. Keep this batch as failed and move on.
+                single_fallback_skipped_transport += len(batch)
+                continue
             if bool(args.single_fallback_on_failure) and len(batch) > 0:
                 # Retry individual events so partial outages do not strand large
                 # backlogs in prediction_log.
@@ -373,6 +394,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "single_fallback_attempted": single_fallback_attempted,
         "single_fallback_scored": single_fallback_scored,
         "single_fallback_failed": single_fallback_failed,
+        "single_fallback_skipped_transport": single_fallback_skipped_transport,
         "remaining_unscored": remaining_unscored,
         "max_remaining": int(args.max_remaining),
         "dry_run": False,
