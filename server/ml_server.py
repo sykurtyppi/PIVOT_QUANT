@@ -966,7 +966,7 @@ def _log_prediction(event: dict, result: dict) -> None:
         is_preview = 1 if event.get("preview") else 0
 
         conn.execute(
-            """INSERT OR IGNORE INTO prediction_log (
+            """INSERT INTO prediction_log (
                 event_id, ts_prediction, model_version, feature_version,
                 best_horizon, abstain,
                 signal_5m, signal_15m, signal_30m, signal_60m,
@@ -978,7 +978,21 @@ def _log_prediction(event: dict, result: dict) -> None:
                 analog_best_reject_prob, analog_best_break_prob, analog_best_n,
                 analog_best_ci_width, analog_best_disagreement, analog_json,
                 quality_flags, is_preview
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(event_id, model_version) DO UPDATE SET
+                ts_prediction = excluded.ts_prediction,
+                regime_policy_mode = excluded.regime_policy_mode,
+                trade_regime = excluded.trade_regime,
+                selected_policy = excluded.selected_policy,
+                regime_policy_json = excluded.regime_policy_json,
+                analog_best_reject_prob = excluded.analog_best_reject_prob,
+                analog_best_break_prob = excluded.analog_best_break_prob,
+                analog_best_n = excluded.analog_best_n,
+                analog_best_ci_width = excluded.analog_best_ci_width,
+                analog_best_disagreement = excluded.analog_best_disagreement,
+                analog_json = excluded.analog_json,
+                quality_flags = excluded.quality_flags,
+                is_preview = excluded.is_preview""",
             (
                 event_id,
                 int(time.time() * 1000),
