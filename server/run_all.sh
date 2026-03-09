@@ -10,6 +10,9 @@ PIDS=()
 OPTIONAL_PIDS=()
 STARTUP_TIMEOUT_SEC="${STARTUP_TIMEOUT_SEC:-120}"
 MONITOR_INTERVAL_SEC="${MONITOR_INTERVAL_SEC:-20}"
+MONITOR_HEALTH_TIMEOUT_SEC="${MONITOR_HEALTH_TIMEOUT_SEC:-4}"
+MONITOR_HEALTH_RETRIES="${MONITOR_HEALTH_RETRIES:-3}"
+MONITOR_HEALTH_RETRY_SLEEP_SEC="${MONITOR_HEALTH_RETRY_SLEEP_SEC:-1}"
 PIVOT_DB="${PIVOT_DB:-${ROOT_DIR}/data/pivot_events.sqlite}"
 LIVE_COLLECTOR_ENABLED="${LIVE_COLLECTOR_ENABLED:-1}"
 LIVE_COLLECTOR_ACTIVE=0
@@ -232,14 +235,26 @@ quick_check_service() {
   local name="$1"
   local port="$2"
   local health_url="${3:-}"
+  local attempts=1
+  local max_attempts="${MONITOR_HEALTH_RETRIES}"
+  local timeout_sec="${MONITOR_HEALTH_TIMEOUT_SEC}"
 
   if ! is_listening "${port}"; then
     echo "[monitor] ${name} is not listening on ${port}"
     return 1
   fi
 
-  if [[ -n "${health_url}" ]] && ! curl -fsS --max-time 2 "${health_url}" >/dev/null 2>&1; then
-    echo "[monitor] ${name} health failed: ${health_url}"
+  if [[ -n "${health_url}" ]]; then
+    while [[ "${attempts}" -le "${max_attempts}" ]]; do
+      if curl -fsS --max-time "${timeout_sec}" "${health_url}" >/dev/null 2>&1; then
+        return 0
+      fi
+      if [[ "${attempts}" -lt "${max_attempts}" ]]; then
+        sleep "${MONITOR_HEALTH_RETRY_SLEEP_SEC}"
+      fi
+      attempts=$((attempts + 1))
+    done
+    echo "[monitor] ${name} health failed after ${max_attempts} attempts: ${health_url}"
     return 1
   fi
 
@@ -249,8 +264,21 @@ quick_check_service() {
 quick_check_live_collector() {
   local url="http://127.0.0.1:5004/health"
   local body=""
-  if ! body="$(curl -fsS --max-time 2 "${url}" 2>/dev/null)"; then
-    echo "[monitor] live_collector health fetch failed: ${url}"
+  local attempts=1
+  local max_attempts="${MONITOR_HEALTH_RETRIES}"
+  local timeout_sec="${MONITOR_HEALTH_TIMEOUT_SEC}"
+  while [[ "${attempts}" -le "${max_attempts}" ]]; do
+    if body="$(curl -fsS --max-time "${timeout_sec}" "${url}" 2>/dev/null)"; then
+      break
+    fi
+    body=""
+    if [[ "${attempts}" -lt "${max_attempts}" ]]; then
+      sleep "${MONITOR_HEALTH_RETRY_SLEEP_SEC}"
+    fi
+    attempts=$((attempts + 1))
+  done
+  if [[ -z "${body}" ]]; then
+    echo "[monitor] live_collector health fetch failed after ${max_attempts} attempts: ${url}"
     return 1
   fi
 

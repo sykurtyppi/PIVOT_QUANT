@@ -1180,6 +1180,16 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("RETRAIN_SCORE_UNSCORED_VERIFY_ON_RETRAIN", retrain_script)
         self.assertIn("RETRAIN_SCORE_UNSCORED_MAX_REMAINING", retrain_script)
 
+    def test_run_all_health_probe_retry_contract_present(self) -> None:
+        run_all = (REPO_ROOT / "server" / "run_all.sh").read_text(encoding="utf-8")
+        self.assertIn("MONITOR_HEALTH_TIMEOUT_SEC", run_all)
+        self.assertIn("MONITOR_HEALTH_RETRIES", run_all)
+        self.assertIn("MONITOR_HEALTH_RETRY_SLEEP_SEC", run_all)
+        self.assertIn('health failed after ${max_attempts} attempts', run_all)
+
+        proc = run_cmd(["bash", "-n", "server/run_all.sh"], cwd=REPO_ROOT)
+        self.assertEqual(proc.returncode, 0, msg=f"{proc.stdout}\n{proc.stderr}")
+
     def test_score_unscored_touch_events_runtime_behavior(self) -> None:
         scorer = load_module(
             "pq_score_unscored_touch_events_runtime_test",
