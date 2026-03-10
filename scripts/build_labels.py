@@ -77,6 +77,15 @@ def compute_mfe_mae(
     return max_fav, max_adv
 
 
+def forward_bars_after_touch(bars: Iterable[dict], ts_event: int) -> list[dict]:
+    """Exclude the touch bar itself to avoid look-ahead leakage.
+
+    ts_event marks the bar where the touch occurred. We only score movement
+    strictly after that timestamp.
+    """
+    return [bar for bar in bars if int(bar["ts"]) > int(ts_event)]
+
+
 def label_event(
     bars: list[dict],
     touch_price: float,
@@ -205,6 +214,7 @@ def main() -> None:
                 continue
 
             bars = fetch_bars(conn, symbol, ts_event, end_ts, interval)
+            bars = forward_bars_after_touch(bars, ts_event)
             if not bars:
                 continue
 

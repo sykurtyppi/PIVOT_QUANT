@@ -293,32 +293,38 @@ class ModelRegistry:
         if not manifest_path.exists():
             raise FileNotFoundError(f"Missing manifest at {manifest_path}")
         with manifest_path.open("r", encoding="utf-8") as handle:
-            self.manifest = json.load(handle)
-        self.manifest_path = str(manifest_path)
-
-        self.models = {"reject": {}, "break": {}}
-        self.thresholds = {"reject": {}, "break": {}}
+            manifest = json.load(handle)
+        manifest_path_str = str(manifest_path)
+        models = {"reject": {}, "break": {}}
+        thresholds = {"reject": {}, "break": {}}
 
         # Load thresholds from manifest first
-        manifest_thresholds = self.manifest.get("thresholds", {})
+        manifest_thresholds = manifest.get("thresholds", {})
         for target in ("reject", "break"):
             for horizon_str, threshold in manifest_thresholds.get(target, {}).items():
-                self.thresholds[target][int(horizon_str)] = float(threshold)
+                thresholds[target][int(horizon_str)] = float(threshold)
 
-        for target, horizons in self.manifest.get("models", {}).items():
+        for target, horizons in manifest.get("models", {}).items():
             for horizon, filename in horizons.items():
                 path = MODEL_DIR / filename
                 if not path.exists():
                     continue
                 payload = joblib.load(path)
-                self.models[target][int(horizon)] = payload
+                models[target][int(horizon)] = payload
 
                 # Fall back to pickle-embedded threshold if manifest didn't have it
                 h_int = int(horizon)
-                if h_int not in self.thresholds.get(target, {}):
+                if h_int not in thresholds.get(target, {}):
                     pkl_thresh = payload.get("optimal_threshold")
                     if pkl_thresh is not None:
-                        self.thresholds.setdefault(target, {})[h_int] = float(pkl_thresh)
+                        thresholds.setdefault(target, {})[h_int] = float(pkl_thresh)
+
+        # Atomically swap in the newly built registry payload so /score never
+        # sees a transient empty model map during reload.
+        self.manifest = manifest
+        self.manifest_path = manifest_path_str
+        self.models = models
+        self.thresholds = thresholds
 
     def get_threshold(self, target: str, horizon: int) -> float:
         """Get optimal decision threshold for a target/horizon pair.

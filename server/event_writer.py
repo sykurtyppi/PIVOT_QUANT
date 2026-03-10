@@ -2,8 +2,14 @@ import json
 import os
 import sys
 import sqlite3
+from datetime import datetime, time, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse, parse_qs
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # pragma: no cover
+    ZoneInfo = None  # type: ignore
 
 # Allow importing from scripts/ (sibling directory)
 _ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -21,6 +27,10 @@ HOST = os.getenv("EVENT_WRITER_BIND", "127.0.0.1")
 PORT = int(os.getenv("EVENT_WRITER_PORT", "5002"))
 _SCHEMA_READY = False
 _DEFAULT_CORS_ORIGINS = "http://127.0.0.1:3000,http://localhost:3000"
+MAX_BODY_BYTES = int(os.getenv("EVENT_WRITER_MAX_BODY_BYTES", str(2 * 1024 * 1024)))
+NY_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone.utc
+RTH_OPEN = time(9, 30)
+RTH_CLOSE = time(16, 0)
 
 
 def _parse_allowed_origins() -> list[str]:
@@ -230,55 +240,60 @@ def insert_bars(conn, bars, max_interval_sec=3600):
 def aggregate_daily_candles(conn, symbol, limit=200):
     """Aggregate 1-minute (or 5-minute) bars into daily OHLCV candles.
 
-    Only uses RTH bars: 14:30-21:00 UTC (9:30 AM - 4:00 PM ET).
+    Uses New York regular trading hours (9:30-16:00 ET), including DST shifts.
     Returns list of dicts with keys: time (epoch seconds), open, high, low,
     close, volume — matching the dashboard candle format.
     """
+    now_utc = datetime.now(timezone.utc)
+    lookback_days = max(int(limit) * 3, 30)
+    cutoff_ms = int((now_utc - timedelta(days=lookback_days)).timestamp() * 1000)
     rows = conn.execute(
         """
-        WITH ranked AS (
-            SELECT
-                date(ts / 1000, 'unixepoch') AS trade_date,
-                ts, open, high, low, close, volume,
-                ROW_NUMBER() OVER (
-                    PARTITION BY date(ts / 1000, 'unixepoch') ORDER BY ts ASC
-                ) AS rn_first,
-                ROW_NUMBER() OVER (
-                    PARTITION BY date(ts / 1000, 'unixepoch') ORDER BY ts DESC
-                ) AS rn_last
-            FROM bar_data
-            WHERE symbol = ?
-              AND bar_interval_sec <= 300
-              AND time(ts / 1000, 'unixepoch') >= '14:30:00'
-              AND time(ts / 1000, 'unixepoch') < '21:00:00'
-        )
-        SELECT
-            trade_date,
-            MIN(CASE WHEN rn_first = 1 THEN ts END) / 1000 AS time_sec,
-            MIN(CASE WHEN rn_first = 1 THEN open END)       AS day_open,
-            MAX(high)                                        AS day_high,
-            MIN(low)                                         AS day_low,
-            MAX(CASE WHEN rn_last = 1 THEN close END)       AS day_close,
-            CAST(SUM(volume) AS INTEGER)                     AS day_volume
-        FROM ranked
-        GROUP BY trade_date
-        HAVING day_open IS NOT NULL AND day_close IS NOT NULL
-        ORDER BY trade_date ASC
-        LIMIT ?
+        SELECT ts, open, high, low, close, volume
+        FROM bar_data
+        WHERE symbol = ?
+          AND bar_interval_sec <= 300
+          AND ts >= ?
+        ORDER BY ts ASC
         """,
-        (symbol.upper(), limit),
+        (symbol.upper(), cutoff_ms),
     ).fetchall()
 
-    candles = []
+    grouped: dict[str, dict] = {}
     for row in rows:
+        ts_ms = int(row[0])
+        dt_et = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).astimezone(NY_TZ)
+        et_time = dt_et.timetz().replace(tzinfo=None)
+        if et_time < RTH_OPEN or et_time >= RTH_CLOSE:
+            continue
+        trade_date = dt_et.date().isoformat()
+        day = grouped.get(trade_date)
+        if day is None:
+            grouped[trade_date] = {
+                "time": ts_ms // 1000,
+                "open": float(row[1]),
+                "high": float(row[2]),
+                "low": float(row[3]),
+                "close": float(row[4]),
+                "volume": int(row[5] or 0),
+            }
+            continue
+        day["high"] = max(day["high"], float(row[2]))
+        day["low"] = min(day["low"], float(row[3]))
+        day["close"] = float(row[4])
+        day["volume"] += int(row[5] or 0)
+
+    candles = []
+    for trade_date in sorted(grouped.keys())[-int(limit):]:
+        day = grouped[trade_date]
         candles.append(
             {
-                "time": row[1],
-                "open": round(row[2], 2),
-                "high": round(row[3], 2),
-                "low": round(row[4], 2),
-                "close": round(row[5], 2),
-                "volume": row[6] or 0,
+                "time": day["time"],
+                "open": round(day["open"], 2),
+                "high": round(day["high"], 2),
+                "low": round(day["low"], 2),
+                "close": round(day["close"], 2),
+                "volume": day["volume"],
             }
         )
     return {
@@ -348,6 +363,9 @@ class WriterHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urlparse(self.path)
         length = int(self.headers.get("Content-Length", "0"))
+        if length > MAX_BODY_BYTES:
+            self._send_json(413, {"error": f"Request body too large (max {MAX_BODY_BYTES} bytes)"})
+            return
         body = self.rfile.read(length).decode("utf-8") if length else ""
         try:
             payload = json.loads(body) if body else {}

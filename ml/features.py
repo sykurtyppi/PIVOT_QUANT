@@ -133,7 +133,7 @@ def build_feature_row(event: dict[str, Any]) -> dict[str, Any]:
     vwap = event.get("vwap")
     if event.get("vwap_dist_bps") is not None:
         row["vwap_dist_bps_calc"] = event.get("vwap_dist_bps")
-    elif vwap and touch_price:
+    elif vwap is not None and touch_price is not None and vwap != 0:
         row["vwap_dist_bps_calc"] = (touch_price - vwap) / vwap * 1e4
     else:
         row["vwap_dist_bps_calc"] = None
@@ -149,7 +149,7 @@ def build_feature_row(event: dict[str, Any]) -> dict[str, Any]:
     gamma_flip = event.get("gamma_flip")
     if event.get("gamma_flip_dist_bps") is not None:
         row["gamma_flip_dist_bps_calc"] = event.get("gamma_flip_dist_bps")
-    elif gamma_flip and touch_price:
+    elif gamma_flip is not None and touch_price is not None and gamma_flip != 0:
         row["gamma_flip_dist_bps_calc"] = (touch_price - gamma_flip) / gamma_flip * 1e4
     else:
         row["gamma_flip_dist_bps_calc"] = None
@@ -158,7 +158,7 @@ def build_feature_row(event: dict[str, Any]) -> dict[str, Any]:
     vpoc = event.get("vpoc")
     if event.get("vpoc_dist_bps") is not None:
         row["vpoc_dist_bps_calc"] = event.get("vpoc_dist_bps")
-    elif vpoc and touch_price:
+    elif vpoc is not None and touch_price is not None and vpoc != 0:
         row["vpoc_dist_bps_calc"] = (touch_price - vpoc) / vpoc * 1e4
     else:
         row["vpoc_dist_bps_calc"] = None
@@ -182,12 +182,12 @@ def build_feature_row(event: dict[str, Any]) -> dict[str, Any]:
     # Distance to weekly/monthly pivot PP (in bps, not raw price)
     weekly_pivot = event.get("weekly_pivot")
     monthly_pivot = event.get("monthly_pivot")
-    if weekly_pivot and touch_price:
+    if weekly_pivot is not None and touch_price is not None and weekly_pivot != 0:
         row["weekly_pivot_dist_bps"] = (touch_price - weekly_pivot) / weekly_pivot * 1e4
     else:
         row["weekly_pivot_dist_bps"] = None
 
-    if monthly_pivot and touch_price:
+    if monthly_pivot is not None and touch_price is not None and monthly_pivot != 0:
         row["monthly_pivot_dist_bps"] = (touch_price - monthly_pivot) / monthly_pivot * 1e4
     else:
         row["monthly_pivot_dist_bps"] = None

@@ -362,6 +362,18 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertAlmostEqual(float(mfe_bps), 200.0, places=6)
         self.assertAlmostEqual(float(mae_bps), -200.0, places=6)
 
+    def test_build_labels_forward_window_excludes_touch_bar(self) -> None:
+        build_labels = load_module(
+            "pq_build_labels_forward_window_test",
+            REPO_ROOT / "scripts" / "build_labels.py",
+        )
+        bars = [
+            {"ts": 1_000, "high": 101.0, "low": 99.0, "close": 100.0},
+            {"ts": 2_000, "high": 102.0, "low": 99.5, "close": 100.5},
+        ]
+        filtered = build_labels.forward_bars_after_touch(bars, 1_000)
+        self.assertEqual([int(bar["ts"]) for bar in filtered], [2_000])
+
     def test_build_labels_break_sustain_one_triggers_on_first_bar(self) -> None:
         build_labels = load_module(
             "pq_build_labels_sustain_test",
@@ -396,6 +408,33 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(reject2, 0)
         self.assertEqual(brk2, 1)
         self.assertEqual(resolution2, 1)
+
+    def test_build_feature_row_keeps_zero_touch_price_distances(self) -> None:
+        features = load_module(
+            "pq_features_zero_touch_price_test",
+            REPO_ROOT / "ml" / "features.py",
+        )
+        ts_event = int(datetime.now(timezone.utc).timestamp() * 1000)
+        row = features.build_feature_row(
+            {
+                "symbol": "SPY",
+                "ts_event": ts_event,
+                "level_type": "R1",
+                "level_price": 100.0,
+                "touch_price": 0.0,
+                "distance_bps": 0.0,
+                "vwap": 100.0,
+                "gamma_flip": 80.0,
+                "vpoc": 50.0,
+                "weekly_pivot": 120.0,
+                "monthly_pivot": 90.0,
+            }
+        )
+        self.assertAlmostEqual(float(row["vwap_dist_bps_calc"]), -10_000.0, places=6)
+        self.assertAlmostEqual(float(row["gamma_flip_dist_bps_calc"]), -10_000.0, places=6)
+        self.assertAlmostEqual(float(row["vpoc_dist_bps_calc"]), -10_000.0, places=6)
+        self.assertAlmostEqual(float(row["weekly_pivot_dist_bps"]), -10_000.0, places=6)
+        self.assertAlmostEqual(float(row["monthly_pivot_dist_bps"]), -10_000.0, places=6)
 
     def test_ml_score_payload_rejects_oversized_batches(self) -> None:
         prior_limit = os.environ.get("ML_SCORE_MAX_BATCH_EVENTS")
@@ -514,6 +553,58 @@ class OpsSmokeTests(unittest.TestCase):
             src = (REPO_ROOT / rel).read_text(encoding="utf-8")
             self.assertIn("ML_CORS_ORIGINS", src)
             self.assertNotIn('Access-Control-Allow-Origin", "*"', src)
+
+    def test_event_writer_daily_candles_use_ny_rth_window(self) -> None:
+        event_writer = load_module(
+            "pq_event_writer_daily_rth_test",
+            REPO_ROOT / "server" / "event_writer.py",
+        )
+        conn = sqlite3.connect(":memory:")
+        try:
+            conn.execute(
+                """
+                CREATE TABLE bar_data(
+                    symbol TEXT NOT NULL,
+                    ts INTEGER NOT NULL,
+                    open REAL NOT NULL,
+                    high REAL NOT NULL,
+                    low REAL NOT NULL,
+                    close REAL NOT NULL,
+                    volume REAL,
+                    bar_interval_sec INTEGER
+                )
+                """
+            )
+
+            now_et = datetime.now(event_writer.NY_TZ)
+            open_et = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+            pre_open_et = open_et - timedelta(minutes=30)
+            before_close_et = open_et.replace(hour=15, minute=59)
+            after_close_et = open_et.replace(hour=16, minute=30)
+
+            rows = [
+                ("SPY", int(pre_open_et.astimezone(timezone.utc).timestamp() * 1000), 90.0, 95.0, 89.0, 90.0, 40.0, 60),
+                ("SPY", int(open_et.astimezone(timezone.utc).timestamp() * 1000), 100.0, 101.0, 99.0, 100.0, 10.0, 60),
+                ("SPY", int(before_close_et.astimezone(timezone.utc).timestamp() * 1000), 110.0, 112.0, 108.0, 110.0, 20.0, 60),
+                ("SPY", int(after_close_et.astimezone(timezone.utc).timestamp() * 1000), 130.0, 200.0, 129.0, 130.0, 30.0, 60),
+            ]
+            conn.executemany(
+                "INSERT INTO bar_data(symbol, ts, open, high, low, close, volume, bar_interval_sec) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                rows,
+            )
+            conn.commit()
+
+            payload = event_writer.aggregate_daily_candles(conn, "SPY", limit=10)
+            candles = payload.get("candles", [])
+            self.assertEqual(len(candles), 1)
+            candle = candles[0]
+            self.assertEqual(float(candle["open"]), 100.0)
+            self.assertEqual(float(candle["close"]), 110.0)
+            self.assertEqual(float(candle["high"]), 112.0)
+            self.assertEqual(float(candle["low"]), 99.0)
+            self.assertEqual(int(candle["volume"]), 30)
+        finally:
+            conn.close()
 
     def test_backfill_gamma_context_falls_back_to_snapshots(self) -> None:
         backfill = load_module(

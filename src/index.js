@@ -266,6 +266,7 @@ import { MathematicalModels } from './math/MathematicalModels.js';
         let isRunning = false;
         let intervalId = null;
         let buffer = [];
+        const quantPivot = this;
 
         const controller = {
             start() {
@@ -283,7 +284,7 @@ import { MathematicalModels } from './math/MathematicalModels.js';
                             }
 
                             if (buffer.length >= 2) {
-                                const results = await this.calculate(buffer, options);
+                                const results = await quantPivot.calculate(buffer, options);
                                 if (onUpdate) {
                                     onUpdate(results);
                                 }
