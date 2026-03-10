@@ -172,6 +172,18 @@ ML_ANALOG_PRIOR_STRENGTH = max(
 ML_ANALOG_DISAGREEMENT_FLAG = max(
     0.0, min(1.0, float(os.getenv("ML_ANALOG_DISAGREEMENT_FLAG", "0.25")))
 )
+ML_ANALOG_DISAGREEMENT_GUARD_MODE = (
+    os.getenv("ML_ANALOG_DISAGREEMENT_GUARD_MODE", "shadow") or "shadow"
+).strip().lower()
+if ML_ANALOG_DISAGREEMENT_GUARD_MODE not in {"off", "shadow", "active"}:
+    ML_ANALOG_DISAGREEMENT_GUARD_MODE = "shadow"
+ML_ANALOG_DISAGREEMENT_GUARD_HORIZONS = {
+    int(h.strip())
+    for h in os.getenv("ML_ANALOG_DISAGREEMENT_GUARD_HORIZONS", "15,30,60").split(",")
+    if h.strip().isdigit() and int(h.strip()) in {5, 15, 30, 60}
+}
+if not ML_ANALOG_DISAGREEMENT_GUARD_HORIZONS:
+    ML_ANALOG_DISAGREEMENT_GUARD_HORIZONS = {15, 30, 60}
 ML_ANALOG_PROMOTION_GATE_PATH = Path(
     os.getenv(
         "ML_ANALOG_PROMOTION_GATE_PATH",
@@ -1090,6 +1102,8 @@ def health():
             "sim_weight_mode": ML_ANALOG_SIM_WEIGHT_MODE,
             "prior_strength": ML_ANALOG_PRIOR_STRENGTH,
             "disagreement_flag": ML_ANALOG_DISAGREEMENT_FLAG,
+            "disagreement_guard_mode": ML_ANALOG_DISAGREEMENT_GUARD_MODE,
+            "disagreement_guard_horizons": sorted(ML_ANALOG_DISAGREEMENT_GUARD_HORIZONS),
             "blend_mode": ML_ANALOG_BLEND_MODE,
             "blend_weight_base": ML_ANALOG_BLEND_WEIGHT_BASE,
             "blend_weight_max": ML_ANALOG_BLEND_WEIGHT_MAX,
@@ -1618,6 +1632,14 @@ def _score_event(event: dict):
         "weight_max": ML_ANALOG_BLEND_WEIGHT_MAX,
         "n_eff_ref": ML_ANALOG_BLEND_N_EFF_REF,
     }
+    disagreement_guard_info: dict[str, object] = {
+        "mode": ML_ANALOG_DISAGREEMENT_GUARD_MODE,
+        "threshold": ML_ANALOG_DISAGREEMENT_FLAG,
+        "horizons": sorted(ML_ANALOG_DISAGREEMENT_GUARD_HORIZONS),
+        "triggered_horizons": [],
+        "applied_horizons": [],
+        "signal_diffs": {},
+    }
     for horizon in all_horizons:
         analog_h = (
             analog_summary.get("horizons", {}).get(str(horizon), {})
@@ -1654,7 +1676,20 @@ def _score_event(event: dict):
         scores[f"analog_ci_width_{horizon}m"] = ci_width
         disagreement = _to_float(analog_h.get("disagreement"))
         scores[f"analog_disagreement_{horizon}m"] = disagreement
-        if disagreement is not None and disagreement >= ML_ANALOG_DISAGREEMENT_FLAG:
+        disagreement_flagged = (
+            disagreement is not None and disagreement >= ML_ANALOG_DISAGREEMENT_FLAG
+        )
+        guard_triggered = (
+            disagreement_flagged
+            and ML_ANALOG_DISAGREEMENT_GUARD_MODE != "off"
+            and horizon in ML_ANALOG_DISAGREEMENT_GUARD_HORIZONS
+        )
+        scores[f"analog_disagreement_guard_{horizon}m"] = bool(guard_triggered)
+        if guard_triggered:
+            cast_triggered = disagreement_guard_info.get("triggered_horizons")
+            if isinstance(cast_triggered, list):
+                cast_triggered.append(horizon)
+        if disagreement_flagged:
             flag = f"ANALOG_DISAGREE_{horizon}m"
             if flag not in quality_flags:
                 quality_flags.append(flag)
@@ -1670,6 +1705,7 @@ def _score_event(event: dict):
             "analog_break": analog_break,
             "blended_reject": blend_reject,
             "blended_break": blend_break,
+            "disagreement_guard_triggered": bool(guard_triggered),
         }
         analog_horizons = analog_summary.get("horizons") if isinstance(analog_summary, dict) else None
         if isinstance(analog_horizons, dict):
@@ -1678,6 +1714,7 @@ def _score_event(event: dict):
                 analog_horizon_payload["blend_weight"] = float(weight)
                 analog_horizon_payload["blend_prob_reject"] = blend_reject
                 analog_horizon_payload["blend_prob_break"] = blend_break
+                analog_horizon_payload["disagreement_guard_triggered"] = bool(guard_triggered)
 
         if (
             ML_ANALOG_BLEND_MODE == "active"
@@ -1747,6 +1784,60 @@ def _score_event(event: dict):
         selected_threshold_map = threshold_guardrail
         selected_signals = guardrail_signals
         guardrail_meta["applied"] = True
+
+    pre_disagreement_guard_signals = dict(selected_signals)
+    triggered_horizons = disagreement_guard_info.get("triggered_horizons")
+    if isinstance(triggered_horizons, list):
+        available_horizons = set(all_horizons)
+        normalized_triggered = {
+            horizon
+            for horizon in triggered_horizons
+            if isinstance(horizon, int) and horizon in available_horizons
+        }
+        for horizon in sorted(normalized_triggered):
+            key = f"signal_{horizon}m"
+            before = pre_disagreement_guard_signals.get(key)
+            after = before
+            applied = False
+            if (
+                ML_ANALOG_DISAGREEMENT_GUARD_MODE == "active"
+                and before is not None
+                and before != "no_edge"
+            ):
+                selected_signals[key] = "no_edge"
+                after = "no_edge"
+                applied = True
+                cast_applied = disagreement_guard_info.get("applied_horizons")
+                if isinstance(cast_applied, list):
+                    cast_applied.append(horizon)
+            signal_diffs_payload = disagreement_guard_info.get("signal_diffs")
+            if isinstance(signal_diffs_payload, dict):
+                signal_diffs_payload[key] = {
+                    "before": before,
+                    "after": after,
+                    "applied": applied,
+                }
+        signal_diffs_payload = disagreement_guard_info.get("signal_diffs")
+        if isinstance(signal_diffs_payload, dict) and signal_diffs_payload:
+            if (
+                ML_ANALOG_DISAGREEMENT_GUARD_MODE == "shadow"
+                and any(
+                    payload.get("before") not in {None, "no_edge"}
+                    for payload in signal_diffs_payload.values()
+                    if isinstance(payload, dict)
+                )
+            ):
+                quality_flags.append("ANALOG_DISAGREEMENT_GUARD_DIVERGENCE")
+            if (
+                ML_ANALOG_DISAGREEMENT_GUARD_MODE == "active"
+                and any(
+                    bool(payload.get("applied"))
+                    for payload in signal_diffs_payload.values()
+                    if isinstance(payload, dict)
+                )
+            ):
+                quality_flags.append("ANALOG_DISAGREEMENT_GUARD_ACTIVE")
+                selected_policy = f"{selected_policy}_analog_disagreement_guard"
 
     signal_diffs = {
         f"signal_{h}m": {
@@ -1835,6 +1926,7 @@ def _score_event(event: dict):
     )
     if isinstance(analog_summary, dict):
         analog_summary["best_horizon"] = best_horizon
+        analog_summary["disagreement_guard"] = disagreement_guard_info
         horizons_payload = analog_summary.get("horizons")
         if isinstance(horizons_payload, dict) and best_horizon is not None:
             analog_summary["best"] = horizons_payload.get(str(best_horizon))
@@ -1878,6 +1970,7 @@ def _score_event(event: dict):
         "quality_flags": quality_flags,
         "analogs": analog_summary,
         "analog_blend": blend_info,
+        "analog_disagreement_guard": disagreement_guard_info,
         "regime_policy": {
             "mode": ML_REGIME_POLICY_MODE,
             "selected_policy": selected_policy,
