@@ -1461,6 +1461,83 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(result.get("remaining_unscored"), 1)
         self.assertEqual(result.get("max_remaining"), 0)
 
+    def test_score_unscored_touch_events_transport_circuit_breaker(self) -> None:
+        scorer = load_module(
+            "pq_score_unscored_touch_events_transport_breaker_test",
+            REPO_ROOT / "scripts" / "score_unscored_touch_events.py",
+        )
+
+        db = self.tmp / "score_unscored_transport_breaker.sqlite"
+        conn = sqlite3.connect(str(db))
+        try:
+            conn.execute(
+                """
+                CREATE TABLE touch_events(
+                    event_id TEXT PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    ts_event INTEGER NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE prediction_log(
+                    event_id TEXT NOT NULL,
+                    ts_prediction INTEGER NOT NULL,
+                    is_preview INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+            now_ms = int(time.time() * 1000)
+            rows = [
+                (f"evt_transport_{idx}", "SPY", now_ms - (idx + 1) * 60_000)
+                for idx in range(5)
+            ]
+            conn.executemany(
+                "INSERT INTO touch_events(event_id, symbol, ts_event) VALUES (?, ?, ?)",
+                rows,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        original_urlopen = scorer.urlopen
+        try:
+
+            def _always_transport_fail(req, timeout=0):  # noqa: ANN001
+                raise URLError("timed out")
+
+            scorer.urlopen = _always_transport_fail
+            args = scorer.parse_args(
+                [
+                    "--db",
+                    str(db),
+                    "--symbols",
+                    "SPY",
+                    "--lookback-days",
+                    "30",
+                    "--limit",
+                    "10",
+                    "--batch-size",
+                    "1",
+                    "--max-attempts",
+                    "1",
+                    "--no-single-fallback-on-failure",
+                    "--max-consecutive-transport-failures",
+                    "2",
+                ]
+            )
+            result = scorer.run(args)
+        finally:
+            scorer.urlopen = original_urlopen
+
+        self.assertEqual(result.get("status"), "error")
+        self.assertEqual(result.get("attempted"), 5)
+        self.assertEqual(result.get("processed_events"), 2)
+        self.assertEqual(result.get("failed"), 5)
+        self.assertTrue(result.get("aborted_early"))
+        self.assertIn("consecutive transport failures", str(result.get("aborted_reason")))
+
     def test_30m_shadow_horizon_contract_present(self) -> None:
         ml_server = (REPO_ROOT / "server" / "ml_server.py").read_text(encoding="utf-8")
         self.assertIn("ML_SHADOW_HORIZONS", ml_server)

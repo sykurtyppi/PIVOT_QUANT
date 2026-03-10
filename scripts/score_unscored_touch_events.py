@@ -35,6 +35,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--retry-base-sec", type=float, default=0.5, help="Retry base sleep")
     parser.add_argument("--retry-max-sec", type=float, default=5.0, help="Retry max sleep")
     parser.add_argument(
+        "--progress-every",
+        type=int,
+        default=25,
+        help="Emit progress to stderr every N processed events (0 disables)",
+    )
+    parser.add_argument(
+        "--max-consecutive-transport-failures",
+        type=int,
+        default=0,
+        help="Abort early after N consecutive transport-outage batches (0 disables)",
+    )
+    parser.add_argument(
         "--single-fallback-on-failure",
         dest="single_fallback_on_failure",
         action="store_true",
@@ -310,6 +322,23 @@ def _is_transport_outage_error(error_text: str | None) -> bool:
     return any(marker in lowered for marker in markers)
 
 
+def _emit_progress(
+    *,
+    processed: int,
+    attempted: int,
+    scored_ok: int,
+    failed: int,
+    last_error: str | None = None,
+) -> None:
+    message = (
+        f"[score_unscored] progress processed={processed}/{attempted} "
+        f"scored_ok={scored_ok} failed={failed}"
+    )
+    if last_error:
+        message = f"{message} last_error={last_error}"
+    print(message, file=sys.stderr, flush=True)
+
+
 def run(args: argparse.Namespace) -> dict[str, Any]:
     symbols = _parse_symbols(args.symbols)
     start_date = _validate_date(args.start_date)
@@ -356,17 +385,36 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
     scored_ok = 0
     failed = 0
+    processed_events = 0
+    aborted_early = False
+    aborted_reason: str | None = None
     refreshed_count: int | None = None
     last_error: str | None = None
     single_fallback_attempted = 0
     single_fallback_scored = 0
     single_fallback_failed = 0
     single_fallback_skipped_transport = 0
+    consecutive_transport_failures = 0
     batch_size = max(1, int(args.batch_size))
     run_started_ms = int(time.time() * 1000)
+    progress_every = max(0, int(args.progress_every))
+    next_progress = progress_every if progress_every > 0 else None
+    max_consecutive_transport_failures = max(0, int(args.max_consecutive_transport_failures))
+
+    if attempted > 0:
+        print(
+            (
+                "[score_unscored] start "
+                f"eligible_total={eligible_total} attempted={attempted} batch_size={batch_size} "
+                f"timeout_sec={float(args.timeout_sec):.3f} max_attempts={max(1, int(args.max_attempts))}"
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
 
     for offset in range(0, attempted, batch_size):
         batch = events[offset : offset + batch_size]
+        processed_events += len(batch)
         ok_count, error = _post_score_batch(
             score_url=args.score_url,
             events=batch,
@@ -378,14 +426,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         scored_ok += ok_count
         batch_failed = max(0, len(batch) - ok_count)
         failed += batch_failed
+        saw_transport_outage = False
         if error and batch_failed > 0:
             last_error = error
             if _is_transport_outage_error(error):
                 # During transport outages, per-event fallback multiplies wait time
                 # without improving success rate. Keep this batch as failed and move on.
+                saw_transport_outage = True
                 single_fallback_skipped_transport += len(batch)
-                continue
-            if bool(args.single_fallback_on_failure) and len(batch) > 0:
+            elif bool(args.single_fallback_on_failure) and len(batch) > 0:
                 # Retry individual events so partial outages do not strand large
                 # backlogs in prediction_log.
                 failed -= batch_failed
@@ -407,6 +456,34 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                         single_fallback_failed += 1
                         if one_error:
                             last_error = one_error
+
+        if saw_transport_outage:
+            consecutive_transport_failures += 1
+            if max_consecutive_transport_failures > 0 and (
+                consecutive_transport_failures >= max_consecutive_transport_failures
+            ):
+                aborted_early = True
+                aborted_reason = (
+                    "aborted after "
+                    f"{consecutive_transport_failures} consecutive transport failures"
+                )
+                remaining_events = max(0, attempted - processed_events)
+                if remaining_events > 0:
+                    failed += remaining_events
+                break
+        else:
+            consecutive_transport_failures = 0
+
+        if progress_every > 0 and next_progress is not None and processed_events >= next_progress:
+            _emit_progress(
+                processed=processed_events,
+                attempted=attempted,
+                scored_ok=scored_ok,
+                failed=failed,
+                last_error=last_error,
+            )
+            while next_progress <= processed_events:
+                next_progress += progress_every
 
     remaining_unscored: int | None = None
     if bool(args.verify_after) or int(args.max_remaining) >= 0:
@@ -434,7 +511,19 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         finally:
             conn_verify.close()
 
+    if progress_every > 0 and processed_events > 0 and processed_events < attempted:
+        _emit_progress(
+            processed=processed_events,
+            attempted=attempted,
+            scored_ok=scored_ok,
+            failed=failed,
+            last_error=last_error,
+        )
+
     status = "ok" if failed == 0 else "partial"
+    if aborted_early:
+        status = "error"
+        last_error = aborted_reason if not last_error else f"{aborted_reason}; last_error={last_error}"
     if bool(args.fail_on_partial) and failed > 0:
         status = "error"
     if int(args.max_remaining) >= 0:
@@ -449,6 +538,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "attempted": attempted,
         "scored_ok": scored_ok,
         "failed": failed,
+        "processed_events": processed_events,
+        "aborted_early": aborted_early,
+        "aborted_reason": aborted_reason,
+        "consecutive_transport_failures": consecutive_transport_failures,
         "single_fallback_attempted": single_fallback_attempted,
         "single_fallback_scored": single_fallback_scored,
         "single_fallback_failed": single_fallback_failed,
