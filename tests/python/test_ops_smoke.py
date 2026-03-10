@@ -642,30 +642,36 @@ class OpsSmokeTests(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_event_writer_reuses_process_sqlite_connection(self) -> None:
+    def test_event_writer_uses_threading_http_server(self) -> None:
+        source = (REPO_ROOT / "server" / "event_writer.py").read_text(encoding="utf-8")
+        self.assertIn("ThreadingHTTPServer", source)
+        self.assertIn("server.daemon_threads = True", source)
+
+    def test_event_writer_reuses_thread_local_sqlite_connection(self) -> None:
         event_writer = load_module(
             "pq_event_writer_conn_reuse_test",
             REPO_ROOT / "server" / "event_writer.py",
         )
         db_path = self.tmp / "event_writer_reuse.sqlite"
         event_writer.DB_PATH = str(db_path)
-        event_writer._CONN = None
-        event_writer._CONN_DB_PATH = None
         event_writer._SCHEMA_READY = False
+        event_writer._SCHEMA_DB_PATH = None
+        event_writer._THREAD_LOCAL.conn = None
+        event_writer._THREAD_LOCAL.conn_db_path = None
 
         conn1 = event_writer.connect()
         conn2 = event_writer.connect()
         try:
             self.assertIs(conn1, conn2)
-            self.assertEqual(event_writer._CONN_DB_PATH, str(db_path))
+            self.assertEqual(event_writer._THREAD_LOCAL.conn_db_path, str(db_path))
             self.assertEqual(conn1.execute("SELECT 1").fetchone()[0], 1)
         finally:
             try:
                 conn1.close()
             except Exception:
                 pass
-            event_writer._CONN = None
-            event_writer._CONN_DB_PATH = None
+            event_writer._THREAD_LOCAL.conn = None
+            event_writer._THREAD_LOCAL.conn_db_path = None
 
     def test_backfill_gamma_context_falls_back_to_snapshots(self) -> None:
         backfill = load_module(

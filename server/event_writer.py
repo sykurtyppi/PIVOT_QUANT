@@ -2,8 +2,9 @@ import json
 import os
 import sys
 import sqlite3
+import threading
 from datetime import datetime, time, timedelta, timezone
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 try:
@@ -26,8 +27,9 @@ DB_PATH = os.getenv("PIVOT_DB", "data/pivot_events.sqlite")
 HOST = os.getenv("EVENT_WRITER_BIND", "127.0.0.1")
 PORT = int(os.getenv("EVENT_WRITER_PORT", "5002"))
 _SCHEMA_READY = False
-_CONN = None
-_CONN_DB_PATH = None
+_SCHEMA_DB_PATH = None
+_SCHEMA_LOCK = threading.Lock()
+_THREAD_LOCAL = threading.local()
 _DEFAULT_CORS_ORIGINS = "http://127.0.0.1:3000,http://localhost:3000"
 MAX_BODY_BYTES = int(os.getenv("EVENT_WRITER_MAX_BODY_BYTES", str(2 * 1024 * 1024)))
 NY_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone.utc
@@ -54,33 +56,43 @@ def _cors_origin(request_origin: str | None) -> str:
 
 
 def connect():
-    global _SCHEMA_READY, _CONN, _CONN_DB_PATH
+    global _SCHEMA_READY, _SCHEMA_DB_PATH
 
-    if _CONN is not None and _CONN_DB_PATH == DB_PATH:
+    conn = getattr(_THREAD_LOCAL, "conn", None)
+    conn_db_path = getattr(_THREAD_LOCAL, "conn_db_path", None)
+    if conn is not None and conn_db_path == DB_PATH:
         try:
-            _CONN.execute("SELECT 1")
-            return _CONN
+            conn.execute("SELECT 1")
+            return conn
         except sqlite3.Error:
             try:
-                _CONN.close()
+                conn.close()
             except sqlite3.Error:
                 pass
-            _CONN = None
-
-    if _CONN_DB_PATH != DB_PATH:
-        _SCHEMA_READY = False
+            _THREAD_LOCAL.conn = None
+            _THREAD_LOCAL.conn_db_path = None
+            conn = None
 
     conn = sqlite3.connect(DB_PATH)
-    _CONN = conn
-    _CONN_DB_PATH = DB_PATH
+    _THREAD_LOCAL.conn = conn
+    _THREAD_LOCAL.conn_db_path = DB_PATH
     conn.execute("PRAGMA foreign_keys=ON;")
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     conn.execute("PRAGMA temp_store=MEMORY;")
     conn.execute("PRAGMA cache_size=-200000;")
+
+    if _SCHEMA_DB_PATH != DB_PATH:
+        with _SCHEMA_LOCK:
+            if _SCHEMA_DB_PATH != DB_PATH:
+                _SCHEMA_READY = False
+                _SCHEMA_DB_PATH = DB_PATH
+
     if not _SCHEMA_READY:
-        _ensure_schema(conn)
-        _SCHEMA_READY = True
+        with _SCHEMA_LOCK:
+            if not _SCHEMA_READY:
+                _ensure_schema(conn)
+                _SCHEMA_READY = True
     return conn
 
 
@@ -410,7 +422,8 @@ class WriterHandler(BaseHTTPRequestHandler):
 
 
 def run_server():
-    server = HTTPServer((HOST, PORT), WriterHandler)
+    server = ThreadingHTTPServer((HOST, PORT), WriterHandler)
+    server.daemon_threads = True
     print(f"Event writer running at http://{HOST}:{PORT}")
     server.serve_forever()
 
