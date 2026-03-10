@@ -64,6 +64,17 @@ const cache = new Map();
 const levelConversionSnapshotCache = new Map();
 const levelConversionResultCache = new Map();
 const authLoginAttemptState = new Map();
+const authSessionState = new Map();
+const authSuccessClientState = new Map();
+const authAuditState = {
+  successfulLogins: 0,
+  failedLogins: 0,
+  lockoutsStarted: 0,
+  lockoutResponses: 0,
+  lastSuccessAtMs: 0,
+  lastFailureAtMs: 0,
+  lastLockoutAtMs: 0,
+};
 const WRITE_ENDPOINTS = new Set(['/api/ml/reload', '/api/ml/score', '/api/events', '/api/bars']);
 const RESPONSE_SECURITY_HEADERS = Object.freeze({
   'X-Content-Type-Options': 'nosniff',
@@ -182,6 +193,21 @@ function buildSecurityConfig(procEnv = process.env, fileEnv = {}) {
     4096,
     100
   );
+  const authMetricsWindowSec = parsePositiveInt(
+    readSetting(procEnv, fileEnv, 'DASH_AUTH_METRICS_WINDOW_SEC', '86400'),
+    86400,
+    60
+  );
+  const authMetricsMaxTrackedClients = parsePositiveInt(
+    readSetting(
+      procEnv,
+      fileEnv,
+      'DASH_AUTH_METRICS_MAX_TRACKED_CLIENTS',
+      String(authRateLimitMaxTrackedClients)
+    ),
+    authRateLimitMaxTrackedClients,
+    100
+  );
   return {
     authEnabled: authEnabledFlag || authCredentialsConfigured,
     authCredentialsConfigured,
@@ -214,6 +240,8 @@ function buildSecurityConfig(procEnv = process.env, fileEnv = {}) {
     authRateLimitMaxAttempts,
     authRateLimitLockoutSec,
     authRateLimitMaxTrackedClients,
+    authMetricsWindowSec,
+    authMetricsMaxTrackedClients,
   };
 }
 
@@ -311,10 +339,15 @@ function hasValidSession(req) {
   const token = cookies[SECURITY.authCookieName];
   const parts = parseTokenParts(token);
   if (!parts) return false;
-  const now = Math.floor(Date.now() / 1000);
+  const nowMs = Date.now();
+  const now = Math.floor(nowMs / 1000);
   if (parts.exp < now) return false;
   const expectedSig = signPayload(parts.payload, SECURITY.authPassword);
-  return safeEqual(parts.sig, expectedSig);
+  const valid = safeEqual(parts.sig, expectedSig);
+  if (valid) {
+    upsertAuthSession(req, parts, nowMs);
+  }
+  return valid;
 }
 
 function encodeHtml(text) {
@@ -422,6 +455,126 @@ function authClientKey(req) {
   return `ra:${remoteAddress || 'unknown'}`;
 }
 
+function formatIsoMs(value) {
+  if (!Number.isFinite(value) || value <= 0) return null;
+  return new Date(value).toISOString();
+}
+
+function pruneAuthSessionState(nowMs) {
+  for (const [nonce, session] of authSessionState.entries()) {
+    if (session.expiresAtMs <= nowMs) {
+      authSessionState.delete(nonce);
+    }
+  }
+  while (authSessionState.size > SECURITY.authMetricsMaxTrackedClients) {
+    let oldestKey = null;
+    let oldestSeenMs = Number.POSITIVE_INFINITY;
+    for (const [nonce, session] of authSessionState.entries()) {
+      if (session.lastSeenMs < oldestSeenMs) {
+        oldestSeenMs = session.lastSeenMs;
+        oldestKey = nonce;
+      }
+    }
+    if (!oldestKey) break;
+    authSessionState.delete(oldestKey);
+  }
+}
+
+function upsertAuthSession(req, tokenParts, nowMs = Date.now()) {
+  if (!tokenParts?.nonce || !Number.isFinite(tokenParts.exp)) return;
+  const expiresAtMs = tokenParts.exp * 1000;
+  if (expiresAtMs <= nowMs) {
+    authSessionState.delete(tokenParts.nonce);
+    return;
+  }
+  const client = authClientKey(req);
+  const current = authSessionState.get(tokenParts.nonce);
+  if (current) {
+    current.lastSeenMs = nowMs;
+    current.expiresAtMs = expiresAtMs;
+    current.client = client;
+  } else {
+    authSessionState.set(tokenParts.nonce, {
+      createdAtMs: nowMs,
+      lastSeenMs: nowMs,
+      expiresAtMs,
+      client,
+    });
+  }
+  pruneAuthSessionState(nowMs);
+}
+
+function clearAuthSessionForRequest(req) {
+  const cookies = parseCookies(req);
+  const token = cookies[SECURITY.authCookieName];
+  const parts = parseTokenParts(token);
+  if (!parts?.nonce) return;
+  authSessionState.delete(parts.nonce);
+}
+
+function pruneAuthSuccessClientState(nowMs) {
+  const staleAfterMs = SECURITY.authMetricsWindowSec * 1000;
+  for (const [key, lastSuccessMs] of authSuccessClientState.entries()) {
+    if (nowMs - lastSuccessMs > staleAfterMs) {
+      authSuccessClientState.delete(key);
+    }
+  }
+  while (authSuccessClientState.size > SECURITY.authMetricsMaxTrackedClients) {
+    let oldestKey = null;
+    let oldestMs = Number.POSITIVE_INFINITY;
+    for (const [key, seenMs] of authSuccessClientState.entries()) {
+      if (seenMs < oldestMs) {
+        oldestMs = seenMs;
+        oldestKey = key;
+      }
+    }
+    if (!oldestKey) break;
+    authSuccessClientState.delete(oldestKey);
+  }
+}
+
+function recordAuthLoginSuccess(req, tokenParts, nowMs = Date.now()) {
+  authAuditState.successfulLogins += 1;
+  authAuditState.lastSuccessAtMs = nowMs;
+  authSuccessClientState.set(authClientKey(req), nowMs);
+  pruneAuthSuccessClientState(nowMs);
+  upsertAuthSession(req, tokenParts, nowMs);
+}
+
+function recordAuthLoginFailure(nowMs = Date.now()) {
+  authAuditState.failedLogins += 1;
+  authAuditState.lastFailureAtMs = nowMs;
+}
+
+function recordAuthLockoutStart(nowMs = Date.now()) {
+  authAuditState.lockoutsStarted += 1;
+  authAuditState.lastLockoutAtMs = nowMs;
+}
+
+function recordAuthLockoutResponse(nowMs = Date.now()) {
+  authAuditState.lockoutResponses += 1;
+  if (!authAuditState.lastLockoutAtMs) {
+    authAuditState.lastLockoutAtMs = nowMs;
+  }
+}
+
+function getAuthAuditSnapshot(nowMs = Date.now()) {
+  pruneAuthSessionState(nowMs);
+  pruneAuthSuccessClientState(nowMs);
+  return {
+    auth_metrics_window_sec: SECURITY.authMetricsWindowSec,
+    auth_active_session_count: authSessionState.size,
+    auth_unique_success_clients_window: authSuccessClientState.size,
+    auth_login_success_total: authAuditState.successfulLogins,
+    auth_login_failed_total: authAuditState.failedLogins,
+    auth_login_lockouts_started_total: authAuditState.lockoutsStarted,
+    auth_login_lockout_responses_total: authAuditState.lockoutResponses,
+    auth_login_last_success_at: formatIsoMs(authAuditState.lastSuccessAtMs),
+    auth_login_last_failure_at: formatIsoMs(authAuditState.lastFailureAtMs),
+    auth_login_last_lockout_at: formatIsoMs(authAuditState.lastLockoutAtMs),
+  };
+}
+
 function pruneAuthLoginAttemptState(nowMs) {
   if (!SECURITY.authRateLimitEnabled) return;
   const staleAfterMs =
@@ -497,6 +650,7 @@ function getAuthLoginThrottleState(req, nowMs = Date.now()) {
 }
 
 function registerAuthLoginFailure(req, nowMs = Date.now()) {
+  recordAuthLoginFailure(nowMs);
   if (!SECURITY.authRateLimitEnabled) {
     return getAuthLoginThrottleState(req, nowMs);
   }
@@ -520,6 +674,7 @@ function registerAuthLoginFailure(req, nowMs = Date.now()) {
   if (entry.failCount >= SECURITY.authRateLimitMaxAttempts) {
     entry.lockUntilMs = nowMs + SECURITY.authRateLimitLockoutSec * 1000;
     entry.failCount = 0;
+    recordAuthLockoutStart(nowMs);
   }
   authLoginAttemptState.set(key, entry);
   pruneAuthLoginAttemptState(nowMs);
@@ -543,6 +698,7 @@ async function handleAuthRoutes(req, res, url) {
       methodNotAllowed(res, 'POST');
       return true;
     }
+    clearAuthSessionForRequest(req);
     clearSessionCookieHeaders(res, req);
     sendJson(res, 200, { status: 'ok' });
     return true;
@@ -567,6 +723,7 @@ async function handleAuthRoutes(req, res, url) {
     const nextPath = form.next && form.next.startsWith('/') ? form.next : '/';
     const throttleState = getAuthLoginThrottleState(req);
     if (throttleState.locked) {
+      recordAuthLockoutResponse();
       sendLoginPage(
         res,
         nextPath,
@@ -598,6 +755,8 @@ async function handleAuthRoutes(req, res, url) {
     }
     clearAuthLoginFailures(req);
     const token = createSessionToken(SECURITY.authPassword, SECURITY.authCookieTtlSec);
+    const tokenParts = parseTokenParts(token);
+    recordAuthLoginSuccess(req, tokenParts);
     setSessionCookieHeaders(res, req, token);
     res.writeHead(
       302,
@@ -2032,6 +2191,7 @@ const server = http.createServer(async (req, res) => {
   const requestIsLocal = isLoopbackRequest(req);
 
   if (url.pathname === '/health') {
+    const authAudit = getAuthAuditSnapshot();
     sendJson(res, 200, {
       status: 'ok',
       auth_enabled: SECURITY.authEnabled,
@@ -2045,6 +2205,7 @@ const server = http.createServer(async (req, res) => {
       auth_rate_limit_max_attempts: SECURITY.authRateLimitMaxAttempts,
       auth_rate_limit_lockout_sec: SECURITY.authRateLimitLockoutSec,
       write_endpoints_local_only: SECURITY.writeEndpointsLocalOnly,
+      ...authAudit,
     });
     return;
   }
