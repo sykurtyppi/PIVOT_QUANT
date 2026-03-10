@@ -248,6 +248,8 @@ ML_ANALOG_FEATURE_WEIGHTS = {
     "distance_atr_ratio": max(
         0.0, float(os.getenv("ML_ANALOG_W_DISTANCE_ATR_RATIO", "1.2"))
     ),
+    "vwap_side": max(0.0, float(os.getenv("ML_ANALOG_W_VWAP_SIDE", "0.5"))),
+    "ema_stack": max(0.0, float(os.getenv("ML_ANALOG_W_EMA_STACK", "0.5"))),
     "rv_30": max(0.0, float(os.getenv("ML_ANALOG_W_RV_30", "0.8"))),
     "or_size_atr": max(0.0, float(os.getenv("ML_ANALOG_W_OR_SIZE_ATR", "0.7"))),
     "overnight_gap_atr": max(
@@ -362,6 +364,16 @@ def _analog_regime_bucket(regime_type: int | None) -> str:
     return "neutral"
 
 
+def _sign3(value: float | None) -> float | None:
+    if value is None:
+        return None
+    if value > 0:
+        return 1.0
+    if value < 0:
+        return -1.0
+    return 0.0
+
+
 def _weighted_interval(p: float, n_eff: float, z: float = 1.96) -> tuple[float, float, float]:
     if n_eff <= 0:
         return (0.0, 1.0, 1.0)
@@ -408,6 +420,8 @@ class AnalogEngine:
                     te.distance_bps,
                     te.atr,
                     te.touch_price,
+                    te.ema_state,
+                    te.vwap_dist_bps,
                     te.rv_30,
                     te.or_size_atr,
                     te.overnight_gap_atr,
@@ -450,6 +464,8 @@ class AnalogEngine:
                         "gamma_mode": _to_int(row["gamma_mode"]),
                         "distance_bps": distance_bps,
                         "distance_atr_ratio": _to_float(distance_atr_ratio),
+                        "vwap_side": _sign3(_to_float(row["vwap_dist_bps"])),
+                        "ema_stack": _sign3(_to_float(row["ema_state"])),
                         "rv_30": _to_float(row["rv_30"]),
                         "or_size_atr": _to_float(row["or_size_atr"]),
                         "overnight_gap_atr": _to_float(row["overnight_gap_atr"]),
@@ -808,9 +824,17 @@ class AnalogEngine:
             "tod_bucket": features.get("tod_bucket"),
             "regime_bucket": trade_regime or _analog_regime_bucket(_to_int(event.get("regime_type"))),
         }
+        vwap_dist_bps = _to_float(features.get("vwap_dist_bps_calc"))
+        if vwap_dist_bps is None:
+            vwap_dist_bps = _to_float(event.get("vwap_dist_bps"))
+        ema_state = _to_float(features.get("ema_state_calc"))
+        if ema_state is None:
+            ema_state = _to_float(event.get("ema_state"))
         query_features = {
             "distance_bps": _to_float(event.get("distance_bps")),
             "distance_atr_ratio": _to_float(features.get("distance_atr_ratio")),
+            "vwap_side": _sign3(vwap_dist_bps),
+            "ema_stack": _sign3(ema_state),
             "rv_30": _to_float(event.get("rv_30")),
             "or_size_atr": _to_float(event.get("or_size_atr")),
             "overnight_gap_atr": _to_float(event.get("overnight_gap_atr")),
