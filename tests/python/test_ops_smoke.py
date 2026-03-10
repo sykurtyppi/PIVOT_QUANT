@@ -1670,6 +1670,18 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("readTailLinesAsync(REPORT_DELIVERY_LOG_FILE, 200)", query_block)
         self.assertNotIn("readFileSync(", query_block)
 
+    def test_dashboard_proxy_ml_metrics_uses_async_file_reads(self) -> None:
+        proxy_source = (REPO_ROOT / "server" / "yahoo_proxy.js").read_text(encoding="utf-8")
+        metrics_block = proxy_source.split("if (url.pathname === '/api/ml/metrics') {", 1)[1].split(
+            "if (url.pathname === '/api/ml/health')",
+            1,
+        )[0]
+        self.assertIn("await Promise.all([", metrics_block)
+        self.assertIn("readJsonFileAsync(METRICS_FILE)", metrics_block)
+        self.assertIn("readJsonFileAsync(CALIB_FILE)", metrics_block)
+        self.assertNotIn("readJsonFile(METRICS_FILE)", metrics_block)
+        self.assertNotIn("readJsonFile(CALIB_FILE)", metrics_block)
+
     def test_ibkr_bridge_uses_timezone_aware_utc_datetimes(self) -> None:
         source = (REPO_ROOT / "server" / "ibkr_gamma_bridge.py").read_text(encoding="utf-8")
         self.assertNotIn("datetime.utcnow(", source)

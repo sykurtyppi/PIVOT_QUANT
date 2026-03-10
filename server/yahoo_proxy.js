@@ -2591,8 +2591,10 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     try {
-      const metrics = readJsonFile(METRICS_FILE);
-      const calib = readJsonFile(CALIB_FILE);
+      const [metrics, calib] = await Promise.all([
+        readJsonFileAsync(METRICS_FILE),
+        readJsonFileAsync(CALIB_FILE),
+      ]);
       const summary = summarizeMlMetrics(metrics, calib);
       if (summary.status === 'empty') {
         sendJson(res, 404, {
