@@ -88,6 +88,53 @@ const FORM_URLENCODED = 'application/x-www-form-urlencoded';
 const ENV_FILE_VALUES = loadEnvMap(ENV_FILE);
 const SECURITY = buildSecurityConfig(process.env, ENV_FILE_VALUES);
 
+function extractScriptSourcesFromHtml(rawHtml) {
+  if (typeof rawHtml !== 'string' || !rawHtml.length) return [];
+  const scripts = [];
+  const regex = /<script\b[^>]*\bsrc=["']([^"']+)["'][^>]*>/gi;
+  let match = null;
+  while ((match = regex.exec(rawHtml)) !== null) {
+    scripts.push(match[1]);
+  }
+  return scripts;
+}
+
+function buildRuntimeArchitectureSnapshot() {
+  const srcEntrypoint = path.join(ROOT_DIR, 'src', 'index.js');
+  let dashboardScripts = [];
+  let dashboardParseError = null;
+  try {
+    const html = fs.readFileSync(DASHBOARD_FILE, 'utf8');
+    dashboardScripts = extractScriptSourcesFromHtml(html);
+  } catch (error) {
+    dashboardParseError = error?.message || String(error);
+  }
+
+  const usesSrcLibrary = dashboardScripts.some((value) => {
+    const normalized = String(value || '').trim();
+    return normalized.startsWith('./src/')
+      || normalized.startsWith('/src/')
+      || normalized.startsWith('src/');
+  });
+
+  return {
+    runtime_mode: 'dashboard_globals',
+    dashboard_entrypoint: path.relative(ROOT_DIR, DASHBOARD_FILE),
+    dashboard_script_count: dashboardScripts.length,
+    dashboard_uses_src_library: usesSrcLibrary,
+    dashboard_script_samples: dashboardScripts.slice(0, 8),
+    src_library_entrypoint: path.relative(ROOT_DIR, srcEntrypoint),
+    src_library_present: fs.existsSync(srcEntrypoint),
+    parse_error: dashboardParseError,
+    notes: [
+      'Primary production runtime is rooted in production_pivot_dashboard.html and root-level browser modules.',
+      'src/ is maintained as a reusable library surface and validated by CI tests.',
+    ],
+  };
+}
+
+const RUNTIME_ARCHITECTURE = buildRuntimeArchitectureSnapshot();
+
 /**
  * LRU cache eviction: remove expired entries first, then oldest if over limit.
  */
@@ -2408,6 +2455,9 @@ const server = http.createServer(async (req, res) => {
       auth_rate_limit_max_attempts: SECURITY.authRateLimitMaxAttempts,
       auth_rate_limit_lockout_sec: SECURITY.authRateLimitLockoutSec,
       write_endpoints_local_only: SECURITY.writeEndpointsLocalOnly,
+      runtime_architecture_mode: RUNTIME_ARCHITECTURE.runtime_mode,
+      runtime_dashboard_uses_src_library: RUNTIME_ARCHITECTURE.dashboard_uses_src_library,
+      runtime_dashboard_script_count: RUNTIME_ARCHITECTURE.dashboard_script_count,
       ...authAudit,
     });
     return;
@@ -2426,6 +2476,22 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     sendJson(res, 200, buildAuthSessionsSnapshot());
+    return;
+  }
+
+  if (url.pathname === '/api/runtime/architecture') {
+    if (!methodAllowed(req, 'GET')) {
+      methodNotAllowed(res, 'GET');
+      return;
+    }
+    if (!requestIsLocal) {
+      sendJson(res, 403, {
+        error: 'Forbidden',
+        message: 'This endpoint is restricted to local requests.',
+      });
+      return;
+    }
+    sendJson(res, 200, { status: 'ok', ...RUNTIME_ARCHITECTURE });
     return;
   }
 
