@@ -1869,18 +1869,6 @@ def _score_event(event: dict):
             "blended_break_capped": bool(blend_break_capped),
             "disagreement_guard_triggered": bool(guard_triggered),
         }
-        analog_horizons = analog_summary.get("horizons") if isinstance(analog_summary, dict) else None
-        if isinstance(analog_horizons, dict):
-            analog_horizon_payload = analog_horizons.get(str(horizon))
-            if isinstance(analog_horizon_payload, dict):
-                analog_horizon_payload["blend_weight"] = float(weight)
-                analog_horizon_payload["blend_prob_reject"] = blend_reject
-                analog_horizon_payload["blend_prob_break"] = blend_break
-                analog_horizon_payload["blend_shift_reject"] = blend_reject_shift
-                analog_horizon_payload["blend_shift_break"] = blend_break_shift
-                analog_horizon_payload["blend_capped_reject"] = bool(blend_reject_capped)
-                analog_horizon_payload["blend_capped_break"] = bool(blend_break_capped)
-                analog_horizon_payload["disagreement_guard_triggered"] = bool(guard_triggered)
 
         if ML_ANALOG_BLEND_MODE == "active" and weight > 0:
             applied_any = False
@@ -1909,6 +1897,35 @@ def _score_event(event: dict):
                 cast_applied = blend_info.get("applied_horizons")
                 if isinstance(cast_applied, list) and horizon not in cast_applied:
                     cast_applied.append(horizon)
+
+        analog_horizons = analog_summary.get("horizons") if isinstance(analog_summary, dict) else None
+        if isinstance(analog_horizons, dict):
+            analog_horizon_payload = analog_horizons.get(str(horizon))
+            if isinstance(analog_horizon_payload, dict):
+                horizon_blend_payload = blend_info["horizons"].get(str(horizon), {})
+                analog_horizon_payload["blend_weight"] = float(weight)
+                analog_horizon_payload["blend_prob_reject"] = blend_reject
+                analog_horizon_payload["blend_prob_break"] = blend_break
+                analog_horizon_payload["blend_shift_reject"] = blend_reject_shift
+                analog_horizon_payload["blend_shift_break"] = blend_break_shift
+                analog_horizon_payload["blend_capped_reject"] = bool(blend_reject_capped)
+                analog_horizon_payload["blend_capped_break"] = bool(blend_break_capped)
+                analog_horizon_payload["blend_allow_reject"] = bool(
+                    horizon_blend_payload.get("allow_reject")
+                )
+                analog_horizon_payload["blend_allow_break"] = bool(
+                    horizon_blend_payload.get("allow_break")
+                )
+                analog_horizon_payload["blend_applied_reject"] = bool(
+                    horizon_blend_payload.get("applied_reject")
+                )
+                analog_horizon_payload["blend_applied_break"] = bool(
+                    horizon_blend_payload.get("applied_break")
+                )
+                analog_horizon_payload["blend_applied"] = bool(
+                    horizon_blend_payload.get("applied")
+                )
+                analog_horizon_payload["disagreement_guard_triggered"] = bool(guard_triggered)
 
     applied_horizons = blend_info.get("applied_horizons")
     if (

@@ -2308,6 +2308,9 @@ class OpsSmokeTests(unittest.TestCase):
         horizon_payload = result["analog_blend"]["horizons"]["5"]
         self.assertTrue(bool(horizon_payload.get("applied_reject")))
         self.assertFalse(bool(horizon_payload.get("applied_break")))
+        analog_horizon_payload = (((result.get("analogs") or {}).get("horizons") or {}).get("5")) or {}
+        self.assertTrue(bool(analog_horizon_payload.get("blend_applied_reject")))
+        self.assertFalse(bool(analog_horizon_payload.get("blend_applied_break")))
 
     def test_analog_blend_shift_cap_limits_probability_move(self) -> None:
         ml_server = load_module("ml_server_analog_blend_shift_cap_runtime", REPO_ROOT / "server" / "ml_server.py")
@@ -2907,6 +2910,60 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIsNotNone(s.model_reject_brier_matched)
         # If row-level post-blend probs (0.5/0.5) were used this would be 0.25.
         self.assertLess(float(s.model_reject_brier_matched or 1.0), 0.05)
+
+    def test_report_analog_shadow_blend_eval_respects_target_applied_flags(self) -> None:
+        report = load_module(
+            "pq_daily_report_analog_blend_applied_flags_test",
+            REPO_ROOT / "scripts" / "generate_daily_ml_report.py",
+        )
+        records = []
+        rows = [
+            # event_id, actual_break, model_break, synthetic_blend_break
+            ("b1", 0, 0.1, 0.9),
+            ("b2", 1, 0.9, 0.1),
+        ]
+        for event_id, actual_break, model_break, synthetic_blend_break in rows:
+            records.append(
+                {
+                    "event_id": event_id,
+                    "horizon_min": 5,
+                    "actual_reject": 1 - actual_break,
+                    "actual_break": actual_break,
+                    "prob_reject_5m": 1.0 - model_break,
+                    "prob_break_5m": model_break,
+                    "analog_json": json.dumps(
+                        {
+                            "horizons": {
+                                "5": {
+                                    "status": "ok",
+                                    "model_reject": 1.0 - model_break,
+                                    "model_break": model_break,
+                                    "reject_prob": 1.0 - synthetic_blend_break,
+                                    "break_prob": synthetic_blend_break,
+                                    "blend_prob_reject": 1.0 - synthetic_blend_break,
+                                    "blend_prob_break": synthetic_blend_break,
+                                    "blend_applied_reject": True,
+                                    "blend_applied_break": False,
+                                    "n": 20,
+                                    "n_eff": 12,
+                                    "reject_ci_width": 0.10,
+                                    "break_ci_width": 0.12,
+                                    "disagreement": 0.05,
+                                }
+                            }
+                        }
+                    ),
+                }
+            )
+
+        summaries = report.compute_analog_shadow_summaries(records, [5], eval_mode="blend")
+        self.assertEqual(len(summaries), 1)
+        s = summaries[0]
+        # Break blend is blocked by blend_applied_break=False, so blend should match model baseline.
+        self.assertIsNotNone(s.break_brier_delta_blend)
+        self.assertIsNotNone(s.break_ece_delta_blend)
+        self.assertAlmostEqual(float(s.break_brier_delta_blend), 0.0, places=9)
+        self.assertAlmostEqual(float(s.break_ece_delta_blend), 0.0, places=9)
 
     def test_report_analog_promotion_gate_evaluates_thresholds(self) -> None:
         report = load_module(

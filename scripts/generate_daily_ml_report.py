@@ -359,6 +359,20 @@ def _extract_analog_prob(horizon_payload: dict[str, Any], target: str) -> float 
     return prob
 
 
+def _to_bool_or_none(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return None
+
+
 def roc_auc_binary(y_true: list[int], probs: list[float]) -> float | None:
     if not y_true:
         return None
@@ -998,6 +1012,14 @@ def compute_analog_shadow_summaries(
                 candidate = horizon_map.get(str(horizon))
                 if isinstance(candidate, dict):
                     horizon_payload = candidate
+            blend_horizon_payload: dict[str, Any] = {}
+            blend_payload = payload.get("blend")
+            if isinstance(blend_payload, dict):
+                blend_horizons = blend_payload.get("horizons")
+                if isinstance(blend_horizons, dict):
+                    blend_candidate = blend_horizons.get(str(horizon))
+                    if isinstance(blend_candidate, dict):
+                        blend_horizon_payload = blend_candidate
             if not horizon_payload:
                 continue
 
@@ -1047,6 +1069,12 @@ def compute_analog_shadow_summaries(
             )
             blend_reject = horizon_payload.get("blend_prob_reject")
             blend_break = horizon_payload.get("blend_prob_break")
+            blend_applied_reject = _to_bool_or_none(horizon_payload.get("blend_applied_reject"))
+            if blend_applied_reject is None:
+                blend_applied_reject = _to_bool_or_none(blend_horizon_payload.get("applied_reject"))
+            blend_applied_break = _to_bool_or_none(horizon_payload.get("blend_applied_break"))
+            if blend_applied_break is None:
+                blend_applied_break = _to_bool_or_none(blend_horizon_payload.get("applied_break"))
             if not isinstance(blend_reject, (int, float)):
                 if (
                     status == "ok"
@@ -1065,6 +1093,13 @@ def compute_analog_shadow_summaries(
                     blend_break = (1.0 - blend_weight) * pb_model_f + blend_weight * pb_analog
                 else:
                     blend_break = None
+
+            # In partial blend modes, a target can be intentionally blocked. Treat those rows
+            # as model-baseline for gate evaluation (actual deployed behavior), not synthetic blend.
+            if blend_applied_reject is False and pr_model_f is not None:
+                blend_reject = pr_model_f
+            if blend_applied_break is False and pb_model_f is not None:
+                blend_break = pb_model_f
 
             if pr_model_f is not None and pr_analog is not None and ar in (0, 1):
                 model_reject_prob.append(pr_model_f)
