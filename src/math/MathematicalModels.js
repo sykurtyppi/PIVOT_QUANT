@@ -577,12 +577,46 @@ export class MathematicalModels {
     /**
      * Calculate level correlations
      */
-    calculateLevelCorrelations(_levels) {
-        // Simplified implementation
+    calculateLevelCorrelations(levels) {
+        if (!levels || typeof levels !== 'object') {
+            return { pearson: 0, spearman: 0, kendall: 0 };
+        }
+
+        const methodMaps = Object.entries(levels)
+            .map(([method, methodLevels]) => ({
+                method,
+                values: this._extractNumericLevelMap(methodLevels)
+            }))
+            .filter(({ values }) => Object.keys(values).length >= 2);
+
+        if (methodMaps.length < 2) {
+            return { pearson: 0, spearman: 0, kendall: 0 };
+        }
+
+        const pairwise = [];
+        for (let i = 0; i < methodMaps.length - 1; i++) {
+            for (let j = i + 1; j < methodMaps.length; j++) {
+                const aligned = this._alignLevelVectors(methodMaps[i].values, methodMaps[j].values);
+                if (aligned.x.length < 2) continue;
+                pairwise.push({
+                    pearson: this._calculatePearsonCorrelation(aligned.x, aligned.y),
+                    spearman: this._calculateSpearmanCorrelation(aligned.x, aligned.y),
+                    kendall: this._calculateKendallTau(aligned.x, aligned.y)
+                });
+            }
+        }
+
+        if (pairwise.length === 0) {
+            return { pearson: 0, spearman: 0, kendall: 0 };
+        }
+
+        const avg = (key) =>
+            pairwise.reduce((sum, row) => sum + (row[key] ?? 0), 0) / pairwise.length;
+
         return {
-            pearson: 0.85,
-            spearman: 0.82,
-            kendall: 0.73
+            pearson: this._roundToPrecision(avg('pearson'), 4),
+            spearman: this._roundToPrecision(avg('spearman'), 4),
+            kendall: this._roundToPrecision(avg('kendall'), 4)
         };
     }
 
@@ -997,12 +1031,14 @@ export class MathematicalModels {
         // Simplified confidence interval calculation
         const prices = ohlcData.map(bar => bar.close);
         const stdDev = Math.sqrt(this._calculateVariance(prices));
-        const margin = stdDev * 1.96; // 95% confidence
+        const boundedConfidence = Math.min(0.999, Math.max(0.5, confidence));
+        const z = this._normalInverse((1 + boundedConfidence) / 2);
+        const margin = stdDev * z;
 
         return {
             lower: this._roundToPrecision(levelValue - margin, 4),
             upper: this._roundToPrecision(levelValue + margin, 4),
-            confidence: confidence
+            confidence: boundedConfidence
         };
     }
 
@@ -1020,15 +1056,55 @@ export class MathematicalModels {
     /**
      * Calculate level accuracy
      */
-    calculateLevelAccuracy(_ohlcData, _levels) {
-        // Simplified accuracy calculation
-        return {
-            overall: 0.75,
-            byMethod: {
-                standard: 0.78,
-                fibonacci: 0.72,
-                camarilla: 0.68
+    calculateLevelAccuracy(ohlcData, levels) {
+        if (!Array.isArray(ohlcData) || ohlcData.length === 0 || !levels || typeof levels !== 'object') {
+            return { overall: 0, byMethod: {} };
+        }
+
+        const rangePcts = ohlcData
+            .map(bar => {
+                const close = Math.abs(bar?.close || 0);
+                if (!Number.isFinite(bar?.high) || !Number.isFinite(bar?.low) || close <= 0) {
+                    return null;
+                }
+                return (bar.high - bar.low) / close;
+            })
+            .filter(value => Number.isFinite(value) && value >= 0);
+
+        const avgRangePct = rangePcts.length ? this._calculateMean(rangePcts) : 0.01;
+        const tolerancePct = Math.min(0.03, Math.max(0.001, avgRangePct * 0.5));
+        const byMethod = {};
+
+        for (const [method, methodLevels] of Object.entries(levels)) {
+            const levelValues = Object.values(this._extractNumericLevelMap(methodLevels));
+            if (levelValues.length === 0) {
+                byMethod[method] = 0;
+                continue;
             }
+
+            let hits = 0;
+            for (const bar of ohlcData) {
+                const close = Number(bar?.close);
+                if (!Number.isFinite(close)) continue;
+                const hasHit = levelValues.some(level => {
+                    const denom = Math.max(Math.abs(level), 1e-9);
+                    return Math.abs(close - level) / denom <= tolerancePct;
+                });
+                if (hasHit) hits += 1;
+            }
+
+            const accuracy = hits / ohlcData.length;
+            byMethod[method] = this._roundToPrecision(Math.min(Math.max(accuracy, 0), 1), 4);
+        }
+
+        const methodAccuracies = Object.values(byMethod);
+        const overall = methodAccuracies.length
+            ? methodAccuracies.reduce((sum, value) => sum + value, 0) / methodAccuracies.length
+            : 0;
+
+        return {
+            overall: this._roundToPrecision(Math.min(Math.max(overall, 0), 1), 4),
+            byMethod
         };
     }
 
@@ -1106,17 +1182,241 @@ export class MathematicalModels {
         return this._roundToPrecision(Math.min(Math.max(betaEstimate, 0.1), 3.0), 4);
     }
 
-    // Placeholder methods for complex calculations (would be fully implemented)
-    _calculateVolumeProfile(_ohlcData) { return {}; }
-    _calculatePriceDistribution(_ohlcData) { return {}; }
-    _interpolateVolumeAtPrice(_profile, _price) { return 0; }
-    _interpolateDensityAtPrice(_distribution, _price) { return 0; }
+    _extractNumericLevelMap(methodLevels) {
+        const values = {};
+        if (!methodLevels || typeof methodLevels !== 'object') return values;
+        for (const [key, value] of Object.entries(methodLevels)) {
+            if (key === 'metadata') continue;
+            if (Number.isFinite(value)) {
+                values[key] = Number(value);
+            }
+        }
+        return values;
+    }
+
+    _alignLevelVectors(leftMap, rightMap) {
+        const keys = Object.keys(leftMap).filter(key => Number.isFinite(rightMap[key]));
+        return {
+            x: keys.map(key => leftMap[key]),
+            y: keys.map(key => rightMap[key])
+        };
+    }
+
+    _calculatePearsonCorrelation(x, y) {
+        if (!Array.isArray(x) || !Array.isArray(y) || x.length !== y.length || x.length < 2) {
+            return 0;
+        }
+        const meanX = this._calculateMean(x);
+        const meanY = this._calculateMean(y);
+        let numerator = 0;
+        let denomX = 0;
+        let denomY = 0;
+        for (let i = 0; i < x.length; i++) {
+            const dx = x[i] - meanX;
+            const dy = y[i] - meanY;
+            numerator += dx * dy;
+            denomX += dx * dx;
+            denomY += dy * dy;
+        }
+        const denom = Math.sqrt(denomX * denomY);
+        if (!Number.isFinite(denom) || denom <= 0) return 0;
+        const corr = numerator / denom;
+        return Math.min(1, Math.max(-1, corr));
+    }
+
+    _rankArray(values) {
+        const pairs = values.map((value, index) => ({ value, index })).sort((a, b) => a.value - b.value);
+        const ranks = new Array(values.length).fill(0);
+        let i = 0;
+        while (i < pairs.length) {
+            let j = i + 1;
+            while (j < pairs.length && pairs[j].value === pairs[i].value) {
+                j++;
+            }
+            const rank = (i + j - 1) / 2 + 1;
+            for (let k = i; k < j; k++) {
+                ranks[pairs[k].index] = rank;
+            }
+            i = j;
+        }
+        return ranks;
+    }
+
+    _calculateSpearmanCorrelation(x, y) {
+        if (!Array.isArray(x) || !Array.isArray(y) || x.length !== y.length || x.length < 2) {
+            return 0;
+        }
+        const rankX = this._rankArray(x);
+        const rankY = this._rankArray(y);
+        return this._calculatePearsonCorrelation(rankX, rankY);
+    }
+
+    _calculateKendallTau(x, y) {
+        if (!Array.isArray(x) || !Array.isArray(y) || x.length !== y.length || x.length < 2) {
+            return 0;
+        }
+        let concordant = 0;
+        let discordant = 0;
+        for (let i = 0; i < x.length - 1; i++) {
+            for (let j = i + 1; j < x.length; j++) {
+                const dx = x[i] - x[j];
+                const dy = y[i] - y[j];
+                if (dx === 0 || dy === 0) continue;
+                if (dx * dy > 0) concordant += 1;
+                else discordant += 1;
+            }
+        }
+        const denom = concordant + discordant;
+        if (denom === 0) return 0;
+        const tau = (concordant - discordant) / denom;
+        return Math.min(1, Math.max(-1, tau));
+    }
+
+    _calculateVolumeProfile(ohlcData) {
+        if (!Array.isArray(ohlcData) || ohlcData.length === 0) return {};
+        const profile = {};
+        for (const bar of ohlcData) {
+            const close = Number(bar?.close);
+            if (!Number.isFinite(close)) continue;
+            const volume = Number.isFinite(bar?.volume) ? Number(bar.volume) : 1;
+            const bucket = this._roundToPrecision(close, 2).toFixed(2);
+            profile[bucket] = (profile[bucket] || 0) + volume;
+        }
+        return profile;
+    }
+
+    _calculatePriceDistribution(ohlcData) {
+        if (!Array.isArray(ohlcData) || ohlcData.length === 0) {
+            return { mean: 0, stdDev: 0, min: 0, max: 0 };
+        }
+        const prices = ohlcData
+            .map(bar => Number(bar?.close))
+            .filter(value => Number.isFinite(value));
+        if (prices.length === 0) {
+            return { mean: 0, stdDev: 0, min: 0, max: 0 };
+        }
+        const mean = this._calculateMean(prices);
+        const stdDev = Math.sqrt(this._calculateVariance(prices));
+        return {
+            mean,
+            stdDev,
+            min: Math.min(...prices),
+            max: Math.max(...prices)
+        };
+    }
+
+    _interpolateVolumeAtPrice(profile, price) {
+        if (!profile || typeof profile !== 'object' || !Number.isFinite(price)) return 0;
+        const target = this._roundToPrecision(price, 2).toFixed(2);
+        if (Number.isFinite(profile[target])) return profile[target];
+
+        let nearestKey = null;
+        let nearestDist = Number.POSITIVE_INFINITY;
+        for (const key of Object.keys(profile)) {
+            const keyPrice = Number(key);
+            if (!Number.isFinite(keyPrice)) continue;
+            const dist = Math.abs(keyPrice - price);
+            if (dist < nearestDist) {
+                nearestDist = dist;
+                nearestKey = key;
+            }
+        }
+        return nearestKey ? Number(profile[nearestKey]) || 0 : 0;
+    }
+
+    _interpolateDensityAtPrice(distribution, price) {
+        const mean = Number(distribution?.mean);
+        const stdDev = Number(distribution?.stdDev);
+        if (!Number.isFinite(price) || !Number.isFinite(mean)) return 0;
+        if (!Number.isFinite(stdDev) || stdDev <= 0) return 1;
+        const z = (price - mean) / stdDev;
+        const density = Math.exp(-0.5 * z * z) / (stdDev * Math.sqrt(2 * Math.PI));
+        return Number.isFinite(density) ? density : 0;
+    }
+
     _calculateGammaScore(volume, density) { return volume * density; }
     _classifyGammaLevel(score) { return score > 0.5 ? 'HIGH' : 'LOW'; }
-    _analyzeGammaDistribution(_levels) { return {}; }
-    _performLevelSignificanceTest(_ohlcData, _level, _alpha, _testType, minSample) {
-        return { pValue: 0.05, testStatistic: 0, confidenceInterval: [0, 1], effectSize: 0, sampleSize: minSample };
+    _analyzeGammaDistribution(levels) {
+        if (!Array.isArray(levels) || levels.length === 0) {
+            return { total: 0, high: 0, low: 0, average: 0 };
+        }
+        const high = levels.filter(level => level.classification === 'HIGH').length;
+        const low = levels.length - high;
+        const average =
+            levels.reduce((sum, level) => sum + (Number(level.gammaScore) || 0), 0) / levels.length;
+        return {
+            total: levels.length,
+            high,
+            low,
+            average: this._roundToPrecision(average, 4)
+        };
     }
-    _calculateVolatilityOfVolatility(_ohlcData) { return 0.1; }
-    _calculateRegimeConfidence(_vol, _percentiles) { return 0.8; }
+
+    _performLevelSignificanceTest(ohlcData, level, _alpha, _testType, minSample) {
+        const closes = Array.isArray(ohlcData)
+            ? ohlcData
+                .map(bar => Number(bar?.close))
+                .filter(value => Number.isFinite(value))
+            : [];
+
+        if (closes.length < minSample || !Number.isFinite(level) || level === 0) {
+            return {
+                pValue: 1,
+                testStatistic: 0,
+                confidenceInterval: [0, 1],
+                effectSize: 0,
+                sampleSize: closes.length
+            };
+        }
+
+        const tolerance = Math.max(Math.abs(level) * 0.01, 1e-6);
+        const hits = closes.filter(price => Math.abs(price - level) <= tolerance).length;
+        const sampleSize = closes.length;
+        const pHat = hits / sampleSize;
+        const p0 = 0.5;
+        const se = Math.sqrt((p0 * (1 - p0)) / sampleSize);
+        const z = se > 0 ? (pHat - p0) / se : 0;
+        const pValue = Math.max(0, Math.min(1, 2 * (1 - this._normalCDF(Math.abs(z)))));
+        const ciHalfWidth = 1.96 * Math.sqrt((pHat * (1 - pHat)) / sampleSize);
+
+        return {
+            pValue: this._roundToPrecision(pValue, 6),
+            testStatistic: this._roundToPrecision(z, 4),
+            confidenceInterval: [
+                this._roundToPrecision(Math.max(0, pHat - ciHalfWidth), 4),
+                this._roundToPrecision(Math.min(1, pHat + ciHalfWidth), 4)
+            ],
+            effectSize: this._roundToPrecision(pHat - p0, 4),
+            sampleSize
+        };
+    }
+
+    _calculateVolatilityOfVolatility(ohlcData) {
+        if (!Array.isArray(ohlcData) || ohlcData.length < 4) return 0;
+        const returns = this._calculateReturns(ohlcData);
+        if (returns.length < 2) return 0;
+
+        const rollingWindow = Math.min(10, Math.max(3, Math.floor(returns.length / 4)));
+        const rollingVols = [];
+        for (let i = rollingWindow; i <= returns.length; i++) {
+            const window = returns.slice(i - rollingWindow, i);
+            const variance = this._calculateVariance(window);
+            rollingVols.push(Math.sqrt(Math.max(0, variance)));
+        }
+        if (rollingVols.length < 2) return 0;
+        return this._roundToPrecision(Math.sqrt(this._calculateVariance(rollingVols)), 6);
+    }
+
+    _calculateRegimeConfidence(vol, percentiles) {
+        if (!Number.isFinite(vol) || !Array.isArray(percentiles) || percentiles.length < 3) {
+            return 0;
+        }
+        const p25 = percentiles[0];
+        const p75 = percentiles[2];
+        const iqr = Math.max(p75 - p25, 1e-9);
+        const distanceToBoundary = vol <= p25 ? p25 - vol : vol >= p75 ? vol - p75 : 0;
+        const normalizedDistance = Math.min(distanceToBoundary / iqr, 1);
+        const confidence = 0.5 + normalizedDistance * 0.5;
+        return this._roundToPrecision(confidence, 4);
+    }
 }

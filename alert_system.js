@@ -12,6 +12,8 @@ class ProfessionalAlertSystem {
         this.browserNotifications = false;
         this.emailAlerts = false;
         this.discordWebhook = null;
+        this.lastObservedPrice = null;
+        this.previousObservedPrice = null;
 
         // Alert types
         this.alertTypes = {
@@ -717,15 +719,20 @@ class ProfessionalAlertSystem {
         if (!window.enhancedDataFetcher) return;
 
         const currentPrice = this.getCurrentPrice();
-        if (!currentPrice) return;
+        if (!Number.isFinite(currentPrice)) return;
+
+        const previousPrice = this.getPreviousPrice();
 
         this.alerts.forEach(alert => {
             if (!alert.active) return;
-            this.checkAlert(alert, currentPrice);
+            this.checkAlert(alert, currentPrice, previousPrice);
         });
+
+        this.previousObservedPrice = this.lastObservedPrice;
+        this.lastObservedPrice = currentPrice;
     }
 
-    checkAlert(alert, currentPrice) {
+    checkAlert(alert, currentPrice, previousPrice) {
         const tolerance = alert.tolerance || 0.5;
         const level = alert.level;
         const condition = alert.condition;
@@ -743,12 +750,14 @@ class ProfessionalAlertSystem {
                 triggered = currentPrice < level - tolerance;
                 break;
             case 'cross_up':
-                const prevPrice = this.getPreviousPrice();
-                triggered = prevPrice <= level && currentPrice > level;
+                triggered = Number.isFinite(previousPrice)
+                    && previousPrice <= level
+                    && currentPrice > level;
                 break;
             case 'cross_down':
-                const prevPrice2 = this.getPreviousPrice();
-                triggered = prevPrice2 >= level && currentPrice < level;
+                triggered = Number.isFinite(previousPrice)
+                    && previousPrice >= level
+                    && currentPrice < level;
                 break;
         }
 
@@ -837,8 +846,31 @@ class ProfessionalAlertSystem {
     }
 
     getPreviousPrice() {
-        // This would need historical price tracking
-        return null;
+        return Number.isFinite(this.previousObservedPrice) ? this.previousObservedPrice : null;
+    }
+
+    escapeHtml(value) {
+        const raw = value == null ? '' : String(value);
+        return raw
+            .replaceAll('&', '&amp;')
+            .replaceAll('<', '&lt;')
+            .replaceAll('>', '&gt;')
+            .replaceAll('"', '&quot;')
+            .replaceAll("'", '&#39;');
+    }
+
+    formatDateForDisplay(value) {
+        if (value instanceof Date) {
+            return value.toLocaleString();
+        }
+        if (value == null) {
+            return 'N/A';
+        }
+        const parsed = new Date(value);
+        if (Number.isNaN(parsed.getTime())) {
+            return 'N/A';
+        }
+        return parsed.toLocaleString();
     }
 
     playAlertSound(type) {
@@ -914,30 +946,46 @@ class ProfessionalAlertSystem {
         if (!listEl) return;
 
         const alertsArray = Array.from(this.alerts.values()).sort((a, b) => b.created - a.created);
+        if (!alertsArray.length) {
+            listEl.innerHTML = '<div style="text-align: center; color: var(--text-secondary); padding: 40px;">No alerts created yet.</div>';
+            return;
+        }
 
-        listEl.innerHTML = alertsArray.length ? alertsArray.map(alert => `
-            <div class="alert-item ${alert.active ? '' : 'inactive'}">
-                <div class="alert-item-info">
-                    <div class="alert-item-title">
-                        ${alert.type} - ${alert.asset} @ ${alert.level.toFixed(2)}
+        listEl.innerHTML = alertsArray.map(alert => {
+            const typeText = this.escapeHtml(alert.type);
+            const assetText = this.escapeHtml(alert.asset);
+            const levelText = Number.isFinite(alert.level) ? alert.level.toFixed(2) : 'N/A';
+            const levelSafe = this.escapeHtml(levelText);
+            const conditionText = this.escapeHtml(alert.condition);
+            const createdText = this.escapeHtml(this.formatDateForDisplay(alert.created));
+            const triggeredText = alert.triggered
+                ? ` • Triggered: ${this.escapeHtml(this.formatDateForDisplay(alert.triggered))}`
+                : '';
+            const toggleLabel = alert.active ? 'Pause' : 'Resume';
+
+            return `
+                <div class="alert-item ${alert.active ? '' : 'inactive'}">
+                    <div class="alert-item-info">
+                        <div class="alert-item-title">
+                            ${typeText} - ${assetText} @ ${levelSafe}
+                        </div>
+                        <div class="alert-item-details">
+                            ${conditionText} • Created: ${createdText}${triggeredText}
+                        </div>
                     </div>
-                    <div class="alert-item-details">
-                        ${alert.condition} • Created: ${alert.created.toLocaleString()}
-                        ${alert.triggered ? ` • Triggered: ${alert.triggered.toLocaleString()}` : ''}
+                    <div class="alert-item-actions">
+                        <button class="alert-btn small ${alert.active ? 'secondary' : ''}"
+                                onclick="window.alertSystem.toggleAlert('${alert.id}')">
+                            ${toggleLabel}
+                        </button>
+                        <button class="alert-btn small danger"
+                                onclick="window.alertSystem.removeAlert('${alert.id}')">
+                            Delete
+                        </button>
                     </div>
                 </div>
-                <div class="alert-item-actions">
-                    <button class="alert-btn small ${alert.active ? 'secondary' : ''}"
-                            onclick="window.alertSystem.toggleAlert('${alert.id}')">
-                        ${alert.active ? 'Pause' : 'Resume'}
-                    </button>
-                    <button class="alert-btn small danger"
-                            onclick="window.alertSystem.removeAlert('${alert.id}')">
-                        Delete
-                    </button>
-                </div>
-            </div>
-        `).join('') : '<div style="text-align: center; color: var(--text-secondary); padding: 40px;">No alerts created yet.</div>';
+            `;
+        }).join('');
     }
 
     updateAlertHistory() {
@@ -945,20 +993,32 @@ class ProfessionalAlertSystem {
         if (!historyEl) return;
 
         const recentHistory = this.alertHistory.slice(0, 50);
+        if (!recentHistory.length) {
+            historyEl.innerHTML = '<div style="text-align: center; color: var(--text-secondary); padding: 40px;">No alert history.</div>';
+            return;
+        }
 
-        historyEl.innerHTML = recentHistory.length ? recentHistory.map(alert => `
-            <div class="alert-history-item">
-                <div>
-                    <div style="color: var(--text-primary); font-weight: 500;">
-                        ${alert.type} - ${alert.asset} @ ${alert.level.toFixed(2)}
+        historyEl.innerHTML = recentHistory.map(alert => {
+            const typeText = this.escapeHtml(alert.type);
+            const assetText = this.escapeHtml(alert.asset);
+            const levelText = Number.isFinite(alert.level) ? alert.level.toFixed(2) : 'N/A';
+            const triggerPriceText = Number.isFinite(alert.triggerPrice) ? alert.triggerPrice.toFixed(2) : 'N/A';
+            const timestampText = this.escapeHtml(this.formatDateForDisplay(alert.timestamp));
+
+            return `
+                <div class="alert-history-item">
+                    <div>
+                        <div style="color: var(--text-primary); font-weight: 500;">
+                            ${typeText} - ${assetText} @ ${this.escapeHtml(levelText)}
+                        </div>
+                        <div style="color: var(--text-secondary); font-size: 13px;">
+                            ${timestampText} • Price: ${this.escapeHtml(triggerPriceText)}
+                        </div>
                     </div>
-                    <div style="color: var(--text-secondary); font-size: 13px;">
-                        ${alert.timestamp.toLocaleString()} • Price: ${alert.triggerPrice?.toFixed(2) || 'N/A'}
-                    </div>
+                    <div class="alert-status-triggered">✓ Triggered</div>
                 </div>
-                <div class="alert-status-triggered">✓ Triggered</div>
-            </div>
-        `).join('') : '<div style="text-align: center; color: var(--text-secondary); padding: 40px;">No alert history.</div>';
+            `;
+        }).join('');
     }
 
     saveSettings() {

@@ -4,11 +4,55 @@
  */
 
 window.EnhancedPivotDisplay = (() => {
+    function resolveEnhancedFDRCorrectionEngine() {
+        const engine = window.EnhancedFDRCorrection;
+        if (!engine) return null;
+        if (typeof engine.analyzePivotSignificanceEnhanced !== 'function') return null;
+        return engine;
+    }
+
+    function buildFallbackFdrResults(pivotStats, regime, timeframe, options) {
+        const levelKeys = ['R3', 'R2', 'R1', 'PIVOT', 'S1', 'S2', 'S3'];
+        const levels = {};
+        levelKeys.forEach(level => {
+            const stats = pivotStats?.[level] || {};
+            const trials = Number.isFinite(stats.trials) ? stats.trials : 0;
+            const successes = Number.isFinite(stats.successes) ? stats.successes : 0;
+            const successRate = trials > 0 ? (successes / trials) * 100 : 0;
+            levels[level] = {
+                successRate,
+                successes,
+                trials,
+                baseline: 50,
+                lift: successRate - 50,
+                nEffective: trials,
+                hasSufficientData: false,
+                significant: false,
+                confidenceInterval: { lower: 0, upper: 100 },
+                pValue: null,
+                qValue: null,
+                permutationPValue: null
+            };
+        });
+        return {
+            levels,
+            summary: {
+                regime,
+                timeframe,
+                significantLevels: 0,
+                validLevels: 0,
+                insufficientDataLevels: levelKeys.length,
+                totalLevels: levelKeys.length,
+                testType: options?.oneSided ? 'one-sided' : 'two-sided',
+                fdrLevel: Number.isFinite(options?.alpha) ? options.alpha : 0.05
+            }
+        };
+    }
 
     /**
      * Create enhanced Level Reliability table with Significance column
      */
-    function createEnhancedLevelReliabilityTable(fdrResults, regime, timeframe, debugMode = false) {
+    function createEnhancedLevelReliabilityTable(fdrResults, regime, timeframe, debugMode = false, fdrEngine = null) {
         const table = document.createElement('table');
         table.className = 'level-reliability-table enhanced';
 
@@ -100,8 +144,12 @@ window.EnhancedPivotDisplay = (() => {
                 sigCell.innerHTML = `<span class="${markClass}">${mark}</span>`;
 
                 // Add comprehensive tooltip
-                const tooltip = window.EnhancedFDRCorrection.generateTooltip(level, result, debugMode);
-                sigCell.title = tooltip;
+                if (fdrEngine && typeof fdrEngine.generateTooltip === 'function') {
+                    const tooltip = fdrEngine.generateTooltip(level, result, debugMode);
+                    sigCell.title = tooltip;
+                } else {
+                    sigCell.title = 'Enhanced FDR engine unavailable';
+                }
             }
             row.appendChild(sigCell);
 
@@ -492,9 +540,14 @@ window.EnhancedPivotDisplay = (() => {
         const finalOptions = { ...defaultOptions, ...options };
 
         // Perform FDR analysis
-        const fdrResults = window.EnhancedFDRCorrection.analyzePivotSignificanceEnhanced(
-            pivotStats, regime, timeframe, finalOptions
-        );
+        const fdrEngine = resolveEnhancedFDRCorrectionEngine();
+        if (!fdrEngine) {
+            /* eslint-disable-next-line no-console */
+            console.warn('[EnhancedPivotDisplay] EnhancedFDRCorrection engine unavailable; rendering fallback view.');
+        }
+        const fdrResults = fdrEngine
+            ? fdrEngine.analyzePivotSignificanceEnhanced(pivotStats, regime, timeframe, finalOptions)
+            : buildFallbackFdrResults(pivotStats, regime, timeframe, finalOptions);
 
         // Create container
         const container = document.createElement('div');
@@ -519,7 +572,9 @@ window.EnhancedPivotDisplay = (() => {
 
         // Add components
         container.appendChild(createSummaryPanel(fdrResults));
-        container.appendChild(createEnhancedLevelReliabilityTable(fdrResults, regime, timeframe, finalOptions.debugMode));
+        container.appendChild(
+            createEnhancedLevelReliabilityTable(fdrResults, regime, timeframe, finalOptions.debugMode, fdrEngine)
+        );
         container.appendChild(createLegendAndControls(fdrResults, finalOptions.debugMode, handleToggle));
 
         return container;

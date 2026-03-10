@@ -1290,6 +1290,162 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("this.config.logging.level <= 2", index_source)
         self.assertNotIn("this.config.logging.level >= 2", index_source)
 
+    def test_backtest_sharpe_uses_period_returns_not_cumulative(self) -> None:
+        if shutil.which("node") is None:
+            self.skipTest("node is not available in PATH")
+
+        node_script = textwrap.dedent(
+            """
+            import QuantPivot from './src/index.js';
+
+            const trades = [
+              { type: 'buy', price: 10, size: 1 },
+              { type: 'sell', price: 11, size: 1 },
+            ];
+            const perf = QuantPivot.prototype._calculateBacktestPerformance.call(
+              {},
+              trades,
+              100,
+              0
+            );
+
+            if (!(perf.totalReturn > 0)) {
+              throw new Error(`Expected positive total return, got ${perf.totalReturn}`);
+            }
+            if (!(perf.sharpeRatio > 0)) {
+              throw new Error(`Sharpe should be positive for this path, got ${perf.sharpeRatio}`);
+            }
+            const expected = 0.0707106781;
+            if (Math.abs(perf.sharpeRatio - expected) > 1e-4) {
+              throw new Error(`Unexpected sharpe=${perf.sharpeRatio}, expected ~${expected}`);
+            }
+            console.log('ok');
+            """
+        ).strip()
+
+        proc = run_cmd(
+            ["node", "--input-type=module", "-e", node_script],
+            cwd=REPO_ROOT,
+        )
+        self.assertEqual(proc.returncode, 0, msg=f"{proc.stdout}\n{proc.stderr}")
+
+    def test_mathematical_models_level_correlations_are_input_driven(self) -> None:
+        if shutil.which("node") is None:
+            self.skipTest("node is not available in PATH")
+
+        node_script = textwrap.dedent(
+            """
+            import { MathematicalModels } from './src/math/MathematicalModels.js';
+            const model = new MathematicalModels({ precision: 6 });
+
+            const positive = model.calculateLevelCorrelations({
+              base: { A: 1, B: 2, C: 3, D: 4 },
+              shifted: { A: 2, B: 4, C: 6, D: 8 },
+            });
+            const negative = model.calculateLevelCorrelations({
+              base: { A: 1, B: 2, C: 3, D: 4 },
+              inverted: { A: 4, B: 3, C: 2, D: 1 },
+            });
+
+            if (!(positive.pearson > 0.99 && positive.spearman > 0.99)) {
+              throw new Error(`Expected strong positive correlation, got ${JSON.stringify(positive)}`);
+            }
+            if (!(negative.pearson < -0.99 && negative.spearman < -0.99)) {
+              throw new Error(`Expected strong negative correlation, got ${JSON.stringify(negative)}`);
+            }
+            console.log('ok');
+            """
+        ).strip()
+
+        proc = run_cmd(
+            ["node", "--input-type=module", "-e", node_script],
+            cwd=REPO_ROOT,
+        )
+        self.assertEqual(proc.returncode, 0, msg=f"{proc.stdout}\n{proc.stderr}")
+
+    def test_mathematical_models_confidence_interval_respects_confidence_input(self) -> None:
+        if shutil.which("node") is None:
+            self.skipTest("node is not available in PATH")
+
+        node_script = textwrap.dedent(
+            """
+            import { MathematicalModels } from './src/math/MathematicalModels.js';
+            const model = new MathematicalModels({ precision: 6 });
+            const bars = [
+              { open: 100.0, high: 101.0, low: 99.0, close: 100.0 },
+              { open: 100.0, high: 102.0, low: 98.0, close: 101.0 },
+              { open: 101.0, high: 103.0, low: 99.0, close: 99.5 },
+              { open: 99.5, high: 100.5, low: 97.5, close: 100.8 },
+              { open: 100.8, high: 102.8, low: 98.8, close: 100.2 },
+            ];
+
+            const ci90 = model.calculateConfidenceInterval(100, bars, 0.90);
+            const ci99 = model.calculateConfidenceInterval(100, bars, 0.99);
+            const width90 = ci90.upper - ci90.lower;
+            const width99 = ci99.upper - ci99.lower;
+
+            if (!(Math.abs(ci90.confidence - 0.90) < 1e-9)) {
+              throw new Error(`Expected confidence=0.90, got ${ci90.confidence}`);
+            }
+            if (!(Math.abs(ci99.confidence - 0.99) < 1e-9)) {
+              throw new Error(`Expected confidence=0.99, got ${ci99.confidence}`);
+            }
+            if (!(width99 > width90)) {
+              throw new Error(`Expected wider interval at 99% confidence (90=${width90}, 99=${width99})`);
+            }
+            console.log('ok');
+            """
+        ).strip()
+
+        proc = run_cmd(
+            ["node", "--input-type=module", "-e", node_script],
+            cwd=REPO_ROOT,
+        )
+        self.assertEqual(proc.returncode, 0, msg=f"{proc.stdout}\n{proc.stderr}")
+
+    def test_mathematical_models_level_accuracy_is_not_constant(self) -> None:
+        if shutil.which("node") is None:
+            self.skipTest("node is not available in PATH")
+
+        node_script = textwrap.dedent(
+            """
+            import { MathematicalModels } from './src/math/MathematicalModels.js';
+            const model = new MathematicalModels({ precision: 6 });
+            const bars = [
+              { open: 100.0, high: 101.0, low: 99.0, close: 100.0 },
+              { open: 100.0, high: 101.5, low: 99.5, close: 100.8 },
+              { open: 100.8, high: 102.0, low: 100.2, close: 101.2 },
+              { open: 101.2, high: 101.8, low: 99.8, close: 100.4 },
+            ];
+
+            const nearLevels = {
+              standard: { PP: 100.5, R1: 101.0, S1: 100.0 },
+              fibonacci: { PP: 100.6, R1: 101.1, S1: 99.9 },
+            };
+            const farLevels = {
+              standard: { PP: 140.0, R1: 145.0, S1: 135.0 },
+              fibonacci: { PP: 160.0, R1: 165.0, S1: 155.0 },
+            };
+
+            const near = model.calculateLevelAccuracy(bars, nearLevels);
+            const far = model.calculateLevelAccuracy(bars, farLevels);
+
+            if (!(near.overall > far.overall)) {
+              throw new Error(`Expected near levels to score better. near=${near.overall}, far=${far.overall}`);
+            }
+            if (near.overall === 0.75 && far.overall === 0.75) {
+              throw new Error('Accuracy appears hardcoded at 0.75');
+            }
+            console.log('ok');
+            """
+        ).strip()
+
+        proc = run_cmd(
+            ["node", "--input-type=module", "-e", node_script],
+            cwd=REPO_ROOT,
+        )
+        self.assertEqual(proc.returncode, 0, msg=f"{proc.stdout}\n{proc.stderr}")
+
     def test_dashboard_proxy_public_auth_and_endpoint_hardening_present(self) -> None:
         proxy_source = (REPO_ROOT / "server" / "yahoo_proxy.js").read_text(encoding="utf-8")
         self.assertIn("DASH_AUTH_ENABLED", proxy_source)
@@ -1320,6 +1476,35 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("auth_rate_limit_enabled", proxy_source)
         self.assertIn("x-forwarded-for", proxy_source)
         self.assertIn("url.pathname === '/health'", proxy_source)
+
+    def test_alert_system_cross_and_xss_hardening_contract_present(self) -> None:
+        source = (REPO_ROOT / "alert_system.js").read_text(encoding="utf-8")
+        self.assertIn("this.previousObservedPrice", source)
+        self.assertIn("this.lastObservedPrice", source)
+        self.assertIn("checkAlert(alert, currentPrice, previousPrice)", source)
+        self.assertIn("Number.isFinite(previousPrice)", source)
+        self.assertIn("getPreviousPrice()", source)
+        self.assertNotIn("return null;", source.split("getPreviousPrice()", 1)[1].split("}", 1)[0])
+        self.assertIn("escapeHtml(value)", source)
+        self.assertIn("replaceAll('<', '&lt;')", source)
+        self.assertIn("updateAlertList()", source)
+        self.assertIn("updateAlertHistory()", source)
+        self.assertIn("this.escapeHtml(alert.type)", source)
+        self.assertIn("this.escapeHtml(alert.asset)", source)
+
+    def test_fdr_display_modules_guard_missing_global_engines(self) -> None:
+        pivot_source = (REPO_ROOT / "pivot_fdr_integration.js").read_text(encoding="utf-8")
+        enhanced_source = (REPO_ROOT / "enhanced_pivot_display.js").read_text(encoding="utf-8")
+
+        self.assertIn("resolveFDRCorrectionEngine()", pivot_source)
+        self.assertIn("window.FDRCorrection", pivot_source)
+        self.assertIn("FDRCorrection engine unavailable", pivot_source)
+
+        self.assertIn("resolveEnhancedFDRCorrectionEngine()", enhanced_source)
+        self.assertIn("window.EnhancedFDRCorrection", enhanced_source)
+        self.assertIn("buildFallbackFdrResults(", enhanced_source)
+        self.assertIn("EnhancedFDRCorrection engine unavailable", enhanced_source)
+        self.assertIn("fdrEngine.generateTooltip", enhanced_source)
 
     def test_session_routine_contract_present(self) -> None:
         installer = (REPO_ROOT / "scripts" / "install_session_routine_launch_agent.sh").read_text(

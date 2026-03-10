@@ -419,9 +419,10 @@ import { MathematicalModels } from './math/MathematicalModels.js';
         let capital = initialCapital;
         let peak = initialCapital;
         let maxDrawdown = 0;
-        const returns = [];
+        const periodReturns = [];
 
         trades.forEach(trade => {
+            const previousCapital = capital;
             const tradeCost = trade.price * trade.size;
             const commissionCost = tradeCost * commission;
 
@@ -435,15 +436,20 @@ import { MathematicalModels } from './math/MathematicalModels.js';
             const drawdown = ((peak - capital) / peak) * 100;
             if (drawdown > maxDrawdown) maxDrawdown = drawdown;
 
-            const returnPct = ((capital - initialCapital) / initialCapital) * 100;
-            returns.push(returnPct);
+            if (previousCapital > 0) {
+                const periodReturnPct = ((capital - previousCapital) / previousCapital) * 100;
+                periodReturns.push(periodReturnPct);
+            }
         });
 
         const totalReturn = ((capital - initialCapital) / initialCapital) * 100;
-        const avgReturn = returns.reduce((sum, ret) => sum + ret, 0) / returns.length;
-        const stdReturn = Math.sqrt(
-            returns.reduce((sum, ret) => sum + Math.pow(ret - avgReturn, 2), 0) / returns.length
-        );
+        const avgReturn = periodReturns.length
+            ? periodReturns.reduce((sum, ret) => sum + ret, 0) / periodReturns.length
+            : 0;
+        const variance = periodReturns.length > 1
+            ? periodReturns.reduce((sum, ret) => sum + Math.pow(ret - avgReturn, 2), 0) / (periodReturns.length - 1)
+            : 0;
+        const stdReturn = Math.sqrt(Math.max(0, variance));
         const sharpeRatio = stdReturn > 0 ? avgReturn / stdReturn : 0;
 
         return {

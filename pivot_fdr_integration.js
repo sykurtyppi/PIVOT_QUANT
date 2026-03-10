@@ -4,6 +4,13 @@
  */
 
 window.PivotFDRIntegration = (() => {
+    function resolveFDRCorrectionEngine() {
+        const engine = window.FDRCorrection;
+        if (!engine) return null;
+        if (typeof engine.analyzePivotSignificance !== 'function') return null;
+        if (typeof engine.formatSignificanceDisplay !== 'function') return null;
+        return engine;
+    }
 
     /**
      * Sample historical data for demonstration
@@ -65,7 +72,21 @@ window.PivotFDRIntegration = (() => {
         });
 
         // Perform FDR analysis
-        const fdrResults = window.FDRCorrection.analyzePivotSignificance(pivotStatsForFDR, 0.05);
+        const fdrEngine = resolveFDRCorrectionEngine();
+        if (!fdrEngine) {
+            /* eslint-disable-next-line no-console */
+            console.warn('[PivotFDRIntegration] FDRCorrection engine unavailable; rendering without significance marks.');
+        }
+        const fdrResults = fdrEngine
+            ? fdrEngine.analyzePivotSignificance(pivotStatsForFDR, 0.05)
+            : {
+                levels: {},
+                summary: {
+                    significantLevels: 0,
+                    totalLevels: Object.keys(pivotStatsForFDR).length,
+                    fdrLevel: 0.05
+                }
+            };
 
         // Sort levels by value (descending)
         const sortedLevels = Object.entries(levelsToShow).sort((a, b) => b[1] - a[1]);
@@ -143,7 +164,9 @@ window.PivotFDRIntegration = (() => {
             const fdrResult = fdrResults.levels[levelKey];
 
             if (fdrResult) {
-                const displayText = window.FDRCorrection.formatSignificanceDisplay(label, fdrResult);
+                const displayText = fdrEngine
+                    ? fdrEngine.formatSignificanceDisplay(label, fdrResult)
+                    : `${label}: ${fdrResult.successRate?.toFixed(1) || 'N/A'}%`;
                 significanceCell.innerHTML = formatSignificanceHTML(displayText, fdrResult);
 
                 // Add styling based on significance
