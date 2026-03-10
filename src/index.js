@@ -471,7 +471,7 @@ import { MathematicalModels } from './math/MathematicalModels.js';
     }
 
     _logInfo(message, data = {}) {
-        if (this.config.logging.level >= 2) {
+        if (this.config.logging.level <= 2) {
             /* eslint-disable-next-line no-console */
             console.info(`[QuantPivot] ${message}`, data);
         }

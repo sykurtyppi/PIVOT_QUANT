@@ -44,6 +44,7 @@ const BACKUP_STATE_FILE = path.join(ROOT_DIR, 'logs', 'backup_state.json');
 const HOST_HEALTH_STATE_FILE = path.join(ROOT_DIR, 'logs', 'host_health_state.json');
 const HEALTH_ALERT_STATE_FILE = path.join(ROOT_DIR, 'logs', 'health_alert_state.json');
 const REPORT_DELIVERY_STATE_FILE = path.join(ROOT_DIR, 'logs', 'report_delivery_state.json');
+const AUTH_METRICS_STATE_FILE = path.join(ROOT_DIR, 'logs', 'auth_metrics.json');
 const REPORT_DELIVERY_LOG_FILE = path.join(ROOT_DIR, 'logs', 'report_delivery.log');
 const HEALTH_ALERT_LOG_FILE = path.join(ROOT_DIR, 'logs', 'health_alert.log');
 const RESTORE_DRILL_LOG_FILE = path.join(ROOT_DIR, 'logs', 'restore_drill.log');
@@ -460,6 +461,45 @@ function formatIsoMs(value) {
   return new Date(value).toISOString();
 }
 
+function parseEpochMs(value) {
+  if (Number.isFinite(value) && value > 0) return Math.floor(value);
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return Math.floor(parsed);
+    }
+  }
+  return 0;
+}
+
+function toNonNegativeInt(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return 0;
+  return Math.floor(parsed);
+}
+
+function summarizeAuthClientKey(clientKey) {
+  const rawKey = String(clientKey || '');
+  const sep = rawKey.indexOf(':');
+  const source = sep > 0 ? rawKey.slice(0, sep) : 'unknown';
+  const detail = sep > 0 ? rawKey.slice(sep + 1) : rawKey;
+  let hint = detail;
+  const ipv4Match = detail.match(/^(\d+\.\d+\.\d+)\.\d+$/);
+  if (ipv4Match) {
+    hint = `${ipv4Match[1]}.x`;
+  } else if (detail.includes(':')) {
+    const groups = detail.split(':').filter(Boolean);
+    hint = groups.length ? `${groups.slice(0, 3).join(':')}:*` : detail;
+  } else if (detail.length > 24) {
+    hint = `${detail.slice(0, 24)}...`;
+  }
+  return {
+    client_id: crypto.createHash('sha256').update(rawKey).digest('hex').slice(0, 12),
+    client_source: source,
+    client_hint: hint || null,
+  };
+}
+
 function pruneAuthSessionState(nowMs) {
   for (const [nonce, session] of authSessionState.entries()) {
     if (session.expiresAtMs <= nowMs) {
@@ -539,16 +579,19 @@ function recordAuthLoginSuccess(req, tokenParts, nowMs = Date.now()) {
   authSuccessClientState.set(authClientKey(req), nowMs);
   pruneAuthSuccessClientState(nowMs);
   upsertAuthSession(req, tokenParts, nowMs);
+  persistAuthMetricsState(nowMs);
 }
 
 function recordAuthLoginFailure(nowMs = Date.now()) {
   authAuditState.failedLogins += 1;
   authAuditState.lastFailureAtMs = nowMs;
+  persistAuthMetricsState(nowMs);
 }
 
 function recordAuthLockoutStart(nowMs = Date.now()) {
   authAuditState.lockoutsStarted += 1;
   authAuditState.lastLockoutAtMs = nowMs;
+  persistAuthMetricsState(nowMs);
 }
 
 function recordAuthLockoutResponse(nowMs = Date.now()) {
@@ -556,6 +599,7 @@ function recordAuthLockoutResponse(nowMs = Date.now()) {
   if (!authAuditState.lastLockoutAtMs) {
     authAuditState.lastLockoutAtMs = nowMs;
   }
+  persistAuthMetricsState(nowMs);
 }
 
 function getAuthAuditSnapshot(nowMs = Date.now()) {
@@ -573,6 +617,77 @@ function getAuthAuditSnapshot(nowMs = Date.now()) {
     auth_login_last_failure_at: formatIsoMs(authAuditState.lastFailureAtMs),
     auth_login_last_lockout_at: formatIsoMs(authAuditState.lastLockoutAtMs),
   };
+}
+
+function buildAuthSessionsSnapshot(nowMs = Date.now()) {
+  const audit = getAuthAuditSnapshot(nowMs);
+  const sessions = [];
+  for (const [nonce, session] of authSessionState.entries()) {
+    const ageSec = Math.max(0, Math.floor((nowMs - session.createdAtMs) / 1000));
+    const idleSec = Math.max(0, Math.floor((nowMs - session.lastSeenMs) / 1000));
+    const expiresInSec = Math.max(0, Math.floor((session.expiresAtMs - nowMs) / 1000));
+    sessions.push({
+      session_id: nonce.slice(0, 12),
+      ...summarizeAuthClientKey(session.client),
+      created_at: formatIsoMs(session.createdAtMs),
+      last_seen_at: formatIsoMs(session.lastSeenMs),
+      expires_at: formatIsoMs(session.expiresAtMs),
+      age_sec: ageSec,
+      idle_sec: idleSec,
+      expires_in_sec: expiresInSec,
+    });
+  }
+  sessions.sort((left, right) => {
+    const a = Date.parse(left.last_seen_at || '');
+    const b = Date.parse(right.last_seen_at || '');
+    return (Number.isFinite(b) ? b : 0) - (Number.isFinite(a) ? a : 0);
+  });
+  return {
+    status: 'ok',
+    generated_at: new Date(nowMs).toISOString(),
+    ...audit,
+    active_sessions: sessions,
+  };
+}
+
+function getPersistableAuthMetricsState(nowMs = Date.now()) {
+  const audit = getAuthAuditSnapshot(nowMs);
+  return {
+    version: 1,
+    updated_at: new Date(nowMs).toISOString(),
+    auth_login_success_total: audit.auth_login_success_total,
+    auth_login_failed_total: audit.auth_login_failed_total,
+    auth_login_lockouts_started_total: audit.auth_login_lockouts_started_total,
+    auth_login_lockout_responses_total: audit.auth_login_lockout_responses_total,
+    auth_login_last_success_at: audit.auth_login_last_success_at,
+    auth_login_last_failure_at: audit.auth_login_last_failure_at,
+    auth_login_last_lockout_at: audit.auth_login_last_lockout_at,
+  };
+}
+
+function persistAuthMetricsState(nowMs = Date.now()) {
+  try {
+    writeJsonFileAtomic(AUTH_METRICS_STATE_FILE, getPersistableAuthMetricsState(nowMs));
+  } catch (error) {
+    console.warn(`[security] failed to persist auth metrics: ${error?.message || String(error)}`);
+  }
+}
+
+function loadPersistedAuthMetricsState() {
+  const persisted = readJsonFileSafe(AUTH_METRICS_STATE_FILE, null);
+  if (!persisted || typeof persisted !== 'object') {
+    return false;
+  }
+  authAuditState.successfulLogins = toNonNegativeInt(persisted.auth_login_success_total);
+  authAuditState.failedLogins = toNonNegativeInt(persisted.auth_login_failed_total);
+  authAuditState.lockoutsStarted = toNonNegativeInt(persisted.auth_login_lockouts_started_total);
+  authAuditState.lockoutResponses = toNonNegativeInt(
+    persisted.auth_login_lockout_responses_total
+  );
+  authAuditState.lastSuccessAtMs = parseEpochMs(persisted.auth_login_last_success_at);
+  authAuditState.lastFailureAtMs = parseEpochMs(persisted.auth_login_last_failure_at);
+  authAuditState.lastLockoutAtMs = parseEpochMs(persisted.auth_login_last_lockout_at);
+  return true;
 }
 
 function pruneAuthLoginAttemptState(nowMs) {
@@ -1711,6 +1826,21 @@ function readJsonFileSafe(filePath, fallback = null) {
   }
 }
 
+function writeJsonFileAtomic(filePath, payload) {
+  const dirPath = path.dirname(filePath);
+  fs.mkdirSync(dirPath, { recursive: true });
+  const tmpPath = `${filePath}.tmp-${process.pid}-${Date.now()}`;
+  const raw = `${JSON.stringify(payload, null, 2)}\n`;
+  try {
+    fs.writeFileSync(tmpPath, raw, 'utf8');
+    fs.renameSync(tmpPath, filePath);
+  } finally {
+    if (fs.existsSync(tmpPath)) {
+      fs.unlinkSync(tmpPath);
+    }
+  }
+}
+
 function loadEnvMap(filePath) {
   const env = {};
   if (!fs.existsSync(filePath)) return env;
@@ -2185,6 +2315,8 @@ function queryLevelStatsFromExports(symbol, _limit) {
   };
 }
 
+const AUTH_METRICS_LOADED = loadPersistedAuthMetricsState();
+
 const server = http.createServer(async (req, res) => {
   const hostHeader = req.headers.host || `127.0.0.1:${PORT}`;
   const url = new URL(req.url || '/', `http://${hostHeader}`);
@@ -2207,6 +2339,22 @@ const server = http.createServer(async (req, res) => {
       write_endpoints_local_only: SECURITY.writeEndpointsLocalOnly,
       ...authAudit,
     });
+    return;
+  }
+
+  if (url.pathname === '/api/security/sessions') {
+    if (!methodAllowed(req, 'GET')) {
+      methodNotAllowed(res, 'GET');
+      return;
+    }
+    if (!requestIsLocal) {
+      sendJson(res, 403, {
+        error: 'Forbidden',
+        message: 'This endpoint is restricted to local requests.',
+      });
+      return;
+    }
+    sendJson(res, 200, buildAuthSessionsSnapshot());
     return;
   }
 
@@ -2682,6 +2830,10 @@ server.listen(PORT, HOST, () => {
   /* eslint-disable-next-line no-console */
   console.log(
     `[security] auth_rate_limit_enabled=${SECURITY.authRateLimitEnabled} window_sec=${SECURITY.authRateLimitWindowSec} max_attempts=${SECURITY.authRateLimitMaxAttempts} lockout_sec=${SECURITY.authRateLimitLockoutSec}`
+  );
+  /* eslint-disable-next-line no-console */
+  console.log(
+    `[security] auth_metrics_state_file=${AUTH_METRICS_STATE_FILE} loaded=${AUTH_METRICS_LOADED} metrics_window_sec=${SECURITY.authMetricsWindowSec}`
   );
 });
 

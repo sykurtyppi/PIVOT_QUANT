@@ -4,13 +4,29 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOG_DIR="${ROOT_DIR}/logs"
 mkdir -p "${LOG_DIR}"
+ENV_FILE="${ROOT_DIR}/.env"
 
-if [[ -f "${ROOT_DIR}/.env" ]]; then
-  set -a
-  # shellcheck disable=SC1091
-  source "${ROOT_DIR}/.env"
-  set +a
-fi
+load_env_file() {
+  local env_path="$1"
+  local raw line key value
+  [[ -f "${env_path}" ]] || return 0
+
+  while IFS= read -r raw || [[ -n "${raw}" ]]; do
+    line="${raw#"${raw%%[![:space:]]*}"}"
+    [[ -z "${line}" ]] && continue
+    [[ "${line:0:1}" == "#" ]] && continue
+    [[ "${line}" == "export "* ]] && line="${line#export }"
+    [[ "${line}" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || continue
+
+    key="${line%%=*}"
+    value="${line#*=}"
+    export "${key}=${value}"
+  done < "${env_path}"
+}
+
+# Load .env with strict key=value parsing (non-executing) to avoid launchd
+# crashes from malformed prose/comment lines.
+load_env_file "${ENV_FILE}"
 
 detect_lan_ip() {
   local iface ip

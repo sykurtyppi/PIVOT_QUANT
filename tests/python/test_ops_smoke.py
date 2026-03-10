@@ -1236,6 +1236,60 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(len(payload["levels"]), 2)
         self.assertAlmostEqual(float(payload["levels"][0]["value"]), 5000.0, places=8)
 
+    def test_mathematical_models_require_open_for_woodie_and_demark(self) -> None:
+        if shutil.which("node") is None:
+            self.skipTest("node is not available in PATH")
+
+        node_script = textwrap.dedent(
+            """
+            import { MathematicalModels } from './src/math/MathematicalModels.js';
+            const model = new MathematicalModels({ precision: 6 });
+
+            const withOpen = [
+              { high: 10.0, low: 9.0, open: 9.3, close: 9.8 },
+              { high: 10.8, low: 9.6, open: 10.0, close: 10.4 },
+            ];
+            const missingOpen = [
+              { high: 10.0, low: 9.0, close: 9.8 },
+              { high: 10.8, low: 9.6, close: 10.4 },
+            ];
+
+            const woodie = await model.calculateWoodiePivots(withOpen);
+            if (!Number.isFinite(woodie.PP)) {
+              throw new Error('Woodie pivot should be numeric for valid OHLC input.');
+            }
+
+            let demarkErr = '';
+            try {
+              await model.calculateDeMarkPivots(missingOpen);
+            } catch (error) {
+              demarkErr = String(error?.message || error);
+            }
+            if (!demarkErr.includes('open required')) {
+              throw new Error(`Expected open-required validation error, got: ${demarkErr}`);
+            }
+            console.log('ok');
+            """
+        ).strip()
+
+        proc = run_cmd(
+            ["node", "--input-type=module", "-e", node_script],
+            cwd=REPO_ROOT,
+        )
+        self.assertEqual(proc.returncode, 0, msg=f"{proc.stdout}\n{proc.stderr}")
+
+    def test_quantpivot_logging_level_contract_present(self) -> None:
+        engine_source = (REPO_ROOT / "src" / "core" / "QuantPivotEngine.js").read_text(
+            encoding="utf-8"
+        )
+        index_source = (REPO_ROOT / "src" / "index.js").read_text(encoding="utf-8")
+
+        self.assertIn("this.config.logging.level <= 2", engine_source)
+        self.assertIn("this.config.logging.level <= 1", engine_source)
+        self.assertIn("this.config.logging.level <= 0", engine_source)
+        self.assertIn("this.config.logging.level <= 2", index_source)
+        self.assertNotIn("this.config.logging.level >= 2", index_source)
+
     def test_dashboard_proxy_public_auth_and_endpoint_hardening_present(self) -> None:
         proxy_source = (REPO_ROOT / "server" / "yahoo_proxy.js").read_text(encoding="utf-8")
         self.assertIn("DASH_AUTH_ENABLED", proxy_source)
@@ -1248,11 +1302,16 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("DASH_AUTH_METRICS_WINDOW_SEC", proxy_source)
         self.assertIn("DASH_AUTH_METRICS_MAX_TRACKED_CLIENTS", proxy_source)
         self.assertIn("DASH_WRITE_ENDPOINTS_LOCAL_ONLY", proxy_source)
+        self.assertIn("AUTH_METRICS_STATE_FILE", proxy_source)
+        self.assertIn("auth_metrics.json", proxy_source)
         self.assertIn("WRITE_ENDPOINTS", proxy_source)
         self.assertIn("handleAuthRoutes", proxy_source)
         self.assertIn("registerAuthLoginFailure", proxy_source)
         self.assertIn("clearAuthLoginFailures", proxy_source)
         self.assertIn("recordAuthLoginSuccess", proxy_source)
+        self.assertIn("loadPersistedAuthMetricsState", proxy_source)
+        self.assertIn("persistAuthMetricsState", proxy_source)
+        self.assertIn("url.pathname === '/api/security/sessions'", proxy_source)
         self.assertIn("auth_active_session_count", proxy_source)
         self.assertIn("auth_login_success_total", proxy_source)
         self.assertIn("Retry-After", proxy_source)
@@ -1292,6 +1351,16 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("--timeout-sec", retrain_script)
         self.assertIn("--max-attempts", retrain_script)
         self.assertIn("--fail-on-partial", retrain_script)
+
+    def test_run_persistent_stack_sources_dotenv_safely(self) -> None:
+        stack_script = (REPO_ROOT / "server" / "run_persistent_stack.sh").read_text(encoding="utf-8")
+        self.assertIn('ENV_FILE="${ROOT_DIR}/.env"', stack_script)
+        self.assertIn("load_env_file()", stack_script)
+        self.assertIn('load_env_file "${ENV_FILE}"', stack_script)
+        self.assertNotIn('source "${ROOT_DIR}/.env"', stack_script)
+
+        proc = run_cmd(["bash", "-n", "server/run_persistent_stack.sh"], cwd=REPO_ROOT)
+        self.assertEqual(proc.returncode, 0, msg=f"{proc.stdout}\n{proc.stderr}")
 
     def test_run_all_health_probe_retry_contract_present(self) -> None:
         run_all = (REPO_ROOT / "server" / "run_all.sh").read_text(encoding="utf-8")

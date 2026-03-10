@@ -257,6 +257,9 @@ export class MathematicalModels {
      * Calculate Woodie Pivot Points
      */
     async calculateWoodiePivots(ohlcData) {
+        if (!this._validateOHLCInputWithOpen(ohlcData)) {
+            throw new Error('Invalid OHLC data (open required) for Woodie Pivot calculation');
+        }
         const latest = ohlcData[ohlcData.length - 1];
         const { high, low, close, open } = latest;
 
@@ -279,6 +282,9 @@ export class MathematicalModels {
      * Calculate DeMark Pivot Points
      */
     async calculateDeMarkPivots(ohlcData) {
+        if (!this._validateOHLCInputWithOpen(ohlcData)) {
+            throw new Error('Invalid OHLC data (open required) for DeMark Pivot calculation');
+        }
         const latest = ohlcData[ohlcData.length - 1];
         const { high, low, close, open } = latest;
 
@@ -739,6 +745,16 @@ export class MathematicalModels {
             bar.high >= bar.low &&
             bar.high >= bar.close &&
             bar.low <= bar.close
+        );
+    }
+
+    _validateOHLCInputWithOpen(data) {
+        if (!this._validateOHLCInput(data)) return false;
+
+        return data.every(bar =>
+            typeof bar.open === 'number' &&
+            bar.high >= bar.open &&
+            bar.low <= bar.open
         );
     }
 
