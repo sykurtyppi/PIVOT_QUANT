@@ -33,6 +33,18 @@ ib = IB()
 ib_lock = threading.Lock()
 
 
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _utc_iso_z() -> str:
+    return _utc_now().isoformat().replace("+00:00", "Z")
+
+
+def _utc_today_yyyymmdd() -> str:
+    return _utc_now().strftime("%Y%m%d")
+
+
 def _parse_allowed_origins() -> list[str]:
     origins = [
         origin.strip()
@@ -119,7 +131,7 @@ def pick_expiries(expirations, mode):
     if not exp_list:
         return []
 
-    today = datetime.utcnow().strftime("%Y%m%d")
+    today = _utc_today_yyyymmdd()
     if mode == "0dte":
         if today in exp_list:
             return [today]
@@ -219,7 +231,7 @@ def compute_gamma_walls(symbol, expiry_mode, limit):
     if not opt_param:
         opt_param = opt_params[0]
 
-    today = datetime.utcnow().strftime("%Y%m%d")
+    today = _utc_today_yyyymmdd()
     front_expiry = pick_expiries(opt_param.expirations, "front")[0]
     expiries = pick_expiries(opt_param.expirations, expiry_mode)
     if expiry_mode == "all":
@@ -403,7 +415,7 @@ def compute_gamma_walls(symbol, expiry_mode, limit):
         "symbol": symbol.upper(),
         "spot": spot,
         "expiryMode": expiry_mode,
-        "generatedAt": datetime.utcnow().isoformat() + "Z",
+        "generatedAt": _utc_iso_z(),
         "gammaFlip": flip,
         "callWall": wall_payload(call_wall),
         "putWall": wall_payload(put_wall),
@@ -607,7 +619,7 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None):
         "symbol": symbol.upper(),
         "spot": spot,
         "expiryMode": "front",
-        "generatedAt": datetime.utcnow().isoformat() + "Z",
+        "generatedAt": _utc_iso_z(),
         "gammaFlip": flip,
         "callWall": wall_payload(call_wall),
         "putWall": wall_payload(put_wall),
@@ -704,7 +716,7 @@ class GammaHandler(BaseHTTPRequestHandler):
                         "symbol": symbol.upper(),
                         "spot": spot,
                         "source": "IBKR",
-                        "generatedAt": datetime.utcnow().isoformat() + "Z",
+                        "generatedAt": _utc_iso_z(),
                     }
                     self._send_json(200, payload)
                 except Exception as exc:
@@ -891,7 +903,7 @@ def fetch_ibkr_market(symbol, interval, range_str):
 
     # Determine if last session is complete: after 4 PM ET (21:00 UTC during
     # EST, conservative — during EDT this triggers 1 hour late, safe direction)
-    now_utc = datetime.now(timezone.utc)
+    now_utc = _utc_now()
     is_last_complete = now_utc.hour >= 21 or now_utc.weekday() >= 5
 
     return {
@@ -905,12 +917,13 @@ def fetch_ibkr_market(symbol, interval, range_str):
         "candles": candles,
         "session": {
             "usedIndex": len(candles) - 1,
-            "usedDate": last.get("sessionDate") or datetime.utcfromtimestamp(last["time"]).strftime("%Y-%m-%d"),
+            "usedDate": last.get("sessionDate")
+            or datetime.fromtimestamp(last["time"], tz=timezone.utc).strftime("%Y-%m-%d"),
             "isLastSessionComplete": is_last_complete,
             "timeZone": "America/New_York",
         },
         "dataSource": source_note,
-        "asOf": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "asOf": _utc_iso_z(),
     }
 
 

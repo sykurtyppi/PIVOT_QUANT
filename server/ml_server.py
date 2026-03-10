@@ -162,6 +162,7 @@ _PREDICTION_LOG_LOCAL = threading.local()
 _PREDICTION_LOG_SCHEMA_READY = False
 _PREDICTION_LOG_SCHEMA_LOCK = threading.Lock()
 SCORE_MAX_BATCH_EVENTS = max(1, int(os.getenv("ML_SCORE_MAX_BATCH_EVENTS", "256")))
+SCORE_MAX_BODY_BYTES = max(1024, int(os.getenv("ML_SCORE_MAX_BODY_BYTES", "262144")))
 ML_ANALOG_ENABLED = _env_bool("ML_ANALOG_ENABLED", True)
 ML_ANALOG_DB = Path(os.getenv("ML_ANALOG_DB", str(PREDICTION_LOG_DB)))
 ML_ANALOG_K = max(3, int(os.getenv("ML_ANALOG_K", "20")))
@@ -2334,15 +2335,58 @@ def _validate_score_payload(payload: object) -> tuple[str, dict | list[dict]]:
     raise HTTPException(status_code=400, detail="Payload must include 'event' or 'events'.")
 
 
+def _parse_content_length_header(raw_value: str | None) -> int | None:
+    if raw_value is None:
+        return None
+    header = raw_value.strip()
+    if not header:
+        return None
+    try:
+        parsed = int(header)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid Content-Length header.") from exc
+    if parsed < 0:
+        raise HTTPException(status_code=400, detail="Invalid Content-Length header.")
+    return parsed
+
+
+def _enforce_score_body_size(content_length: int | None, body_size: int) -> None:
+    limit = SCORE_MAX_BODY_BYTES
+    if content_length is not None and content_length > limit:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Payload too large ({content_length} bytes). Max allowed: {limit}.",
+        )
+    if body_size > limit:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Payload too large ({body_size} bytes). Max allowed: {limit}.",
+        )
+
+
+def _parse_score_json_body(raw_body: bytes) -> object:
+    try:
+        return json.loads(raw_body)
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload: body must be UTF-8.") from exc
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON payload: {exc.msg}") from exc
+
+
+async def _read_score_payload(request: Request) -> object:
+    content_length = _parse_content_length_header(request.headers.get("content-length"))
+    _enforce_score_body_size(content_length, 0)
+    raw_body = await request.body()
+    _enforce_score_body_size(content_length, len(raw_body))
+    return _parse_score_json_body(raw_body)
+
+
 @app.post("/score")
 async def score(request: Request):
     has_models = any(horizons for horizons in registry.available().values())
     if registry.manifest is None or not has_models:
         raise HTTPException(status_code=503, detail="Models not loaded. Train artifacts first.")
-    try:
-        payload = await request.json()
-    except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=400, detail=f"Invalid JSON payload: {exc.msg}") from exc
+    payload = await _read_score_payload(request)
 
     mode, normalized = _validate_score_payload(payload)
 

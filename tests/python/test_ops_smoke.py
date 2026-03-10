@@ -456,6 +456,40 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(getattr(err, "status_code", None), 413)
         self.assertIn("Max allowed: 2", getattr(err, "detail", ""))
 
+    def test_ml_score_payload_rejects_oversized_body_and_bad_content_length(self) -> None:
+        prior_limit = os.environ.get("ML_SCORE_MAX_BODY_BYTES")
+        os.environ["ML_SCORE_MAX_BODY_BYTES"] = "2048"
+        try:
+            ml_server = load_module(
+                "pq_ml_server_body_guard_test",
+                REPO_ROOT / "server" / "ml_server.py",
+            )
+        finally:
+            if prior_limit is None:
+                os.environ.pop("ML_SCORE_MAX_BODY_BYTES", None)
+            else:
+                os.environ["ML_SCORE_MAX_BODY_BYTES"] = prior_limit
+
+        with self.assertRaises(Exception) as ctx:
+            ml_server._enforce_score_body_size(4096, 0)
+        err = ctx.exception
+        self.assertEqual(getattr(err, "status_code", None), 413)
+        self.assertIn("Max allowed: 2048", getattr(err, "detail", ""))
+
+        with self.assertRaises(Exception) as ctx:
+            ml_server._enforce_score_body_size(None, 4096)
+        err = ctx.exception
+        self.assertEqual(getattr(err, "status_code", None), 413)
+        self.assertIn("Max allowed: 2048", getattr(err, "detail", ""))
+
+        with self.assertRaises(Exception) as ctx:
+            ml_server._parse_content_length_header("abc")
+        self.assertEqual(getattr(ctx.exception, "status_code", None), 400)
+
+        with self.assertRaises(Exception) as ctx:
+            ml_server._parse_score_json_body(b"\x80")
+        self.assertEqual(getattr(ctx.exception, "status_code", None), 400)
+
     def test_reconcile_predictions_paths_resolve_from_repo_root(self) -> None:
         reconcile_predictions = load_module(
             "pq_reconcile_paths_test",
@@ -1501,6 +1535,13 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("auth_rate_limit_enabled", proxy_source)
         self.assertIn("x-forwarded-for", proxy_source)
         self.assertIn("url.pathname === '/health'", proxy_source)
+
+    def test_ibkr_bridge_uses_timezone_aware_utc_datetimes(self) -> None:
+        source = (REPO_ROOT / "server" / "ibkr_gamma_bridge.py").read_text(encoding="utf-8")
+        self.assertNotIn("datetime.utcnow(", source)
+        self.assertNotIn("datetime.utcfromtimestamp(", source)
+        self.assertIn("datetime.now(timezone.utc)", source)
+        self.assertIn("_utc_iso_z()", source)
 
     def test_alert_system_cross_and_xss_hardening_contract_present(self) -> None:
         source = (REPO_ROOT / "alert_system.js").read_text(encoding="utf-8")
