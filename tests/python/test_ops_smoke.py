@@ -1506,6 +1506,24 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("EnhancedFDRCorrection engine unavailable", enhanced_source)
         self.assertIn("fdrEngine.generateTooltip", enhanced_source)
 
+    def test_dashboard_market_loader_cancels_stale_requests(self) -> None:
+        dashboard_source = (REPO_ROOT / "production_pivot_dashboard.html").read_text(encoding="utf-8")
+        self.assertIn("marketLoadAbortController", dashboard_source)
+        self.assertIn("state.marketLoadAbortController.abort()", dashboard_source)
+        self.assertIn(
+            "const requestOptions = marketLoadAbortController ? { signal: marketLoadAbortController.signal } : {};",
+            dashboard_source,
+        )
+        self.assertIn("async function fetchJson(url, timeoutMs = 10000, options = {})", dashboard_source)
+        self.assertIn("AbortSignal.any", dashboard_source)
+        self.assertIn("fetchIbkrMarket(symbol, interval, range, requestOptions)", dashboard_source)
+        self.assertIn("fetchDashboardMarket(symbol, interval, range, requestOptions)", dashboard_source)
+        self.assertIn("fetchYahooWithBackoff(symbol, range, interval, 4, requestOptions)", dashboard_source)
+        self.assertIn("fetchPersistedDailyCandles(symbol, requestOptions)", dashboard_source)
+        self.assertIn("fetchVixLevel(interval, range, requestOptions)", dashboard_source)
+        self.assertIn("fetchGammaData(symbol, requestOptions)", dashboard_source)
+        self.assertIn("if (isStaleRequest() || isAbortError(error))", dashboard_source)
+
     def test_session_routine_contract_present(self) -> None:
         installer = (REPO_ROOT / "scripts" / "install_session_routine_launch_agent.sh").read_text(
             encoding="utf-8"

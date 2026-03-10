@@ -2127,6 +2127,7 @@
             marketRequestSeq: 0,
             marketActiveRequestSeq: 0,
             marketPendingReload: false,
+            marketLoadAbortController: null,
             intradaySyncInFlight: false,
             lastTouchByLevel: new Map(),
             touchCountByDay: {},
@@ -4705,6 +4706,27 @@
 
         const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+        function createAbortError(message = 'Request aborted') {
+            const error = new Error(message);
+            error.name = 'AbortError';
+            return error;
+        }
+
+        function isAbortError(error) {
+            if (!error) return false;
+            if (error.name === 'AbortError') return true;
+            if (String(error?.message || '').toLowerCase().includes('aborted')) return true;
+            return false;
+        }
+
+        function throwIfAborted(signal) {
+            if (!signal?.aborted) return;
+            if (signal.reason instanceof Error) {
+                throw signal.reason;
+            }
+            throw createAbortError();
+        }
+
         function normalizeRangeForInterval(range, interval) {
             if (isIntradayInterval(interval) && INTRADAY_RANGE_CAP[interval]) {
                 range = clampRangeByCap(range, INTRADAY_RANGE_CAP[interval]);
@@ -4719,15 +4741,31 @@
             return range;
         }
 
-        async function fetchJson(url, timeoutMs = 10000) {
+        async function fetchJson(url, timeoutMs = 10000, options = {}) {
             const supportsAbort = typeof AbortController !== 'undefined';
             const controller = supportsAbort ? new AbortController() : null;
+            const externalSignal = options?.signal || null;
+            let externalAbortHandler = null;
+            let requestSignal = controller ? controller.signal : undefined;
+
+            throwIfAborted(externalSignal);
+            if (externalSignal) {
+                if (requestSignal && typeof AbortSignal !== 'undefined' && typeof AbortSignal.any === 'function') {
+                    requestSignal = AbortSignal.any([requestSignal, externalSignal]);
+                } else if (requestSignal) {
+                    externalAbortHandler = () => controller?.abort();
+                    externalSignal.addEventListener('abort', externalAbortHandler, { once: true });
+                } else {
+                    requestSignal = externalSignal;
+                }
+            }
+
             const timeoutId = setTimeout(() => {
                 if (controller) controller.abort();
             }, timeoutMs);
             try {
                 if (typeof fetch === 'function') {
-                    const response = await fetch(url, controller ? { signal: controller.signal } : undefined);
+                    const response = await fetch(url, requestSignal ? { signal: requestSignal } : undefined);
                     if (!response.ok) {
                         const error = new Error(`HTTP ${response.status}`);
                         error.status = response.status;
@@ -4747,15 +4785,37 @@
 
                 return await new Promise((resolve, reject) => {
                     const xhr = new XMLHttpRequest();
+                    let settled = false;
+                    const onResolve = (value) => {
+                        if (settled) return;
+                        settled = true;
+                        resolve(value);
+                    };
+                    const onReject = (error) => {
+                        if (settled) return;
+                        settled = true;
+                        reject(error);
+                    };
                     xhr.open('GET', url, true);
                     xhr.timeout = timeoutMs;
+                    if (externalSignal) {
+                        if (externalSignal.aborted) {
+                            onReject(createAbortError());
+                            return;
+                        }
+                        externalAbortHandler = () => {
+                            try { xhr.abort(); } catch (_) { /* noop */ }
+                            onReject(createAbortError());
+                        };
+                        externalSignal.addEventListener('abort', externalAbortHandler, { once: true });
+                    }
                     xhr.onreadystatechange = () => {
                         if (xhr.readyState === XMLHttpRequest.DONE) {
                             if (xhr.status >= 200 && xhr.status < 300) {
                                 try {
-                                    resolve(JSON.parse(xhr.responseText));
+                                    onResolve(JSON.parse(xhr.responseText));
                                 } catch (error) {
-                                    reject(new Error('Invalid JSON'));
+                                    onReject(new Error('Invalid JSON'));
                                 }
                             } else {
                                 const error = new Error(`HTTP ${xhr.status}`);
@@ -4769,16 +4829,19 @@
                                 } catch (_) {
                                     // ignore non-JSON error payloads
                                 }
-                                reject(error);
+                                onReject(error);
                             }
                         }
                     };
-                    xhr.onerror = () => reject(new Error('Network error'));
-                    xhr.ontimeout = () => reject(new Error('Request timeout'));
+                    xhr.onerror = () => onReject(new Error('Network error'));
+                    xhr.ontimeout = () => onReject(new Error('Request timeout'));
                     xhr.send();
                 });
             } finally {
                 clearTimeout(timeoutId);
+                if (externalSignal && externalAbortHandler) {
+                    externalSignal.removeEventListener('abort', externalAbortHandler);
+                }
             }
         }
 
@@ -4942,21 +5005,24 @@
             };
         }
 
-        async function fetchYahooWithBackoff(symbol, range, interval, maxRetries = 4) {
+        async function fetchYahooWithBackoff(symbol, range, interval, maxRetries = 4, options = {}) {
             const yahooSymbol = symbol === 'SPX' ? '^GSPC' : symbol;
             const hosts = ['query1.finance.yahoo.com', 'query2.finance.yahoo.com'];
+            const externalSignal = options?.signal || null;
 
             let attempt = 0;
             let lastError = null;
 
             while (attempt <= maxRetries) {
+                throwIfAborted(externalSignal);
                 attempt += 1;
                 try {
                     let payload = null;
                     for (const host of hosts) {
+                        throwIfAborted(externalSignal);
                         const yahooUrl = `https://${host}/v8/finance/chart/${encodeURIComponent(yahooSymbol)}?range=${encodeURIComponent(range)}&interval=${encodeURIComponent(interval)}`;
                         const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(yahooUrl)}`;
-                        const wrapped = await fetchJson(proxyUrl, 12000);
+                        const wrapped = await fetchJson(proxyUrl, 12000, options);
                         if (!wrapped?.contents) continue;
                         payload = JSON.parse(wrapped.contents);
                         if (payload?.chart?.result?.[0]) break;
@@ -4978,19 +5044,20 @@
                     }
                     const delay = Math.min(8000, 800 * Math.pow(2, attempt - 1));
                     await sleep(delay * (0.7 + Math.random() * 0.6));
+                    throwIfAborted(externalSignal);
                 }
             }
 
             throw lastError || new Error('Yahoo fallback failed');
         }
 
-        async function fetchVixLevel(interval, range) {
+        async function fetchVixLevel(interval, range, options = {}) {
             try {
                 const vixInterval = '1d';
                 const vixRange = range === '1y' ? '6mo' : '1mo';
                 const query = `symbol=${encodeURIComponent('^VIX')}&range=${encodeURIComponent(vixRange)}&interval=${encodeURIComponent(vixInterval)}`;
                 const apiUrl = `${getApiOrigin()}/api/market?${query}`;
-                const data = await fetchJson(apiUrl, 6000);
+                const data = await fetchJson(apiUrl, 6000, options);
                 if (Number.isFinite(data?.currentPrice)) {
                     return data.currentPrice;
                 }
@@ -5000,11 +5067,11 @@
             return null;
         }
 
-        async function fetchGammaData(symbol) {
+        async function fetchGammaData(symbol, options = {}) {
             try {
                 const expiryMode = document.getElementById('gamma-expiry-select')?.value || 'front';
                 const apiUrl = `${getApiOrigin()}/api/gamma?symbol=${encodeURIComponent(symbol)}&expiry=${encodeURIComponent(expiryMode)}&limit=60`;
-                const data = await fetchJson(apiUrl, 6000);
+                const data = await fetchJson(apiUrl, 6000, options);
                 const hasGammaFlip = Number.isFinite(data?.gammaFlip);
                 const hasStats = !!data?.stats;
                 if (hasGammaFlip || hasStats) {
@@ -5030,21 +5097,21 @@
             return null;
         }
 
-        async function fetchIbkrMarket(symbol, interval, range) {
+        async function fetchIbkrMarket(symbol, interval, range, options = {}) {
             try {
                 const apiUrl = `${getApiOrigin()}/api/ib/market?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}&range=${encodeURIComponent(range)}`;
-                return await fetchJson(apiUrl, 6000);
+                return await fetchJson(apiUrl, 6000, options);
             } catch (error) {
                 console.warn('IBKR market fetch failed', error);
                 return null;
             }
         }
 
-        async function fetchDashboardMarket(symbol, interval, range) {
+        async function fetchDashboardMarket(symbol, interval, range, options = {}) {
             try {
                 const query = `symbol=${encodeURIComponent(symbol)}&range=${encodeURIComponent(range)}&interval=${encodeURIComponent(interval)}`;
                 const apiUrl = `${getApiOrigin()}/api/market?${query}`;
-                return await fetchJson(apiUrl, 10000);
+                return await fetchJson(apiUrl, 10000, options);
             } catch (error) {
                 console.warn('Dashboard market API fetch failed', error);
                 return null;
@@ -5061,10 +5128,10 @@
             }
         }
 
-        async function fetchPersistedDailyCandles(symbol) {
+        async function fetchPersistedDailyCandles(symbol, options = {}) {
             try {
                 const apiUrl = `${getApiOrigin()}/api/daily-candles?symbol=${encodeURIComponent(symbol)}&limit=200`;
-                const data = await fetchJson(apiUrl, 6000);
+                const data = await fetchJson(apiUrl, 6000, options);
                 return data?.candles || [];
             } catch (error) {
                 console.warn('Persisted daily candles fetch failed', error);
@@ -6230,16 +6297,29 @@
 
         async function loadMarketData() {
             const requestSeq = ++state.marketRequestSeq;
+            if (state.marketLoadAbortController) {
+                try {
+                    state.marketLoadAbortController.abort();
+                } catch (_error) {
+                    // ignore abort errors
+                }
+                state.marketLoadAbortController = null;
+            }
             if (state.marketLoading) {
                 state.marketPendingReload = true;
                 stopRealtimePollers();
                 return;
             }
+            const marketLoadAbortController = typeof AbortController !== 'undefined' ? new AbortController() : null;
+            state.marketLoadAbortController = marketLoadAbortController;
+            const requestOptions = marketLoadAbortController ? { signal: marketLoadAbortController.signal } : {};
             state.marketLoading = true;
             state.marketActiveRequestSeq = requestSeq;
             state.marketPendingReload = false;
             stopRealtimePollers();
-            const isStaleRequest = () => requestSeq !== state.marketRequestSeq;
+            const isStaleRequest = () =>
+                requestSeq !== state.marketRequestSeq
+                || Boolean(marketLoadAbortController?.signal?.aborted);
             if ((Number(state.autoRefreshSec) || 0) > 0) {
                 state.nextAutoRefreshAt = Date.now() + (Number(state.autoRefreshSec) * 1000);
             }
@@ -6270,7 +6350,7 @@
             try {
                 let data = null;
                 try {
-                    data = await fetchIbkrMarket(symbol, interval, range);
+                    data = await fetchIbkrMarket(symbol, interval, range, requestOptions);
                     if (isStaleRequest()) return;
                     if (!data?.candles?.length) {
                         throw new Error('IBKR market data unavailable');
@@ -6279,11 +6359,11 @@
                 } catch (error) {
                     console.warn('IBKR market data failed, falling back to dashboard market API', error);
                     setDebug(`IBKR market data failed (${error.message}). Falling back to dashboard market API.`);
-                    data = await fetchDashboardMarket(symbol, interval, range);
+                    data = await fetchDashboardMarket(symbol, interval, range, requestOptions);
                     if (isStaleRequest()) return;
                     if (!data?.candles?.length) {
                         setDebug('Dashboard market API unavailable. Falling back to Yahoo proxy.');
-                        data = await fetchYahooWithBackoff(symbol, range, interval);
+                        data = await fetchYahooWithBackoff(symbol, range, interval, 4, requestOptions);
                         if (isStaleRequest()) return;
                     }
                 }
@@ -6304,7 +6384,7 @@
                 // avoid duplicate-looking same-day candles across sources/time zones.
                 if (interval === '1d' || interval === 'daily') {
                     state.candles = normalizeDailyCandles(state.candles, state.timeZone);
-                    const persistedCandles = await fetchPersistedDailyCandles(symbol);
+                    const persistedCandles = await fetchPersistedDailyCandles(symbol, requestOptions);
                     if (isStaleRequest()) return;
                     if (persistedCandles.length) {
                         const liveCandleCount = state.candles.length;
@@ -6315,9 +6395,9 @@
                     }
                 }
 
-                state.vixLevel = await fetchVixLevel(interval, range);
+                state.vixLevel = await fetchVixLevel(interval, range, requestOptions);
                 if (isStaleRequest()) return;
-                state.gammaData = await fetchGammaData(symbol);
+                state.gammaData = await fetchGammaData(symbol, requestOptions);
                 if (isStaleRequest()) return;
 
                 if (state.candleSeries) {
@@ -6405,7 +6485,7 @@
                 setDebug(`Loaded ${state.candles.length} candles. Session ${data.session?.usedDate || '--'}.`);
                 updateSystemStrip();
             } catch (error) {
-                if (isStaleRequest()) {
+                if (isStaleRequest() || isAbortError(error)) {
                     return;
                 }
                 console.error(error);
@@ -6454,6 +6534,9 @@
                 if (requestSeq === state.marketActiveRequestSeq) {
                     state.marketLoading = false;
                     state.marketActiveRequestSeq = 0;
+                }
+                if (state.marketLoadAbortController === marketLoadAbortController) {
+                    state.marketLoadAbortController = null;
                 }
                 state.lastRefreshAt = Date.now();
                 updateRefreshMeta();
