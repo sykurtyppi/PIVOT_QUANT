@@ -1543,6 +1543,15 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("datetime.now(timezone.utc)", source)
         self.assertIn("_utc_iso_z()", source)
 
+    def test_ibkr_bridge_connection_guard_is_lock_protected(self) -> None:
+        source = (REPO_ROOT / "server" / "ibkr_gamma_bridge.py").read_text(encoding="utf-8")
+        self.assertIn("ib_lock = threading.RLock()", source)
+        self.assertIn("def ensure_connected()", source)
+        ensure_block = source.split("def ensure_connected()", 1)[1].split("def fetch_spot", 1)[0]
+        self.assertIn("with ib_lock:", ensure_block)
+        self.assertIn("if ib.isConnected()", ensure_block)
+        self.assertIn("ib.connect(IB_HOST, IB_PORT, clientId=IB_CLIENT_ID)", ensure_block)
+
     def test_alert_system_cross_and_xss_hardening_contract_present(self) -> None:
         source = (REPO_ROOT / "alert_system.js").read_text(encoding="utf-8")
         self.assertIn("this.previousObservedPrice", source)

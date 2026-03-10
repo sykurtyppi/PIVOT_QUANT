@@ -30,7 +30,7 @@ MARKETDATA_APP_BASE = "https://api.marketdata.app/v1"
 _DEFAULT_CORS_ORIGINS = "http://127.0.0.1:3000,http://localhost:3000"
 
 ib = IB()
-ib_lock = threading.Lock()
+ib_lock = threading.RLock()
 
 
 def _utc_now() -> datetime:
@@ -107,9 +107,10 @@ def _fetch_ticker_price(contract):
 
 
 def ensure_connected():
-    if ib.isConnected():
-        return
-    ib.connect(IB_HOST, IB_PORT, clientId=IB_CLIENT_ID)
+    with ib_lock:
+        if ib.isConnected():
+            return
+        ib.connect(IB_HOST, IB_PORT, clientId=IB_CLIENT_ID)
 
 
 def fetch_spot(symbol):
