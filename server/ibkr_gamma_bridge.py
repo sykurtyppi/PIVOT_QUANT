@@ -6,6 +6,10 @@ import urllib.request
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse, parse_qs
+try:
+    from zoneinfo import ZoneInfo
+except Exception:  # pragma: no cover
+    ZoneInfo = None
 
 from ib_insync import IB, Index, Option, Stock, ContFuture
 
@@ -28,6 +32,7 @@ IB_DATA_TYPE = os.getenv("IB_DATA_TYPE", "").strip()
 MARKETDATA_APP_TOKEN = os.getenv("MARKETDATA_APP_TOKEN", "").strip()
 MARKETDATA_APP_BASE = "https://api.marketdata.app/v1"
 _DEFAULT_CORS_ORIGINS = "http://127.0.0.1:3000,http://localhost:3000"
+NY_TZ = ZoneInfo("America/New_York") if ZoneInfo else None
 
 ib = IB()
 ib_lock = threading.RLock()
@@ -43,6 +48,16 @@ def _utc_iso_z() -> str:
 
 def _utc_today_yyyymmdd() -> str:
     return _utc_now().strftime("%Y%m%d")
+
+
+def _is_market_session_closed(now_utc: datetime) -> bool:
+    if now_utc.weekday() >= 5:
+        return True
+    if NY_TZ is None:
+        # Fallback without zoneinfo: conservative close estimate.
+        return now_utc.hour >= 21
+    now_et = now_utc.astimezone(NY_TZ)
+    return now_et.hour > 16 or (now_et.hour == 16 and now_et.minute >= 0)
 
 
 def _parse_allowed_origins() -> list[str]:
@@ -902,10 +917,8 @@ def fetch_ibkr_market(symbol, interval, range_str):
         if _is_finite(es_spot):
             spot = es_spot
 
-    # Determine if last session is complete: after 4 PM ET (21:00 UTC during
-    # EST, conservative — during EDT this triggers 1 hour late, safe direction)
     now_utc = _utc_now()
-    is_last_complete = now_utc.hour >= 21 or now_utc.weekday() >= 5
+    is_last_complete = _is_market_session_closed(now_utc)
 
     return {
         "symbol": symbol.upper(),

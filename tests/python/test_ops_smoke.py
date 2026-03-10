@@ -1568,6 +1568,22 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("if ib.isConnected()", ensure_block)
         self.assertIn("ib.connect(IB_HOST, IB_PORT, clientId=IB_CLIENT_ID)", ensure_block)
 
+    def test_ibkr_bridge_market_close_uses_new_york_timezone(self) -> None:
+        bridge = load_module(
+            "pq_ibkr_market_close_timezone_test",
+            REPO_ROOT / "server" / "ibkr_gamma_bridge.py",
+        )
+        if getattr(bridge, "NY_TZ", None) is None:
+            self.skipTest("zoneinfo unavailable")
+
+        pre_close_utc = datetime(2026, 3, 10, 19, 59, tzinfo=timezone.utc)  # 15:59 ET
+        close_utc = datetime(2026, 3, 10, 20, 0, tzinfo=timezone.utc)  # 16:00 ET
+        weekend_utc = datetime(2026, 3, 14, 14, 0, tzinfo=timezone.utc)  # Saturday
+
+        self.assertFalse(bridge._is_market_session_closed(pre_close_utc))
+        self.assertTrue(bridge._is_market_session_closed(close_utc))
+        self.assertTrue(bridge._is_market_session_closed(weekend_utc))
+
     def test_alert_system_cross_and_xss_hardening_contract_present(self) -> None:
         source = (REPO_ROOT / "alert_system.js").read_text(encoding="utf-8")
         self.assertIn("this.previousObservedPrice", source)
