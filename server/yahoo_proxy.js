@@ -6,6 +6,7 @@ import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { buildConversionSnapshot, convertLevels, normalizeInstrument } from './level_converter.js';
 
+const fsp = fs.promises;
 const HOST = process.env.HOST || '127.0.0.1';
 const PORT = Number(process.env.PORT || 3000);
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 15000);
@@ -1857,6 +1858,28 @@ function loadEnvMap(filePath) {
   return env;
 }
 
+async function loadEnvMapAsync(filePath) {
+  const env = {};
+  let raw = null;
+  try {
+    raw = await fsp.readFile(filePath, 'utf8');
+  } catch (error) {
+    if (error?.code === 'ENOENT') return env;
+    throw error;
+  }
+  const lines = raw.split(/\r?\n/);
+  for (const lineRaw of lines) {
+    const line = lineRaw.trim();
+    if (!line || line.startsWith('#')) continue;
+    const idx = line.indexOf('=');
+    if (idx <= 0) continue;
+    const key = line.slice(0, idx).trim();
+    const value = line.slice(idx + 1).trim().replace(/^['"]|['"]$/g, '');
+    if (key) env[key] = value;
+  }
+  return env;
+}
+
 function parseCsv(raw) {
   if (typeof raw !== 'string' || !raw.trim()) return [];
   return raw
@@ -1881,6 +1904,39 @@ function readTailLines(filePath, maxLines = 120) {
   const lines = fs.readFileSync(filePath, 'utf8').split(/\r?\n/).filter(Boolean);
   if (lines.length <= maxLines) return lines;
   return lines.slice(-maxLines);
+}
+
+async function readTailLinesAsync(filePath, maxLines = 120) {
+  let raw = null;
+  try {
+    raw = await fsp.readFile(filePath, 'utf8');
+  } catch (error) {
+    if (error?.code === 'ENOENT') return [];
+    throw error;
+  }
+  const lines = raw.split(/\r?\n/).filter(Boolean);
+  if (lines.length <= maxLines) return lines;
+  return lines.slice(-maxLines);
+}
+
+async function readJsonFileAsync(filePath) {
+  let raw = null;
+  try {
+    raw = await fsp.readFile(filePath, 'utf8');
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  }
+  return JSON.parse(raw);
+}
+
+async function readJsonFileSafeAsync(filePath, fallback = null) {
+  try {
+    const value = await readJsonFileAsync(filePath);
+    return value == null ? fallback : value;
+  } catch (_error) {
+    return fallback;
+  }
 }
 
 function parseLogTimestamp(line) {
@@ -2014,15 +2070,30 @@ async function readOpsStatusRows() {
 }
 
 async function queryOpsStatus() {
-  const env = loadEnvMap(ENV_FILE);
-  const ops = await readOpsStatusRows();
-  const backupState = readJsonFileSafe(BACKUP_STATE_FILE, {});
-  const hostState = readJsonFileSafe(HOST_HEALTH_STATE_FILE, {});
-  const alertState = readJsonFileSafe(HEALTH_ALERT_STATE_FILE, {});
-  const reportState = readJsonFileSafe(REPORT_DELIVERY_STATE_FILE, {});
-  const reportLog = summarizeReportDelivery(readTailLines(REPORT_DELIVERY_LOG_FILE, 200));
-  const alertLog = summarizeHealthAlert(readTailLines(HEALTH_ALERT_LOG_FILE, 200));
-  const drillLog = summarizeRestoreDrill(readTailLines(RESTORE_DRILL_LOG_FILE, 200));
+  const [
+    env,
+    ops,
+    backupState,
+    hostState,
+    alertState,
+    reportState,
+    reportLogLines,
+    alertLogLines,
+    drillLogLines,
+  ] = await Promise.all([
+    loadEnvMapAsync(ENV_FILE),
+    readOpsStatusRows(),
+    readJsonFileSafeAsync(BACKUP_STATE_FILE, {}),
+    readJsonFileSafeAsync(HOST_HEALTH_STATE_FILE, {}),
+    readJsonFileSafeAsync(HEALTH_ALERT_STATE_FILE, {}),
+    readJsonFileSafeAsync(REPORT_DELIVERY_STATE_FILE, {}),
+    readTailLinesAsync(REPORT_DELIVERY_LOG_FILE, 200),
+    readTailLinesAsync(HEALTH_ALERT_LOG_FILE, 200),
+    readTailLinesAsync(RESTORE_DRILL_LOG_FILE, 200),
+  ]);
+  const reportLog = summarizeReportDelivery(reportLogLines);
+  const alertLog = summarizeHealthAlert(alertLogLines);
+  const drillLog = summarizeRestoreDrill(drillLogLines);
 
   const backupLastRunMs = toNumber(ops.backup_last_run_ms, toNumber(backupState.last_run_ms, null));
   const restoreLastRunMs = toNumber(ops.backup_restore_last_run_ms, null);

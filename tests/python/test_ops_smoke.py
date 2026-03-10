@@ -1536,6 +1536,22 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("x-forwarded-for", proxy_source)
         self.assertIn("url.pathname === '/health'", proxy_source)
 
+    def test_dashboard_proxy_ops_status_uses_async_file_reads(self) -> None:
+        proxy_source = (REPO_ROOT / "server" / "yahoo_proxy.js").read_text(encoding="utf-8")
+        self.assertIn("const fsp = fs.promises;", proxy_source)
+        self.assertIn("async function loadEnvMapAsync(filePath)", proxy_source)
+        self.assertIn("async function readJsonFileSafeAsync(filePath, fallback = null)", proxy_source)
+        self.assertIn("async function readTailLinesAsync(filePath, maxLines = 120)", proxy_source)
+        query_block = proxy_source.split("async function queryOpsStatus()", 1)[1].split(
+            "return {",
+            1,
+        )[0]
+        self.assertIn("await Promise.all([", query_block)
+        self.assertIn("loadEnvMapAsync(ENV_FILE)", query_block)
+        self.assertIn("readJsonFileSafeAsync(BACKUP_STATE_FILE, {})", query_block)
+        self.assertIn("readTailLinesAsync(REPORT_DELIVERY_LOG_FILE, 200)", query_block)
+        self.assertNotIn("readFileSync(", query_block)
+
     def test_ibkr_bridge_uses_timezone_aware_utc_datetimes(self) -> None:
         source = (REPO_ROOT / "server" / "ibkr_gamma_bridge.py").read_text(encoding="utf-8")
         self.assertNotIn("datetime.utcnow(", source)
