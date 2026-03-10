@@ -264,6 +264,11 @@ allowed_origins = [
     ).split(",")
     if origin.strip()
 ]
+if "*" in allowed_origins:
+    print("ML server warning: ignoring wildcard '*' in ML_CORS_ORIGINS; use explicit origins.")
+    allowed_origins = [origin for origin in allowed_origins if origin != "*"]
+if not allowed_origins:
+    print("ML server warning: ML_CORS_ORIGINS is empty; no browser origins are allowed.")
 
 
 class ModelRegistry:
@@ -897,7 +902,7 @@ app = FastAPI(title="PivotQuant ML Server", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allowed_origins or ["*"],
+    allow_origins=allowed_origins,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],

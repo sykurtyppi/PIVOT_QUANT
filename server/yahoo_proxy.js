@@ -63,6 +63,7 @@ const YAHOO_HOSTS = ['query1.finance.yahoo.com', 'query2.finance.yahoo.com'];
 const cache = new Map();
 const levelConversionSnapshotCache = new Map();
 const levelConversionResultCache = new Map();
+const authLoginAttemptState = new Map();
 const WRITE_ENDPOINTS = new Set(['/api/ml/reload', '/api/ml/score', '/api/events', '/api/bars']);
 const RESPONSE_SECURITY_HEADERS = Object.freeze({
   'X-Content-Type-Options': 'nosniff',
@@ -129,6 +130,12 @@ function parseBool(value, fallback = false) {
   return fallback;
 }
 
+function parsePositiveInt(value, fallback, min = 1) {
+  const parsed = Number.parseInt(String(value ?? ''), 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, parsed);
+}
+
 function readSetting(procEnv, fileEnv, key, fallback = '') {
   if (typeof procEnv?.[key] === 'string' && procEnv[key] !== '') {
     return procEnv[key];
@@ -148,10 +155,43 @@ function buildSecurityConfig(procEnv = process.env, fileEnv = {}) {
   ).trim();
   const authEnabledFlag = parseBool(readSetting(procEnv, fileEnv, 'DASH_AUTH_ENABLED', ''), false);
   const authCredentialsConfigured = authPassword.length > 0;
+  const authPasswordMinLength = parsePositiveInt(
+    readSetting(procEnv, fileEnv, 'DASH_AUTH_MIN_PASSWORD_LEN', '20'),
+    20,
+    8
+  );
+  const authPasswordStrongEnough =
+    !authCredentialsConfigured || authPassword.length >= authPasswordMinLength;
+  const authRateLimitWindowSec = parsePositiveInt(
+    readSetting(procEnv, fileEnv, 'DASH_AUTH_RATE_LIMIT_WINDOW_SEC', '300'),
+    300,
+    30
+  );
+  const authRateLimitMaxAttempts = parsePositiveInt(
+    readSetting(procEnv, fileEnv, 'DASH_AUTH_RATE_LIMIT_MAX_ATTEMPTS', '8'),
+    8,
+    1
+  );
+  const authRateLimitLockoutSec = parsePositiveInt(
+    readSetting(procEnv, fileEnv, 'DASH_AUTH_RATE_LIMIT_LOCKOUT_SEC', '900'),
+    900,
+    10
+  );
+  const authRateLimitMaxTrackedClients = parsePositiveInt(
+    readSetting(procEnv, fileEnv, 'DASH_AUTH_RATE_LIMIT_MAX_TRACKED_CLIENTS', '4096'),
+    4096,
+    100
+  );
   return {
     authEnabled: authEnabledFlag || authCredentialsConfigured,
     authCredentialsConfigured,
     authPassword,
+    authPasswordMinLength,
+    authPasswordStrongEnough,
+    authPasswordPolicyEnforced: parseBool(
+      readSetting(procEnv, fileEnv, 'DASH_AUTH_ENFORCE_STRONG_PASSWORD', 'false'),
+      false
+    ),
     authCookieName: readSetting(procEnv, fileEnv, 'DASH_AUTH_COOKIE_NAME', 'pq_dash_auth').trim() || 'pq_dash_auth',
     authCookieTtlSec: Math.max(
       300,
@@ -166,6 +206,14 @@ function buildSecurityConfig(procEnv = process.env, fileEnv = {}) {
       true
     ),
     authCookieSecure: parseBool(readSetting(procEnv, fileEnv, 'DASH_AUTH_COOKIE_SECURE', 'true'), true),
+    authRateLimitEnabled: parseBool(
+      readSetting(procEnv, fileEnv, 'DASH_AUTH_RATE_LIMIT_ENABLED', 'true'),
+      true
+    ),
+    authRateLimitWindowSec,
+    authRateLimitMaxAttempts,
+    authRateLimitLockoutSec,
+    authRateLimitMaxTrackedClients,
   };
 }
 
@@ -313,12 +361,13 @@ function renderLoginPage(nextPath, message = '') {
 </html>`;
 }
 
-function sendLoginPage(res, nextPath, message = '', statusCode = 200) {
+function sendLoginPage(res, nextPath, message = '', statusCode = 200, extraHeaders = {}) {
   res.writeHead(
     statusCode,
     withSecurityHeaders({
       'Content-Type': 'text/html; charset=utf-8',
       'Cache-Control': 'no-store',
+      ...extraHeaders,
     })
   );
   res.end(renderLoginPage(nextPath, message));
@@ -361,6 +410,127 @@ function clearSessionCookieHeaders(res, req) {
   res.setHeader('Set-Cookie', cookieParts.join('; '));
 }
 
+function authClientKey(req) {
+  const remoteAddress = normalizeRemoteAddress(req?.socket?.remoteAddress || '');
+  if (isLoopbackAddress(remoteAddress)) {
+    const forwardedForRaw = String(req?.headers?.['x-forwarded-for'] || '');
+    const forwardedFor = forwardedForRaw.split(',')[0]?.trim() || '';
+    if (forwardedFor) {
+      return `xff:${forwardedFor}`;
+    }
+  }
+  return `ra:${remoteAddress || 'unknown'}`;
+}
+
+function pruneAuthLoginAttemptState(nowMs) {
+  if (!SECURITY.authRateLimitEnabled) return;
+  const staleAfterMs =
+    Math.max(SECURITY.authRateLimitWindowSec, SECURITY.authRateLimitLockoutSec) * 1000 * 2;
+  for (const [key, entry] of authLoginAttemptState.entries()) {
+    const isExpired = nowMs - entry.lastSeenMs > staleAfterMs;
+    const lockExpired = !entry.lockUntilMs || entry.lockUntilMs <= nowMs;
+    if (isExpired && lockExpired) {
+      authLoginAttemptState.delete(key);
+    }
+  }
+
+  while (authLoginAttemptState.size > SECURITY.authRateLimitMaxTrackedClients) {
+    let oldestKey = null;
+    let oldestSeen = Number.POSITIVE_INFINITY;
+    for (const [key, entry] of authLoginAttemptState.entries()) {
+      if (entry.lastSeenMs < oldestSeen) {
+        oldestSeen = entry.lastSeenMs;
+        oldestKey = key;
+      }
+    }
+    if (!oldestKey) break;
+    authLoginAttemptState.delete(oldestKey);
+  }
+}
+
+function getAuthLoginThrottleState(req, nowMs = Date.now()) {
+  if (!SECURITY.authRateLimitEnabled) {
+    return {
+      key: null,
+      locked: false,
+      retryAfterSec: 0,
+      remainingAttempts: SECURITY.authRateLimitMaxAttempts,
+    };
+  }
+
+  pruneAuthLoginAttemptState(nowMs);
+  const key = authClientKey(req);
+  const entry = authLoginAttemptState.get(key);
+  if (!entry) {
+    return {
+      key,
+      locked: false,
+      retryAfterSec: 0,
+      remainingAttempts: SECURITY.authRateLimitMaxAttempts,
+    };
+  }
+
+  entry.lastSeenMs = nowMs;
+  if (entry.lockUntilMs > nowMs) {
+    return {
+      key,
+      locked: true,
+      retryAfterSec: Math.max(1, Math.ceil((entry.lockUntilMs - nowMs) / 1000)),
+      remainingAttempts: 0,
+    };
+  }
+
+  const windowMs = SECURITY.authRateLimitWindowSec * 1000;
+  if (nowMs - entry.windowStartMs >= windowMs) {
+    entry.windowStartMs = nowMs;
+    entry.failCount = 0;
+    entry.lockUntilMs = 0;
+    authLoginAttemptState.set(key, entry);
+  }
+
+  return {
+    key,
+    locked: false,
+    retryAfterSec: 0,
+    remainingAttempts: Math.max(0, SECURITY.authRateLimitMaxAttempts - entry.failCount),
+  };
+}
+
+function registerAuthLoginFailure(req, nowMs = Date.now()) {
+  if (!SECURITY.authRateLimitEnabled) {
+    return getAuthLoginThrottleState(req, nowMs);
+  }
+
+  const state = getAuthLoginThrottleState(req, nowMs);
+  const key = state.key;
+  const windowMs = SECURITY.authRateLimitWindowSec * 1000;
+  const entry = authLoginAttemptState.get(key) || {
+    windowStartMs: nowMs,
+    failCount: 0,
+    lockUntilMs: 0,
+    lastSeenMs: nowMs,
+  };
+  if (nowMs - entry.windowStartMs >= windowMs) {
+    entry.windowStartMs = nowMs;
+    entry.failCount = 0;
+    entry.lockUntilMs = 0;
+  }
+  entry.failCount += 1;
+  entry.lastSeenMs = nowMs;
+  if (entry.failCount >= SECURITY.authRateLimitMaxAttempts) {
+    entry.lockUntilMs = nowMs + SECURITY.authRateLimitLockoutSec * 1000;
+    entry.failCount = 0;
+  }
+  authLoginAttemptState.set(key, entry);
+  pruneAuthLoginAttemptState(nowMs);
+  return getAuthLoginThrottleState(req, nowMs);
+}
+
+function clearAuthLoginFailures(req) {
+  if (!SECURITY.authRateLimitEnabled) return;
+  authLoginAttemptState.delete(authClientKey(req));
+}
+
 async function handleAuthRoutes(req, res, url) {
   const isAuthPath = url.pathname === '/auth/login' || url.pathname === '/auth/logout';
   if (!isAuthPath) return false;
@@ -395,10 +565,38 @@ async function handleAuthRoutes(req, res, url) {
     const body = await readBody(req, 8 * 1024);
     const form = parseFormBody(body);
     const nextPath = form.next && form.next.startsWith('/') ? form.next : '/';
-    if (!safeEqual(form.password, SECURITY.authPassword)) {
-      sendLoginPage(res, nextPath, 'Invalid password.', 401);
+    const throttleState = getAuthLoginThrottleState(req);
+    if (throttleState.locked) {
+      sendLoginPage(
+        res,
+        nextPath,
+        `Too many login attempts. Try again in ${throttleState.retryAfterSec}s.`,
+        429,
+        { 'Retry-After': String(throttleState.retryAfterSec) }
+      );
       return true;
     }
+    if (!safeEqual(form.password, SECURITY.authPassword)) {
+      const failedState = registerAuthLoginFailure(req);
+      if (failedState.locked) {
+        sendLoginPage(
+          res,
+          nextPath,
+          `Too many login attempts. Try again in ${failedState.retryAfterSec}s.`,
+          429,
+          { 'Retry-After': String(failedState.retryAfterSec) }
+        );
+        return true;
+      }
+      sendLoginPage(
+        res,
+        nextPath,
+        `Invalid password. ${failedState.remainingAttempts} attempt(s) remaining before lockout.`,
+        401
+      );
+      return true;
+    }
+    clearAuthLoginFailures(req);
     const token = createSessionToken(SECURITY.authPassword, SECURITY.authCookieTtlSec);
     setSessionCookieHeaders(res, req, token);
     res.writeHead(
@@ -1839,6 +2037,13 @@ const server = http.createServer(async (req, res) => {
       auth_enabled: SECURITY.authEnabled,
       auth_credentials_configured: SECURITY.authCredentialsConfigured,
       auth_method: 'password_cookie',
+      auth_password_policy_enforced: SECURITY.authPasswordPolicyEnforced,
+      auth_password_strong_enough: SECURITY.authPasswordStrongEnough,
+      auth_password_min_length: SECURITY.authPasswordMinLength,
+      auth_rate_limit_enabled: SECURITY.authRateLimitEnabled,
+      auth_rate_limit_window_sec: SECURITY.authRateLimitWindowSec,
+      auth_rate_limit_max_attempts: SECURITY.authRateLimitMaxAttempts,
+      auth_rate_limit_lockout_sec: SECURITY.authRateLimitLockoutSec,
       write_endpoints_local_only: SECURITY.writeEndpointsLocalOnly,
     });
     return;
@@ -1853,6 +2058,13 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, 500, {
         error: 'Authentication misconfigured',
         message: 'DASH_AUTH_PASSWORD is required when DASH_AUTH_ENABLED=true',
+      });
+      return;
+    }
+    if (SECURITY.authPasswordPolicyEnforced && !SECURITY.authPasswordStrongEnough) {
+      sendJson(res, 500, {
+        error: 'Authentication misconfigured',
+        message: `DASH_AUTH_PASSWORD must be at least ${SECURITY.authPasswordMinLength} characters when DASH_AUTH_ENFORCE_STRONG_PASSWORD=true`,
       });
       return;
     }
@@ -2296,9 +2508,19 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, HOST, () => {
   /* eslint-disable-next-line no-console */
   console.log(`Pivot dashboard server running at http://${HOST}:${PORT}`);
+  if (SECURITY.authEnabled && SECURITY.authCredentialsConfigured && !SECURITY.authPasswordStrongEnough) {
+    /* eslint-disable-next-line no-console */
+    console.warn(
+      `[security] weak DASH_AUTH_PASSWORD detected (len=${SECURITY.authPassword.length}). Recommended length is >=${SECURITY.authPasswordMinLength}.`
+    );
+  }
   /* eslint-disable-next-line no-console */
   console.log(
     `[security] auth_enabled=${SECURITY.authEnabled} auth_credentials_configured=${SECURITY.authCredentialsConfigured} auth_local_bypass=${SECURITY.authBypassLocal} write_endpoints_local_only=${SECURITY.writeEndpointsLocalOnly}`
+  );
+  /* eslint-disable-next-line no-console */
+  console.log(
+    `[security] auth_rate_limit_enabled=${SECURITY.authRateLimitEnabled} window_sec=${SECURITY.authRateLimitWindowSec} max_attempts=${SECURITY.authRateLimitMaxAttempts} lockout_sec=${SECURITY.authRateLimitLockoutSec}`
   );
 });
 

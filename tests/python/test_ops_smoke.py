@@ -549,10 +549,12 @@ class OpsSmokeTests(unittest.TestCase):
             "server/event_writer.py",
             "server/live_event_collector.py",
             "server/ibkr_gamma_bridge.py",
+            "server/ml_server.py",
         ):
             src = (REPO_ROOT / rel).read_text(encoding="utf-8")
             self.assertIn("ML_CORS_ORIGINS", src)
             self.assertNotIn('Access-Control-Allow-Origin", "*"', src)
+            self.assertNotIn('or ["*"]', src)
 
     def test_event_writer_daily_candles_use_ny_rth_window(self) -> None:
         event_writer = load_module(
@@ -1238,11 +1240,20 @@ class OpsSmokeTests(unittest.TestCase):
         proxy_source = (REPO_ROOT / "server" / "yahoo_proxy.js").read_text(encoding="utf-8")
         self.assertIn("DASH_AUTH_ENABLED", proxy_source)
         self.assertIn("DASH_AUTH_PASSWORD", proxy_source)
+        self.assertIn("DASH_AUTH_MIN_PASSWORD_LEN", proxy_source)
+        self.assertIn("DASH_AUTH_ENFORCE_STRONG_PASSWORD", proxy_source)
+        self.assertIn("DASH_AUTH_RATE_LIMIT_ENABLED", proxy_source)
+        self.assertIn("DASH_AUTH_RATE_LIMIT_MAX_ATTEMPTS", proxy_source)
+        self.assertIn("DASH_AUTH_RATE_LIMIT_LOCKOUT_SEC", proxy_source)
         self.assertIn("DASH_WRITE_ENDPOINTS_LOCAL_ONLY", proxy_source)
         self.assertIn("WRITE_ENDPOINTS", proxy_source)
         self.assertIn("handleAuthRoutes", proxy_source)
+        self.assertIn("registerAuthLoginFailure", proxy_source)
+        self.assertIn("clearAuthLoginFailures", proxy_source)
+        self.assertIn("Retry-After", proxy_source)
         self.assertIn("url.pathname === '/auth/login'", proxy_source)
         self.assertIn("auth_method: 'password_cookie'", proxy_source)
+        self.assertIn("auth_rate_limit_enabled", proxy_source)
         self.assertIn("x-forwarded-for", proxy_source)
         self.assertIn("url.pathname === '/health'", proxy_source)
 
