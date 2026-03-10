@@ -830,8 +830,12 @@ export class MathematicalModels {
     }
 
     _calculateVariance(array) {
+        if (!Array.isArray(array) || array.length < 2) {
+            return 0;
+        }
         const mean = this._calculateMean(array);
-        return array.reduce((sum, value) => sum + Math.pow(value - mean, 2), 0) / array.length;
+        const sumSquares = array.reduce((sum, value) => sum + Math.pow(value - mean, 2), 0);
+        return sumSquares / (array.length - 1);
     }
 
     _calculateStatistics(array) {

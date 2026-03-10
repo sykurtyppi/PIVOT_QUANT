@@ -1462,6 +1462,35 @@ class OpsSmokeTests(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 0, msg=f"{proc.stdout}\n{proc.stderr}")
 
+    def test_mathematical_models_variance_uses_sample_denominator(self) -> None:
+        if shutil.which("node") is None:
+            self.skipTest("node is not available in PATH")
+
+        node_script = textwrap.dedent(
+            """
+            import { MathematicalModels } from './src/math/MathematicalModels.js';
+            const model = new MathematicalModels({ precision: 6 });
+
+            const values = [1, 2, 3, 4];
+            const variance = model._calculateVariance(values);
+            const expectedSampleVariance = 5 / 3;
+            if (Math.abs(variance - expectedSampleVariance) > 1e-9) {
+              throw new Error(`Expected sample variance ${expectedSampleVariance}, got ${variance}`);
+            }
+            const singleton = model._calculateVariance([42]);
+            if (singleton !== 0) {
+              throw new Error(`Expected singleton variance 0, got ${singleton}`);
+            }
+            console.log('ok');
+            """
+        ).strip()
+
+        proc = run_cmd(
+            ["node", "--input-type=module", "-e", node_script],
+            cwd=REPO_ROOT,
+        )
+        self.assertEqual(proc.returncode, 0, msg=f"{proc.stdout}\n{proc.stderr}")
+
     def test_mathematical_models_level_accuracy_is_not_constant(self) -> None:
         if shutil.which("node") is None:
             self.skipTest("node is not available in PATH")
