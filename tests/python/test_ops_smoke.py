@@ -2405,6 +2405,101 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(gate_fail.status, "fail")
         self.assertIn("insufficient_passed_horizons", gate_fail.reasons)
 
+    def test_report_analog_promotion_gate_blend_mode_can_pass_when_analog_fails(self) -> None:
+        report = load_module(
+            "pq_daily_report_analog_gate_blend_mode_test",
+            REPO_ROOT / "scripts" / "generate_daily_ml_report.py",
+        )
+
+        summaries = [
+            report.AnalogHorizonSummary(
+                horizon=5,
+                sample_size=220,
+                analog_available_count=120,
+                analog_quality_ok_count=110,
+                mean_neighbors=20.0,
+                mean_effective_neighbors=14.0,
+                mean_ci_width=0.18,
+                mean_disagreement=0.10,
+                high_disagreement_count=8,
+                high_disagreement_model_abs_error=0.25,
+                low_disagreement_model_abs_error=0.20,
+                model_reject_brier_matched=0.20,
+                analog_reject_brier=0.24,
+                reject_brier_delta=0.04,
+                model_reject_ece_matched=0.10,
+                analog_reject_ece=0.13,
+                reject_ece_delta=0.03,
+                model_break_brier_matched=0.18,
+                analog_break_brier=0.20,
+                break_brier_delta=0.02,
+                model_break_ece_matched=0.08,
+                analog_break_ece=0.10,
+                break_ece_delta=0.02,
+                blend_reject_brier=0.19,
+                blend_reject_ece=0.09,
+                blend_break_brier=0.17,
+                blend_break_ece=0.07,
+                reject_brier_delta_blend=-0.01,
+                reject_ece_delta_blend=-0.01,
+                break_brier_delta_blend=-0.01,
+                break_ece_delta_blend=-0.01,
+            ),
+            report.AnalogHorizonSummary(
+                horizon=15,
+                sample_size=210,
+                analog_available_count=115,
+                analog_quality_ok_count=108,
+                mean_neighbors=20.0,
+                mean_effective_neighbors=13.0,
+                mean_ci_width=0.20,
+                mean_disagreement=0.11,
+                high_disagreement_count=9,
+                high_disagreement_model_abs_error=0.24,
+                low_disagreement_model_abs_error=0.21,
+                model_reject_brier_matched=0.21,
+                analog_reject_brier=0.23,
+                reject_brier_delta=0.02,
+                model_reject_ece_matched=0.11,
+                analog_reject_ece=0.12,
+                reject_ece_delta=0.01,
+                model_break_brier_matched=0.19,
+                analog_break_brier=0.21,
+                break_brier_delta=0.02,
+                model_break_ece_matched=0.09,
+                analog_break_ece=0.10,
+                break_ece_delta=0.01,
+                blend_reject_brier=0.20,
+                blend_reject_ece=0.10,
+                blend_break_brier=0.18,
+                blend_break_ece=0.08,
+                reject_brier_delta_blend=-0.01,
+                reject_ece_delta_blend=-0.01,
+                break_brier_delta_blend=-0.01,
+                break_ece_delta_blend=-0.01,
+            ),
+        ]
+
+        gate_blend = report.compute_analog_promotion_gate(
+            summaries,
+            [5, 15, 30, 60],
+            eval_mode="blend",
+            lookback_days=5,
+        )
+        self.assertEqual(gate_blend.status, "pass")
+        self.assertEqual(gate_blend.passed_horizons, [5, 15])
+        self.assertEqual(gate_blend.thresholds.get("eval_mode"), "blend")
+        self.assertEqual(int(gate_blend.thresholds.get("lookback_days") or 0), 5)
+
+        gate_analog = report.compute_analog_promotion_gate(
+            summaries,
+            [5, 15, 30, 60],
+            eval_mode="analog",
+            lookback_days=5,
+        )
+        self.assertEqual(gate_analog.status, "fail")
+        self.assertIn("insufficient_passed_horizons", gate_analog.reasons)
+
     def test_weekend_deep_audit_generates_markdown_with_core_sections(self) -> None:
         db = self.tmp / "weekend_audit.sqlite"
         conn = sqlite3.connect(str(db))

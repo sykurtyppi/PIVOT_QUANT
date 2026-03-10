@@ -1671,6 +1671,13 @@ def _score_event(event: dict):
             "blended_reject": blend_reject,
             "blended_break": blend_break,
         }
+        analog_horizons = analog_summary.get("horizons") if isinstance(analog_summary, dict) else None
+        if isinstance(analog_horizons, dict):
+            analog_horizon_payload = analog_horizons.get(str(horizon))
+            if isinstance(analog_horizon_payload, dict):
+                analog_horizon_payload["blend_weight"] = float(weight)
+                analog_horizon_payload["blend_prob_reject"] = blend_reject
+                analog_horizon_payload["blend_prob_break"] = blend_break
 
         if (
             ML_ANALOG_BLEND_MODE == "active"

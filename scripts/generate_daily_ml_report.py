@@ -68,6 +68,28 @@ ANALOG_PROMOTION_MAX_MEAN_CI_WIDTH = float(os.getenv("ML_ANALOG_PROMOTION_MAX_ME
 ANALOG_PROMOTION_MAX_BRIER_DELTA = float(os.getenv("ML_ANALOG_PROMOTION_MAX_BRIER_DELTA", "0.0"))
 ANALOG_PROMOTION_MAX_ECE_DELTA = float(os.getenv("ML_ANALOG_PROMOTION_MAX_ECE_DELTA", "0.0"))
 ANALOG_PROMOTION_MIN_HORIZONS = max(1, int(os.getenv("ML_ANALOG_PROMOTION_MIN_HORIZONS", "2")))
+ANALOG_PROMOTION_LOOKBACK_DAYS = max(
+    1, int(os.getenv("ML_ANALOG_PROMOTION_LOOKBACK_DAYS", "5"))
+)
+ANALOG_PROMOTION_EVAL_MODE = (
+    os.getenv("ML_ANALOG_PROMOTION_EVAL_MODE", "blend") or "blend"
+).strip().lower()
+if ANALOG_PROMOTION_EVAL_MODE not in {"analog", "blend"}:
+    ANALOG_PROMOTION_EVAL_MODE = "blend"
+ANALOG_BLEND_WEIGHT_BASE = max(
+    0.0, min(1.0, float(os.getenv("ML_ANALOG_BLEND_WEIGHT_BASE", "0.30")))
+)
+ANALOG_BLEND_WEIGHT_MAX = max(
+    0.0, min(1.0, float(os.getenv("ML_ANALOG_BLEND_WEIGHT_MAX", "0.60")))
+)
+if ANALOG_BLEND_WEIGHT_MAX < ANALOG_BLEND_WEIGHT_BASE:
+    ANALOG_BLEND_WEIGHT_MAX = ANALOG_BLEND_WEIGHT_BASE
+ANALOG_BLEND_N_EFF_REF = max(
+    1.0, float(os.getenv("ML_ANALOG_BLEND_N_EFF_REF", "20"))
+)
+ANALOG_BLEND_CI_WIDTH_REF = max(
+    0.05, float(os.getenv("ML_ANALOG_MAX_CI_WIDTH", "0.6"))
+)
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -79,6 +101,9 @@ def _env_bool(name: str, default: bool) -> bool:
 
 ANALOG_PROMOTION_REQUIRE_BOTH_TARGETS = _env_bool(
     "ML_ANALOG_PROMOTION_REQUIRE_BOTH_TARGETS", True
+)
+ANALOG_PROMOTION_USE_SHRUNK = _env_bool(
+    "ML_ANALOG_PROMOTION_USE_SHRUNK", True
 )
 
 # NYSE full-closure holidays (update annually).
@@ -169,6 +194,14 @@ class AnalogHorizonSummary:
     model_break_ece_matched: float | None
     analog_break_ece: float | None
     break_ece_delta: float | None
+    blend_reject_brier: float | None = None
+    blend_reject_ece: float | None = None
+    blend_break_brier: float | None = None
+    blend_break_ece: float | None = None
+    reject_brier_delta_blend: float | None = None
+    reject_ece_delta_blend: float | None = None
+    break_brier_delta_blend: float | None = None
+    break_ece_delta_blend: float | None = None
 
 
 @dataclass
@@ -286,6 +319,33 @@ def expected_calibration_error(y_true: list[int], probs: list[float], bins: int 
         conf = statistics.fmean(probs[j] for j in idx)
         ece += (len(idx) / n) * abs(acc - conf)
     return ece
+
+
+def _compute_report_blend_weight(n_eff: float | None, ci_width: float | None) -> float:
+    if n_eff is None:
+        return 0.0
+    eff_scale = min(1.0, max(0.0, float(n_eff)) / ANALOG_BLEND_N_EFF_REF)
+    if ci_width is None:
+        ci_scale = 1.0
+    else:
+        ci_scale = max(0.0, 1.0 - (float(ci_width) / ANALOG_BLEND_CI_WIDTH_REF))
+    weight = ANALOG_BLEND_WEIGHT_BASE * eff_scale * ci_scale
+    return max(0.0, min(ANALOG_BLEND_WEIGHT_MAX, weight))
+
+
+def _extract_analog_prob(horizon_payload: dict[str, Any], target: str) -> float | None:
+    preferred_key = f"{target}_prob_shrunk" if ANALOG_PROMOTION_USE_SHRUNK else f"{target}_prob"
+    raw = horizon_payload.get(preferred_key)
+    if not isinstance(raw, (int, float)):
+        raw = horizon_payload.get(f"{target}_prob")
+    if not isinstance(raw, (int, float)):
+        return None
+    prob = float(raw)
+    if prob < 0.0:
+        return 0.0
+    if prob > 1.0:
+        return 1.0
+    return prob
 
 
 def roc_auc_binary(y_true: list[int], probs: list[float]) -> float | None:
@@ -878,6 +938,7 @@ def build_horizon_metrics(records: list[dict[str, Any]], horizon: int) -> Metric
 def compute_analog_shadow_summaries(
     records: list[dict[str, Any]],
     horizons: list[int],
+    eval_mode: str = ANALOG_PROMOTION_EVAL_MODE,
 ) -> list[AnalogHorizonSummary]:
     def _delta(current: float | None, baseline: float | None) -> float | None:
         if current is None or baseline is None:
@@ -900,11 +961,15 @@ def compute_analog_shadow_summaries(
         low_disagreement_model_abs_error: list[float] = []
 
         reject_actual: list[int] = []
+        reject_actual_blend: list[int] = []
         model_reject_prob: list[float] = []
         analog_reject_prob: list[float] = []
+        blend_reject_prob: list[float] = []
         break_actual: list[int] = []
+        break_actual_blend: list[int] = []
         model_break_prob: list[float] = []
         analog_break_prob: list[float] = []
+        blend_break_prob: list[float] = []
 
         for row in subset:
             payload = _parse_json_object(row.get("analog_json"))
@@ -938,25 +1003,64 @@ def compute_analog_shadow_summaries(
                 ci_candidates.append(float(break_ci_width))
             if ci_candidates:
                 ci_widths.append(max(ci_candidates))
+            ci_width_for_blend = max(ci_candidates) if ci_candidates else None
 
             model_abs_components: list[float] = []
             pr_model = row.get(model_reject_key)
-            pr_analog = horizon_payload.get("reject_prob")
+            pr_analog = _extract_analog_prob(horizon_payload, "reject")
             ar = row.get("actual_reject")
-            if isinstance(pr_model, (int, float)) and isinstance(pr_analog, (int, float)) and ar in (0, 1):
-                model_reject_prob.append(float(pr_model))
-                analog_reject_prob.append(float(pr_analog))
-                reject_actual.append(int(ar))
-                model_abs_components.append(abs(float(pr_model) - int(ar)))
-
+            pr_model_f = float(pr_model) if isinstance(pr_model, (int, float)) else None
             pb_model = row.get(model_break_key)
-            pb_analog = horizon_payload.get("break_prob")
+            pb_model_f = float(pb_model) if isinstance(pb_model, (int, float)) else None
+            pb_analog = _extract_analog_prob(horizon_payload, "break")
+            n_eff_for_blend = (
+                float(horizon_payload.get("n_eff"))
+                if isinstance(horizon_payload.get("n_eff"), (int, float))
+                else None
+            )
+            blend_weight = _compute_report_blend_weight(
+                n_eff_for_blend,
+                ci_width_for_blend,
+            )
+            blend_reject = horizon_payload.get("blend_prob_reject")
+            blend_break = horizon_payload.get("blend_prob_break")
+            if not isinstance(blend_reject, (int, float)):
+                if (
+                    status == "ok"
+                    and pr_model_f is not None
+                    and pr_analog is not None
+                ):
+                    blend_reject = (1.0 - blend_weight) * pr_model_f + blend_weight * pr_analog
+                else:
+                    blend_reject = None
+            if not isinstance(blend_break, (int, float)):
+                if (
+                    status == "ok"
+                    and pb_model_f is not None
+                    and pb_analog is not None
+                ):
+                    blend_break = (1.0 - blend_weight) * pb_model_f + blend_weight * pb_analog
+                else:
+                    blend_break = None
+
+            if pr_model_f is not None and pr_analog is not None and ar in (0, 1):
+                model_reject_prob.append(pr_model_f)
+                analog_reject_prob.append(pr_analog)
+                reject_actual.append(int(ar))
+                model_abs_components.append(abs(pr_model_f - int(ar)))
+                if isinstance(blend_reject, (int, float)):
+                    blend_reject_prob.append(float(blend_reject))
+                    reject_actual_blend.append(int(ar))
+
             ab = row.get("actual_break")
-            if isinstance(pb_model, (int, float)) and isinstance(pb_analog, (int, float)) and ab in (0, 1):
-                model_break_prob.append(float(pb_model))
-                analog_break_prob.append(float(pb_analog))
+            if pb_model_f is not None and pb_analog is not None and ab in (0, 1):
+                model_break_prob.append(pb_model_f)
+                analog_break_prob.append(pb_analog)
                 break_actual.append(int(ab))
-                model_abs_components.append(abs(float(pb_model) - int(ab)))
+                model_abs_components.append(abs(pb_model_f - int(ab)))
+                if isinstance(blend_break, (int, float)):
+                    blend_break_prob.append(float(blend_break))
+                    break_actual_blend.append(int(ab))
 
             disagreement_value = horizon_payload.get("disagreement")
             if isinstance(disagreement_value, (int, float)):
@@ -976,6 +1080,10 @@ def compute_analog_shadow_summaries(
         analog_break_brier = brier_score(break_actual, analog_break_prob)
         model_break_ece = expected_calibration_error(break_actual, model_break_prob)
         analog_break_ece = expected_calibration_error(break_actual, analog_break_prob)
+        blend_reject_brier = brier_score(reject_actual_blend, blend_reject_prob)
+        blend_reject_ece = expected_calibration_error(reject_actual_blend, blend_reject_prob)
+        blend_break_brier = brier_score(break_actual_blend, blend_break_prob)
+        blend_break_ece = expected_calibration_error(break_actual_blend, blend_break_prob)
 
         summaries.append(
             AnalogHorizonSummary(
@@ -1002,6 +1110,14 @@ def compute_analog_shadow_summaries(
                 model_break_ece_matched=model_break_ece,
                 analog_break_ece=analog_break_ece,
                 break_ece_delta=_delta(analog_break_ece, model_break_ece),
+                blend_reject_brier=blend_reject_brier,
+                blend_reject_ece=blend_reject_ece,
+                blend_break_brier=blend_break_brier,
+                blend_break_ece=blend_break_ece,
+                reject_brier_delta_blend=_delta(blend_reject_brier, model_reject_brier),
+                reject_ece_delta_blend=_delta(blend_reject_ece, model_reject_ece),
+                break_brier_delta_blend=_delta(blend_break_brier, model_break_brier),
+                break_ece_delta_blend=_delta(blend_break_ece, model_break_ece),
             )
         )
     return summaries
@@ -1010,7 +1126,13 @@ def compute_analog_shadow_summaries(
 def compute_analog_promotion_gate(
     summaries: list[AnalogHorizonSummary],
     horizons: list[int],
+    eval_mode: str = ANALOG_PROMOTION_EVAL_MODE,
+    lookback_days: int = ANALOG_PROMOTION_LOOKBACK_DAYS,
 ) -> AnalogPromotionGate:
+    eval_mode_norm = (eval_mode or "blend").strip().lower()
+    if eval_mode_norm not in {"analog", "blend"}:
+        eval_mode_norm = "blend"
+
     thresholds = {
         "min_available": ANALOG_PROMOTION_MIN_AVAILABLE,
         "min_quality_ok": ANALOG_PROMOTION_MIN_QUALITY_OK,
@@ -1020,6 +1142,8 @@ def compute_analog_promotion_gate(
         "max_ece_delta": ANALOG_PROMOTION_MAX_ECE_DELTA,
         "min_horizons": ANALOG_PROMOTION_MIN_HORIZONS,
         "require_both_targets": ANALOG_PROMOTION_REQUIRE_BOTH_TARGETS,
+        "eval_mode": eval_mode_norm,
+        "lookback_days": max(1, int(lookback_days)),
     }
     by_horizon = {int(s.horizon): s for s in summaries}
     evaluated: list[int] = []
@@ -1042,13 +1166,39 @@ def compute_analog_promotion_gate(
         if s.mean_ci_width is None or s.mean_ci_width > ANALOG_PROMOTION_MAX_MEAN_CI_WIDTH:
             horizon_reasons.append("ci_width")
 
+        reject_brier_delta = s.reject_brier_delta
+        reject_ece_delta = s.reject_ece_delta
+        break_brier_delta = s.break_brier_delta
+        break_ece_delta = s.break_ece_delta
+        if eval_mode_norm == "blend":
+            reject_brier_delta = (
+                s.reject_brier_delta_blend
+                if s.reject_brier_delta_blend is not None
+                else s.reject_brier_delta
+            )
+            reject_ece_delta = (
+                s.reject_ece_delta_blend
+                if s.reject_ece_delta_blend is not None
+                else s.reject_ece_delta
+            )
+            break_brier_delta = (
+                s.break_brier_delta_blend
+                if s.break_brier_delta_blend is not None
+                else s.break_brier_delta
+            )
+            break_ece_delta = (
+                s.break_ece_delta_blend
+                if s.break_ece_delta_blend is not None
+                else s.break_ece_delta
+            )
+
         reject_checks = [
-            s.reject_brier_delta is not None and s.reject_brier_delta <= ANALOG_PROMOTION_MAX_BRIER_DELTA,
-            s.reject_ece_delta is not None and s.reject_ece_delta <= ANALOG_PROMOTION_MAX_ECE_DELTA,
+            reject_brier_delta is not None and reject_brier_delta <= ANALOG_PROMOTION_MAX_BRIER_DELTA,
+            reject_ece_delta is not None and reject_ece_delta <= ANALOG_PROMOTION_MAX_ECE_DELTA,
         ]
         break_checks = [
-            s.break_brier_delta is not None and s.break_brier_delta <= ANALOG_PROMOTION_MAX_BRIER_DELTA,
-            s.break_ece_delta is not None and s.break_ece_delta <= ANALOG_PROMOTION_MAX_ECE_DELTA,
+            break_brier_delta is not None and break_brier_delta <= ANALOG_PROMOTION_MAX_BRIER_DELTA,
+            break_ece_delta is not None and break_ece_delta <= ANALOG_PROMOTION_MAX_ECE_DELTA,
         ]
         if ANALOG_PROMOTION_REQUIRE_BOTH_TARGETS:
             if not all(reject_checks):
@@ -1294,6 +1444,10 @@ def render_report(
     bundles: list[MetricBundle],
     analog_summaries: list[AnalogHorizonSummary],
     analog_gate: AnalogPromotionGate,
+    analog_gate_eval_mode: str,
+    analog_gate_lookback_days: int,
+    analog_gate_start_ms: int,
+    analog_gate_end_ms: int,
     regime_summary: dict[str, int],
     regime_policy_summary: dict[str, Any],
     manifest: dict[str, Any],
@@ -1416,6 +1570,14 @@ def render_report(
         "(from `ML_ANALOG_DISAGREEMENT_FLAG`)"
     )
     lines.append(
+        f"- Promotion eval mode: `{analog_gate_eval_mode}` "
+        "(gate compares model vs this probability series)"
+    )
+    lines.append(
+        f"- Promotion eval window (ET): {ts_to_et(analog_gate_start_ms)} -> {ts_to_et(analog_gate_end_ms)} "
+        f"({analog_gate_lookback_days}d lookback)"
+    )
+    lines.append(
         f"- Promotion gate: **{analog_gate.status.upper()}** "
         f"(required horizons={analog_gate.required_horizons}, "
         f"evaluated={len(analog_gate.evaluated_horizons)}, passed={len(analog_gate.passed_horizons)})"
@@ -1431,10 +1593,13 @@ def render_report(
     if analog_gate.reasons:
         lines.append(f"- Gate reasons: {', '.join(analog_gate.reasons)}")
     if not any(s.analog_available_count > 0 for s in analog_summaries):
-        lines.append("- No analog payloads observed in this report window.")
+        lines.append("- No analog payloads observed in the promotion-eval window.")
         lines.append("")
     else:
-        lines.append("| Horizon | Labeled N | Analog Rows | Quality OK | Mean N_eff | Mean CI Width | Mean Disagreement |")
+        lines.append(
+            "| Horizon | Labeled N (Gate Window) | Analog Rows | Quality OK | "
+            "Mean N_eff | Mean CI Width | Mean Disagreement |"
+        )
         lines.append("|---|---:|---:|---:|---:|---:|---:|")
         for s in analog_summaries:
             lines.append(
@@ -1453,19 +1618,35 @@ def render_report(
             return f"{v:+.{digits}f}"
 
         lines.append(
-            "| Horizon | Brier R (Model) | Brier R (Analog) | Δ R | ECE R (Model) | ECE R (Analog) | Δ R | "
-            "Brier B (Model) | Brier B (Analog) | Δ B | ECE B (Model) | ECE B (Analog) | Δ B |"
+            "| Horizon | Brier R (Model) | Brier R (Analog) | Δ R (A-M) | "
+            "Brier R (Blend) | Δ R (B-M) | ECE R (Model) | ECE R (Analog) | Δ R (A-M) | "
+            "ECE R (Blend) | Δ R (B-M) |"
         )
         lines.append(
-            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
         )
         for s in analog_summaries:
             lines.append(
                 f"| {s.horizon}m | "
                 f"{format_metric(s.model_reject_brier_matched)} | {format_metric(s.analog_reject_brier)} | {_fmt_delta(s.reject_brier_delta)} | "
+                f"{format_metric(s.blend_reject_brier)} | {_fmt_delta(s.reject_brier_delta_blend)} | "
                 f"{format_metric(s.model_reject_ece_matched)} | {format_metric(s.analog_reject_ece)} | {_fmt_delta(s.reject_ece_delta)} | "
+                f"{format_metric(s.blend_reject_ece)} | {_fmt_delta(s.reject_ece_delta_blend)} |"
+            )
+        lines.append("")
+        lines.append(
+            "| Horizon | Brier B (Model) | Brier B (Analog) | Δ B (A-M) | "
+            "Brier B (Blend) | Δ B (B-M) | ECE B (Model) | ECE B (Analog) | Δ B (A-M) | "
+            "ECE B (Blend) | Δ B (B-M) |"
+        )
+        lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+        for s in analog_summaries:
+            lines.append(
+                f"| {s.horizon}m | "
                 f"{format_metric(s.model_break_brier_matched)} | {format_metric(s.analog_break_brier)} | {_fmt_delta(s.break_brier_delta)} | "
-                f"{format_metric(s.model_break_ece_matched)} | {format_metric(s.analog_break_ece)} | {_fmt_delta(s.break_ece_delta)} |"
+                f"{format_metric(s.blend_break_brier)} | {_fmt_delta(s.break_brier_delta_blend)} | "
+                f"{format_metric(s.model_break_ece_matched)} | {format_metric(s.analog_break_ece)} | {_fmt_delta(s.break_ece_delta)} | "
+                f"{format_metric(s.blend_break_ece)} | {_fmt_delta(s.break_ece_delta_blend)} |"
             )
         lines.append("")
         for s in analog_summaries:
@@ -1599,6 +1780,24 @@ def main() -> None:
     parser.add_argument("--report-date", default=None, help="Report date in YYYY-MM-DD (ET)")
     parser.add_argument("--out-dir", default=DEFAULT_REPORT_DIR, help="Output directory for markdown reports")
     parser.add_argument("--include-preview", action="store_true", default=False, help="Include preview predictions")
+    parser.add_argument(
+        "--analog-gate-lookback-days",
+        type=int,
+        default=ANALOG_PROMOTION_LOOKBACK_DAYS,
+        help=(
+            "Lookback window (days) for analog promotion-gate evaluation "
+            "(default: ML_ANALOG_PROMOTION_LOOKBACK_DAYS or 5)"
+        ),
+    )
+    parser.add_argument(
+        "--analog-gate-eval-mode",
+        default=ANALOG_PROMOTION_EVAL_MODE,
+        choices=("analog", "blend"),
+        help=(
+            "Use analog-only or blended probabilities when computing promotion deltas "
+            "(default: ML_ANALOG_PROMOTION_EVAL_MODE or blend)"
+        ),
+    )
     parser.add_argument("--print-path", action="store_true", default=True, help="Print output report path")
     args = parser.parse_args()
 
@@ -1621,13 +1820,28 @@ def main() -> None:
 
         report_day = parse_report_date(args.report_date)
         start_ms, end_ms = day_bounds_ms(report_day)
+        gate_lookback_days = max(1, int(args.analog_gate_lookback_days))
+        gate_start_ms = start_ms - ((gate_lookback_days - 1) * 86_400_000)
+        gate_eval_mode = str(args.analog_gate_eval_mode or ANALOG_PROMOTION_EVAL_MODE).strip().lower()
+        if gate_eval_mode not in {"analog", "blend"}:
+            gate_eval_mode = ANALOG_PROMOTION_EVAL_MODE
         predictions = fetch_latest_predictions(conn, start_ms, end_ms, args.include_preview)
         labeled_records = fetch_labeled_records(conn, start_ms, end_ms, args.include_preview)
+        labeled_records_gate = fetch_labeled_records(conn, gate_start_ms, end_ms, args.include_preview)
 
         horizons = REPORT_HORIZONS or [5, 15, 30, 60]
         bundles = [build_horizon_metrics(labeled_records, h) for h in horizons]
-        analog_summaries = compute_analog_shadow_summaries(labeled_records, horizons)
-        analog_gate = compute_analog_promotion_gate(analog_summaries, horizons)
+        analog_summaries = compute_analog_shadow_summaries(
+            labeled_records_gate,
+            horizons,
+            eval_mode=gate_eval_mode,
+        )
+        analog_gate = compute_analog_promotion_gate(
+            analog_summaries,
+            horizons,
+            eval_mode=gate_eval_mode,
+            lookback_days=gate_lookback_days,
+        )
         regime_summary = compute_regime_summary(predictions)
         regime_policy_summary = compute_regime_policy_summary(predictions)
 
@@ -1642,6 +1856,10 @@ def main() -> None:
             bundles=bundles,
             analog_summaries=analog_summaries,
             analog_gate=analog_gate,
+            analog_gate_eval_mode=gate_eval_mode,
+            analog_gate_lookback_days=gate_lookback_days,
+            analog_gate_start_ms=gate_start_ms,
+            analog_gate_end_ms=end_ms,
             regime_summary=regime_summary,
             regime_policy_summary=regime_policy_summary,
             manifest=manifest,
@@ -1660,6 +1878,10 @@ def main() -> None:
             "passed_horizons": analog_gate.passed_horizons,
             "reasons": analog_gate.reasons,
             "thresholds": analog_gate.thresholds,
+            "eval_mode": gate_eval_mode,
+            "lookback_days": gate_lookback_days,
+            "window_start_ms": gate_start_ms,
+            "window_end_ms": end_ms,
             "generated_at_ms": int(time.time() * 1000),
         }
         gate_path = out_dir / f"analog_promotion_gate_{report_day.strftime('%Y-%m-%d')}.json"
