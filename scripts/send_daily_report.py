@@ -41,6 +41,14 @@ DEFAULT_LOG_FILES = [
 NOISE_PATTERNS = [
     re.compile(r'GET /health HTTP/1\.1" 200 OK'),
     re.compile(r'^INFO:\s+127\.0\.0\.1:\d+\s+-\s+"GET /health'),
+    re.compile(r"Yahoo 1m data limited to ~7d\. Clamping range to 7d\.", re.IGNORECASE),
+    re.compile(r"^test_[A-Za-z0-9_]+\s+\([^)]+\)\s+\.\.\.\s+ok$", re.IGNORECASE),
+]
+BENIGN_STATUS_PATTERNS = [
+    re.compile(r'"status"\s*:\s*"ok"', re.IGNORECASE),
+    re.compile(r'"failed"\s*:\s*0\b', re.IGNORECASE),
+    re.compile(r'"single_fallback_failed"\s*:\s*0\b', re.IGNORECASE),
+    re.compile(r'"last_error"\s*:\s*null\b', re.IGNORECASE),
 ]
 
 try:
@@ -953,9 +961,43 @@ def is_noise_line(line: str) -> bool:
     return any(pattern.search(line) for pattern in NOISE_PATTERNS)
 
 
+def is_benign_status_line(line: str) -> bool:
+    text = line.strip()
+    if not text:
+        return True
+
+    lowered = text.lower()
+    if "[score_unscored] start" in lowered:
+        return True
+
+    if text.startswith("{") or text.startswith('"'):
+        return any(pattern.search(text) for pattern in BENIGN_STATUS_PATTERNS)
+
+    return False
+
+
+def anomaly_max_chars() -> int:
+    raw = os.getenv("ML_REPORT_ANOMALY_MAX_CHARS", "220").strip()
+    try:
+        parsed = int(raw)
+    except ValueError:
+        return 220
+    return min(max(parsed, 80), 2000)
+
+
+def compact_anomaly_line(line: str) -> str:
+    text = re.sub(r"\s+", " ", line).strip()
+    max_chars = anomaly_max_chars()
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 3].rstrip() + "..."
+
+
 def is_anomaly_line(line: str) -> bool:
     text = line.strip()
     if not text or is_noise_line(text):
+        return False
+    if is_benign_status_line(text):
         return False
 
     lowered = text.lower()
@@ -1016,6 +1058,9 @@ def build_anomaly_digest(log_tails: dict[str, str], limit: int, since_ms: int | 
             if not is_anomaly_line(line):
                 continue
             normalized = normalize_anomaly_line(line)
+            if is_benign_status_line(normalized):
+                continue
+            normalized = compact_anomaly_line(normalized)
             key = f"[{source}] {normalized}"
             counts[key] += 1
 
