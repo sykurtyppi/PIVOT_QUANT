@@ -26,6 +26,8 @@ DB_PATH = os.getenv("PIVOT_DB", "data/pivot_events.sqlite")
 HOST = os.getenv("EVENT_WRITER_BIND", "127.0.0.1")
 PORT = int(os.getenv("EVENT_WRITER_PORT", "5002"))
 _SCHEMA_READY = False
+_CONN = None
+_CONN_DB_PATH = None
 _DEFAULT_CORS_ORIGINS = "http://127.0.0.1:3000,http://localhost:3000"
 MAX_BODY_BYTES = int(os.getenv("EVENT_WRITER_MAX_BODY_BYTES", str(2 * 1024 * 1024)))
 NY_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone.utc
@@ -52,8 +54,25 @@ def _cors_origin(request_origin: str | None) -> str:
 
 
 def connect():
-    global _SCHEMA_READY
+    global _SCHEMA_READY, _CONN, _CONN_DB_PATH
+
+    if _CONN is not None and _CONN_DB_PATH == DB_PATH:
+        try:
+            _CONN.execute("SELECT 1")
+            return _CONN
+        except sqlite3.Error:
+            try:
+                _CONN.close()
+            except sqlite3.Error:
+                pass
+            _CONN = None
+
+    if _CONN_DB_PATH != DB_PATH:
+        _SCHEMA_READY = False
+
     conn = sqlite3.connect(DB_PATH)
+    _CONN = conn
+    _CONN_DB_PATH = DB_PATH
     conn.execute("PRAGMA foreign_keys=ON;")
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
@@ -327,10 +346,7 @@ class WriterHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path in ("/", "/health"):
             conn = connect()
-            try:
-                schema_version = read_schema_version(conn)
-            finally:
-                conn.close()
+            schema_version = read_schema_version(conn)
             self._send_json(
                 200,
                 {
@@ -352,8 +368,6 @@ class WriterHandler(BaseHTTPRequestHandler):
                 self._send_json(200, result)
             except Exception as exc:
                 self._send_json(500, {"error": str(exc)})
-            finally:
-                conn.close()
             return
 
         self.send_response(404)
@@ -376,22 +390,19 @@ class WriterHandler(BaseHTTPRequestHandler):
             return
 
         conn = connect()
-        try:
-            if parsed.path == "/events":
-                events = payload.get("events", [])
-                inserted = insert_events(conn, events)
-                conn.commit()
-                self._send_json(200, {"inserted": inserted})
-                return
+        if parsed.path == "/events":
+            events = payload.get("events", [])
+            inserted = insert_events(conn, events)
+            conn.commit()
+            self._send_json(200, {"inserted": inserted})
+            return
 
-            if parsed.path == "/bars":
-                bars = payload.get("bars", [])
-                inserted = insert_bars(conn, bars)
-                conn.commit()
-                self._send_json(200, {"inserted": inserted})
-                return
-        finally:
-            conn.close()
+        if parsed.path == "/bars":
+            bars = payload.get("bars", [])
+            inserted = insert_bars(conn, bars)
+            conn.commit()
+            self._send_json(200, {"inserted": inserted})
+            return
 
         self.send_response(404)
         self.end_headers()
