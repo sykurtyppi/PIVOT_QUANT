@@ -22,6 +22,28 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_horizon_float_map(name: str) -> dict[int, float]:
+    raw = os.getenv(name, "")
+    out: dict[int, float] = {}
+    if not raw:
+        return out
+    for token in raw.split(","):
+        token = token.strip()
+        if not token or ":" not in token:
+            continue
+        key, value = token.split(":", 1)
+        key_norm = key.strip().lower().rstrip("m")
+        try:
+            horizon = int(key_norm)
+            value_f = float(value.strip())
+        except Exception:
+            continue
+        if horizon not in {5, 15, 30, 60}:
+            continue
+        out[horizon] = max(0.0, min(1.0, value_f))
+    return out
+
+
 ROOT = Path(__file__).resolve().parents[1]
 ANALOG_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone.utc
 if str(ROOT) not in sys.path:
@@ -208,6 +230,18 @@ if ML_ANALOG_BLEND_WEIGHT_MAX < ML_ANALOG_BLEND_WEIGHT_BASE:
     ML_ANALOG_BLEND_WEIGHT_MAX = ML_ANALOG_BLEND_WEIGHT_BASE
 ML_ANALOG_BLEND_N_EFF_REF = max(
     1.0, float(os.getenv("ML_ANALOG_BLEND_N_EFF_REF", "20"))
+)
+ML_ANALOG_BLEND_MAX_SHIFT_REJECT = max(
+    0.0, min(1.0, float(os.getenv("ML_ANALOG_BLEND_MAX_SHIFT_REJECT", "1.0")))
+)
+ML_ANALOG_BLEND_MAX_SHIFT_BREAK = max(
+    0.0, min(1.0, float(os.getenv("ML_ANALOG_BLEND_MAX_SHIFT_BREAK", "1.0")))
+)
+ML_ANALOG_BLEND_MAX_SHIFT_REJECT_BY_HORIZON = _env_horizon_float_map(
+    "ML_ANALOG_BLEND_MAX_SHIFT_REJECT_BY_HORIZON"
+)
+ML_ANALOG_BLEND_MAX_SHIFT_BREAK_BY_HORIZON = _env_horizon_float_map(
+    "ML_ANALOG_BLEND_MAX_SHIFT_BREAK_BY_HORIZON"
 )
 ML_ANALOG_FEATURE_WEIGHTS = {
     "distance_bps": max(0.0, float(os.getenv("ML_ANALOG_W_DISTANCE_BPS", "1.0"))),
@@ -895,6 +929,32 @@ def _compute_analog_blend_weight(
     return max(0.0, min(ML_ANALOG_BLEND_WEIGHT_MAX, weight))
 
 
+def _apply_blend_shift_cap(
+    *,
+    model_prob: float | None,
+    blended_prob: float | None,
+    horizon: int,
+    target: str,
+) -> tuple[float | None, bool, float | None]:
+    if model_prob is None or blended_prob is None:
+        return blended_prob, False, None
+    if target == "reject":
+        cap = ML_ANALOG_BLEND_MAX_SHIFT_REJECT_BY_HORIZON.get(
+            horizon, ML_ANALOG_BLEND_MAX_SHIFT_REJECT
+        )
+    else:
+        cap = ML_ANALOG_BLEND_MAX_SHIFT_BREAK_BY_HORIZON.get(
+            horizon, ML_ANALOG_BLEND_MAX_SHIFT_BREAK
+        )
+    cap = max(0.0, min(1.0, float(cap)))
+    shift = float(blended_prob) - float(model_prob)
+    if abs(shift) <= cap:
+        return blended_prob, False, shift
+    clipped = float(model_prob) + math.copysign(cap, shift)
+    clipped = max(0.0, min(1.0, clipped))
+    return clipped, True, clipped - float(model_prob)
+
+
 def _log_prediction(event: dict, result: dict) -> None:
     """Append a prediction record to the prediction_log table.
 
@@ -1118,6 +1178,10 @@ def health():
             "blend_weight_base": ML_ANALOG_BLEND_WEIGHT_BASE,
             "blend_weight_max": ML_ANALOG_BLEND_WEIGHT_MAX,
             "blend_n_eff_ref": ML_ANALOG_BLEND_N_EFF_REF,
+            "blend_max_shift_reject": ML_ANALOG_BLEND_MAX_SHIFT_REJECT,
+            "blend_max_shift_break": ML_ANALOG_BLEND_MAX_SHIFT_BREAK,
+            "blend_max_shift_reject_by_horizon": ML_ANALOG_BLEND_MAX_SHIFT_REJECT_BY_HORIZON,
+            "blend_max_shift_break_by_horizon": ML_ANALOG_BLEND_MAX_SHIFT_BREAK_BY_HORIZON,
             "feature_weights": ML_ANALOG_FEATURE_WEIGHTS,
         },
     }
@@ -1671,6 +1735,10 @@ def _score_event(event: dict):
         "weight_base": ML_ANALOG_BLEND_WEIGHT_BASE,
         "weight_max": ML_ANALOG_BLEND_WEIGHT_MAX,
         "n_eff_ref": ML_ANALOG_BLEND_N_EFF_REF,
+        "max_shift_reject": ML_ANALOG_BLEND_MAX_SHIFT_REJECT,
+        "max_shift_break": ML_ANALOG_BLEND_MAX_SHIFT_BREAK,
+        "max_shift_reject_by_horizon": ML_ANALOG_BLEND_MAX_SHIFT_REJECT_BY_HORIZON,
+        "max_shift_break_by_horizon": ML_ANALOG_BLEND_MAX_SHIFT_BREAK_BY_HORIZON,
     }
     disagreement_guard_info: dict[str, object] = {
         "mode": ML_ANALOG_DISAGREEMENT_GUARD_MODE,
@@ -1708,6 +1776,18 @@ def _score_event(event: dict):
             weight = _compute_analog_blend_weight(n_eff=n_eff, ci_width=ci_width)
             blend_reject = (1.0 - weight) * model_reject + weight * analog_reject
             blend_break = (1.0 - weight) * model_break + weight * analog_break
+        blend_reject, blend_reject_capped, blend_reject_shift = _apply_blend_shift_cap(
+            model_prob=model_reject,
+            blended_prob=blend_reject,
+            horizon=horizon,
+            target="reject",
+        )
+        blend_break, blend_break_capped, blend_break_shift = _apply_blend_shift_cap(
+            model_prob=model_break,
+            blended_prob=blend_break,
+            horizon=horizon,
+            target="break",
+        )
 
         scores[f"analog_reject_{horizon}m"] = analog_reject
         scores[f"analog_break_{horizon}m"] = analog_break
@@ -1733,6 +1813,10 @@ def _score_event(event: dict):
             flag = f"ANALOG_DISAGREE_{horizon}m"
             if flag not in quality_flags:
                 quality_flags.append(flag)
+        if blend_reject_capped or blend_break_capped:
+            capped_flag = f"ANALOG_BLEND_SHIFT_CAPPED_{horizon}m"
+            if capped_flag not in quality_flags:
+                quality_flags.append(capped_flag)
 
         scores[f"blend_prob_reject_{horizon}m"] = blend_reject
         scores[f"blend_prob_break_{horizon}m"] = blend_break
@@ -1779,6 +1863,10 @@ def _score_event(event: dict):
             "analog_break": analog_break,
             "blended_reject": blend_reject,
             "blended_break": blend_break,
+            "blended_reject_shift": blend_reject_shift,
+            "blended_break_shift": blend_break_shift,
+            "blended_reject_capped": bool(blend_reject_capped),
+            "blended_break_capped": bool(blend_break_capped),
             "disagreement_guard_triggered": bool(guard_triggered),
         }
         analog_horizons = analog_summary.get("horizons") if isinstance(analog_summary, dict) else None
@@ -1788,6 +1876,10 @@ def _score_event(event: dict):
                 analog_horizon_payload["blend_weight"] = float(weight)
                 analog_horizon_payload["blend_prob_reject"] = blend_reject
                 analog_horizon_payload["blend_prob_break"] = blend_break
+                analog_horizon_payload["blend_shift_reject"] = blend_reject_shift
+                analog_horizon_payload["blend_shift_break"] = blend_break_shift
+                analog_horizon_payload["blend_capped_reject"] = bool(blend_reject_capped)
+                analog_horizon_payload["blend_capped_break"] = bool(blend_break_capped)
                 analog_horizon_payload["disagreement_guard_triggered"] = bool(guard_triggered)
 
         if ML_ANALOG_BLEND_MODE == "active" and weight > 0:
@@ -1845,6 +1937,18 @@ def _score_event(event: dict):
         )
     ):
         quality_flags.append("ANALOG_BLEND_TARGET_SPLIT")
+    if (
+        isinstance(horizon_blend_payload, dict)
+        and any(
+            isinstance(payload, dict)
+            and (
+                bool(payload.get("blended_reject_capped"))
+                or bool(payload.get("blended_break_capped"))
+            )
+            for payload in horizon_blend_payload.values()
+        )
+    ):
+        quality_flags.append("ANALOG_BLEND_SHIFT_CAPPED")
     baseline_signals = _classify_signals(
         all_horizons=all_horizons,
         scores=scores,

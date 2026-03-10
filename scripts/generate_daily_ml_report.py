@@ -1025,11 +1025,15 @@ def compute_analog_shadow_summaries(
             ci_width_for_blend = max(ci_candidates) if ci_candidates else None
 
             model_abs_components: list[float] = []
-            pr_model = row.get(model_reject_key)
+            pr_model = horizon_payload.get("model_reject")
+            if not isinstance(pr_model, (int, float)):
+                pr_model = row.get(model_reject_key)
             pr_analog = _extract_analog_prob(horizon_payload, "reject")
             ar = row.get("actual_reject")
             pr_model_f = float(pr_model) if isinstance(pr_model, (int, float)) else None
-            pb_model = row.get(model_break_key)
+            pb_model = horizon_payload.get("model_break")
+            if not isinstance(pb_model, (int, float)):
+                pb_model = row.get(model_break_key)
             pb_model_f = float(pb_model) if isinstance(pb_model, (int, float)) else None
             pb_analog = _extract_analog_prob(horizon_payload, "break")
             n_eff_for_blend = (

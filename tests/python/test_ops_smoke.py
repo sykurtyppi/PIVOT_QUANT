@@ -2309,6 +2309,115 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertTrue(bool(horizon_payload.get("applied_reject")))
         self.assertFalse(bool(horizon_payload.get("applied_break")))
 
+    def test_analog_blend_shift_cap_limits_probability_move(self) -> None:
+        ml_server = load_module("ml_server_analog_blend_shift_cap_runtime", REPO_ROOT / "server" / "ml_server.py")
+
+        class DummyModel:
+            classes_ = np.array([0, 1])
+
+            def __init__(self, prob: float) -> None:
+                self.prob = prob
+
+            def predict_proba(self, _df):
+                return np.array([[1.0 - self.prob, self.prob]], dtype=float)
+
+        now_ms = int(time.time() * 1000)
+        ml_server.build_feature_row = lambda event: {
+            "x": 1.0,
+            "distance_atr_ratio": event.get("distance_atr_ratio"),
+            "tod_bucket": ml_server._analog_tod_bucket(event.get("ts_event")),
+        }
+        ml_server.collect_missing = lambda _event: []
+        ml_server.ML_SHADOW_HORIZONS = set()
+        ml_server.ML_ANALOG_ENABLED = True
+        ml_server.ML_ANALOG_MIN_POOL = 10
+        ml_server.ML_ANALOG_MIN_N = 10
+        ml_server.ML_ANALOG_MIN_EFFECTIVE_N = 5.0
+        ml_server.ML_ANALOG_MAX_MEAN_DISTANCE = 3.0
+        ml_server.ML_ANALOG_MAX_CI_WIDTH = 0.8
+        ml_server.ML_ANALOG_BLEND_MODE = "active"
+        ml_server.ML_ANALOG_BLEND_PARTIAL_MODE = "off"
+        ml_server.ML_ANALOG_BLEND_WEIGHT_BASE = 1.0
+        ml_server.ML_ANALOG_BLEND_WEIGHT_MAX = 1.0
+        ml_server.ML_ANALOG_BLEND_N_EFF_REF = 1.0
+        ml_server.ML_ANALOG_BLEND_MAX_SHIFT_REJECT = 0.05
+        ml_server.ML_ANALOG_BLEND_MAX_SHIFT_BREAK = 0.05
+        ml_server.ML_ANALOG_BLEND_MAX_SHIFT_REJECT_BY_HORIZON = {}
+        ml_server.ML_ANALOG_BLEND_MAX_SHIFT_BREAK_BY_HORIZON = {}
+
+        ml_server.registry.models = {
+            "reject": {
+                5: {
+                    "feature_columns": ["x"],
+                    "pipeline": DummyModel(0.2),
+                    "calibration": "sigmoid",
+                }
+            },
+            "break": {
+                5: {
+                    "feature_columns": ["x"],
+                    "pipeline": DummyModel(0.2),
+                    "calibration": "sigmoid",
+                }
+            },
+        }
+        ml_server.registry.thresholds = {"reject": {5: 0.5}, "break": {5: 0.5}}
+        ml_server.registry.manifest = {"version": "vtest", "trained_end_ts": now_ms}
+
+        tod = ml_server._analog_tod_bucket(now_ms - 60_000)
+        rows = []
+        for idx in range(40):
+            rows.append(
+                {
+                    "event_id": f"blend_cap_{idx}",
+                    "symbol": "SPY",
+                    "ts_event": now_ms - (idx + 5) * 60_000,
+                    "level_family": "support",
+                    "tod_bucket": tod,
+                    "regime_bucket": "compression",
+                    "gamma_mode": 1,
+                    "distance_bps": 2.0 + (idx % 5) * 0.2,
+                    "distance_atr_ratio": 0.08 + (idx % 5) * 0.01,
+                    "rv_30": 12.0 + (idx % 5) * 0.1,
+                    "or_size_atr": 0.25 + (idx % 5) * 0.01,
+                    "overnight_gap_atr": 0.1 + (idx % 5) * 0.01,
+                    "reject": 1.0,
+                    "break": 0.0,
+                }
+            )
+        ml_server.analog_engine.enabled = True
+        ml_server.analog_engine.error = None
+        ml_server.analog_engine.loaded_at_ms = now_ms
+        ml_server.analog_engine.rows_by_horizon = {5: rows}
+        ml_server._read_analog_promotion_gate = lambda: {"status": "pass", "reasons": []}
+
+        result = ml_server._score_event(
+            {
+                "event_id": "blend_cap_case",
+                "symbol": "SPY",
+                "ts_event": now_ms,
+                "level_type": "S1",
+                "distance_bps": 2.1,
+                "distance_atr_ratio": 0.09,
+                "rv_30": 12.2,
+                "or_size_atr": 0.27,
+                "overnight_gap_atr": 0.11,
+                "regime_type": 3,
+                "rv_regime": 1,
+                "gamma_mode": 1,
+            }
+        )
+
+        self.assertAlmostEqual(float(result["scores"]["prob_reject_5m"]), 0.25, places=6)
+        self.assertAlmostEqual(float(result["scores"]["prob_break_5m"]), 0.15, places=6)
+        self.assertIn("ANALOG_BLEND_SHIFT_CAPPED", result["quality_flags"])
+        self.assertIn("ANALOG_BLEND_SHIFT_CAPPED_5m", result["quality_flags"])
+        horizon_payload = result["analog_blend"]["horizons"]["5"]
+        self.assertTrue(bool(horizon_payload.get("blended_reject_capped")))
+        self.assertTrue(bool(horizon_payload.get("blended_break_capped")))
+        self.assertAlmostEqual(float(horizon_payload.get("blended_reject_shift") or 0.0), 0.05, places=6)
+        self.assertAlmostEqual(float(horizon_payload.get("blended_break_shift") or 0.0), -0.05, places=6)
+
     def test_analog_disagreement_guard_shadow_marks_divergence(self) -> None:
         ml_server = load_module(
             "ml_server_analog_disagreement_guard_shadow_runtime",
@@ -2750,6 +2859,54 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertAlmostEqual(float(s.guard_break_keep_rate or 0.0), 0.25, places=6)
         self.assertIsNotNone(s.guard_reject_brier_delta)
         self.assertIsNotNone(s.guard_break_brier_delta)
+
+    def test_report_analog_shadow_uses_raw_model_probs_from_payload_when_present(self) -> None:
+        report = load_module(
+            "pq_daily_report_analog_model_baseline_test",
+            REPO_ROOT / "scripts" / "generate_daily_ml_report.py",
+        )
+        records = []
+        rows = [
+            # event_id, actual_reject, raw_model_reject, row_prob_reject
+            ("m1", 1, 0.9, 0.5),
+            ("m2", 0, 0.1, 0.5),
+        ]
+        for event_id, ar, raw_model_r, row_model_r in rows:
+            records.append(
+                {
+                    "event_id": event_id,
+                    "horizon_min": 5,
+                    "actual_reject": ar,
+                    "actual_break": 1 - ar,
+                    "prob_reject_5m": row_model_r,
+                    "prob_break_5m": 1.0 - row_model_r,
+                    "analog_json": json.dumps(
+                        {
+                            "horizons": {
+                                "5": {
+                                    "status": "ok",
+                                    "model_reject": raw_model_r,
+                                    "model_break": 1.0 - raw_model_r,
+                                    "reject_prob": raw_model_r,
+                                    "break_prob": 1.0 - raw_model_r,
+                                    "n": 20,
+                                    "n_eff": 12,
+                                    "reject_ci_width": 0.10,
+                                    "break_ci_width": 0.12,
+                                    "disagreement": 0.05,
+                                }
+                            }
+                        }
+                    ),
+                }
+            )
+
+        summaries = report.compute_analog_shadow_summaries(records, [5], eval_mode="blend")
+        self.assertEqual(len(summaries), 1)
+        s = summaries[0]
+        self.assertIsNotNone(s.model_reject_brier_matched)
+        # If row-level post-blend probs (0.5/0.5) were used this would be 0.25.
+        self.assertLess(float(s.model_reject_brier_matched or 1.0), 0.05)
 
     def test_report_analog_promotion_gate_evaluates_thresholds(self) -> None:
         report = load_module(
