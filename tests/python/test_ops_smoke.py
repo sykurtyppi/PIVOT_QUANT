@@ -2311,6 +2311,10 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIsNotNone(s.break_brier_delta)
         self.assertLess(float(s.reject_brier_delta or 0.0), 0.0)
         self.assertLess(float(s.break_brier_delta or 0.0), 0.0)
+        self.assertAlmostEqual(float(s.guard_reject_keep_rate or 0.0), 0.25, places=6)
+        self.assertAlmostEqual(float(s.guard_break_keep_rate or 0.0), 0.25, places=6)
+        self.assertIsNotNone(s.guard_reject_brier_delta)
+        self.assertIsNotNone(s.guard_break_brier_delta)
 
     def test_report_analog_promotion_gate_evaluates_thresholds(self) -> None:
         report = load_module(

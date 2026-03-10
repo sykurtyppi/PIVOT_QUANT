@@ -202,6 +202,16 @@ class AnalogHorizonSummary:
     reject_ece_delta_blend: float | None = None
     break_brier_delta_blend: float | None = None
     break_ece_delta_blend: float | None = None
+    guard_reject_keep_rate: float | None = None
+    guard_break_keep_rate: float | None = None
+    guard_reject_brier: float | None = None
+    guard_reject_ece: float | None = None
+    guard_break_brier: float | None = None
+    guard_break_ece: float | None = None
+    guard_reject_brier_delta: float | None = None
+    guard_reject_ece_delta: float | None = None
+    guard_break_brier_delta: float | None = None
+    guard_break_ece_delta: float | None = None
 
 
 @dataclass
@@ -962,14 +972,22 @@ def compute_analog_shadow_summaries(
 
         reject_actual: list[int] = []
         reject_actual_blend: list[int] = []
+        reject_actual_guard: list[int] = []
         model_reject_prob: list[float] = []
         analog_reject_prob: list[float] = []
         blend_reject_prob: list[float] = []
+        model_reject_prob_guard: list[float] = []
         break_actual: list[int] = []
         break_actual_blend: list[int] = []
+        break_actual_guard: list[int] = []
         model_break_prob: list[float] = []
         analog_break_prob: list[float] = []
         blend_break_prob: list[float] = []
+        model_break_prob_guard: list[float] = []
+        guard_reject_eligible = 0
+        guard_reject_kept = 0
+        guard_break_eligible = 0
+        guard_break_kept = 0
 
         for row in subset:
             payload = _parse_json_object(row.get("analog_json"))
@@ -1063,6 +1081,7 @@ def compute_analog_shadow_summaries(
                     break_actual_blend.append(int(ab))
 
             disagreement_value = horizon_payload.get("disagreement")
+            disagreement: float | None = None
             if isinstance(disagreement_value, (int, float)):
                 disagreement = float(disagreement_value)
                 disagreements.append(disagreement)
@@ -1071,6 +1090,18 @@ def compute_analog_shadow_summaries(
                         high_disagreement_model_abs_error.append(statistics.fmean(model_abs_components))
                     else:
                         low_disagreement_model_abs_error.append(statistics.fmean(model_abs_components))
+            if disagreement is not None and pr_model_f is not None and ar in (0, 1):
+                guard_reject_eligible += 1
+                if disagreement < ANALOG_DISAGREEMENT_THRESHOLD:
+                    guard_reject_kept += 1
+                    model_reject_prob_guard.append(pr_model_f)
+                    reject_actual_guard.append(int(ar))
+            if disagreement is not None and pb_model_f is not None and ab in (0, 1):
+                guard_break_eligible += 1
+                if disagreement < ANALOG_DISAGREEMENT_THRESHOLD:
+                    guard_break_kept += 1
+                    model_break_prob_guard.append(pb_model_f)
+                    break_actual_guard.append(int(ab))
 
         model_reject_brier = brier_score(reject_actual, model_reject_prob)
         analog_reject_brier = brier_score(reject_actual, analog_reject_prob)
@@ -1084,6 +1115,20 @@ def compute_analog_shadow_summaries(
         blend_reject_ece = expected_calibration_error(reject_actual_blend, blend_reject_prob)
         blend_break_brier = brier_score(break_actual_blend, blend_break_prob)
         blend_break_ece = expected_calibration_error(break_actual_blend, blend_break_prob)
+        guard_reject_brier = brier_score(reject_actual_guard, model_reject_prob_guard)
+        guard_reject_ece = expected_calibration_error(reject_actual_guard, model_reject_prob_guard)
+        guard_break_brier = brier_score(break_actual_guard, model_break_prob_guard)
+        guard_break_ece = expected_calibration_error(break_actual_guard, model_break_prob_guard)
+        guard_reject_keep_rate = (
+            (guard_reject_kept / guard_reject_eligible)
+            if guard_reject_eligible > 0
+            else None
+        )
+        guard_break_keep_rate = (
+            (guard_break_kept / guard_break_eligible)
+            if guard_break_eligible > 0
+            else None
+        )
 
         summaries.append(
             AnalogHorizonSummary(
@@ -1118,6 +1163,16 @@ def compute_analog_shadow_summaries(
                 reject_ece_delta_blend=_delta(blend_reject_ece, model_reject_ece),
                 break_brier_delta_blend=_delta(blend_break_brier, model_break_brier),
                 break_ece_delta_blend=_delta(blend_break_ece, model_break_ece),
+                guard_reject_keep_rate=guard_reject_keep_rate,
+                guard_break_keep_rate=guard_break_keep_rate,
+                guard_reject_brier=guard_reject_brier,
+                guard_reject_ece=guard_reject_ece,
+                guard_break_brier=guard_break_brier,
+                guard_break_ece=guard_break_ece,
+                guard_reject_brier_delta=_delta(guard_reject_brier, model_reject_brier),
+                guard_reject_ece_delta=_delta(guard_reject_ece, model_reject_ece),
+                guard_break_brier_delta=_delta(guard_break_brier, model_break_brier),
+                guard_break_ece_delta=_delta(guard_break_ece, model_break_ece),
             )
         )
     return summaries
@@ -1647,6 +1702,23 @@ def render_report(
                 f"{format_metric(s.blend_break_brier)} | {_fmt_delta(s.break_brier_delta_blend)} | "
                 f"{format_metric(s.model_break_ece_matched)} | {format_metric(s.analog_break_ece)} | {_fmt_delta(s.break_ece_delta)} | "
                 f"{format_metric(s.blend_break_ece)} | {_fmt_delta(s.break_ece_delta_blend)} |"
+            )
+        lines.append("")
+        lines.append(
+            f"- Disagreement guard what-if: keep only rows with disagreement < {ANALOG_DISAGREEMENT_THRESHOLD:.2f}"
+        )
+        lines.append(
+            "| Horizon | Keep Rate R | Brier R (Guard) | Δ R (G-M) | ECE R (Guard) | Δ R (G-M) | "
+            "Keep Rate B | Brier B (Guard) | Δ B (G-M) | ECE B (Guard) | Δ B (G-M) |"
+        )
+        lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+        for s in analog_summaries:
+            lines.append(
+                f"| {s.horizon}m | "
+                f"{format_metric(s.guard_reject_keep_rate, 3)} | {format_metric(s.guard_reject_brier)} | {_fmt_delta(s.guard_reject_brier_delta)} | "
+                f"{format_metric(s.guard_reject_ece)} | {_fmt_delta(s.guard_reject_ece_delta)} | "
+                f"{format_metric(s.guard_break_keep_rate, 3)} | {format_metric(s.guard_break_brier)} | {_fmt_delta(s.guard_break_brier_delta)} | "
+                f"{format_metric(s.guard_break_ece)} | {_fmt_delta(s.guard_break_ece_delta)} |"
             )
         lines.append("")
         for s in analog_summaries:
