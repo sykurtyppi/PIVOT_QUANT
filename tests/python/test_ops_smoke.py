@@ -1349,6 +1349,56 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("this.config.logging.level <= 2", index_source)
         self.assertNotIn("this.config.logging.level >= 2", index_source)
 
+    def test_quantpivot_dispose_unsubscribes_config_and_window_handlers(self) -> None:
+        if shutil.which("node") is None:
+            self.skipTest("node is not available in PATH")
+
+        node_script = textwrap.dedent(
+            """
+            import QuantPivot, { ConfigurationManager } from './src/index.js';
+
+            const manager = ConfigurationManager.getInstance();
+            const originalSubscribe = manager.subscribe.bind(manager);
+            let unsubscribeCalls = 0;
+            manager.subscribe = (callback) => {
+              const unsubscribe = originalSubscribe(callback);
+              return () => {
+                unsubscribeCalls += 1;
+                unsubscribe();
+              };
+            };
+
+            const listeners = [];
+            globalThis.window = {
+              addEventListener(type, handler) {
+                listeners.push({ type, handler, removed: false });
+              },
+              removeEventListener(type, handler) {
+                const item = listeners.find((entry) => entry.type === type && entry.handler === handler);
+                if (item) item.removed = true;
+              },
+            };
+
+            const qp = new QuantPivot({}, 'production');
+            qp.dispose();
+
+            if (unsubscribeCalls !== 1) {
+              throw new Error(`Expected exactly one unsubscribe call, got ${unsubscribeCalls}`);
+            }
+            const unhandled = listeners.find((entry) => entry.type === 'unhandledrejection');
+            if (!unhandled || unhandled.removed !== true) {
+              throw new Error('Expected unhandledrejection listener to be removed on dispose().');
+            }
+            console.log('ok');
+            """
+        ).strip()
+
+        proc = run_cmd(
+            ["node", "--input-type=module", "-e", node_script],
+            cwd=REPO_ROOT,
+        )
+        self.assertEqual(proc.returncode, 0, msg=f"{proc.stdout}\n{proc.stderr}")
+
     def test_backtest_sharpe_uses_period_returns_not_cumulative(self) -> None:
         if shutil.which("node") is None:
             self.skipTest("node is not available in PATH")

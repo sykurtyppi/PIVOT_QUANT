@@ -31,6 +31,8 @@ import { MathematicalModels } from './math/MathematicalModels.js';
             // State management
             this.isInitialized = true;
             this.version = '2.0.0';
+            this._configUnsubscribe = null;
+            this._unhandledRejectionHandler = null;
 
             this._setupEventHandlers();
             this._logInitialization();
@@ -177,6 +179,14 @@ import { MathematicalModels } from './math/MathematicalModels.js';
      * Dispose and cleanup resources
      */
     dispose() {
+        if (typeof this._configUnsubscribe === 'function') {
+            this._configUnsubscribe();
+            this._configUnsubscribe = null;
+        }
+        if (typeof window !== 'undefined' && this._unhandledRejectionHandler) {
+            window.removeEventListener('unhandledrejection', this._unhandledRejectionHandler);
+            this._unhandledRejectionHandler = null;
+        }
         this.engine.dispose();
         this.monitor.dispose();
         this.isInitialized = false;
@@ -397,7 +407,7 @@ import { MathematicalModels } from './math/MathematicalModels.js';
 
     _setupEventHandlers() {
         // Handle configuration changes
-        ConfigurationManager.getInstance().subscribe((env, _config) => {
+        this._configUnsubscribe = ConfigurationManager.getInstance().subscribe((env, _config) => {
             if (env === this.environment) {
                 this._logInfo('Configuration updated');
             }
@@ -405,9 +415,10 @@ import { MathematicalModels } from './math/MathematicalModels.js';
 
         // Handle unhandled errors
         if (typeof window !== 'undefined') {
-            window.addEventListener('unhandledrejection', (event) => {
+            this._unhandledRejectionHandler = (event) => {
                 this.monitor.recordError('unhandled_rejection', event.reason);
-            });
+            };
+            window.addEventListener('unhandledrejection', this._unhandledRejectionHandler);
         }
     }
 
