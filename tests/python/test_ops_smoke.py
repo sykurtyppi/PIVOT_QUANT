@@ -3248,6 +3248,43 @@ class OpsSmokeTests(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_ml_prediction_log_reuses_thread_local_connection(self) -> None:
+        db = self.tmp / "predlog_conn_reuse.sqlite"
+        prev_db = os.environ.get("PREDICTION_LOG_DB")
+        os.environ["PREDICTION_LOG_DB"] = str(db)
+        try:
+            ml_server = load_module("ml_server_predlog_conn_reuse_runtime", REPO_ROOT / "server" / "ml_server.py")
+        finally:
+            if prev_db is None:
+                os.environ.pop("PREDICTION_LOG_DB", None)
+            else:
+                os.environ["PREDICTION_LOG_DB"] = prev_db
+
+        conn1 = ml_server._get_prediction_log_conn()
+        conn2 = ml_server._get_prediction_log_conn()
+        self.assertIs(conn1, conn2)
+
+        event = {"event_id": "evt_conn_reuse"}
+        result = {
+            "model_version": "vreuse",
+            "feature_version": "v3",
+            "best_horizon": 5,
+            "abstain": False,
+            "scores": {},
+            "signals": {},
+            "thresholds": {},
+            "quality_flags": [],
+        }
+        ml_server._log_prediction(event, result)
+        cached = getattr(ml_server._PREDICTION_LOG_LOCAL, "conn", None)
+        self.assertIs(cached, conn1)
+
+        try:
+            conn1.close()
+        except Exception:
+            pass
+        ml_server._PREDICTION_LOG_LOCAL.conn = None
+
     def test_report_regime_policy_summary_counts_divergence(self) -> None:
         report = load_module(
             "pq_daily_report_regime_policy_summary_test",

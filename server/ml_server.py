@@ -5,6 +5,7 @@ import os
 import sqlite3
 import sys
 import time
+import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -157,6 +158,9 @@ PREDICTION_LOG_DB = Path(os.getenv(
     "PREDICTION_LOG_DB",
     str(ROOT / "data" / "pivot_events.sqlite"),
 ))
+_PREDICTION_LOG_LOCAL = threading.local()
+_PREDICTION_LOG_SCHEMA_READY = False
+_PREDICTION_LOG_SCHEMA_LOCK = threading.Lock()
 SCORE_MAX_BATCH_EVENTS = max(1, int(os.getenv("ML_SCORE_MAX_BATCH_EVENTS", "256")))
 ML_ANALOG_ENABLED = _env_bool("ML_ANALOG_ENABLED", True)
 ML_ANALOG_DB = Path(os.getenv("ML_ANALOG_DB", str(PREDICTION_LOG_DB)))
@@ -990,22 +994,36 @@ def _apply_blend_shift_cap(
     return clipped, True, clipped - float(model_prob)
 
 
-def _log_prediction(event: dict, result: dict) -> None:
-    """Append a prediction record to the prediction_log table.
+def _get_prediction_log_conn() -> sqlite3.Connection:
+    conn = getattr(_PREDICTION_LOG_LOCAL, "conn", None)
+    if conn is not None:
+        try:
+            conn.execute("SELECT 1")
+            return conn
+        except sqlite3.Error:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+            _PREDICTION_LOG_LOCAL.conn = None
 
-    Best-effort: failures are logged but never propagate to the caller.
-    This lets us reconcile live predictions against actual outcomes later.
-    The prediction_log table is created by migrate_db.py (migration v3);
-    CREATE IF NOT EXISTS is kept here as a safety net for standalone use.
-    """
-    event_id = event.get("event_id")
-    if not event_id:
+    conn = sqlite3.connect(str(PREDICTION_LOG_DB))
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute("PRAGMA temp_store=MEMORY;")
+    conn.execute("PRAGMA cache_size=-200000;")
+    _PREDICTION_LOG_LOCAL.conn = conn
+    return conn
+
+
+def _ensure_prediction_log_schema(conn: sqlite3.Connection) -> None:
+    global _PREDICTION_LOG_SCHEMA_READY
+    if _PREDICTION_LOG_SCHEMA_READY:
         return
 
-    conn = None
-    try:
-        conn = sqlite3.connect(str(PREDICTION_LOG_DB))
-        conn.execute("PRAGMA journal_mode=WAL;")
+    with _PREDICTION_LOG_SCHEMA_LOCK:
+        if _PREDICTION_LOG_SCHEMA_READY:
+            return
         conn.execute(
             """CREATE TABLE IF NOT EXISTS prediction_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1041,6 +1059,7 @@ def _log_prediction(event: dict, result: dict) -> None:
                 "ALTER TABLE prediction_log "
                 "ADD COLUMN is_preview INTEGER NOT NULL DEFAULT 0"
             )
+            pred_cols.add("is_preview")
         compat_cols = {
             "signal_30m": "TEXT",
             "prob_reject_30m": "REAL",
@@ -1061,6 +1080,26 @@ def _log_prediction(event: dict, result: dict) -> None:
         for col_name, col_type in compat_cols.items():
             if col_name not in pred_cols:
                 conn.execute(f"ALTER TABLE prediction_log ADD COLUMN {col_name} {col_type}")
+        conn.commit()
+        _PREDICTION_LOG_SCHEMA_READY = True
+
+
+def _log_prediction(event: dict, result: dict) -> None:
+    """Append a prediction record to the prediction_log table.
+
+    Best-effort: failures are logged but never propagate to the caller.
+    This lets us reconcile live predictions against actual outcomes later.
+    The prediction_log table is created by migrate_db.py (migration v3);
+    CREATE IF NOT EXISTS is kept here as a safety net for standalone use.
+    """
+    event_id = event.get("event_id")
+    if not event_id:
+        return
+
+    conn = None
+    try:
+        conn = _get_prediction_log_conn()
+        _ensure_prediction_log_schema(conn)
 
         scores = result.get("scores", {})
         signals = result.get("signals", {})
@@ -1152,10 +1191,13 @@ def _log_prediction(event: dict, result: dict) -> None:
         )
         conn.commit()
     except Exception as exc:
+        if conn is not None and getattr(_PREDICTION_LOG_LOCAL, "conn", None) is conn:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+            _PREDICTION_LOG_LOCAL.conn = None
         log.warning("Prediction log write failed: %s", exc)
-    finally:
-        if conn is not None:
-            conn.close()
 
 
 @app.get("/health")
