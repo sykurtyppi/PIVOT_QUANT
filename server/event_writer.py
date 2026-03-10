@@ -3,6 +3,7 @@ import os
 import sys
 import sqlite3
 import threading
+import atexit
 from datetime import datetime, time, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -47,6 +48,21 @@ def _parse_allowed_origins() -> list[str]:
 
 
 ALLOWED_ORIGINS = _parse_allowed_origins()
+
+
+def _close_thread_local_connection() -> None:
+    conn = getattr(_THREAD_LOCAL, "conn", None)
+    if conn is None:
+        return
+    try:
+        conn.close()
+    except sqlite3.Error:
+        pass
+    _THREAD_LOCAL.conn = None
+    _THREAD_LOCAL.conn_db_path = None
+
+
+atexit.register(_close_thread_local_connection)
 
 
 def _cors_origin(request_origin: str | None) -> str:

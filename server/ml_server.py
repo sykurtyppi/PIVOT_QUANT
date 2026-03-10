@@ -6,6 +6,7 @@ import sqlite3
 import sys
 import time
 import threading
+import atexit
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1015,6 +1016,20 @@ def _get_prediction_log_conn() -> sqlite3.Connection:
     conn.execute("PRAGMA cache_size=-200000;")
     _PREDICTION_LOG_LOCAL.conn = conn
     return conn
+
+
+def _close_prediction_log_conn() -> None:
+    conn = getattr(_PREDICTION_LOG_LOCAL, "conn", None)
+    if conn is None:
+        return
+    try:
+        conn.close()
+    except sqlite3.Error:
+        pass
+    _PREDICTION_LOG_LOCAL.conn = None
+
+
+atexit.register(_close_prediction_log_conn)
 
 
 def _ensure_prediction_log_schema(conn: sqlite3.Connection) -> None:

@@ -647,6 +647,10 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("ThreadingHTTPServer", source)
         self.assertIn("server.daemon_threads = True", source)
 
+    def test_event_writer_registers_atexit_connection_cleanup(self) -> None:
+        source = (REPO_ROOT / "server" / "event_writer.py").read_text(encoding="utf-8")
+        self.assertIn("atexit.register(_close_thread_local_connection)", source)
+
     def test_event_writer_reuses_thread_local_sqlite_connection(self) -> None:
         event_writer = load_module(
             "pq_event_writer_conn_reuse_test",
@@ -3480,6 +3484,10 @@ class OpsSmokeTests(unittest.TestCase):
         except Exception:
             pass
         ml_server._PREDICTION_LOG_LOCAL.conn = None
+
+    def test_ml_prediction_log_registers_atexit_cleanup(self) -> None:
+        source = (REPO_ROOT / "server" / "ml_server.py").read_text(encoding="utf-8")
+        self.assertIn("atexit.register(_close_prediction_log_conn)", source)
 
     def test_report_regime_policy_summary_counts_divergence(self) -> None:
         report = load_module(
