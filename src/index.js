@@ -23,10 +23,10 @@ import { MathematicalModels } from './math/MathematicalModels.js';
             this.config = ConfigurationManager.mergeWithDefaults(config, environment);
             this.engine = new QuantPivotEngine(this.config);
 
-            // Initialize components
-            this.validator = new ValidationFramework(this.config.validation);
-            this.monitor = new PerformanceMonitor(this.config.performance);
-            this.math = new MathematicalModels(this.config.mathematical);
+            // Reuse engine components to keep state and metrics consistent.
+            this.validator = this.engine.validator;
+            this.monitor = this.engine.monitor;
+            this.math = this.engine.mathModels;
 
             // State management
             this.isInitialized = true;
@@ -187,8 +187,15 @@ import { MathematicalModels } from './math/MathematicalModels.js';
             window.removeEventListener('unhandledrejection', this._unhandledRejectionHandler);
             this._unhandledRejectionHandler = null;
         }
+        const monitorSharedWithEngine =
+            this.engine &&
+            this.monitor &&
+            this.engine.monitor &&
+            this.monitor === this.engine.monitor;
         this.engine.dispose();
-        this.monitor.dispose();
+        if (!monitorSharedWithEngine && this.monitor && typeof this.monitor.dispose === 'function') {
+            this.monitor.dispose();
+        }
         this.isInitialized = false;
         this._logInfo('System disposed');
     }

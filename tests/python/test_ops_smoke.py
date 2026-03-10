@@ -1355,6 +1355,35 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("this.config.logging.level <= 2", index_source)
         self.assertNotIn("this.config.logging.level >= 2", index_source)
 
+    def test_quantpivot_reuses_engine_component_instances(self) -> None:
+        if shutil.which("node") is None:
+            self.skipTest("node is not available in PATH")
+
+        node_script = textwrap.dedent(
+            """
+            import QuantPivot from './src/index.js';
+
+            const qp = new QuantPivot({}, 'production');
+            if (qp.validator !== qp.engine.validator) {
+              throw new Error('QuantPivot validator should reuse engine.validator.');
+            }
+            if (qp.monitor !== qp.engine.monitor) {
+              throw new Error('QuantPivot monitor should reuse engine.monitor.');
+            }
+            if (qp.math !== qp.engine.mathModels) {
+              throw new Error('QuantPivot math should reuse engine.mathModels.');
+            }
+            qp.dispose();
+            console.log('ok');
+            """
+        ).strip()
+
+        proc = run_cmd(
+            ["node", "--input-type=module", "-e", node_script],
+            cwd=REPO_ROOT,
+        )
+        self.assertEqual(proc.returncode, 0, msg=f"{proc.stdout}\n{proc.stderr}")
+
     def test_quantpivot_dispose_unsubscribes_config_and_window_handlers(self) -> None:
         if shutil.which("node") is None:
             self.skipTest("node is not available in PATH")
