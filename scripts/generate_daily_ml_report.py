@@ -17,7 +17,7 @@ import sqlite3
 import statistics
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -222,6 +222,7 @@ class AnalogPromotionGate:
     required_horizons: int
     reasons: list[str]
     thresholds: dict[str, Any]
+    horizon_results: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 def connect(db_path: str) -> sqlite3.Connection:
@@ -1204,21 +1205,43 @@ def compute_analog_promotion_gate(
     evaluated: list[int] = []
     passed: list[int] = []
     reasons: list[str] = []
+    horizon_results: dict[str, dict[str, Any]] = {}
 
     for horizon in horizons:
         s = by_horizon.get(int(horizon))
         if s is None:
+            horizon_results[str(horizon)] = {
+                "evaluated": False,
+                "pass": False,
+                "reasons": ["missing_summary"],
+            }
             continue
         if s.analog_available_count < ANALOG_PROMOTION_MIN_AVAILABLE:
+            horizon_results[str(horizon)] = {
+                "evaluated": False,
+                "pass": False,
+                "reasons": ["min_available"],
+                "available_count": int(s.analog_available_count),
+            }
             continue
         evaluated.append(int(horizon))
 
         horizon_reasons: list[str] = []
-        if s.analog_quality_ok_count < ANALOG_PROMOTION_MIN_QUALITY_OK:
+        quality_ok_pass = s.analog_quality_ok_count >= ANALOG_PROMOTION_MIN_QUALITY_OK
+        effective_n_pass = (
+            s.mean_effective_neighbors is not None
+            and s.mean_effective_neighbors >= ANALOG_PROMOTION_MIN_EFFECTIVE_N
+        )
+        ci_width_pass = (
+            s.mean_ci_width is not None and s.mean_ci_width <= ANALOG_PROMOTION_MAX_MEAN_CI_WIDTH
+        )
+        base_quality_pass = bool(quality_ok_pass and effective_n_pass and ci_width_pass)
+
+        if not quality_ok_pass:
             horizon_reasons.append("quality_ok")
-        if s.mean_effective_neighbors is None or s.mean_effective_neighbors < ANALOG_PROMOTION_MIN_EFFECTIVE_N:
+        if not effective_n_pass:
             horizon_reasons.append("effective_n")
-        if s.mean_ci_width is None or s.mean_ci_width > ANALOG_PROMOTION_MAX_MEAN_CI_WIDTH:
+        if not ci_width_pass:
             horizon_reasons.append("ci_width")
 
         reject_brier_delta = s.reject_brier_delta
@@ -1255,16 +1278,44 @@ def compute_analog_promotion_gate(
             break_brier_delta is not None and break_brier_delta <= ANALOG_PROMOTION_MAX_BRIER_DELTA,
             break_ece_delta is not None and break_ece_delta <= ANALOG_PROMOTION_MAX_ECE_DELTA,
         ]
+        reject_delta_pass = all(reject_checks)
+        break_delta_pass = all(break_checks)
+        reject_pass = bool(base_quality_pass and reject_delta_pass)
+        break_pass = bool(base_quality_pass and break_delta_pass)
+
         if ANALOG_PROMOTION_REQUIRE_BOTH_TARGETS:
-            if not all(reject_checks):
+            if not reject_delta_pass:
                 horizon_reasons.append("reject_delta")
-            if not all(break_checks):
+            if not break_delta_pass:
                 horizon_reasons.append("break_delta")
         else:
-            if not (all(reject_checks) or all(break_checks)):
+            if not (reject_delta_pass or break_delta_pass):
                 horizon_reasons.append("delta")
 
-        if horizon_reasons:
+        horizon_pass = len(horizon_reasons) == 0
+        horizon_results[str(horizon)] = {
+            "evaluated": True,
+            "pass": bool(horizon_pass),
+            "reasons": list(horizon_reasons),
+            "quality_ok_pass": bool(quality_ok_pass),
+            "effective_n_pass": bool(effective_n_pass),
+            "ci_width_pass": bool(ci_width_pass),
+            "base_quality_pass": bool(base_quality_pass),
+            "reject_pass": bool(reject_pass),
+            "break_pass": bool(break_pass),
+            "reject_delta_pass": bool(reject_delta_pass),
+            "break_delta_pass": bool(break_delta_pass),
+            "reject_brier_delta": reject_brier_delta,
+            "reject_ece_delta": reject_ece_delta,
+            "break_brier_delta": break_brier_delta,
+            "break_ece_delta": break_ece_delta,
+            "available_count": int(s.analog_available_count),
+            "quality_ok_count": int(s.analog_quality_ok_count),
+            "mean_effective_n": s.mean_effective_neighbors,
+            "mean_ci_width": s.mean_ci_width,
+        }
+
+        if not horizon_pass:
             reasons.append(f"{horizon}m:" + ",".join(horizon_reasons))
             continue
         passed.append(int(horizon))
@@ -1286,6 +1337,7 @@ def compute_analog_promotion_gate(
         required_horizons=ANALOG_PROMOTION_MIN_HORIZONS,
         reasons=reasons,
         thresholds=thresholds,
+        horizon_results=horizon_results,
     )
 
 
@@ -1645,6 +1697,19 @@ def render_report(
         lines.append(
             f"- Gate horizons passed: {', '.join(f'{h}m' for h in analog_gate.passed_horizons)}"
         )
+    gate_target_pass_lines: list[str] = []
+    for horizon in analog_gate.evaluated_horizons:
+        payload = analog_gate.horizon_results.get(str(horizon), {})
+        if not isinstance(payload, dict):
+            continue
+        reject_ok = payload.get("reject_pass")
+        break_ok = payload.get("break_pass")
+        if isinstance(reject_ok, bool) and isinstance(break_ok, bool):
+            gate_target_pass_lines.append(
+                f"{horizon}m:R={'pass' if reject_ok else 'fail'},B={'pass' if break_ok else 'fail'}"
+            )
+    if gate_target_pass_lines:
+        lines.append(f"- Gate target passes: {', '.join(gate_target_pass_lines)}")
     if analog_gate.reasons:
         lines.append(f"- Gate reasons: {', '.join(analog_gate.reasons)}")
     if not any(s.analog_available_count > 0 for s in analog_summaries):
@@ -1948,6 +2013,7 @@ def main() -> None:
             "required_horizons": analog_gate.required_horizons,
             "evaluated_horizons": analog_gate.evaluated_horizons,
             "passed_horizons": analog_gate.passed_horizons,
+            "horizon_results": analog_gate.horizon_results,
             "reasons": analog_gate.reasons,
             "thresholds": analog_gate.thresholds,
             "eval_mode": gate_eval_mode,

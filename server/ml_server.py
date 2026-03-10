@@ -193,6 +193,11 @@ ML_ANALOG_PROMOTION_GATE_PATH = Path(
 ML_ANALOG_BLEND_MODE = (os.getenv("ML_ANALOG_BLEND_MODE", "shadow") or "shadow").strip().lower()
 if ML_ANALOG_BLEND_MODE not in {"off", "shadow", "active"}:
     ML_ANALOG_BLEND_MODE = "shadow"
+ML_ANALOG_BLEND_PARTIAL_MODE = (
+    os.getenv("ML_ANALOG_BLEND_PARTIAL_MODE", "off") or "off"
+).strip().lower()
+if ML_ANALOG_BLEND_PARTIAL_MODE not in {"off", "horizon", "target"}:
+    ML_ANALOG_BLEND_PARTIAL_MODE = "off"
 ML_ANALOG_BLEND_WEIGHT_BASE = max(
     0.0, min(1.0, float(os.getenv("ML_ANALOG_BLEND_WEIGHT_BASE", "0.30")))
 )
@@ -856,6 +861,9 @@ def _read_analog_promotion_gate() -> dict[str, object]:
         return {"status": "unknown", "path": str(path), "reason": f"parse_error:{exc}"}
     if not isinstance(payload, dict):
         return {"status": "unknown", "path": str(path), "reason": "invalid_payload"}
+    horizon_results = payload.get("horizon_results")
+    if not isinstance(horizon_results, dict):
+        horizon_results = {}
     return {
         "status": str(payload.get("status") or "unknown"),
         "path": str(path),
@@ -863,6 +871,7 @@ def _read_analog_promotion_gate() -> dict[str, object]:
         "required_horizons": payload.get("required_horizons"),
         "evaluated_horizons": payload.get("evaluated_horizons"),
         "passed_horizons": payload.get("passed_horizons"),
+        "horizon_results": horizon_results,
         "reasons": payload.get("reasons"),
         "generated_at_ms": payload.get("generated_at_ms"),
     }
@@ -1105,6 +1114,7 @@ def health():
             "disagreement_guard_mode": ML_ANALOG_DISAGREEMENT_GUARD_MODE,
             "disagreement_guard_horizons": sorted(ML_ANALOG_DISAGREEMENT_GUARD_HORIZONS),
             "blend_mode": ML_ANALOG_BLEND_MODE,
+            "blend_partial_mode": ML_ANALOG_BLEND_PARTIAL_MODE,
             "blend_weight_base": ML_ANALOG_BLEND_WEIGHT_BASE,
             "blend_weight_max": ML_ANALOG_BLEND_WEIGHT_MAX,
             "blend_n_eff_ref": ML_ANALOG_BLEND_N_EFF_REF,
@@ -1184,6 +1194,18 @@ def _to_float(value) -> float | None:
         return float(value)
     except Exception:
         return None
+
+
+def _to_bool(value) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        norm = value.strip().lower()
+        if norm in {"1", "true", "yes", "on"}:
+            return True
+        if norm in {"0", "false", "no", "off"}:
+            return False
+    return None
 
 
 def _clamp_threshold(value: float) -> float:
@@ -1619,14 +1641,32 @@ def _score_event(event: dict):
         best_horizon=None,
     )
     gate_pass = str(analog_gate.get("status") or "").strip().lower() == "pass"
+    all_horizons_set = set(all_horizons)
+    gate_passed_horizons = {
+        horizon
+        for horizon in (
+            _to_int(raw)
+            for raw in (analog_gate.get("passed_horizons") if isinstance(analog_gate.get("passed_horizons"), list) else [])
+        )
+        if horizon in all_horizons_set
+    }
+    gate_horizon_results = analog_gate.get("horizon_results")
+    if not isinstance(gate_horizon_results, dict):
+        gate_horizon_results = {}
     blend_info: dict[str, object] = {
         "mode": ML_ANALOG_BLEND_MODE,
+        "partial_mode": ML_ANALOG_BLEND_PARTIAL_MODE,
         "gate_status": analog_gate.get("status"),
         "gate_path": analog_gate.get("path"),
         "gate_report_date": analog_gate.get("report_date"),
         "gate_reasons": analog_gate.get("reasons"),
         "allow_active_blend": gate_pass,
+        "allow_partial_blend": bool(
+            ML_ANALOG_BLEND_PARTIAL_MODE != "off" and not gate_pass
+        ),
+        "gate_passed_horizons": sorted(gate_passed_horizons),
         "applied_horizons": [],
+        "applied_targets": [],
         "horizons": {},
         "weight_base": ML_ANALOG_BLEND_WEIGHT_BASE,
         "weight_max": ML_ANALOG_BLEND_WEIGHT_MAX,
@@ -1696,9 +1736,43 @@ def _score_event(event: dict):
 
         scores[f"blend_prob_reject_{horizon}m"] = blend_reject
         scores[f"blend_prob_break_{horizon}m"] = blend_break
+        horizon_gate_payload = gate_horizon_results.get(str(horizon))
+        if not isinstance(horizon_gate_payload, dict):
+            horizon_gate_payload = {}
+        horizon_pass_flag = _to_bool(horizon_gate_payload.get("pass"))
+        if horizon_pass_flag is None:
+            horizon_pass_flag = horizon in gate_passed_horizons
+        reject_target_gate = _to_bool(horizon_gate_payload.get("reject_pass"))
+        break_target_gate = _to_bool(horizon_gate_payload.get("break_pass"))
+        if ML_ANALOG_BLEND_PARTIAL_MODE == "target":
+            reject_blend_allowed = bool(
+                gate_pass
+                or reject_target_gate
+                or (reject_target_gate is None and (horizon_pass_flag or horizon in gate_passed_horizons))
+            )
+            break_blend_allowed = bool(
+                gate_pass
+                or break_target_gate
+                or (break_target_gate is None and (horizon_pass_flag or horizon in gate_passed_horizons))
+            )
+        elif ML_ANALOG_BLEND_PARTIAL_MODE == "horizon":
+            horizon_blend_allowed = bool(gate_pass or horizon_pass_flag or horizon in gate_passed_horizons)
+            reject_blend_allowed = horizon_blend_allowed
+            break_blend_allowed = horizon_blend_allowed
+        else:
+            reject_blend_allowed = bool(gate_pass)
+            break_blend_allowed = bool(gate_pass)
+
         blend_info["horizons"][str(horizon)] = {
             "weight": weight,
             "applied": False,
+            "applied_reject": False,
+            "applied_break": False,
+            "gate_pass": bool(horizon_pass_flag),
+            "gate_reject_pass": reject_target_gate,
+            "gate_break_pass": break_target_gate,
+            "allow_reject": bool(reject_blend_allowed),
+            "allow_break": bool(break_blend_allowed),
             "model_reject": model_reject,
             "model_break": model_break,
             "analog_reject": analog_reject,
@@ -1716,29 +1790,61 @@ def _score_event(event: dict):
                 analog_horizon_payload["blend_prob_break"] = blend_break
                 analog_horizon_payload["disagreement_guard_triggered"] = bool(guard_triggered)
 
-        if (
-            ML_ANALOG_BLEND_MODE == "active"
-            and gate_pass
-            and weight > 0
-            and blend_reject is not None
-            and blend_break is not None
-        ):
-            scores[f"prob_reject_{horizon}m"] = blend_reject
-            scores[f"prob_break_{horizon}m"] = blend_break
-            blend_info["horizons"][str(horizon)]["applied"] = True
-            cast_applied = blend_info.get("applied_horizons")
-            if isinstance(cast_applied, list):
-                cast_applied.append(horizon)
+        if ML_ANALOG_BLEND_MODE == "active" and weight > 0:
+            applied_any = False
+            if (
+                reject_blend_allowed
+                and blend_reject is not None
+            ):
+                scores[f"prob_reject_{horizon}m"] = blend_reject
+                blend_info["horizons"][str(horizon)]["applied_reject"] = True
+                applied_any = True
+                cast_targets = blend_info.get("applied_targets")
+                if isinstance(cast_targets, list):
+                    cast_targets.append(f"{horizon}m:reject")
+            if (
+                break_blend_allowed
+                and blend_break is not None
+            ):
+                scores[f"prob_break_{horizon}m"] = blend_break
+                blend_info["horizons"][str(horizon)]["applied_break"] = True
+                applied_any = True
+                cast_targets = blend_info.get("applied_targets")
+                if isinstance(cast_targets, list):
+                    cast_targets.append(f"{horizon}m:break")
+            if applied_any:
+                blend_info["horizons"][str(horizon)]["applied"] = True
+                cast_applied = blend_info.get("applied_horizons")
+                if isinstance(cast_applied, list) and horizon not in cast_applied:
+                    cast_applied.append(horizon)
 
-    if ML_ANALOG_BLEND_MODE == "active" and not gate_pass:
-        quality_flags.append("ANALOG_BLEND_BLOCKED_GATE")
     applied_horizons = blend_info.get("applied_horizons")
+    if (
+        ML_ANALOG_BLEND_MODE == "active"
+        and isinstance(applied_horizons, list)
+        and not applied_horizons
+        and not gate_pass
+    ):
+        quality_flags.append("ANALOG_BLEND_BLOCKED_GATE")
     if (
         ML_ANALOG_BLEND_MODE == "active"
         and isinstance(applied_horizons, list)
         and applied_horizons
     ):
         quality_flags.append("ANALOG_BLEND_ACTIVE")
+        if not gate_pass and ML_ANALOG_BLEND_PARTIAL_MODE != "off":
+            quality_flags.append("ANALOG_BLEND_PARTIAL_GATE")
+    horizon_blend_payload = blend_info.get("horizons")
+    if (
+        ML_ANALOG_BLEND_MODE == "active"
+        and isinstance(horizon_blend_payload, dict)
+        and any(
+            isinstance(payload, dict)
+            and payload.get("applied_reject") != payload.get("applied_break")
+            for payload in horizon_blend_payload.values()
+        )
+    ):
+        quality_flags.append("ANALOG_BLEND_TARGET_SPLIT")
     baseline_signals = _classify_signals(
         all_horizons=all_horizons,
         scores=scores,
