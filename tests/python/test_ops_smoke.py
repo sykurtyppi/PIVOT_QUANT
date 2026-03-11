@@ -518,6 +518,156 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertAlmostEqual(float(row["weekly_pivot_dist_bps"]), -10_000.0, places=6)
         self.assertAlmostEqual(float(row["monthly_pivot_dist_bps"]), -10_000.0, places=6)
 
+    def test_build_feature_row_time_features_and_tod_buckets(self) -> None:
+        features = load_module(
+            "pq_features_time_bucket_test",
+            REPO_ROOT / "ml" / "features.py",
+        )
+        dt_open = datetime(2026, 3, 10, 9, 45, tzinfo=features.NY_TZ)
+        ts_open = int(dt_open.astimezone(timezone.utc).timestamp() * 1000)
+        open_row = features.build_feature_row(
+            {
+                "symbol": "SPY",
+                "ts_event": ts_open,
+                "level_type": "R1",
+                "level_price": 100.0,
+                "touch_price": 100.0,
+                "distance_bps": 0.0,
+            }
+        )
+        self.assertEqual(int(open_row["event_hour_et"]), 9)
+        self.assertEqual(open_row["tod_bucket"], "open")
+        self.assertEqual(int(open_row["minutes_since_open"]), 15)
+        self.assertEqual(int(open_row["minutes_until_close"]), 375)
+        self.assertEqual(int(open_row["is_first_30min"]), 1)
+        self.assertEqual(int(open_row["is_last_30min"]), 0)
+        self.assertEqual(int(open_row["is_lunch_hour"]), 0)
+
+        dt_power = datetime(2026, 3, 10, 15, 45, tzinfo=features.NY_TZ)
+        ts_power = int(dt_power.astimezone(timezone.utc).timestamp() * 1000)
+        power_row = features.build_feature_row(
+            {
+                "symbol": "SPY",
+                "ts_event": ts_power,
+                "level_type": "S1",
+                "level_price": 100.0,
+                "touch_price": 100.0,
+                "distance_bps": 0.0,
+            }
+        )
+        self.assertEqual(power_row["tod_bucket"], "power")
+        self.assertEqual(int(power_row["is_first_30min"]), 0)
+        self.assertEqual(int(power_row["is_last_30min"]), 1)
+
+    def test_build_feature_row_ema_vwap_and_atr_derivations(self) -> None:
+        features = load_module(
+            "pq_features_derivations_test",
+            REPO_ROOT / "ml" / "features.py",
+        )
+        ts_event = int(datetime(2026, 3, 10, 15, 0, tzinfo=timezone.utc).timestamp() * 1000)
+        row = features.build_feature_row(
+            {
+                "symbol": "SPY",
+                "ts_event": ts_event,
+                "level_type": "R2",
+                "level_price": 100.0,
+                "touch_price": 101.0,
+                "distance_bps": 50.0,
+                "ema9": 102.0,
+                "ema21": 100.0,
+                "vwap": 100.0,
+                "session_std": 0.5,
+                "atr": 2.0,
+            }
+        )
+        self.assertEqual(int(row["ema_state_calc"]), 1)
+        self.assertAlmostEqual(float(row["ema_spread_bps"]), 200.0, places=6)
+        self.assertAlmostEqual(float(row["price_vs_ema21_bps"]), 100.0, places=6)
+        self.assertAlmostEqual(float(row["vwap_dist_bps_calc"]), 100.0, places=6)
+        self.assertAlmostEqual(float(row["vwap_zscore"]), 2.0, places=6)
+        self.assertAlmostEqual(float(row["atr_bps"]), 198.01980198019803, places=6)
+        self.assertAlmostEqual(float(row["distance_atr_ratio"]), 0.2525, places=6)
+
+    def test_build_feature_row_prefers_explicit_distance_fields(self) -> None:
+        features = load_module(
+            "pq_features_explicit_distances_test",
+            REPO_ROOT / "ml" / "features.py",
+        )
+        ts_event = int(datetime(2026, 3, 10, 15, 0, tzinfo=timezone.utc).timestamp() * 1000)
+        row = features.build_feature_row(
+            {
+                "symbol": "SPY",
+                "ts_event": ts_event,
+                "level_type": "GAMMA",
+                "level_price": 100.0,
+                "touch_price": 101.0,
+                "distance_bps": 25.0,
+                "vwap": 1.0,
+                "gamma_flip": 1.0,
+                "vpoc": 1.0,
+                "vwap_dist_bps": 0.0,
+                "gamma_flip_dist_bps": -12.5,
+                "vpoc_dist_bps": 34.5,
+            }
+        )
+        self.assertAlmostEqual(float(row["vwap_dist_bps_calc"]), 0.0, places=6)
+        self.assertAlmostEqual(float(row["gamma_flip_dist_bps_calc"]), -12.5, places=6)
+        self.assertAlmostEqual(float(row["vpoc_dist_bps_calc"]), 34.5, places=6)
+        self.assertEqual(row["level_family"], "gamma")
+
+    def test_build_feature_row_confluence_and_missing_keys(self) -> None:
+        features = load_module(
+            "pq_features_confluence_missing_test",
+            REPO_ROOT / "ml" / "features.py",
+        )
+        ts_event = int(datetime(2026, 3, 10, 15, 0, tzinfo=timezone.utc).timestamp() * 1000)
+        row = features.build_feature_row(
+            {
+                "symbol": "SPY",
+                "ts_event": ts_event,
+                "level_type": "S2",
+                "level_price": 100.0,
+                "touch_price": 100.0,
+                "distance_bps": 0.0,
+                "mtf_confluence_types": '["weekly_pp", "monthly_pp"]',
+            }
+        )
+        self.assertEqual(int(row["has_weekly_confluence"]), 1)
+        self.assertEqual(int(row["has_monthly_confluence"]), 1)
+        self.assertEqual(row["level_family"], "support")
+
+        invalid_row = features.build_feature_row(
+            {
+                "symbol": "SPY",
+                "ts_event": ts_event,
+                "level_type": "P",
+                "level_price": 100.0,
+                "touch_price": 100.0,
+                "distance_bps": 0.0,
+                "mtf_confluence_types": "{bad json",
+            }
+        )
+        self.assertEqual(int(invalid_row["has_weekly_confluence"]), 0)
+        self.assertEqual(int(invalid_row["has_monthly_confluence"]), 0)
+        self.assertEqual(invalid_row["level_family"], "pivot")
+
+        missing = features.collect_missing({"symbol": "SPY"})
+        self.assertEqual(
+            missing,
+            ["ts_event", "level_type", "level_price", "touch_price", "distance_bps"],
+        )
+
+    def test_drop_features_returns_copy(self) -> None:
+        features = load_module(
+            "pq_features_drop_copy_test",
+            REPO_ROOT / "ml" / "features.py",
+        )
+        dropped_one = features.drop_features()
+        dropped_one.add("__tmp_marker__")
+        dropped_two = features.drop_features()
+        self.assertIn("touch_price", dropped_two)
+        self.assertNotIn("__tmp_marker__", dropped_two)
+
     def test_ml_score_payload_rejects_oversized_batches(self) -> None:
         prior_limit = os.environ.get("ML_SCORE_MAX_BATCH_EVENTS")
         os.environ["ML_SCORE_MAX_BATCH_EVENTS"] = "2"
