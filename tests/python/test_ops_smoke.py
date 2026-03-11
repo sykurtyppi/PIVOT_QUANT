@@ -1984,6 +1984,30 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("with self._lock:", score_block)
         self.assertIn("rows_by_horizon = self.rows_by_horizon", score_block)
 
+    def test_ml_server_registry_load_and_score_use_snapshot(self) -> None:
+        source = (REPO_ROOT / "server" / "ml_server.py").read_text(encoding="utf-8")
+        registry_block = source.split("class ModelRegistry:", 1)[1].split(
+            "def _analog_level_family(",
+            1,
+        )[0]
+        self.assertIn("self._lock = threading.RLock()", registry_block)
+        self.assertIn("def snapshot(self) -> dict[str, object]:", registry_block)
+        load_block = registry_block.split("def load(self):", 1)[1].split(
+            "def snapshot(self) -> dict[str, object]:",
+            1,
+        )[0]
+        self.assertIn("with self._lock:", load_block)
+        self.assertIn("self.manifest = manifest", load_block)
+        self.assertIn("self.models = models", load_block)
+        self.assertIn("self.thresholds = thresholds", load_block)
+        score_block = source.split("def _score_event(event: dict):", 1)[1].split(
+            "def _validate_score_payload(",
+            1,
+        )[0]
+        self.assertIn("registry_snapshot = registry.snapshot()", score_block)
+        self.assertIn("snapshot_models = registry_snapshot.get(\"models\")", score_block)
+        self.assertIn("snapshot_thresholds = registry_snapshot.get(\"thresholds\")", score_block)
+
     def test_ibkr_bridge_uses_timezone_aware_utc_datetimes(self) -> None:
         source = (REPO_ROOT / "server" / "ibkr_gamma_bridge.py").read_text(encoding="utf-8")
         self.assertNotIn("datetime.utcnow(", source)

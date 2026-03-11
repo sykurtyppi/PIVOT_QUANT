@@ -283,6 +283,7 @@ class ModelRegistry:
         self.manifest_path: str | None = None
         self.models = {"reject": {}, "break": {}}
         self.thresholds = {"reject": {}, "break": {}}
+        self._lock = threading.RLock()
 
     def resolve_manifest_path(self) -> Path:
         if RF_MANIFEST_PATH:
@@ -332,20 +333,39 @@ class ModelRegistry:
 
         # Atomically swap in the newly built registry payload so /score never
         # sees a transient empty model map during reload.
-        self.manifest = manifest
-        self.manifest_path = manifest_path_str
-        self.models = models
-        self.thresholds = thresholds
+        with self._lock:
+            self.manifest = manifest
+            self.manifest_path = manifest_path_str
+            self.models = models
+            self.thresholds = thresholds
+
+    def snapshot(self) -> dict[str, object]:
+        with self._lock:
+            return {
+                "manifest": self.manifest,
+                "manifest_path": self.manifest_path,
+                "models": {
+                    "reject": dict(self.models.get("reject", {})),
+                    "break": dict(self.models.get("break", {})),
+                },
+                "thresholds": {
+                    "reject": dict(self.thresholds.get("reject", {})),
+                    "break": dict(self.thresholds.get("break", {})),
+                },
+            }
 
     def get_threshold(self, target: str, horizon: int) -> float:
         """Get optimal decision threshold for a target/horizon pair.
         Falls back to 0.5 if not available."""
-        return self.thresholds.get(target, {}).get(horizon, 0.5)
+        with self._lock:
+            return self.thresholds.get(target, {}).get(horizon, 0.5)
 
     def available(self):
-        return {
-            target: sorted(horizons.keys()) for target, horizons in self.models.items()
-        }
+        snapshot = self.snapshot()
+        models = snapshot.get("models", {})
+        if not isinstance(models, dict):
+            models = {}
+        return {target: sorted(horizons.keys()) for target, horizons in models.items()}
 
 
 def _analog_level_family(level_type: object) -> str:
@@ -937,9 +957,11 @@ app.add_middleware(
 
 def _is_model_stale() -> bool:
     """Check if the model artifacts are older than STALE_MODEL_HOURS."""
-    if not registry.manifest:
+    snapshot = registry.snapshot()
+    manifest = snapshot.get("manifest")
+    if not isinstance(manifest, dict):
         return False
-    trained_end_ts = registry.manifest.get("trained_end_ts")
+    trained_end_ts = manifest.get("trained_end_ts")
     if not trained_end_ts:
         return False
     age_hours = (time.time() * 1000 - trained_end_ts) / (3600 * 1000)
@@ -1238,7 +1260,22 @@ def _log_prediction(event: dict, result: dict) -> None:
 
 @app.get("/health")
 def health():
-    has_models = any(horizons for horizons in registry.available().values())
+    registry_snapshot = registry.snapshot()
+    manifest = registry_snapshot.get("manifest")
+    if not isinstance(manifest, dict):
+        manifest = None
+    manifest_path = registry_snapshot.get("manifest_path")
+    if manifest_path is not None:
+        manifest_path = str(manifest_path)
+    models_payload = registry_snapshot.get("models")
+    if not isinstance(models_payload, dict):
+        models_payload = {}
+    models = {
+        target: sorted(horizons.keys())
+        for target, horizons in models_payload.items()
+        if isinstance(horizons, dict)
+    }
+    has_models = any(horizons for horizons in models.values())
     stale = _is_model_stale()
     if not has_models or _startup_error is not None:
         status = "degraded"
@@ -1249,9 +1286,9 @@ def health():
     result = {
         "status": status,
         "feature_version": FEATURE_VERSION,
-        "manifest": registry.manifest,
-        "manifest_path": registry.manifest_path,
-        "models": registry.available(),
+        "manifest": manifest,
+        "manifest_path": manifest_path,
+        "models": models,
         "regime_policy_mode": ML_REGIME_POLICY_MODE,
         "regime_threshold_max_delta": ML_REGIME_THRESHOLD_MAX_DELTA,
         "atr_zone_bounds": {
@@ -1300,8 +1337,8 @@ def health():
     }
     if _startup_error is not None:
         result["startup_error"] = _startup_error
-    if stale:
-        trained_end_ts = registry.manifest.get("trained_end_ts", 0)
+    if stale and manifest is not None:
+        trained_end_ts = manifest.get("trained_end_ts", 0)
         age_hours = (time.time() * 1000 - trained_end_ts) / (3600 * 1000)
         result["stale_hours"] = round(age_hours, 1)
     return result
@@ -1315,10 +1352,22 @@ def reload_models():
         registry.load()
         analog_engine.refresh()
         _startup_error = None
+        registry_snapshot = registry.snapshot()
+        manifest = registry_snapshot.get("manifest")
+        if not isinstance(manifest, dict):
+            manifest = None
+        models_payload = registry_snapshot.get("models")
+        if not isinstance(models_payload, dict):
+            models_payload = {}
+        models = {
+            target: sorted(horizons.keys())
+            for target, horizons in models_payload.items()
+            if isinstance(horizons, dict)
+        }
         return {
             "status": "ok",
-            "models": registry.available(),
-            "manifest": registry.manifest,
+            "models": models,
+            "manifest": manifest,
             "analogs": analog_engine.health(),
         }
     except Exception as exc:
@@ -1510,11 +1559,15 @@ def _classify_atr_zone(distance_ratio: float | None) -> str:
     return "far"
 
 
-def _build_regime_thresholds(all_horizons: list[int], trade_regime: str) -> dict[str, dict[int, float]]:
+def _build_regime_thresholds(
+    all_horizons: list[int],
+    trade_regime: str,
+    baseline_thresholds: dict[str, dict[int, float]],
+) -> dict[str, dict[int, float]]:
     thresholds = {"reject": {}, "break": {}}
     for horizon in all_horizons:
-        base_reject = registry.get_threshold("reject", horizon)
-        base_break = registry.get_threshold("break", horizon)
+        base_reject = _clamp_threshold(baseline_thresholds["reject"].get(horizon, 0.5))
+        base_break = _clamp_threshold(baseline_thresholds["break"].get(horizon, 0.5))
         if trade_regime == "compression":
             thresholds["reject"][horizon] = _adjust_threshold(
                 base_reject, ML_REGIME_COMPRESSION_REJECT_DELTA
@@ -1715,6 +1768,29 @@ def _pick_best_horizon(
 def _score_event(event: dict):
     missing = collect_missing(event)
     features = build_feature_row(event)
+    registry_snapshot = registry.snapshot()
+    manifest = registry_snapshot.get("manifest")
+    if not isinstance(manifest, dict):
+        manifest = None
+    snapshot_models = registry_snapshot.get("models")
+    if not isinstance(snapshot_models, dict):
+        snapshot_models = {"reject": {}, "break": {}}
+    snapshot_thresholds = registry_snapshot.get("thresholds")
+    if not isinstance(snapshot_thresholds, dict):
+        snapshot_thresholds = {"reject": {}, "break": {}}
+
+    models_reject = snapshot_models.get("reject")
+    if not isinstance(models_reject, dict):
+        models_reject = {}
+    models_break = snapshot_models.get("break")
+    if not isinstance(models_break, dict):
+        models_break = {}
+    thresholds_reject = snapshot_thresholds.get("reject")
+    if not isinstance(thresholds_reject, dict):
+        thresholds_reject = {}
+    thresholds_break = snapshot_thresholds.get("break")
+    if not isinstance(thresholds_break, dict):
+        thresholds_break = {}
 
     scores = {}
     quality_flags = []
@@ -1727,8 +1803,8 @@ def _score_event(event: dict):
     if _is_model_stale():
         quality_flags.append("STALE_MODEL")
 
-    stats = registry.manifest.get("stats", {}) if registry.manifest else {}
-    calibration = registry.manifest.get("calibration", {}) if registry.manifest else {}
+    stats = manifest.get("stats", {}) if manifest else {}
+    calibration = manifest.get("calibration", {}) if manifest else {}
 
     def extract_prob(model, df):
         probs = model.predict_proba(df)
@@ -1742,9 +1818,14 @@ def _score_event(event: dict):
         return None
 
     thresholds_used = {}
+    model_map = {"reject": models_reject, "break": models_break}
+    threshold_map_live = {"reject": thresholds_reject, "break": thresholds_break}
+
+    def _snapshot_threshold(target: str, horizon: int) -> float:
+        return float(threshold_map_live.get(target, {}).get(horizon, 0.5))
 
     for target in ("reject", "break"):
-        for horizon, payload in registry.models.get(target, {}).items():
+        for horizon, payload in model_map.get(target, {}).items():
             feature_cols = payload.get("feature_columns", [])
             if not feature_cols:
                 continue
@@ -1757,7 +1838,7 @@ def _score_event(event: dict):
             scores[f"prob_{target}_{horizon}m"] = prob
 
             # Store the threshold used for this model
-            threshold = registry.get_threshold(target, horizon)
+            threshold = _snapshot_threshold(target, horizon)
             thresholds_used[f"threshold_{target}_{horizon}m"] = threshold
 
             horizon_stats = stats.get(str(horizon), {}).get(target, {})
@@ -1784,16 +1865,16 @@ def _score_event(event: dict):
     # ── Signal classification per horizon ──
     # Uses optimal thresholds instead of hardcoded 0.5
     all_horizons = sorted(
-        set(registry.models.get("reject", {}).keys())
-        .union(registry.models.get("break", {}).keys())
+        set(models_reject.keys())
+        .union(models_break.keys())
     )
     scored_horizons = [h for h in all_horizons if h not in ML_SHADOW_HORIZONS]
     if not scored_horizons:
         scored_horizons = list(all_horizons)
 
     threshold_baseline = {
-        "reject": {h: _clamp_threshold(registry.get_threshold("reject", h)) for h in all_horizons},
-        "break": {h: _clamp_threshold(registry.get_threshold("break", h)) for h in all_horizons},
+        "reject": {h: _clamp_threshold(_snapshot_threshold("reject", h)) for h in all_horizons},
+        "break": {h: _clamp_threshold(_snapshot_threshold("break", h)) for h in all_horizons},
     }
     regime_state = _compute_trade_regime(event=event, features=features)
     atr_distance_ratio = _compute_atr_distance_ratio(event=event, features=features)
@@ -1801,6 +1882,7 @@ def _score_event(event: dict):
     threshold_regime_base = _build_regime_thresholds(
         all_horizons=all_horizons,
         trade_regime=regime_state["bucket"],
+        baseline_thresholds=threshold_baseline,
     )
     threshold_regime, atr_overlay_meta = _apply_atr_zone_overlay(
         threshold_map=threshold_regime_base,
@@ -2303,9 +2385,9 @@ def _score_event(event: dict):
         "thresholds": thresholds_used,
         "abstain": abstain,
         "best_horizon": best_horizon,
-        "model_version": registry.manifest.get("version") if registry.manifest else None,
+        "model_version": manifest.get("version") if manifest else None,
         "feature_version": FEATURE_VERSION,
-        "trained_end_ts": registry.manifest.get("trained_end_ts") if registry.manifest else None,
+        "trained_end_ts": manifest.get("trained_end_ts") if manifest else None,
         "calibration": calibration,
         "quality_flags": quality_flags,
         "analogs": analog_summary,
@@ -2418,8 +2500,20 @@ async def _read_score_payload(request: Request) -> object:
 
 @app.post("/score")
 async def score(request: Request):
-    has_models = any(horizons for horizons in registry.available().values())
-    if registry.manifest is None or not has_models:
+    registry_snapshot = registry.snapshot()
+    manifest = registry_snapshot.get("manifest")
+    if not isinstance(manifest, dict):
+        manifest = None
+    models_payload = registry_snapshot.get("models")
+    if not isinstance(models_payload, dict):
+        models_payload = {}
+    models = {
+        target: sorted(horizons.keys())
+        for target, horizons in models_payload.items()
+        if isinstance(horizons, dict)
+    }
+    has_models = any(horizons for horizons in models.values())
+    if manifest is None or not has_models:
         raise HTTPException(status_code=503, detail="Models not loaded. Train artifacts first.")
     payload = await _read_score_payload(request)
 
