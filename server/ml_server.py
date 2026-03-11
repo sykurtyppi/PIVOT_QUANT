@@ -414,12 +414,18 @@ class AnalogEngine:
         self.loaded_at_ms: int | None = None
         self.rows_by_horizon: dict[int, list[dict[str, object]]] = {}
         self.enabled = bool(ML_ANALOG_ENABLED)
+        self._lock = threading.RLock()
 
     def refresh(self) -> None:
-        self.error = None
-        self.rows_by_horizon = {}
-        self.loaded_at_ms = int(time.time() * 1000)
-        if not self.enabled:
+        loaded_at_ms = int(time.time() * 1000)
+        error: str | None = None
+        rows_by_horizon: dict[int, list[dict[str, object]]] = {}
+        enabled = bool(self.enabled)
+        if not enabled:
+            with self._lock:
+                self.error = None
+                self.rows_by_horizon = {}
+                self.loaded_at_ms = loaded_at_ms
             return
 
         conn = None
@@ -490,21 +496,30 @@ class AnalogEngine:
                         "break": _to_float(row["break"]),
                     }
                 )
-            self.rows_by_horizon = out
+            rows_by_horizon = out
         except Exception as exc:  # pragma: no cover - defensive
-            self.error = str(exc)
-            self.rows_by_horizon = {}
+            error = str(exc)
+            rows_by_horizon = {}
         finally:
             if conn is not None:
                 conn.close()
+        with self._lock:
+            self.error = error
+            self.rows_by_horizon = rows_by_horizon
+            self.loaded_at_ms = loaded_at_ms
 
     def health(self) -> dict[str, object]:
+        with self._lock:
+            rows_by_horizon = self.rows_by_horizon
+            error = self.error
+            loaded_at_ms = self.loaded_at_ms
+            enabled = self.enabled
         return {
-            "enabled": self.enabled,
+            "enabled": enabled,
             "db": str(self.db_path),
-            "loaded_at_ms": self.loaded_at_ms,
-            "error": self.error,
-            "rows": {str(h): len(rows) for h, rows in self.rows_by_horizon.items()},
+            "loaded_at_ms": loaded_at_ms,
+            "error": error,
+            "rows": {str(h): len(rows) for h, rows in rows_by_horizon.items()},
             "k": ML_ANALOG_K,
             "max_candidates": ML_ANALOG_MAX_CANDIDATES,
             "min_pool": ML_ANALOG_MIN_POOL,
@@ -820,16 +835,21 @@ class AnalogEngine:
         scores: dict[str, float | None],
         best_horizon: int | None,
     ) -> dict[str, object]:
+        with self._lock:
+            enabled = self.enabled
+            error = self.error
+            loaded_at_ms = self.loaded_at_ms
+            rows_by_horizon = self.rows_by_horizon
         summary: dict[str, object] = {
-            "enabled": self.enabled,
-            "error": self.error,
-            "loaded_at_ms": self.loaded_at_ms,
+            "enabled": enabled,
+            "error": error,
+            "loaded_at_ms": loaded_at_ms,
             "horizons": {},
             "best": None,
         }
-        if not self.enabled:
+        if not enabled:
             return summary
-        if self.error:
+        if error:
             summary["status"] = "degraded"
             return summary
 
@@ -863,7 +883,7 @@ class AnalogEngine:
             model_reject = _to_float(scores.get(f"prob_reject_{horizon}m"))
             model_break = _to_float(scores.get(f"prob_break_{horizon}m"))
             result = self._score_horizon(
-                rows=self.rows_by_horizon.get(horizon, []),
+                rows=rows_by_horizon.get(horizon, []),
                 query_event=query_event,
                 query_features=query_features,
                 model_reject_prob=model_reject,

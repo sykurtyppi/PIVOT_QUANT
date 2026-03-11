@@ -1821,6 +1821,19 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertNotIn("readJsonFile(METRICS_FILE)", metrics_block)
         self.assertNotIn("readJsonFile(CALIB_FILE)", metrics_block)
 
+    def test_ml_server_analog_engine_refresh_and_score_use_lock(self) -> None:
+        source = (REPO_ROOT / "server" / "ml_server.py").read_text(encoding="utf-8")
+        self.assertIn("self._lock = threading.RLock()", source)
+        refresh_block = source.split("def refresh(self) -> None:", 1)[1].split(
+            "def health(self) -> dict[str, object]:",
+            1,
+        )[0]
+        self.assertIn("with self._lock:", refresh_block)
+        self.assertIn("self.rows_by_horizon = rows_by_horizon", refresh_block)
+        score_block = source.split("def score_event(", 1)[1].split("registry = ModelRegistry()", 1)[0]
+        self.assertIn("with self._lock:", score_block)
+        self.assertIn("rows_by_horizon = self.rows_by_horizon", score_block)
+
     def test_ibkr_bridge_uses_timezone_aware_utc_datetimes(self) -> None:
         source = (REPO_ROOT / "server" / "ibkr_gamma_bridge.py").read_text(encoding="utf-8")
         self.assertNotIn("datetime.utcnow(", source)
