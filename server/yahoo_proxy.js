@@ -88,41 +88,73 @@ const FORM_URLENCODED = 'application/x-www-form-urlencoded';
 const ENV_FILE_VALUES = loadEnvMap(ENV_FILE);
 const SECURITY = buildSecurityConfig(process.env, ENV_FILE_VALUES);
 
-function extractScriptSourcesFromHtml(rawHtml) {
-  if (typeof rawHtml !== 'string' || !rawHtml.length) return [];
-  const scripts = [];
-  const regex = /<script\b[^>]*\bsrc=["']([^"']+)["'][^>]*>/gi;
+function extractScriptTagSummaryFromHtml(rawHtml) {
+  const summary = {
+    total: 0,
+    external: 0,
+    inline: 0,
+    externalSources: [],
+    inlineBodies: [],
+  };
+  if (typeof rawHtml !== 'string' || !rawHtml.length) return summary;
+
+  const tagRegex = /<script\b([^>]*)>([\s\S]*?)<\/script>/gi;
   let match = null;
-  while ((match = regex.exec(rawHtml)) !== null) {
-    scripts.push(match[1]);
+  while ((match = tagRegex.exec(rawHtml)) !== null) {
+    summary.total += 1;
+    const attrs = String(match[1] || '');
+    const body = String(match[2] || '');
+    const srcMatch = attrs.match(/\bsrc=["']([^"']+)["']/i);
+    if (srcMatch) {
+      summary.external += 1;
+      summary.externalSources.push(srcMatch[1]);
+      continue;
+    }
+    summary.inline += 1;
+    summary.inlineBodies.push(body);
   }
-  return scripts;
+  return summary;
 }
 
 function buildRuntimeArchitectureSnapshot() {
   const srcEntrypoint = path.join(ROOT_DIR, 'src', 'index.js');
-  let dashboardScripts = [];
+  let scriptSummary = {
+    total: 0,
+    external: 0,
+    inline: 0,
+    externalSources: [],
+    inlineBodies: [],
+  };
   let dashboardParseError = null;
   try {
     const html = fs.readFileSync(DASHBOARD_FILE, 'utf8');
-    dashboardScripts = extractScriptSourcesFromHtml(html);
+    scriptSummary = extractScriptTagSummaryFromHtml(html);
   } catch (error) {
     dashboardParseError = error?.message || String(error);
   }
 
-  const usesSrcLibrary = dashboardScripts.some((value) => {
+  const usesSrcLibraryByPath = scriptSummary.externalSources.some((value) => {
     const normalized = String(value || '').trim();
     return normalized.startsWith('./src/')
       || normalized.startsWith('/src/')
       || normalized.startsWith('src/');
   });
+  const usesSrcLibraryByInlineImport = scriptSummary.inlineBodies.some((body) => {
+    if (typeof body !== 'string' || body.length === 0) return false;
+    return /from\s+['"](?:\.\/)?src\//.test(body)
+      || /import\(\s*['"](?:\.\/)?src\//.test(body);
+  });
+  const usesSrcLibrary = usesSrcLibraryByPath || usesSrcLibraryByInlineImport;
 
   return {
     runtime_mode: 'dashboard_globals',
     dashboard_entrypoint: path.relative(ROOT_DIR, DASHBOARD_FILE),
-    dashboard_script_count: dashboardScripts.length,
+    dashboard_script_count: scriptSummary.total,
+    dashboard_script_count_total: scriptSummary.total,
+    dashboard_script_count_external: scriptSummary.external,
+    dashboard_script_count_inline: scriptSummary.inline,
     dashboard_uses_src_library: usesSrcLibrary,
-    dashboard_script_samples: dashboardScripts.slice(0, 8),
+    dashboard_script_samples: scriptSummary.externalSources.slice(0, 8),
     src_library_entrypoint: path.relative(ROOT_DIR, srcEntrypoint),
     src_library_present: fs.existsSync(srcEntrypoint),
     parse_error: dashboardParseError,

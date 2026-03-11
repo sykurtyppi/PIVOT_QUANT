@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import sqlite3
+import socket
 import subprocess
 import sys
 import tarfile
@@ -18,7 +19,8 @@ import time
 import unittest
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
+import urllib.request
 
 import numpy as np
 
@@ -59,6 +61,86 @@ class OpsSmokeTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _find_free_tcp_port(self) -> int:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.bind(("127.0.0.1", 0))
+                return int(sock.getsockname()[1])
+        except PermissionError as exc:
+            self.skipTest(f"socket bind not permitted in this environment: {exc}")
+
+    def _read_json_url(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        timeout_sec: float = 2.0,
+    ) -> tuple[int, dict]:
+        req = urllib.request.Request(url, headers=headers or {})
+        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:  # noqa: S310
+            payload = json.loads(resp.read().decode("utf-8"))
+            return int(resp.status), payload
+
+    def _start_dashboard_proxy(self, port: int) -> subprocess.Popen[str]:
+        env = os.environ.copy()
+        env.update(
+            {
+                "HOST": "127.0.0.1",
+                "PORT": str(port),
+                "DASH_AUTH_PASSWORD": "smoke_test_password_1234567890",
+            }
+        )
+        return subprocess.Popen(
+            ["node", "server/yahoo_proxy.js"],
+            cwd=str(REPO_ROOT),
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+
+    def _wait_for_dashboard_proxy_health(
+        self,
+        port: int,
+        proc: subprocess.Popen[str],
+        *,
+        timeout_sec: float = 20.0,
+    ) -> dict:
+        deadline = time.time() + timeout_sec
+        last_error: Exception | None = None
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                output = ""
+                if proc.stdout is not None:
+                    output = proc.stdout.read() or ""
+                self.fail(
+                    f"dashboard proxy exited early with code {proc.returncode}: {output[-1200:]}"
+                )
+            try:
+                status, payload = self._read_json_url(
+                    f"http://127.0.0.1:{port}/health", timeout_sec=1.5
+                )
+                if status == 200 and payload.get("status") == "ok":
+                    return payload
+            except Exception as exc:  # pragma: no cover - startup race
+                last_error = exc
+            time.sleep(0.1)
+        self.fail(f"dashboard proxy health did not become ready in {timeout_sec}s: {last_error}")
+
+    def _stop_process(self, proc: subprocess.Popen[str]) -> None:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
+        if proc.stdout is not None:
+            try:
+                proc.stdout.close()
+            except Exception:
+                pass
 
     def _make_db(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1650,6 +1732,9 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("buildRuntimeArchitectureSnapshot()", proxy_source)
         self.assertIn("runtime_architecture_mode", proxy_source)
         self.assertIn("runtime_dashboard_uses_src_library", proxy_source)
+        self.assertIn("dashboard_script_count_total", proxy_source)
+        self.assertIn("dashboard_script_count_external", proxy_source)
+        self.assertIn("dashboard_script_count_inline", proxy_source)
         self.assertIn("auth_active_session_count", proxy_source)
         self.assertIn("auth_login_success_total", proxy_source)
         self.assertIn("Retry-After", proxy_source)
@@ -1658,6 +1743,55 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("auth_rate_limit_enabled", proxy_source)
         self.assertIn("x-forwarded-for", proxy_source)
         self.assertIn("url.pathname === '/health'", proxy_source)
+
+    def test_dashboard_proxy_runtime_architecture_live_endpoint(self) -> None:
+        if shutil.which("node") is None:
+            self.skipTest("node is not available in PATH")
+
+        port = self._find_free_tcp_port()
+        proc = self._start_dashboard_proxy(port)
+        try:
+            health = self._wait_for_dashboard_proxy_health(port, proc)
+            self.assertEqual(health.get("runtime_architecture_mode"), "dashboard_globals")
+            self.assertIn("runtime_dashboard_script_count", health)
+
+            status, payload = self._read_json_url(
+                f"http://127.0.0.1:{port}/api/runtime/architecture",
+                timeout_sec=2.0,
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(payload.get("status"), "ok")
+            self.assertEqual(payload.get("runtime_mode"), "dashboard_globals")
+
+            total = int(payload.get("dashboard_script_count_total", -1))
+            external = int(payload.get("dashboard_script_count_external", -1))
+            inline = int(payload.get("dashboard_script_count_inline", -1))
+            self.assertGreaterEqual(total, 0)
+            self.assertGreaterEqual(external, 0)
+            self.assertGreaterEqual(inline, 0)
+            self.assertEqual(total, external + inline)
+        finally:
+            self._stop_process(proc)
+
+    def test_dashboard_proxy_runtime_architecture_rejects_forwarded_requests(self) -> None:
+        if shutil.which("node") is None:
+            self.skipTest("node is not available in PATH")
+
+        port = self._find_free_tcp_port()
+        proc = self._start_dashboard_proxy(port)
+        try:
+            self._wait_for_dashboard_proxy_health(port, proc)
+            with self.assertRaises(HTTPError) as ctx:
+                self._read_json_url(
+                    f"http://127.0.0.1:{port}/api/runtime/architecture",
+                    headers={"x-forwarded-for": "203.0.113.9"},
+                    timeout_sec=2.0,
+                )
+            self.assertEqual(ctx.exception.code, 403)
+            body = ctx.exception.read().decode("utf-8")
+            self.assertIn("restricted to local requests", body)
+        finally:
+            self._stop_process(proc)
 
     def test_dashboard_proxy_ops_status_uses_async_file_reads(self) -> None:
         proxy_source = (REPO_ROOT / "server" / "yahoo_proxy.js").read_text(encoding="utf-8")
