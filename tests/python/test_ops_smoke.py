@@ -960,6 +960,11 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("ThreadingHTTPServer", source)
         self.assertIn("server.daemon_threads = True", source)
 
+    def test_live_collector_uses_threading_http_server(self) -> None:
+        source = (REPO_ROOT / "server" / "live_event_collector.py").read_text(encoding="utf-8")
+        self.assertIn("ThreadingHTTPServer", source)
+        self.assertIn("server.daemon_threads = True", source)
+
     def test_event_writer_registers_atexit_connection_cleanup(self) -> None:
         source = (REPO_ROOT / "server" / "event_writer.py").read_text(encoding="utf-8")
         self.assertIn("atexit.register(_close_thread_local_connection)", source)
@@ -2380,14 +2385,20 @@ class OpsSmokeTests(unittest.TestCase):
 
     def test_run_all_health_probe_retry_contract_present(self) -> None:
         run_all = (REPO_ROOT / "server" / "run_all.sh").read_text(encoding="utf-8")
+        env_example = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
         self.assertIn("MONITOR_HEALTH_TIMEOUT_SEC", run_all)
         self.assertIn("MONITOR_HEALTH_RETRIES", run_all)
         self.assertIn("MONITOR_HEALTH_RETRY_SLEEP_SEC", run_all)
         self.assertIn("MONITOR_ML_HEALTH_TIMEOUT_SEC", run_all)
         self.assertIn("MONITOR_ML_CONSECUTIVE_FAIL_LIMIT", run_all)
         self.assertIn("MONITOR_ML_FATAL", run_all)
+        self.assertIn("MONITOR_LIVE_COLLECTOR_CONSECUTIVE_FAIL_LIMIT", run_all)
+        self.assertIn("MONITOR_LIVE_COLLECTOR_FATAL", run_all)
         self.assertIn("ml_server fail limit reached; continuing", run_all)
+        self.assertIn("live_collector fail limit reached; continuing", run_all)
         self.assertIn('health failed after ${max_attempts} attempts', run_all)
+        self.assertIn("MONITOR_LIVE_COLLECTOR_CONSECUTIVE_FAIL_LIMIT=3", env_example)
+        self.assertIn("MONITOR_LIVE_COLLECTOR_FATAL=false", env_example)
 
         proc = run_cmd(["bash", "-n", "server/run_all.sh"], cwd=REPO_ROOT)
         self.assertEqual(proc.returncode, 0, msg=f"{proc.stdout}\n{proc.stderr}")

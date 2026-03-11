@@ -7,7 +7,7 @@ import sqlite3
 import sys
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Set
 from urllib.error import HTTPError, URLError
@@ -419,8 +419,9 @@ class _HealthHandler(BaseHTTPRequestHandler):
         return
 
 
-def _run_health_server() -> HTTPServer:
-    server = HTTPServer((HOST, PORT), _HealthHandler)
+def _run_health_server() -> ThreadingHTTPServer:
+    server = ThreadingHTTPServer((HOST, PORT), _HealthHandler)
+    server.daemon_threads = True
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server

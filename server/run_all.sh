@@ -17,6 +17,8 @@ MONITOR_CONSECUTIVE_FAIL_LIMIT="${MONITOR_CONSECUTIVE_FAIL_LIMIT:-3}"
 MONITOR_ML_HEALTH_TIMEOUT_SEC="${MONITOR_ML_HEALTH_TIMEOUT_SEC:-6}"
 MONITOR_ML_CONSECUTIVE_FAIL_LIMIT="${MONITOR_ML_CONSECUTIVE_FAIL_LIMIT:-6}"
 MONITOR_ML_FATAL="${MONITOR_ML_FATAL:-0}"
+MONITOR_LIVE_COLLECTOR_CONSECUTIVE_FAIL_LIMIT="${MONITOR_LIVE_COLLECTOR_CONSECUTIVE_FAIL_LIMIT:-}"
+MONITOR_LIVE_COLLECTOR_FATAL="${MONITOR_LIVE_COLLECTOR_FATAL:-0}"
 PIVOT_DB="${PIVOT_DB:-${ROOT_DIR}/data/pivot_events.sqlite}"
 LIVE_COLLECTOR_ENABLED="${LIVE_COLLECTOR_ENABLED:-1}"
 LIVE_COLLECTOR_ACTIVE=0
@@ -312,6 +314,12 @@ monitor_stack() {
   if [[ "${MONITOR_ML_CONSECUTIVE_FAIL_LIMIT}" -lt 1 ]]; then
     MONITOR_ML_CONSECUTIVE_FAIL_LIMIT=1
   fi
+  if ! [[ "${MONITOR_LIVE_COLLECTOR_CONSECUTIVE_FAIL_LIMIT}" =~ ^[0-9]+$ ]]; then
+    MONITOR_LIVE_COLLECTOR_CONSECUTIVE_FAIL_LIMIT="${MONITOR_CONSECUTIVE_FAIL_LIMIT}"
+  fi
+  if [[ "${MONITOR_LIVE_COLLECTOR_CONSECUTIVE_FAIL_LIMIT}" -lt 1 ]]; then
+    MONITOR_LIVE_COLLECTOR_CONSECUTIVE_FAIL_LIMIT=1
+  fi
 
   if [[ "${#PIDS[@]}" -eq 0 ]]; then
     echo "No new services were started by this supervisor. Monitoring existing stack (${MONITOR_INTERVAL_SEC}s interval)."
@@ -361,9 +369,13 @@ monitor_stack() {
         lc_failures=0
       else
         lc_failures=$((lc_failures + 1))
-        echo "[WARN] live_collector health miss (${lc_failures}/${MONITOR_CONSECUTIVE_FAIL_LIMIT})"
-        if [[ "${lc_failures}" -ge "${MONITOR_CONSECUTIVE_FAIL_LIMIT}" ]]; then
-          die "live_collector health check failed"
+        echo "[WARN] live_collector health miss (${lc_failures}/${MONITOR_LIVE_COLLECTOR_CONSECUTIVE_FAIL_LIMIT})"
+        if [[ "${lc_failures}" -ge "${MONITOR_LIVE_COLLECTOR_CONSECUTIVE_FAIL_LIMIT}" ]]; then
+          if is_truthy "${MONITOR_LIVE_COLLECTOR_FATAL}"; then
+            die "live_collector health check failed"
+          fi
+          echo "[WARN] live_collector fail limit reached; continuing (MONITOR_LIVE_COLLECTOR_FATAL=${MONITOR_LIVE_COLLECTOR_FATAL})"
+          lc_failures=0
         fi
       fi
       quick_check_live_collector || echo "[WARN] live_collector status degraded"
