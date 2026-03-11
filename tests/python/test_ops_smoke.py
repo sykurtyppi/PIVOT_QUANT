@@ -2019,6 +2019,7 @@ class OpsSmokeTests(unittest.TestCase):
         )[0]
         self.assertIn("self.manifest_signature", load_block)
         self.assertIn("if not force:", load_block)
+        self.assertIn("def is_manifest_unchanged(self) -> bool:", registry_block)
         self.assertIn("with self._lock:", load_block)
         self.assertIn("self.manifest = manifest", load_block)
         self.assertIn("self.models = models", load_block)
@@ -2036,11 +2037,14 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("ML_RELOAD_MIN_INTERVAL_SEC", source)
         self.assertIn("_RELOAD_LOCK = threading.Lock()", source)
         self.assertIn("_reload_state", source)
-        reload_block = source.split("def reload_models(force: bool = False):", 1)[1].split(
+        reload_block = source.split("async def reload_models(force: bool = False):", 1)[1].split(
             "def _check_feature_drift(",
             1,
         )[0]
-        self.assertIn("changed = registry.load(force=force)", reload_block)
+        self.assertIn("registry.is_manifest_unchanged()", reload_block)
+        self.assertIn("await asyncio.to_thread(registry.load, force=force)", reload_block)
+        self.assertIn("await asyncio.to_thread(analog_engine.refresh)", reload_block)
+        self.assertIn("changed = await asyncio.to_thread(registry.load, force=force)", reload_block)
         self.assertIn("if changed:", reload_block)
         self.assertIn("\"status\": status", reload_block)
         self.assertIn("\"changed\": changed", reload_block)
@@ -2067,7 +2071,7 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("if not _try_begin_score_request():", score_block)
         self.assertIn("status_code=429", score_block)
         self.assertIn("Score concurrency limit reached.", score_block)
-        self.assertIn("await asyncio.to_thread(_score_event, event)", score_block)
+        self.assertIn("await asyncio.to_thread(_score_single_event_with_log, event)", score_block)
         self.assertIn("await asyncio.to_thread(_score_events_batch, events)", score_block)
 
     def test_ibkr_bridge_uses_timezone_aware_utc_datetimes(self) -> None:

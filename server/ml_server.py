@@ -317,6 +317,19 @@ class ModelRegistry:
         stat = path.stat()
         return (int(stat.st_mtime_ns), int(stat.st_size))
 
+    def is_manifest_unchanged(self) -> bool:
+        manifest_path = self.resolve_manifest_path()
+        if not manifest_path.exists():
+            return False
+        signature = self._file_signature(manifest_path)
+        manifest_path_str = str(manifest_path)
+        with self._lock:
+            return bool(
+                self.manifest is not None
+                and self.manifest_path == manifest_path_str
+                and self.manifest_signature == signature
+            )
+
     def load(self, *, force: bool = False) -> bool:
         manifest_path = self.resolve_manifest_path()
         if not manifest_path.exists():
@@ -1479,7 +1492,7 @@ async def health():
 
 
 @app.post("/reload")
-def reload_models(force: bool = False):
+async def reload_models(force: bool = False):
     """Hot-reload model artifacts from disk without restarting the server."""
     global _startup_error
     now_ms = int(time.time() * 1000)
@@ -1523,9 +1536,12 @@ def reload_models(force: bool = False):
         last_error=None,
     )
     try:
-        changed = registry.load(force=force)
+        if not force and registry.is_manifest_unchanged():
+            changed = False
+        else:
+            changed = await asyncio.to_thread(registry.load, force=force)
         if changed:
-            analog_engine.refresh()
+            await asyncio.to_thread(analog_engine.refresh)
         _startup_error = None
         duration_ms = (time.perf_counter() - started_at) * 1000.0
         complete_ms = int(time.time() * 1000)
@@ -2742,8 +2758,7 @@ async def score(request: Request):
 
         if mode == "single":
             event = normalized
-            result = await asyncio.to_thread(_score_event, event)
-            await asyncio.to_thread(_log_prediction, event, result)
+            result = await asyncio.to_thread(_score_single_event_with_log, event)
             request_ok = True
             return JSONResponse(result)
 
@@ -2773,6 +2788,12 @@ def _score_events_batch(events: list[dict]) -> list[dict]:
         _log_prediction(ev, res)
         results.append(res)
     return results
+
+
+def _score_single_event_with_log(event: dict) -> dict:
+    result = _score_event(event)
+    _log_prediction(event, result)
+    return result
 
 
 def run():
