@@ -48,6 +48,21 @@ def _env_horizon_float_map(name: str) -> dict[int, float]:
     return out
 
 
+def _env_n_jobs(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw.strip())
+    except Exception:
+        return default
+    if value == 0:
+        return default
+    if value < -1:
+        return -1
+    return value
+
+
 ROOT = Path(__file__).resolve().parents[1]
 ANALOG_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone.utc
 if str(ROOT) not in sys.path:
@@ -170,6 +185,7 @@ ML_SCORE_MAX_IN_FLIGHT = max(1, int(os.getenv("ML_SCORE_MAX_IN_FLIGHT", "2")))
 ML_SCORE_ANALOG_DISABLE_IN_FLIGHT = max(
     0, int(os.getenv("ML_SCORE_ANALOG_DISABLE_IN_FLIGHT", "1"))
 )
+ML_INFERENCE_N_JOBS = _env_n_jobs("ML_INFERENCE_N_JOBS", 1)
 PREDICTION_LOG_CONNECT_TIMEOUT_SEC = max(
     0.01, float(os.getenv("PREDICTION_LOG_CONNECT_TIMEOUT_SEC", "0.05"))
 )
@@ -324,6 +340,66 @@ class ModelRegistry:
         stat = path.stat()
         return (int(stat.st_mtime_ns), int(stat.st_size))
 
+    @staticmethod
+    def _set_inference_n_jobs(node: object, n_jobs: int, seen: set[int] | None = None) -> None:
+        """Recursively force estimator n_jobs for low-latency single-event inference."""
+        if node is None:
+            return
+        if seen is None:
+            seen = set()
+        node_id = id(node)
+        if node_id in seen:
+            return
+        seen.add(node_id)
+
+        if hasattr(node, "n_jobs"):
+            try:
+                setattr(node, "n_jobs", n_jobs)
+            except Exception:
+                pass
+
+        if isinstance(node, dict):
+            for value in node.values():
+                ModelRegistry._set_inference_n_jobs(value, n_jobs, seen)
+            return
+        if isinstance(node, (list, tuple, set)):
+            for value in node:
+                ModelRegistry._set_inference_n_jobs(value, n_jobs, seen)
+            return
+
+        for attr_name in ("base_model", "estimator", "model", "classifier", "regressor"):
+            child = getattr(node, attr_name, None)
+            if child is not None:
+                ModelRegistry._set_inference_n_jobs(child, n_jobs, seen)
+
+        named_steps = getattr(node, "named_steps", None)
+        if hasattr(named_steps, "items"):
+            for _, child in named_steps.items():
+                ModelRegistry._set_inference_n_jobs(child, n_jobs, seen)
+
+        steps = getattr(node, "steps", None)
+        if isinstance(steps, list):
+            for item in steps:
+                if isinstance(item, (list, tuple)) and len(item) >= 2:
+                    ModelRegistry._set_inference_n_jobs(item[1], n_jobs, seen)
+
+        transformers = getattr(node, "transformers", None)
+        if isinstance(transformers, list):
+            for item in transformers:
+                if isinstance(item, (list, tuple)) and len(item) >= 2:
+                    ModelRegistry._set_inference_n_jobs(item[1], n_jobs, seen)
+
+        transformers_fitted = getattr(node, "transformers_", None)
+        if isinstance(transformers_fitted, list):
+            for item in transformers_fitted:
+                if isinstance(item, (list, tuple)) and len(item) >= 2:
+                    ModelRegistry._set_inference_n_jobs(item[1], n_jobs, seen)
+
+        estimators = getattr(node, "estimators_", None)
+        if isinstance(estimators, (list, tuple)):
+            for child in estimators:
+                ModelRegistry._set_inference_n_jobs(child, n_jobs, seen)
+
     def is_manifest_unchanged(self) -> bool:
         manifest_path = self.resolve_manifest_path()
         if not manifest_path.exists():
@@ -368,6 +444,11 @@ class ModelRegistry:
                 if not path.exists():
                     continue
                 payload = joblib.load(path)
+                if isinstance(payload, dict):
+                    ModelRegistry._set_inference_n_jobs(payload.get("pipeline"), ML_INFERENCE_N_JOBS)
+                    ModelRegistry._set_inference_n_jobs(payload.get("calibrator"), ML_INFERENCE_N_JOBS)
+                else:
+                    ModelRegistry._set_inference_n_jobs(payload, ML_INFERENCE_N_JOBS)
                 models[target][int(horizon)] = payload
 
                 # Fall back to pickle-embedded threshold if manifest didn't have it
@@ -1580,6 +1661,7 @@ async def health():
         "models": models,
         "reload": _reload_state_snapshot(),
         "score": _score_state_snapshot(),
+        "inference_n_jobs": ML_INFERENCE_N_JOBS,
         "prediction_log": _prediction_log_state_snapshot(),
         "regime_policy_mode": ML_REGIME_POLICY_MODE,
         "regime_threshold_max_delta": ML_REGIME_THRESHOLD_MAX_DELTA,

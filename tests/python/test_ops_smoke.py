@@ -2016,6 +2016,8 @@ class OpsSmokeTests(unittest.TestCase):
             1,
         )[0]
         self.assertIn("self._lock = threading.RLock()", registry_block)
+        self.assertIn("ML_INFERENCE_N_JOBS", source)
+        self.assertIn("def _set_inference_n_jobs(", registry_block)
         self.assertIn("def snapshot(self) -> dict[str, object]:", registry_block)
         load_block = registry_block.split("def load(self", 1)[1].split(
             "def snapshot(self) -> dict[str, object]:",
@@ -2025,6 +2027,14 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("if not force:", load_block)
         self.assertIn("def is_manifest_unchanged(self) -> bool:", registry_block)
         self.assertIn("with self._lock:", load_block)
+        self.assertIn(
+            "ModelRegistry._set_inference_n_jobs(payload.get(\"pipeline\"), ML_INFERENCE_N_JOBS)",
+            load_block,
+        )
+        self.assertIn(
+            "ModelRegistry._set_inference_n_jobs(payload.get(\"calibrator\"), ML_INFERENCE_N_JOBS)",
+            load_block,
+        )
         self.assertIn("self.manifest = manifest", load_block)
         self.assertIn("self.models = models", load_block)
         self.assertIn("self.thresholds = thresholds", load_block)
@@ -2064,6 +2074,8 @@ class OpsSmokeTests(unittest.TestCase):
         source = (REPO_ROOT / "server" / "ml_server.py").read_text(encoding="utf-8")
         self.assertIn("ML_SCORE_MAX_IN_FLIGHT", source)
         self.assertIn("ML_SCORE_ANALOG_DISABLE_IN_FLIGHT", source)
+        self.assertIn("ML_INFERENCE_N_JOBS", source)
+        self.assertIn("\"inference_n_jobs\": ML_INFERENCE_N_JOBS", source)
         self.assertIn("PREDICTION_LOG_QUEUE_MAX_SIZE", source)
         self.assertIn("PREDICTION_LOG_CONNECT_TIMEOUT_SEC", source)
         self.assertIn("PREDICTION_LOG_BUSY_TIMEOUT_MS", source)
