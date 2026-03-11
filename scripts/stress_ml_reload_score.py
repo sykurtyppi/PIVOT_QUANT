@@ -138,6 +138,30 @@ def _post_json_status(
         return int(exc.code), (time.perf_counter() - start) * 1000.0, body_text
 
 
+def _wait_for_health(
+    *,
+    base_url: str,
+    ready_timeout_sec: float,
+    ready_poll_ms: int,
+    timeout_sec: float,
+) -> tuple[bool, float, str | None]:
+    health_url = f"{base_url.rstrip('/')}/health"
+    started = time.perf_counter()
+    deadline = started + max(0.1, ready_timeout_sec)
+    poll_sec = max(0.01, ready_poll_ms / 1000.0)
+    last_error: str | None = None
+
+    while time.perf_counter() < deadline:
+        req = Request(url=health_url, method="GET")
+        try:
+            with urlopen(req, timeout=max(0.1, timeout_sec)):  # noqa: S310
+                return True, (time.perf_counter() - started), None
+        except (HTTPError, URLError, OSError, TimeoutError) as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+            time.sleep(poll_sec)
+    return False, (time.perf_counter() - started), last_error
+
+
 def _make_event(worker_id: int, seq: int) -> dict[str, Any]:
     ts_ms = int(time.time() * 1000)
     return {
@@ -228,6 +252,8 @@ def run_stress(
     *,
     base_url: str,
     duration_sec: float,
+    ready_timeout_sec: float,
+    ready_poll_ms: int,
     score_workers: int,
     score_interval_ms: int,
     score_error_backoff_ms: int,
@@ -239,6 +265,28 @@ def run_stress(
     stats = StressStats()
     score_url = f"{base_url.rstrip('/')}/score"
     reload_url = f"{base_url.rstrip('/')}/reload"
+    ready_ok, ready_wait_sec, ready_error = _wait_for_health(
+        base_url=base_url,
+        ready_timeout_sec=ready_timeout_sec,
+        ready_poll_ms=ready_poll_ms,
+        timeout_sec=timeout_sec,
+    )
+    if not ready_ok:
+        summary = stats.snapshot()
+        summary["base_url"] = base_url
+        summary["duration_sec"] = 0.0
+        summary["ready"] = False
+        summary["ready_wait_sec"] = round(ready_wait_sec, 3)
+        summary["ready_timeout_sec"] = ready_timeout_sec
+        summary["score_workers"] = score_workers
+        summary["score_interval_ms"] = score_interval_ms
+        summary["score_error_backoff_ms"] = score_error_backoff_ms
+        summary["reload_interval_ms"] = reload_interval_ms
+        summary["timeout_sec"] = timeout_sec
+        summary["fail_on_error"] = bool(fail_on_error)
+        summary["last_error"] = ready_error or "health check timeout"
+        summary["ok"] = False
+        return summary
 
     threads: list[threading.Thread] = []
     for worker_id in range(max(1, score_workers)):
@@ -284,6 +332,9 @@ def run_stress(
     summary = stats.snapshot()
     summary["base_url"] = base_url
     summary["duration_sec"] = round(finished_at - started_at, 3)
+    summary["ready"] = True
+    summary["ready_wait_sec"] = round(ready_wait_sec, 3)
+    summary["ready_timeout_sec"] = ready_timeout_sec
     summary["score_workers"] = score_workers
     summary["score_interval_ms"] = score_interval_ms
     summary["score_error_backoff_ms"] = score_error_backoff_ms
@@ -344,6 +395,8 @@ def run_self_test(args: argparse.Namespace) -> int:
         summary = run_stress(
             base_url=f"http://{host}:{port}",
             duration_sec=max(0.5, float(args.duration_sec)),
+            ready_timeout_sec=max(0.1, float(args.ready_timeout_sec)),
+            ready_poll_ms=max(10, int(args.ready_poll_ms)),
             score_workers=max(1, int(args.score_workers)),
             score_interval_ms=max(0, int(args.score_interval_ms)),
             score_error_backoff_ms=max(0, int(args.score_error_backoff_ms)),
@@ -365,6 +418,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="ML server base URL")
     parser.add_argument("--duration-sec", type=float, default=20.0, help="Stress duration in seconds")
+    parser.add_argument(
+        "--ready-timeout-sec",
+        type=float,
+        default=45.0,
+        help="Wait this long for /health before starting load.",
+    )
+    parser.add_argument(
+        "--ready-poll-ms",
+        type=int,
+        default=250,
+        help="Polling interval while waiting for /health readiness.",
+    )
     parser.add_argument("--score-workers", type=int, default=4, help="Concurrent /score workers")
     parser.add_argument(
         "--score-interval-ms",
@@ -406,6 +471,8 @@ def main() -> int:
     summary = run_stress(
         base_url=str(args.base_url),
         duration_sec=max(0.5, float(args.duration_sec)),
+        ready_timeout_sec=max(0.1, float(args.ready_timeout_sec)),
+        ready_poll_ms=max(10, int(args.ready_poll_ms)),
         score_workers=max(1, int(args.score_workers)),
         score_interval_ms=max(0, int(args.score_interval_ms)),
         score_error_backoff_ms=max(0, int(args.score_error_backoff_ms)),

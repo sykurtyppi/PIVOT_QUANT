@@ -1983,6 +1983,10 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("--self-test", source)
         self.assertIn("--score-interval-ms", source)
         self.assertIn("--score-error-backoff-ms", source)
+        self.assertIn("--ready-timeout-sec", source)
+        self.assertIn("--ready-poll-ms", source)
+        self.assertIn("def _wait_for_health(", source)
+        self.assertIn("\"ready_wait_sec\"", source)
         self.assertIn("\"status\": \"skipped\"", source)
         self.assertIn("ThreadingHTTPServer", source)
         self.assertIn("fail_on_error", source)
@@ -2059,9 +2063,12 @@ class OpsSmokeTests(unittest.TestCase):
     def test_ml_server_score_endpoint_has_concurrency_backpressure(self) -> None:
         source = (REPO_ROOT / "server" / "ml_server.py").read_text(encoding="utf-8")
         self.assertIn("ML_SCORE_MAX_IN_FLIGHT", source)
+        self.assertIn("ML_SCORE_ANALOG_DISABLE_IN_FLIGHT", source)
         self.assertIn("PREDICTION_LOG_CONNECT_TIMEOUT_SEC", source)
         self.assertIn("PREDICTION_LOG_BUSY_TIMEOUT_MS", source)
         self.assertIn("PRAGMA busy_timeout", source)
+        self.assertIn("_SCORE_LOAD_SHED_LOCAL = threading.local()", source)
+        self.assertIn("ANALOG_LOAD_SHED", source)
         self.assertIn("_SCORE_GATE = threading.BoundedSemaphore", source)
         self.assertIn("\"score\": _score_state_snapshot()", source)
         score_block = source.split("async def score(request: Request):", 1)[1].split(
@@ -2071,8 +2078,14 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("if not _try_begin_score_request():", score_block)
         self.assertIn("status_code=429", score_block)
         self.assertIn("Score concurrency limit reached.", score_block)
-        self.assertIn("await asyncio.to_thread(_score_single_event_with_log, event)", score_block)
-        self.assertIn("await asyncio.to_thread(_score_events_batch, events)", score_block)
+        self.assertIn(
+            "await asyncio.to_thread(_score_single_event_with_log, event, disable_analogs)",
+            score_block,
+        )
+        self.assertIn(
+            "await asyncio.to_thread(_score_events_batch, events, disable_analogs)",
+            score_block,
+        )
 
     def test_ibkr_bridge_uses_timezone_aware_utc_datetimes(self) -> None:
         source = (REPO_ROOT / "server" / "ibkr_gamma_bridge.py").read_text(encoding="utf-8")

@@ -165,7 +165,10 @@ _PREDICTION_LOG_SCHEMA_READY = False
 _PREDICTION_LOG_SCHEMA_LOCK = threading.Lock()
 SCORE_MAX_BATCH_EVENTS = max(1, int(os.getenv("ML_SCORE_MAX_BATCH_EVENTS", "256")))
 SCORE_MAX_BODY_BYTES = max(1024, int(os.getenv("ML_SCORE_MAX_BODY_BYTES", "262144")))
-ML_SCORE_MAX_IN_FLIGHT = max(1, int(os.getenv("ML_SCORE_MAX_IN_FLIGHT", "8")))
+ML_SCORE_MAX_IN_FLIGHT = max(1, int(os.getenv("ML_SCORE_MAX_IN_FLIGHT", "2")))
+ML_SCORE_ANALOG_DISABLE_IN_FLIGHT = max(
+    0, int(os.getenv("ML_SCORE_ANALOG_DISABLE_IN_FLIGHT", "2"))
+)
 PREDICTION_LOG_CONNECT_TIMEOUT_SEC = max(
     0.01, float(os.getenv("PREDICTION_LOG_CONNECT_TIMEOUT_SEC", "0.05"))
 )
@@ -989,6 +992,7 @@ _reload_state: dict[str, object] = {
 }
 _SCORE_GATE = threading.BoundedSemaphore(ML_SCORE_MAX_IN_FLIGHT)
 _SCORE_STATE_LOCK = threading.Lock()
+_SCORE_LOAD_SHED_LOCAL = threading.local()
 _score_state: dict[str, object] = {
     "max_in_flight": ML_SCORE_MAX_IN_FLIGHT,
     "in_flight": 0,
@@ -1989,6 +1993,7 @@ def _pick_best_horizon(
 
 
 def _score_event(event: dict):
+    load_shed_analogs = bool(getattr(_SCORE_LOAD_SHED_LOCAL, "disable_analogs", False))
     missing = collect_missing(event)
     features = build_feature_row(event)
     registry_snapshot = registry.snapshot()
@@ -2113,15 +2118,34 @@ def _score_event(event: dict):
         trade_regime=regime_state["bucket"],
         atr_zone=atr_zone,
     )
-    analog_gate = _read_analog_promotion_gate()
-    analog_summary = analog_engine.score_event(
-        event=event,
-        features=features,
-        horizons=all_horizons,
-        trade_regime=regime_state["bucket"],
-        scores=scores,
-        best_horizon=None,
-    )
+    if load_shed_analogs:
+        analog_gate = {
+            "status": "load_shed",
+            "path": str(ML_ANALOG_PROMOTION_GATE_PATH),
+            "report_date": None,
+            "passed_horizons": [],
+            "horizon_results": {},
+            "reasons": ["score_load_shed"],
+        }
+        analog_summary = {
+            "enabled": bool(ML_ANALOG_ENABLED),
+            "status": "load_shed",
+            "error": None,
+            "loaded_at_ms": None,
+            "horizons": {},
+            "best": None,
+            "best_horizon": None,
+        }
+    else:
+        analog_gate = _read_analog_promotion_gate()
+        analog_summary = analog_engine.score_event(
+            event=event,
+            features=features,
+            horizons=all_horizons,
+            trade_regime=regime_state["bucket"],
+            scores=scores,
+            best_horizon=None,
+        )
     gate_pass = str(analog_gate.get("status") or "").strip().lower() == "pass"
     all_horizons_set = set(all_horizons)
     gate_passed_horizons = {
@@ -2137,6 +2161,7 @@ def _score_event(event: dict):
         gate_horizon_results = {}
     blend_info: dict[str, object] = {
         "mode": ML_ANALOG_BLEND_MODE,
+        "load_shed": bool(load_shed_analogs),
         "partial_mode": ML_ANALOG_BLEND_PARTIAL_MODE,
         "gate_status": analog_gate.get("status"),
         "gate_path": analog_gate.get("path"),
@@ -2160,6 +2185,7 @@ def _score_event(event: dict):
     }
     disagreement_guard_info: dict[str, object] = {
         "mode": ML_ANALOG_DISAGREEMENT_GUARD_MODE,
+        "load_shed": bool(load_shed_analogs),
         "threshold": ML_ANALOG_DISAGREEMENT_FLAG,
         "horizons": sorted(ML_ANALOG_DISAGREEMENT_GUARD_HORIZONS),
         "triggered_horizons": [],
@@ -2596,6 +2622,8 @@ def _score_event(event: dict):
                 break
         if diverged:
             quality_flags.append("ANALOG_BLEND_DIVERGENCE")
+    if load_shed_analogs:
+        quality_flags.append("ANALOG_LOAD_SHED")
 
     for horizon in all_horizons:
         thresholds_used[f"threshold_reject_{horizon}m"] = selected_threshold_map["reject"].get(horizon, 0.5)
@@ -2752,19 +2780,25 @@ async def score(request: Request):
     started_at = time.perf_counter()
     request_ok = False
     request_error: str | None = None
+    score_state = _score_state_snapshot()
+    current_in_flight = int(score_state.get("in_flight", 0))
+    disable_analogs = (
+        ML_SCORE_ANALOG_DISABLE_IN_FLIGHT > 0
+        and current_in_flight >= ML_SCORE_ANALOG_DISABLE_IN_FLIGHT
+    )
     try:
         payload = await _read_score_payload(request)
         mode, normalized = _validate_score_payload(payload)
 
         if mode == "single":
             event = normalized
-            result = await asyncio.to_thread(_score_single_event_with_log, event)
+            result = await asyncio.to_thread(_score_single_event_with_log, event, disable_analogs)
             request_ok = True
             return JSONResponse(result)
 
         if mode == "batch":
             events = normalized
-            results = await asyncio.to_thread(_score_events_batch, events)
+            results = await asyncio.to_thread(_score_events_batch, events, disable_analogs)
             request_ok = True
             return JSONResponse({"results": results})
 
@@ -2781,19 +2815,27 @@ async def score(request: Request):
         _finish_score_request(ok=request_ok, duration_ms=duration_ms, error=request_error)
 
 
-def _score_events_batch(events: list[dict]) -> list[dict]:
+def _score_events_batch(events: list[dict], disable_analogs: bool = False) -> list[dict]:
     results: list[dict] = []
-    for ev in events:
-        res = _score_event(ev)
-        _log_prediction(ev, res)
-        results.append(res)
+    try:
+        _SCORE_LOAD_SHED_LOCAL.disable_analogs = bool(disable_analogs)
+        for ev in events:
+            res = _score_event(ev)
+            _log_prediction(ev, res)
+            results.append(res)
+    finally:
+        _SCORE_LOAD_SHED_LOCAL.disable_analogs = False
     return results
 
 
-def _score_single_event_with_log(event: dict) -> dict:
-    result = _score_event(event)
-    _log_prediction(event, result)
-    return result
+def _score_single_event_with_log(event: dict, disable_analogs: bool = False) -> dict:
+    try:
+        _SCORE_LOAD_SHED_LOCAL.disable_analogs = bool(disable_analogs)
+        result = _score_event(event)
+        _log_prediction(event, result)
+        return result
+    finally:
+        _SCORE_LOAD_SHED_LOCAL.disable_analogs = False
 
 
 def run():
