@@ -1971,6 +1971,20 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertNotIn("readJsonFile(METRICS_FILE)", metrics_block)
         self.assertNotIn("readJsonFile(CALIB_FILE)", metrics_block)
 
+    def test_reload_score_stress_harness_contract_present(self) -> None:
+        source = (REPO_ROOT / "scripts" / "stress_ml_reload_score.py").read_text(encoding="utf-8")
+        self.assertIn("DEFAULT_BASE_URL", source)
+        self.assertIn('"/score"', source)
+        self.assertIn('"/reload"', source)
+        self.assertIn("--self-test", source)
+        self.assertIn("ThreadingHTTPServer", source)
+        self.assertIn("fail_on_error", source)
+
+    def test_ci_runs_reload_score_stress_harness_self_test(self) -> None:
+        ci = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        self.assertIn("stress_ml_reload_score.py --self-test", ci)
+        self.assertIn("--reload-interval-ms 80", ci)
+
     def test_ml_server_analog_engine_refresh_and_score_use_lock(self) -> None:
         source = (REPO_ROOT / "server" / "ml_server.py").read_text(encoding="utf-8")
         self.assertIn("self._lock = threading.RLock()", source)

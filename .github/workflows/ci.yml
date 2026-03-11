@@ -59,3 +59,6 @@ jobs:
 
       - name: Run ops smoke tests
         run: python -m unittest discover -s tests/python -p "test_ops_smoke.py" -v
+
+      - name: Run reload/score stress harness self-test
+        run: python scripts/stress_ml_reload_score.py --self-test --duration-sec 1.5 --score-workers 3 --reload-interval-ms 80 --fail-on-error
