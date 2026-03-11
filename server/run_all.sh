@@ -354,7 +354,7 @@ monitor_stack() {
       fi
     fi
 
-    if quick_check_service "dashboard" "3000" "http://127.0.0.1:3000/"; then
+    if quick_check_service "dashboard" "3000" "http://127.0.0.1:3000/health"; then
       dash_failures=0
     else
       dash_failures=$((dash_failures + 1))
@@ -431,7 +431,7 @@ else
   echo "gamma_bridge ready on port 5001"
 fi
 verify_service "ml_server" "5003" "http://127.0.0.1:5003/health"
-verify_service "dashboard" "3000" "http://127.0.0.1:3000/"
+verify_service "dashboard" "3000" "http://127.0.0.1:3000/health"
 if [[ "${LIVE_COLLECTOR_ACTIVE}" -eq 1 ]]; then
   # Start collector only after core services are confirmed ready to avoid first-cycle score race.
   start_service "live_collector" "5004" "false" bash server/run_live_collector.sh

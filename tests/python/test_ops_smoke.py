@@ -2396,6 +2396,8 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("MONITOR_LIVE_COLLECTOR_FATAL", run_all)
         self.assertIn("ml_server fail limit reached; continuing", run_all)
         self.assertIn("live_collector fail limit reached; continuing", run_all)
+        self.assertIn('quick_check_service "dashboard" "3000" "http://127.0.0.1:3000/health"', run_all)
+        self.assertIn('verify_service "dashboard" "3000" "http://127.0.0.1:3000/health"', run_all)
         self.assertIn('health failed after ${max_attempts} attempts', run_all)
         self.assertIn("MONITOR_LIVE_COLLECTOR_CONSECUTIVE_FAIL_LIMIT=3", env_example)
         self.assertIn("MONITOR_LIVE_COLLECTOR_FATAL=false", env_example)
