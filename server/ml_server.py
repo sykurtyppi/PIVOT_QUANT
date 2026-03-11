@@ -286,6 +286,7 @@ class ModelRegistry:
     def __init__(self):
         self.manifest = None
         self.manifest_path: str | None = None
+        self.manifest_signature: tuple[int, int] | None = None
         self.models = {"reject": {}, "break": {}}
         self.thresholds = {"reject": {}, "break": {}}
         self._lock = threading.RLock()
@@ -305,13 +306,27 @@ class ModelRegistry:
                 return legacy_path
         return candidate_path
 
-    def load(self):
+    @staticmethod
+    def _file_signature(path: Path) -> tuple[int, int]:
+        stat = path.stat()
+        return (int(stat.st_mtime_ns), int(stat.st_size))
+
+    def load(self, *, force: bool = False) -> bool:
         manifest_path = self.resolve_manifest_path()
         if not manifest_path.exists():
             raise FileNotFoundError(f"Missing manifest at {manifest_path}")
+        signature = self._file_signature(manifest_path)
+        manifest_path_str = str(manifest_path)
+        if not force:
+            with self._lock:
+                if (
+                    self.manifest_path == manifest_path_str
+                    and self.manifest_signature == signature
+                    and self.manifest is not None
+                ):
+                    return False
         with manifest_path.open("r", encoding="utf-8") as handle:
             manifest = json.load(handle)
-        manifest_path_str = str(manifest_path)
         models = {"reject": {}, "break": {}}
         thresholds = {"reject": {}, "break": {}}
 
@@ -341,14 +356,17 @@ class ModelRegistry:
         with self._lock:
             self.manifest = manifest
             self.manifest_path = manifest_path_str
+            self.manifest_signature = signature
             self.models = models
             self.thresholds = thresholds
+        return True
 
     def snapshot(self) -> dict[str, object]:
         with self._lock:
             return {
                 "manifest": self.manifest,
                 "manifest_path": self.manifest_path,
+                "manifest_signature": self.manifest_signature,
                 "models": {
                     "reject": dict(self.models.get("reject", {})),
                     "break": dict(self.models.get("break", {})),
@@ -945,6 +963,7 @@ _reload_state: dict[str, object] = {
     "last_status": "never",
     "last_error": None,
     "success_count": 0,
+    "noop_count": 0,
     "failure_count": 0,
     "busy_reject_count": 0,
     "cooldown_reject_count": 0,
@@ -1445,7 +1464,7 @@ async def health():
 
 
 @app.post("/reload")
-def reload_models():
+def reload_models(force: bool = False):
     """Hot-reload model artifacts from disk without restarting the server."""
     global _startup_error
     now_ms = int(time.time() * 1000)
@@ -1489,19 +1508,22 @@ def reload_models():
         last_error=None,
     )
     try:
-        registry.load()
-        analog_engine.refresh()
+        changed = registry.load(force=force)
+        if changed:
+            analog_engine.refresh()
         _startup_error = None
         duration_ms = (time.perf_counter() - started_at) * 1000.0
         complete_ms = int(time.time() * 1000)
         ok_before = _reload_state_snapshot()
+        status = "ok" if changed else "noop"
         _update_reload_state(
             in_progress=False,
             last_completed_at_ms=complete_ms,
             last_duration_ms=round(duration_ms, 3),
-            last_status="ok",
+            last_status=status,
             last_error=None,
             success_count=int(ok_before.get("success_count", 0)) + 1,
+            noop_count=int(ok_before.get("noop_count", 0)) + (0 if changed else 1),
         )
         registry_snapshot = registry.snapshot()
         manifest = registry_snapshot.get("manifest")
@@ -1516,7 +1538,8 @@ def reload_models():
             if isinstance(horizons, dict)
         }
         return {
-            "status": "ok",
+            "status": status,
+            "changed": changed,
             "models": models,
             "manifest": manifest,
             "analogs": analog_engine.health(),

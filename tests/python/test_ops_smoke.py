@@ -2013,10 +2013,12 @@ class OpsSmokeTests(unittest.TestCase):
         )[0]
         self.assertIn("self._lock = threading.RLock()", registry_block)
         self.assertIn("def snapshot(self) -> dict[str, object]:", registry_block)
-        load_block = registry_block.split("def load(self):", 1)[1].split(
+        load_block = registry_block.split("def load(self", 1)[1].split(
             "def snapshot(self) -> dict[str, object]:",
             1,
         )[0]
+        self.assertIn("self.manifest_signature", load_block)
+        self.assertIn("if not force:", load_block)
         self.assertIn("with self._lock:", load_block)
         self.assertIn("self.manifest = manifest", load_block)
         self.assertIn("self.models = models", load_block)
@@ -2034,17 +2036,21 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("ML_RELOAD_MIN_INTERVAL_SEC", source)
         self.assertIn("_RELOAD_LOCK = threading.Lock()", source)
         self.assertIn("_reload_state", source)
-        reload_block = source.split("def reload_models():", 1)[1].split(
+        reload_block = source.split("def reload_models(force: bool = False):", 1)[1].split(
             "def _check_feature_drift(",
             1,
         )[0]
+        self.assertIn("changed = registry.load(force=force)", reload_block)
+        self.assertIn("if changed:", reload_block)
+        self.assertIn("\"status\": status", reload_block)
+        self.assertIn("\"changed\": changed", reload_block)
         self.assertIn("if not _RELOAD_LOCK.acquire(blocking=False):", reload_block)
         self.assertIn("status_code=409", reload_block)
         self.assertIn("\"status\": \"busy\"", reload_block)
         self.assertIn("status_code=429", reload_block)
         self.assertIn("\"status\": \"cooldown\"", reload_block)
         self.assertIn("last_status=\"running\"", reload_block)
-        self.assertIn("\"status\": \"ok\"", reload_block)
+        self.assertIn("status = \"ok\" if changed else \"noop\"", reload_block)
 
     def test_ml_server_score_endpoint_has_concurrency_backpressure(self) -> None:
         source = (REPO_ROOT / "server" / "ml_server.py").read_text(encoding="utf-8")
