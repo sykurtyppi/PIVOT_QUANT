@@ -78,8 +78,11 @@ WRITE_BARS = _env_bool("LIVE_COLLECTOR_WRITE_BARS", True)
 WRITE_EVENTS = _env_bool("LIVE_COLLECTOR_WRITE_EVENTS", True)
 SCORE_ENABLED = _env_bool("LIVE_COLLECTOR_SCORE_ENABLED", True)
 SCORE_API_URL = os.getenv("LIVE_COLLECTOR_SCORE_URL", "http://127.0.0.1:5003/score")
-SCORE_BATCH_SIZE = max(1, int(os.getenv("LIVE_COLLECTOR_SCORE_BATCH_SIZE", "64")))
-SCORE_TIMEOUT_SEC = max(1, int(os.getenv("LIVE_COLLECTOR_SCORE_TIMEOUT_SEC", "6")))
+SCORE_BATCH_SIZE = max(1, int(os.getenv("LIVE_COLLECTOR_SCORE_BATCH_SIZE", "16")))
+SCORE_TIMEOUT_SEC = max(1.0, float(os.getenv("LIVE_COLLECTOR_SCORE_TIMEOUT_SEC", "12")))
+SCORE_MAX_ATTEMPTS = max(1, int(os.getenv("LIVE_COLLECTOR_SCORE_MAX_ATTEMPTS", "2")))
+SCORE_RETRY_BASE_SEC = max(0.0, float(os.getenv("LIVE_COLLECTOR_SCORE_RETRY_BASE_SEC", "0.5")))
+SCORE_RETRY_MAX_SEC = max(SCORE_RETRY_BASE_SEC, float(os.getenv("LIVE_COLLECTOR_SCORE_RETRY_MAX_SEC", "4.0")))
 SCORE_UNSCORED_LOOKBACK_DAYS = max(0, int(os.getenv("LIVE_COLLECTOR_SCORE_UNSCORED_LOOKBACK_DAYS", "3")))
 SCORE_UNSCORED_MAX_PER_CYCLE = max(0, int(os.getenv("LIVE_COLLECTOR_SCORE_UNSCORED_MAX_PER_CYCLE", "12")))
 GAMMA_REFRESH_SEC = max(30, int(os.getenv("LIVE_COLLECTOR_GAMMA_REFRESH_SEC", "300")))
@@ -148,6 +151,53 @@ def _get_state_snapshot() -> Dict[str, Any]:
 
 def _chunked(items: List[Any], chunk_size: int) -> List[List[Any]]:
     return [items[i:i + chunk_size] for i in range(0, len(items), chunk_size)]
+
+
+def _score_retry_delay_sec(attempt: int) -> float:
+    # Exponential backoff capped by SCORE_RETRY_MAX_SEC.
+    if attempt <= 0:
+        return 0.0
+    return min(SCORE_RETRY_MAX_SEC, SCORE_RETRY_BASE_SEC * (2 ** (attempt - 1)))
+
+
+def _score_chunk(chunk: List[Dict[str, Any]], headers: Dict[str, str]) -> None:
+    payload = json.dumps({"events": chunk}).encode("utf-8")
+    req = Request(SCORE_API_URL, data=payload, headers=headers, method="POST")
+    retryable_http = {408, 409, 425, 429, 500, 502, 503, 504}
+    last_exc: Exception | None = None
+
+    for attempt in range(1, SCORE_MAX_ATTEMPTS + 1):
+        try:
+            with urlopen(req, timeout=SCORE_TIMEOUT_SEC) as response:
+                raw = response.read().decode("utf-8")
+            data = json.loads(raw) if raw else {}
+            if not isinstance(data, dict):
+                raise RuntimeError("ML score response is not JSON object")
+            if "results" not in data and "scores" not in data:
+                raise RuntimeError("ML score response missing expected keys")
+            return
+        except HTTPError as exc:
+            last_exc = exc
+            retryable = int(getattr(exc, "code", 0) or 0) in retryable_http
+        except (URLError, TimeoutError, json.JSONDecodeError) as exc:
+            last_exc = exc
+            retryable = True
+
+        if attempt >= SCORE_MAX_ATTEMPTS or not retryable:
+            break
+        delay_sec = _score_retry_delay_sec(attempt)
+        log.warning(
+            "ML score request retry %d/%d (batch_size=%d, delay=%.2fs): %s",
+            attempt + 1,
+            SCORE_MAX_ATTEMPTS,
+            len(chunk),
+            delay_sec,
+            last_exc,
+        )
+        if delay_sec > 0:
+            time.sleep(delay_sec)
+
+    raise RuntimeError(f"ML score request failed: {last_exc}")
 
 
 def _get_gamma_context(symbol: str) -> Dict[str, Any] | None:
@@ -262,27 +312,39 @@ def _fetch_unscored_events(
     return [dict(row) for row in rows]
 
 
-def _score_events(events: List[Dict[str, Any]]) -> None:
+def _score_events(events: List[Dict[str, Any]]) -> int:
     if not events or not SCORE_ENABLED:
-        return
+        return 0
 
     headers = {
         "Content-Type": "application/json",
         "User-Agent": "PivotQuantLiveCollector/1.0",
     }
+    scored = 0
     for chunk in _chunked(events, SCORE_BATCH_SIZE):
-        payload = json.dumps({"events": chunk}).encode("utf-8")
-        request = Request(SCORE_API_URL, data=payload, headers=headers, method="POST")
         try:
-            with urlopen(request, timeout=SCORE_TIMEOUT_SEC) as response:
-                raw = response.read().decode("utf-8")
-            data = json.loads(raw) if raw else {}
-            if not isinstance(data, dict):
-                raise RuntimeError("ML score response is not JSON object")
-            if "results" not in data and "scores" not in data:
-                raise RuntimeError("ML score response missing expected keys")
-        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
-            raise RuntimeError(f"ML score request failed: {exc}") from exc
+            _score_chunk(chunk, headers)
+            scored += len(chunk)
+            continue
+        except Exception as chunk_exc:
+            if len(chunk) <= 1:
+                raise RuntimeError(f"ML score request failed: {chunk_exc}") from chunk_exc
+            log.warning(
+                "ML score batch failed; retrying each event individually (batch_size=%d): %s",
+                len(chunk),
+                chunk_exc,
+            )
+
+        for event in chunk:
+            try:
+                _score_chunk([event], headers)
+                scored += 1
+            except Exception as event_exc:
+                event_id = event.get("event_id")
+                raise RuntimeError(
+                    f"ML score request failed for event_id={event_id}: {event_exc}"
+                ) from event_exc
+    return scored
 
 
 def _collect_symbol(conn: sqlite3.Connection, symbol: str) -> tuple[Dict[str, Any], List[Dict[str, Any]]]:
@@ -473,9 +535,9 @@ def main() -> None:
 
                     if SCORE_ENABLED and new_events:
                         try:
-                            _score_events(new_events)
-                            result["events_scored"] = len(new_events)
-                            total_scored += len(new_events)
+                            scored_now = _score_events(new_events)
+                            result["events_scored"] = scored_now
+                            total_scored += scored_now
                         except Exception as score_exc:
                             cycle_errors.append(f"{symbol}:score:{score_exc}")
                             log.warning("Collector scoring failed for %s: %s", symbol, score_exc)
@@ -495,9 +557,9 @@ def main() -> None:
                         )
                         if backlog_events:
                             try:
-                                _score_events(backlog_events)
-                                result["events_scored"] += len(backlog_events)
-                                total_scored += len(backlog_events)
+                                scored_backlog = _score_events(backlog_events)
+                                result["events_scored"] += scored_backlog
+                                total_scored += scored_backlog
                             except Exception as score_gap_exc:
                                 cycle_errors.append(f"{symbol}:score_gap:{score_gap_exc}")
                                 log.warning(

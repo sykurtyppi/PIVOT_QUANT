@@ -50,6 +50,18 @@ BENIGN_STATUS_PATTERNS = [
     re.compile(r'"single_fallback_failed"\s*:\s*0\b', re.IGNORECASE),
     re.compile(r'"last_error"\s*:\s*null\b', re.IGNORECASE),
 ]
+SCORE_FAILURE_PATTERNS = (
+    "collector scoring failed",
+    "score request failed",
+    "ml score request failed",
+)
+SCORE_TIMEOUT_TOKEN_RE = re.compile(r"\b(?:timed?\s*out|timeout(?:error)?)\b", re.IGNORECASE)
+SCORE_TIMEOUT_IGNORED_PATTERNS = (
+    "timeout_sec",
+    "ready_timeout_sec",
+    "--timeout-sec",
+    "--ready-timeout-sec",
+)
 
 try:
     from zoneinfo import ZoneInfo
@@ -297,9 +309,12 @@ def fetch_db_progress(
         "db_path": db_path,
         "bars_today": None,
         "events_today": None,
+        "eligible_events_today": None,
         "predictions_today": None,
         "predictions_live_today": None,
         "predictions_preview_today": None,
+        "scored_events_live_today": None,
+        "unscored_eligible_today": None,
         "last_bar_ts": None,
         "last_event_ts": None,
         "last_prediction_ts": None,
@@ -311,17 +326,22 @@ def fetch_db_progress(
         return stats
 
     try:
-        if table_exists(conn, "bar_data"):
+        has_bar_data = table_exists(conn, "bar_data")
+        has_touch_events = table_exists(conn, "touch_events")
+        has_prediction_log = table_exists(conn, "prediction_log")
+        touch_cols = {r[1] for r in conn.execute("PRAGMA table_info(touch_events)").fetchall()} if has_touch_events else set()
+        pred_cols = {r[1] for r in conn.execute("PRAGMA table_info(prediction_log)").fetchall()} if has_prediction_log else set()
+
+        if has_bar_data:
             stats["bars_today"] = get_count_between(conn, "bar_data", "ts", start_ms, end_ms)
             stats["last_bar_ts"] = get_max_ts(conn, "bar_data", "ts")
 
-        if table_exists(conn, "touch_events"):
+        if has_touch_events:
             stats["events_today"] = get_count_between(conn, "touch_events", "ts_event", start_ms, end_ms)
             stats["last_event_ts"] = get_max_ts(conn, "touch_events", "ts_event")
 
-        if table_exists(conn, "prediction_log"):
+        if has_prediction_log:
             stats["predictions_today"] = get_count_between(conn, "prediction_log", "ts_prediction", start_ms, end_ms)
-            pred_cols = {r[1] for r in conn.execute("PRAGMA table_info(prediction_log)").fetchall()}
             if "is_preview" in pred_cols:
                 live = int(
                     conn.execute(
@@ -344,6 +364,43 @@ def fetch_db_progress(
                 stats["predictions_live_today"] = live
                 stats["predictions_preview_today"] = preview
             stats["last_prediction_ts"] = get_max_ts(conn, "prediction_log", "ts_prediction")
+
+        if has_touch_events and has_prediction_log and "event_id" in touch_cols and "event_id" in pred_cols:
+            eligible_events = int(
+                conn.execute(
+                    """
+                    SELECT COUNT(*) FROM (
+                        SELECT DISTINCT te.event_id
+                        FROM touch_events te
+                        WHERE te.ts_event >= ? AND te.ts_event < ?
+                          AND te.event_id IS NOT NULL
+                          AND TRIM(te.event_id) != ''
+                    )
+                    """,
+                    (start_ms, end_ms),
+                ).fetchone()[0]
+            )
+            live_predicate = "AND COALESCE(pl.is_preview, 0) = 0" if "is_preview" in pred_cols else ""
+            scored_live_events = int(
+                conn.execute(
+                    f"""
+                    SELECT COUNT(*) FROM (
+                        SELECT DISTINCT te.event_id
+                        FROM touch_events te
+                        JOIN prediction_log pl
+                          ON pl.event_id = te.event_id
+                        WHERE te.ts_event >= ? AND te.ts_event < ?
+                          AND te.event_id IS NOT NULL
+                          AND TRIM(te.event_id) != ''
+                          {live_predicate}
+                    )
+                    """,
+                    (start_ms, end_ms),
+                ).fetchone()[0]
+            )
+            stats["eligible_events_today"] = eligible_events
+            stats["scored_events_live_today"] = scored_live_events
+            stats["unscored_eligible_today"] = max(eligible_events - scored_live_events, 0)
     finally:
         conn.close()
 
@@ -602,13 +659,16 @@ def find_previous_report(report_path: Path, current_date: str) -> Path | None:
 
 def score_failure_keywords(line: str) -> tuple[bool, bool]:
     lowered = line.lower()
-    failure = "collector scoring failed" in lowered or "score request failed" in lowered
-    timeout = "timed out" in lowered or "timeout" in lowered
+    failure = any(pattern in lowered for pattern in SCORE_FAILURE_PATTERNS)
+    has_timeout_token = bool(SCORE_TIMEOUT_TOKEN_RE.search(lowered))
+    has_ignored_timeout = any(token in lowered for token in SCORE_TIMEOUT_IGNORED_PATTERNS)
+    timeout = failure and has_timeout_token and not has_ignored_timeout
     return failure, timeout
 
 
 def count_score_failures_by_day(log_files: list[Path], report_day: date) -> dict[str, int]:
     target_prefix = report_day.strftime("%Y-%m-%d")
+    bracketed_target_prefix = f"[{target_prefix}"
     stats = {"failures": 0, "timeouts": 0}
     watch = {"live_collector.log", "retrain.log"}
     for path in log_files:
@@ -617,7 +677,7 @@ def count_score_failures_by_day(log_files: list[Path], report_day: date) -> dict
         try:
             with path.open("r", encoding="utf-8", errors="replace") as fh:
                 for raw in fh:
-                    if not raw.startswith(target_prefix):
+                    if not (raw.startswith(target_prefix) or raw.startswith(bracketed_target_prefix)):
                         continue
                     failure, timeout = score_failure_keywords(raw)
                     if failure:
@@ -631,7 +691,9 @@ def count_score_failures_by_day(log_files: list[Path], report_day: date) -> dict
 
 def count_score_timeouts_in_tail(log_tails: dict[str, str]) -> int:
     total = 0
-    for _, body in log_tails.items():
+    for path, body in log_tails.items():
+        if Path(path).name not in {"live_collector.log", "retrain.log"}:
+            continue
         for line in body.splitlines():
             _, timeout = score_failure_keywords(line)
             if timeout:
@@ -1152,13 +1214,21 @@ def build_compact_email_body(
     lines.append(f"- Predictions logged today: {predictions_today if predictions_today is not None else '--'}")
     live_count = db_progress.get("predictions_live_today")
     preview_count = db_progress.get("predictions_preview_today")
-    eligible = events_today if isinstance(events_today, int) else None
-    scored_live = live_count if isinstance(live_count, int) else (
-        predictions_today if isinstance(predictions_today, int) else None
-    )
-    unscored = None
-    if isinstance(eligible, int) and isinstance(scored_live, int):
-        unscored = max(eligible - scored_live, 0)
+    eligible = db_progress.get("eligible_events_today")
+    if not isinstance(eligible, int):
+        eligible = events_today if isinstance(events_today, int) else None
+
+    scored_live = db_progress.get("scored_events_live_today")
+    if not isinstance(scored_live, int):
+        scored_live = live_count if isinstance(live_count, int) else (
+            predictions_today if isinstance(predictions_today, int) else None
+        )
+
+    unscored = db_progress.get("unscored_eligible_today")
+    if not isinstance(unscored, int):
+        unscored = None
+        if isinstance(eligible, int) and isinstance(scored_live, int):
+            unscored = max(eligible - scored_live, 0)
 
     if live_count is not None or preview_count is not None:
         lines.append(

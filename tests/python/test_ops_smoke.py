@@ -512,6 +512,112 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertAlmostEqual(float(impact["win_rate_net"]), 1.0, places=6)
         self.assertEqual(int(impact["by_horizon"][5]["n"]), 2)
 
+    def test_daily_report_unscored_uses_distinct_event_ids(self) -> None:
+        db = self.tmp / "daily_report_counts.sqlite"
+        conn = sqlite3.connect(str(db))
+        try:
+            conn.execute(
+                """
+                CREATE TABLE touch_events(
+                    event_id TEXT,
+                    ts_event INTEGER
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE prediction_log(
+                    event_id TEXT,
+                    ts_prediction INTEGER,
+                    is_preview INTEGER
+                )
+                """
+            )
+
+            send_daily_report = load_module(
+                "pq_send_daily_report_distinct_counts_test",
+                REPO_ROOT / "scripts" / "send_daily_report.py",
+            )
+            report_day = date(2026, 3, 11)
+            start_ms, _ = send_daily_report.et_day_bounds_ms(report_day)
+
+            conn.executemany(
+                "INSERT INTO touch_events(event_id, ts_event) VALUES (?, ?)",
+                [
+                    ("evt_a", start_ms + 10_000),
+                    ("evt_b", start_ms + 20_000),
+                    ("evt_c", start_ms + 30_000),
+                ],
+            )
+            conn.executemany(
+                "INSERT INTO prediction_log(event_id, ts_prediction, is_preview) VALUES (?, ?, ?)",
+                [
+                    ("evt_a", start_ms + 40_000, 0),
+                    ("evt_a", start_ms + 50_000, 0),  # duplicate live predictions for same event
+                    ("evt_b", start_ms + 60_000, 1),  # preview should not count as scored live event
+                ],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        stats = send_daily_report.fetch_db_progress(str(db), report_day)
+        self.assertEqual(stats.get("events_today"), 3)
+        self.assertEqual(stats.get("predictions_today"), 3)
+        self.assertEqual(stats.get("predictions_live_today"), 2)
+        self.assertEqual(stats.get("eligible_events_today"), 3)
+        self.assertEqual(stats.get("scored_events_live_today"), 1)
+        self.assertEqual(stats.get("unscored_eligible_today"), 2)
+
+    def test_daily_report_timeout_count_ignores_non_failure_timeout_fields(self) -> None:
+        send_daily_report = load_module(
+            "pq_send_daily_report_timeout_count_test",
+            REPO_ROOT / "scripts" / "send_daily_report.py",
+        )
+
+        report_day = date(2026, 3, 11)
+        logs_dir = self.tmp / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        collector_log = logs_dir / "live_collector.log"
+        retrain_log = logs_dir / "retrain.log"
+        ml_log = logs_dir / "ml_server.log"
+
+        collector_log.write_text(
+            "\n".join(
+                [
+                    "2026-03-11 10:00:00 [WARNING] Collector scoring failed for SPY: ML score request failed: <urlopen error timed out>",
+                    "2026-03-11 10:00:30 [INFO] score config timeout_sec=20",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        retrain_log.write_text(
+            "\n".join(
+                [
+                    "[2026-03-11 10:01:00] [score_unscored] start eligible_total=2 timeout_sec=12.000",
+                    "[2026-03-11 10:01:05] WARN score request failed: <urlopen error timed out>",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        ml_log.write_text('{"ready_timeout_sec": 45, "timeout_sec": 20}\n', encoding="utf-8")
+
+        log_tails = {
+            str(collector_log): collector_log.read_text(encoding="utf-8"),
+            str(retrain_log): retrain_log.read_text(encoding="utf-8"),
+            str(ml_log): ml_log.read_text(encoding="utf-8"),
+        }
+        self.assertEqual(send_daily_report.count_score_timeouts_in_tail(log_tails), 2)
+
+        day_stats = send_daily_report.count_score_failures_by_day(
+            [collector_log, retrain_log, ml_log],
+            report_day,
+        )
+        self.assertEqual(day_stats.get("failures"), 2)
+        self.assertEqual(day_stats.get("timeouts"), 2)
+
     def test_build_labels_unknown_side_excursions_are_symmetric(self) -> None:
         build_labels = load_module(
             "pq_build_labels_symmetry_test",
@@ -964,6 +1070,103 @@ class OpsSmokeTests(unittest.TestCase):
         source = (REPO_ROOT / "server" / "live_event_collector.py").read_text(encoding="utf-8")
         self.assertIn("ThreadingHTTPServer", source)
         self.assertIn("server.daemon_threads = True", source)
+
+    def test_live_collector_score_retries_transient_transport_errors(self) -> None:
+        collector = load_module(
+            "pq_live_collector_score_retry_test",
+            REPO_ROOT / "server" / "live_event_collector.py",
+        )
+
+        class _FakeResp:
+            def __init__(self, payload: dict) -> None:
+                self._raw = json.dumps(payload).encode("utf-8")
+
+            def read(self) -> bytes:
+                return self._raw
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> bool:
+                return False
+
+        original_urlopen = collector.urlopen
+        original_sleep = collector.time.sleep
+        original_attempts = collector.SCORE_MAX_ATTEMPTS
+        original_retry_base = collector.SCORE_RETRY_BASE_SEC
+        original_retry_max = collector.SCORE_RETRY_MAX_SEC
+        try:
+            collector.SCORE_MAX_ATTEMPTS = 2
+            collector.SCORE_RETRY_BASE_SEC = 0.001
+            collector.SCORE_RETRY_MAX_SEC = 0.001
+            sleep_calls: list[float] = []
+            collector.time.sleep = lambda delay: sleep_calls.append(float(delay))
+
+            calls = {"n": 0}
+
+            def _flaky_urlopen(req, timeout=0):  # noqa: ANN001
+                payload = json.loads(req.data.decode("utf-8"))
+                events = payload.get("events", [])
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise URLError("timed out")
+                return _FakeResp({"results": [{"status": "ok"} for _ in events]})
+
+            collector.urlopen = _flaky_urlopen
+            scored = collector._score_events([{"event_id": "evt_retry"}])
+        finally:
+            collector.urlopen = original_urlopen
+            collector.time.sleep = original_sleep
+            collector.SCORE_MAX_ATTEMPTS = original_attempts
+            collector.SCORE_RETRY_BASE_SEC = original_retry_base
+            collector.SCORE_RETRY_MAX_SEC = original_retry_max
+
+        self.assertEqual(scored, 1)
+        self.assertEqual(calls["n"], 2)
+        self.assertEqual(len(sleep_calls), 1)
+
+    def test_live_collector_score_batch_falls_back_to_single_events(self) -> None:
+        collector = load_module(
+            "pq_live_collector_score_single_fallback_test",
+            REPO_ROOT / "server" / "live_event_collector.py",
+        )
+
+        class _FakeResp:
+            def __init__(self, payload: dict) -> None:
+                self._raw = json.dumps(payload).encode("utf-8")
+
+            def read(self) -> bytes:
+                return self._raw
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> bool:
+                return False
+
+        original_urlopen = collector.urlopen
+        original_attempts = collector.SCORE_MAX_ATTEMPTS
+        try:
+            collector.SCORE_MAX_ATTEMPTS = 1
+            posted_sizes: list[int] = []
+
+            def _batch_fail_urlopen(req, timeout=0):  # noqa: ANN001
+                payload = json.loads(req.data.decode("utf-8"))
+                events = payload.get("events", [])
+                posted_sizes.append(len(events))
+                if len(events) > 1:
+                    raise URLError("timed out")
+                return _FakeResp({"results": [{"status": "ok"} for _ in events]})
+
+            collector.urlopen = _batch_fail_urlopen
+            scored = collector._score_events([{"event_id": "evt_a"}, {"event_id": "evt_b"}])
+        finally:
+            collector.urlopen = original_urlopen
+            collector.SCORE_MAX_ATTEMPTS = original_attempts
+
+        self.assertEqual(scored, 2)
+        self.assertIn(2, posted_sizes)
+        self.assertGreaterEqual(posted_sizes.count(1), 2)
 
     def test_event_writer_registers_atexit_connection_cleanup(self) -> None:
         source = (REPO_ROOT / "server" / "event_writer.py").read_text(encoding="utf-8")
@@ -2392,13 +2595,19 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("MONITOR_ML_HEALTH_TIMEOUT_SEC", run_all)
         self.assertIn("MONITOR_ML_CONSECUTIVE_FAIL_LIMIT", run_all)
         self.assertIn("MONITOR_ML_FATAL", run_all)
+        self.assertIn("MONITOR_EVENT_WRITER_FATAL", run_all)
+        self.assertIn("MONITOR_DASHBOARD_FATAL", run_all)
         self.assertIn("MONITOR_LIVE_COLLECTOR_CONSECUTIVE_FAIL_LIMIT", run_all)
         self.assertIn("MONITOR_LIVE_COLLECTOR_FATAL", run_all)
+        self.assertIn("event_writer fail limit reached; continuing", run_all)
         self.assertIn("ml_server fail limit reached; continuing", run_all)
+        self.assertIn("dashboard fail limit reached; continuing", run_all)
         self.assertIn("live_collector fail limit reached; continuing", run_all)
         self.assertIn('quick_check_service "dashboard" "3000" "http://127.0.0.1:3000/health"', run_all)
         self.assertIn('verify_service "dashboard" "3000" "http://127.0.0.1:3000/health"', run_all)
         self.assertIn('health failed after ${max_attempts} attempts', run_all)
+        self.assertIn("MONITOR_EVENT_WRITER_FATAL=false", env_example)
+        self.assertIn("MONITOR_DASHBOARD_FATAL=false", env_example)
         self.assertIn("MONITOR_LIVE_COLLECTOR_CONSECUTIVE_FAIL_LIMIT=3", env_example)
         self.assertIn("MONITOR_LIVE_COLLECTOR_FATAL=false", env_example)
 
