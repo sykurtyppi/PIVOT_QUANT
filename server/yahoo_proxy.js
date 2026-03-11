@@ -296,8 +296,8 @@ function buildSecurityConfig(procEnv = process.env, fileEnv = {}) {
     authPasswordMinLength,
     authPasswordStrongEnough,
     authPasswordPolicyEnforced: parseBool(
-      readSetting(procEnv, fileEnv, 'DASH_AUTH_ENFORCE_STRONG_PASSWORD', 'false'),
-      false
+      readSetting(procEnv, fileEnv, 'DASH_AUTH_ENFORCE_STRONG_PASSWORD', 'true'),
+      true
     ),
     authCookieName: readSetting(procEnv, fileEnv, 'DASH_AUTH_COOKIE_NAME', 'pq_dash_auth').trim() || 'pq_dash_auth',
     authCookieTtlSec: Math.max(
@@ -2988,6 +2988,12 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, HOST, () => {
   /* eslint-disable-next-line no-console */
   console.log(`Pivot dashboard server running at http://${HOST}:${PORT}`);
+  if (SECURITY.authEnabled && !SECURITY.authPasswordPolicyEnforced) {
+    /* eslint-disable-next-line no-console */
+    console.warn(
+      '[security] DASH_AUTH_ENFORCE_STRONG_PASSWORD=false while auth is enabled; weak passwords are allowed.'
+    );
+  }
   if (SECURITY.authEnabled && SECURITY.authCredentialsConfigured && !SECURITY.authPasswordStrongEnough) {
     /* eslint-disable-next-line no-console */
     console.warn(

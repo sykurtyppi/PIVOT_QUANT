@@ -1857,10 +1857,13 @@ class OpsSmokeTests(unittest.TestCase):
 
     def test_dashboard_proxy_public_auth_and_endpoint_hardening_present(self) -> None:
         proxy_source = (REPO_ROOT / "server" / "yahoo_proxy.js").read_text(encoding="utf-8")
+        env_example = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
         self.assertIn("DASH_AUTH_ENABLED", proxy_source)
         self.assertIn("DASH_AUTH_PASSWORD", proxy_source)
         self.assertIn("DASH_AUTH_MIN_PASSWORD_LEN", proxy_source)
         self.assertIn("DASH_AUTH_ENFORCE_STRONG_PASSWORD", proxy_source)
+        self.assertIn("readSetting(procEnv, fileEnv, 'DASH_AUTH_ENFORCE_STRONG_PASSWORD', 'true')", proxy_source)
+        self.assertIn("DASH_AUTH_ENFORCE_STRONG_PASSWORD=true", env_example)
         self.assertIn("DASH_AUTH_RATE_LIMIT_ENABLED", proxy_source)
         self.assertIn("DASH_AUTH_RATE_LIMIT_MAX_ATTEMPTS", proxy_source)
         self.assertIn("DASH_AUTH_RATE_LIMIT_LOCKOUT_SEC", proxy_source)
@@ -1890,6 +1893,10 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("Retry-After", proxy_source)
         self.assertIn("url.pathname === '/auth/login'", proxy_source)
         self.assertIn("auth_method: 'password_cookie'", proxy_source)
+        self.assertIn(
+            "DASH_AUTH_ENFORCE_STRONG_PASSWORD=false while auth is enabled; weak passwords are allowed.",
+            proxy_source,
+        )
         self.assertIn("auth_rate_limit_enabled", proxy_source)
         self.assertIn("x-forwarded-for", proxy_source)
         self.assertIn("url.pathname === '/health'", proxy_source)
