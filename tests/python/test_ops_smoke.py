@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import importlib.util
+import asyncio
 import os
 import re
 import shutil
@@ -82,6 +83,80 @@ class OpsSmokeTests(unittest.TestCase):
             payload = json.loads(resp.read().decode("utf-8"))
             return int(resp.status), payload
 
+    async def _asgi_json_request_async(
+        self,
+        app,
+        method: str,
+        path: str,
+        *,
+        payload: dict | list | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> tuple[int, dict]:
+        body = b""
+        scope_headers: list[tuple[bytes, bytes]] = [(b"host", b"testserver")]
+        if payload is not None:
+            body = json.dumps(payload).encode("utf-8")
+            scope_headers.append((b"content-type", b"application/json"))
+            scope_headers.append((b"content-length", str(len(body)).encode("ascii")))
+        if headers:
+            for key, value in headers.items():
+                scope_headers.append((key.strip().lower().encode("ascii"), str(value).encode("utf-8")))
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": method.upper(),
+            "scheme": "http",
+            "path": path,
+            "raw_path": path.encode("ascii"),
+            "query_string": b"",
+            "headers": scope_headers,
+            "client": ("127.0.0.1", 54321),
+            "server": ("testserver", 80),
+        }
+
+        request_sent = False
+        response_status = 500
+        response_body = b""
+
+        async def receive():
+            nonlocal request_sent
+            if not request_sent:
+                request_sent = True
+                return {"type": "http.request", "body": body, "more_body": False}
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            nonlocal response_status, response_body
+            if message["type"] == "http.response.start":
+                response_status = int(message["status"])
+            elif message["type"] == "http.response.body":
+                response_body += message.get("body", b"")
+
+        await app(scope, receive, send)
+        decoded = json.loads(response_body.decode("utf-8") or "{}")
+        return response_status, decoded
+
+    def _asgi_json_request(
+        self,
+        app,
+        method: str,
+        path: str,
+        *,
+        payload: dict | list | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> tuple[int, dict]:
+        return asyncio.run(
+            self._asgi_json_request_async(
+                app,
+                method,
+                path,
+                payload=payload,
+                headers=headers,
+            )
+        )
+
     def _start_dashboard_proxy(self, port: int) -> subprocess.Popen[str]:
         env = os.environ.copy()
         env.update(
@@ -153,6 +228,12 @@ class OpsSmokeTests(unittest.TestCase):
             conn.commit()
         finally:
             conn.close()
+
+    def _load_ml_server_module(self):
+        return load_module(
+            f"pq_ml_server_runtime_{time.time_ns()}",
+            REPO_ROOT / "server" / "ml_server.py",
+        )
 
     def _touch_tree(self, root: Path, rel: str, content: str) -> None:
         path = root / rel
@@ -2109,6 +2190,73 @@ class OpsSmokeTests(unittest.TestCase):
             "await asyncio.to_thread(_score_events_batch, events, disable_analogs)",
             score_block,
         )
+
+    def test_ml_server_reload_runtime_busy_backpressure(self) -> None:
+        ml_server = self._load_ml_server_module()
+
+        class _BusyLock:
+            def acquire(self, blocking=False):  # noqa: ARG002 - signature parity with threading.Lock
+                return False
+
+            def release(self):  # pragma: no cover - not used on busy branch
+                return None
+
+        original_lock = ml_server._RELOAD_LOCK
+        try:
+            ml_server._RELOAD_LOCK = _BusyLock()
+            status, payload = self._asgi_json_request(ml_server.app, "POST", "/reload")
+            self.assertEqual(status, 409)
+            self.assertEqual(payload.get("status"), "busy")
+            self.assertIn("Reload already in progress", payload.get("message", ""))
+            self.assertIn("reload", payload)
+        finally:
+            ml_server._RELOAD_LOCK = original_lock
+
+    def test_ml_server_reload_runtime_cooldown_backpressure(self) -> None:
+        ml_server = self._load_ml_server_module()
+        original_min_interval = ml_server.ML_RELOAD_MIN_INTERVAL_SEC
+        original_reload_state = dict(ml_server._reload_state)
+        try:
+            ml_server.ML_RELOAD_MIN_INTERVAL_SEC = 60.0
+            ml_server._reload_state.update(
+                {
+                    "last_started_at_ms": int(time.time() * 1000),
+                    "cooldown_reject_count": 0,
+                }
+            )
+            status, payload = self._asgi_json_request(ml_server.app, "POST", "/reload")
+            self.assertEqual(status, 429)
+            self.assertEqual(payload.get("status"), "cooldown")
+            self.assertIn("too frequently", payload.get("message", "").lower())
+            self.assertIn("reload", payload)
+        finally:
+            ml_server.ML_RELOAD_MIN_INTERVAL_SEC = original_min_interval
+            ml_server._reload_state.clear()
+            ml_server._reload_state.update(original_reload_state)
+
+    def test_ml_server_score_runtime_busy_backpressure(self) -> None:
+        ml_server = self._load_ml_server_module()
+        original_snapshot = ml_server.registry.snapshot
+        original_try_begin = ml_server._try_begin_score_request
+        try:
+            ml_server.registry.snapshot = lambda: {
+                "manifest": {"version": "smoke-test"},
+                "models": {"reject": {5: object()}, "break": {5: object()}},
+            }
+            ml_server._try_begin_score_request = lambda: False
+            status, payload = self._asgi_json_request(
+                ml_server.app,
+                "POST",
+                "/score",
+                payload={"event": {"symbol": "SPY", "horizon_min": 5}},
+            )
+            self.assertEqual(status, 429)
+            self.assertEqual(payload.get("status"), "busy")
+            self.assertIn("Score concurrency limit reached", payload.get("message", ""))
+            self.assertIn("score", payload)
+        finally:
+            ml_server.registry.snapshot = original_snapshot
+            ml_server._try_begin_score_request = original_try_begin
 
     def test_ibkr_bridge_uses_timezone_aware_utc_datetimes(self) -> None:
         source = (REPO_ROOT / "server" / "ibkr_gamma_bridge.py").read_text(encoding="utf-8")
