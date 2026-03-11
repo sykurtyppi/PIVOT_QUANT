@@ -2055,6 +2055,9 @@ class OpsSmokeTests(unittest.TestCase):
     def test_ml_server_score_endpoint_has_concurrency_backpressure(self) -> None:
         source = (REPO_ROOT / "server" / "ml_server.py").read_text(encoding="utf-8")
         self.assertIn("ML_SCORE_MAX_IN_FLIGHT", source)
+        self.assertIn("PREDICTION_LOG_CONNECT_TIMEOUT_SEC", source)
+        self.assertIn("PREDICTION_LOG_BUSY_TIMEOUT_MS", source)
+        self.assertIn("PRAGMA busy_timeout", source)
         self.assertIn("_SCORE_GATE = threading.BoundedSemaphore", source)
         self.assertIn("\"score\": _score_state_snapshot()", source)
         score_block = source.split("async def score(request: Request):", 1)[1].split(
@@ -2192,6 +2195,10 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("MONITOR_HEALTH_TIMEOUT_SEC", run_all)
         self.assertIn("MONITOR_HEALTH_RETRIES", run_all)
         self.assertIn("MONITOR_HEALTH_RETRY_SLEEP_SEC", run_all)
+        self.assertIn("MONITOR_ML_HEALTH_TIMEOUT_SEC", run_all)
+        self.assertIn("MONITOR_ML_CONSECUTIVE_FAIL_LIMIT", run_all)
+        self.assertIn("MONITOR_ML_FATAL", run_all)
+        self.assertIn("ml_server fail limit reached; continuing", run_all)
         self.assertIn('health failed after ${max_attempts} attempts', run_all)
 
         proc = run_cmd(["bash", "-n", "server/run_all.sh"], cwd=REPO_ROOT)

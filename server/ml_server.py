@@ -166,6 +166,12 @@ _PREDICTION_LOG_SCHEMA_LOCK = threading.Lock()
 SCORE_MAX_BATCH_EVENTS = max(1, int(os.getenv("ML_SCORE_MAX_BATCH_EVENTS", "256")))
 SCORE_MAX_BODY_BYTES = max(1024, int(os.getenv("ML_SCORE_MAX_BODY_BYTES", "262144")))
 ML_SCORE_MAX_IN_FLIGHT = max(1, int(os.getenv("ML_SCORE_MAX_IN_FLIGHT", "8")))
+PREDICTION_LOG_CONNECT_TIMEOUT_SEC = max(
+    0.01, float(os.getenv("PREDICTION_LOG_CONNECT_TIMEOUT_SEC", "0.05"))
+)
+PREDICTION_LOG_BUSY_TIMEOUT_MS = max(
+    0, int(os.getenv("PREDICTION_LOG_BUSY_TIMEOUT_MS", "50"))
+)
 ML_RELOAD_MIN_INTERVAL_SEC = max(
     0.0, float(os.getenv("ML_RELOAD_MIN_INTERVAL_SEC", "1.5"))
 )
@@ -1168,7 +1174,11 @@ def _get_prediction_log_conn() -> sqlite3.Connection:
                 pass
             _PREDICTION_LOG_LOCAL.conn = None
 
-    conn = sqlite3.connect(str(PREDICTION_LOG_DB))
+    conn = sqlite3.connect(
+        str(PREDICTION_LOG_DB),
+        timeout=PREDICTION_LOG_CONNECT_TIMEOUT_SEC,
+    )
+    conn.execute(f"PRAGMA busy_timeout={int(PREDICTION_LOG_BUSY_TIMEOUT_MS)};")
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     conn.execute("PRAGMA temp_store=MEMORY;")
@@ -1366,6 +1376,11 @@ def _log_prediction(event: dict, result: dict) -> None:
         )
         conn.commit()
     except Exception as exc:
+        if isinstance(exc, sqlite3.OperationalError):
+            lowered = str(exc).lower()
+            if "database is locked" in lowered or "database is busy" in lowered:
+                log.debug("Prediction log skipped due SQLite contention: %s", exc)
+                return
         if conn is not None and getattr(_PREDICTION_LOG_LOCAL, "conn", None) is conn:
             try:
                 conn.close()

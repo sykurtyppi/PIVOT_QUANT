@@ -14,6 +14,9 @@ MONITOR_HEALTH_TIMEOUT_SEC="${MONITOR_HEALTH_TIMEOUT_SEC:-4}"
 MONITOR_HEALTH_RETRIES="${MONITOR_HEALTH_RETRIES:-3}"
 MONITOR_HEALTH_RETRY_SLEEP_SEC="${MONITOR_HEALTH_RETRY_SLEEP_SEC:-1}"
 MONITOR_CONSECUTIVE_FAIL_LIMIT="${MONITOR_CONSECUTIVE_FAIL_LIMIT:-3}"
+MONITOR_ML_HEALTH_TIMEOUT_SEC="${MONITOR_ML_HEALTH_TIMEOUT_SEC:-6}"
+MONITOR_ML_CONSECUTIVE_FAIL_LIMIT="${MONITOR_ML_CONSECUTIVE_FAIL_LIMIT:-6}"
+MONITOR_ML_FATAL="${MONITOR_ML_FATAL:-0}"
 PIVOT_DB="${PIVOT_DB:-${ROOT_DIR}/data/pivot_events.sqlite}"
 LIVE_COLLECTOR_ENABLED="${LIVE_COLLECTOR_ENABLED:-1}"
 LIVE_COLLECTOR_ACTIVE=0
@@ -236,9 +239,9 @@ quick_check_service() {
   local name="$1"
   local port="$2"
   local health_url="${3:-}"
+  local timeout_sec="${4:-$MONITOR_HEALTH_TIMEOUT_SEC}"
+  local max_attempts="${5:-$MONITOR_HEALTH_RETRIES}"
   local attempts=1
-  local max_attempts="${MONITOR_HEALTH_RETRIES}"
-  local timeout_sec="${MONITOR_HEALTH_TIMEOUT_SEC}"
 
   if ! is_listening "${port}"; then
     echo "[monitor] ${name} is not listening on ${port}"
@@ -303,6 +306,12 @@ monitor_stack() {
   if [[ "${MONITOR_CONSECUTIVE_FAIL_LIMIT}" -lt 1 ]]; then
     MONITOR_CONSECUTIVE_FAIL_LIMIT=1
   fi
+  if ! [[ "${MONITOR_ML_CONSECUTIVE_FAIL_LIMIT}" =~ ^[0-9]+$ ]]; then
+    MONITOR_ML_CONSECUTIVE_FAIL_LIMIT="${MONITOR_CONSECUTIVE_FAIL_LIMIT}"
+  fi
+  if [[ "${MONITOR_ML_CONSECUTIVE_FAIL_LIMIT}" -lt 1 ]]; then
+    MONITOR_ML_CONSECUTIVE_FAIL_LIMIT=1
+  fi
 
   if [[ "${#PIDS[@]}" -eq 0 ]]; then
     echo "No new services were started by this supervisor. Monitoring existing stack (${MONITOR_INTERVAL_SEC}s interval)."
@@ -323,13 +332,17 @@ monitor_stack() {
 
     quick_check_service "gamma_bridge" "5001" || echo "[WARN] gamma_bridge not responding on 5001 (IBKR may be offline)"
 
-    if quick_check_service "ml_server" "5003" "http://127.0.0.1:5003/health"; then
+    if quick_check_service "ml_server" "5003" "http://127.0.0.1:5003/health" "${MONITOR_ML_HEALTH_TIMEOUT_SEC}" "${MONITOR_HEALTH_RETRIES}"; then
       ml_failures=0
     else
       ml_failures=$((ml_failures + 1))
-      echo "[WARN] ml_server health miss (${ml_failures}/${MONITOR_CONSECUTIVE_FAIL_LIMIT})"
-      if [[ "${ml_failures}" -ge "${MONITOR_CONSECUTIVE_FAIL_LIMIT}" ]]; then
-        die "ml_server health check failed"
+      echo "[WARN] ml_server health miss (${ml_failures}/${MONITOR_ML_CONSECUTIVE_FAIL_LIMIT})"
+      if [[ "${ml_failures}" -ge "${MONITOR_ML_CONSECUTIVE_FAIL_LIMIT}" ]]; then
+        if is_truthy "${MONITOR_ML_FATAL}"; then
+          die "ml_server health check failed"
+        fi
+        echo "[WARN] ml_server fail limit reached; continuing (MONITOR_ML_FATAL=${MONITOR_ML_FATAL})"
+        ml_failures=0
       fi
     fi
 
