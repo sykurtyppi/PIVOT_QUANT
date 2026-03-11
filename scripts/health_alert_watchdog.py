@@ -36,6 +36,24 @@ def parse_csv(raw: str | None) -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
+def to_int(value: object, default: int = 0) -> int:
+    try:
+        if value is None:
+            return default
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def to_float(value: object, default: float | None = None) -> float | None:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def now_iso_utc() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
@@ -79,7 +97,14 @@ def save_state(path: Path, state: dict[str, Any]) -> None:
     temp_path.replace(path)
 
 
-def check_service(name: str, url: str, timeout_sec: float) -> dict[str, Any]:
+def check_service(
+    name: str,
+    url: str,
+    timeout_sec: float,
+    *,
+    ml_score_latency_max_ms: float,
+    ml_score_min_success_count: int,
+) -> dict[str, Any]:
     started = time.time()
     req = request.Request(
         url,
@@ -155,6 +180,27 @@ def check_service(name: str, url: str, timeout_sec: float) -> dict[str, Any]:
         if up
         else f"Unexpected health status: {status_value or '--'}"
     )
+    score_last_duration_ms = None
+    score_success_count = None
+    score_latency_breached = False
+    score_latency_reason = ""
+    if name == "ml" and ml_score_latency_max_ms > 0:
+        score_payload = payload.get("score")
+        if isinstance(score_payload, dict):
+            score_last_duration_ms = to_float(score_payload.get("last_duration_ms"))
+            score_success_count = to_int(score_payload.get("success_count"), 0)
+            if (
+                score_last_duration_ms is not None
+                and score_success_count >= max(0, ml_score_min_success_count)
+                and score_last_duration_ms > ml_score_latency_max_ms
+            ):
+                score_latency_breached = True
+                score_latency_reason = (
+                    f"score.last_duration_ms={score_last_duration_ms:.3f} "
+                    f"exceeds threshold={ml_score_latency_max_ms:.3f} "
+                    f"(success_count={score_success_count})"
+                )
+
     return {
         "service": name,
         "up": up,
@@ -163,6 +209,11 @@ def check_service(name: str, url: str, timeout_sec: float) -> dict[str, Any]:
         "http_status": http_status,
         "latency_ms": latency_ms,
         "url": url,
+        "score_last_duration_ms": score_last_duration_ms,
+        "score_success_count": score_success_count,
+        "score_latency_breached": score_latency_breached,
+        "score_latency_reason": score_latency_reason,
+        "score_latency_threshold_ms": ml_score_latency_max_ms if ml_score_latency_max_ms > 0 else None,
     }
 
 
@@ -375,6 +426,12 @@ def build_body(
         f"Reason: {result['reason']}",
         f"Latency: {result['latency_ms']} ms",
     ]
+    if result.get("score_last_duration_ms") is not None:
+        lines.append(f"Score last duration: {result['score_last_duration_ms']:.3f} ms")
+    if result.get("score_latency_threshold_ms") is not None:
+        lines.append(f"Score duration threshold: {result['score_latency_threshold_ms']:.3f} ms")
+    if result.get("score_success_count") is not None:
+        lines.append(f"Score success count: {result['score_success_count']}")
     if prior:
         previous_state = prior.get("state")
         previous_reason = prior.get("last_reason")
@@ -442,6 +499,15 @@ def main() -> int:
     }
     subject_prefix = os.getenv("ML_ALERT_SUBJECT_PREFIX", "[ALERT]").strip() or "[ALERT]"
     recovery_prefix = os.getenv("ML_ALERT_RECOVERY_PREFIX", "[RECOVERED]").strip() or "[RECOVERED]"
+    ml_score_latency_max_ms = max(
+        0.0, float(os.getenv("ML_ALERT_ML_SCORE_LAST_DURATION_MAX_MS", "0") or "0")
+    )
+    ml_score_min_success_count = max(
+        0, int(os.getenv("ML_ALERT_ML_SCORE_MIN_SUCCESS_COUNT", "5") or "5")
+    )
+    ml_score_consecutive_fails = max(
+        1, int(os.getenv("ML_ALERT_ML_SCORE_CONSECUTIVE_FAILS", "3") or "3")
+    )
 
     state = load_state(state_file)
     service_state = state.setdefault("services", {})
@@ -450,10 +516,34 @@ def main() -> int:
     changed = False
 
     for name, url in services.items():
-        result = check_service(name=name, url=url, timeout_sec=args.timeout_sec)
+        result = check_service(
+            name=name,
+            url=url,
+            timeout_sec=args.timeout_sec,
+            ml_score_latency_max_ms=ml_score_latency_max_ms,
+            ml_score_min_success_count=ml_score_min_success_count,
+        )
         summaries.append(f"{name}={result['status']}{'' if result['up'] else '(!)'}")
 
         previous = service_state.get(name, {})
+        if not isinstance(previous, dict):
+            previous = {}
+
+        if name == "ml":
+            streak = to_int(previous.get("ml_score_latency_streak"), 0)
+            if bool(result.get("score_latency_breached")):
+                streak += 1
+                previous["ml_score_latency_streak"] = streak
+                if streak >= ml_score_consecutive_fails:
+                    result["up"] = False
+                    result["status"] = "latency_regressed"
+                    base_reason = str(result.get("score_latency_reason") or "score latency threshold exceeded")
+                    result["reason"] = (
+                        f"{base_reason}; streak={streak}/{ml_score_consecutive_fails}"
+                    )
+            else:
+                previous["ml_score_latency_streak"] = 0
+
         previous_state = str(previous.get("state") or "unknown")
         current_state = "up" if result["up"] else "down"
 

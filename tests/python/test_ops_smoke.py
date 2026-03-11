@@ -2237,6 +2237,23 @@ class OpsSmokeTests(unittest.TestCase):
         proc = run_cmd(["bash", "-n", "server/run_all.sh"], cwd=REPO_ROOT)
         self.assertEqual(proc.returncode, 0, msg=f"{proc.stdout}\n{proc.stderr}")
 
+    def test_health_alert_watchdog_latency_regression_contract_present(self) -> None:
+        watchdog = (REPO_ROOT / "scripts" / "health_alert_watchdog.py").read_text(encoding="utf-8")
+        env_example = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+        self.assertIn("ML_ALERT_ML_SCORE_LAST_DURATION_MAX_MS", watchdog)
+        self.assertIn("ML_ALERT_ML_SCORE_MIN_SUCCESS_COUNT", watchdog)
+        self.assertIn("ML_ALERT_ML_SCORE_CONSECUTIVE_FAILS", watchdog)
+        self.assertIn("score_last_duration_ms", watchdog)
+        self.assertIn("score_latency_breached", watchdog)
+        self.assertIn("ml_score_latency_streak", watchdog)
+        self.assertIn("latency_regressed", watchdog)
+        self.assertIn("ML_ALERT_ML_SCORE_LAST_DURATION_MAX_MS", env_example)
+        self.assertIn("ML_ALERT_ML_SCORE_MIN_SUCCESS_COUNT", env_example)
+        self.assertIn("ML_ALERT_ML_SCORE_CONSECUTIVE_FAILS", env_example)
+
+        proc = run_cmd([PYTHON, "-m", "py_compile", "scripts/health_alert_watchdog.py"], cwd=REPO_ROOT)
+        self.assertEqual(proc.returncode, 0, msg=f"{proc.stdout}\n{proc.stderr}")
+
     def test_score_unscored_touch_events_runtime_behavior(self) -> None:
         scorer = load_module(
             "pq_score_unscored_touch_events_runtime_test",
