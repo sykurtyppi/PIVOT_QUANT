@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import math
@@ -164,6 +165,7 @@ _PREDICTION_LOG_SCHEMA_READY = False
 _PREDICTION_LOG_SCHEMA_LOCK = threading.Lock()
 SCORE_MAX_BATCH_EVENTS = max(1, int(os.getenv("ML_SCORE_MAX_BATCH_EVENTS", "256")))
 SCORE_MAX_BODY_BYTES = max(1024, int(os.getenv("ML_SCORE_MAX_BODY_BYTES", "262144")))
+ML_SCORE_MAX_IN_FLIGHT = max(1, int(os.getenv("ML_SCORE_MAX_IN_FLIGHT", "8")))
 ML_RELOAD_MIN_INTERVAL_SEC = max(
     0.0, float(os.getenv("ML_RELOAD_MIN_INTERVAL_SEC", "1.5"))
 )
@@ -947,6 +949,21 @@ _reload_state: dict[str, object] = {
     "busy_reject_count": 0,
     "cooldown_reject_count": 0,
 }
+_SCORE_GATE = threading.BoundedSemaphore(ML_SCORE_MAX_IN_FLIGHT)
+_SCORE_STATE_LOCK = threading.Lock()
+_score_state: dict[str, object] = {
+    "max_in_flight": ML_SCORE_MAX_IN_FLIGHT,
+    "in_flight": 0,
+    "max_observed_in_flight": 0,
+    "last_started_at_ms": None,
+    "last_completed_at_ms": None,
+    "last_duration_ms": None,
+    "last_status": "never",
+    "last_error": None,
+    "success_count": 0,
+    "failure_count": 0,
+    "busy_reject_count": 0,
+}
 
 
 def _update_reload_state(**fields: object) -> None:
@@ -957,6 +974,59 @@ def _update_reload_state(**fields: object) -> None:
 def _reload_state_snapshot() -> dict[str, object]:
     with _RELOAD_STATE_LOCK:
         return dict(_reload_state)
+
+
+def _update_score_state(**fields: object) -> None:
+    with _SCORE_STATE_LOCK:
+        _score_state.update(fields)
+
+
+def _score_state_snapshot() -> dict[str, object]:
+    with _SCORE_STATE_LOCK:
+        return dict(_score_state)
+
+
+def _try_begin_score_request() -> bool:
+    if not _SCORE_GATE.acquire(blocking=False):
+        state_before = _score_state_snapshot()
+        _update_score_state(
+            busy_reject_count=int(state_before.get("busy_reject_count", 0)) + 1,
+            last_status="busy",
+            last_error="concurrency limit reached",
+        )
+        return False
+
+    with _SCORE_STATE_LOCK:
+        in_flight = int(_score_state.get("in_flight", 0)) + 1
+        max_observed = max(in_flight, int(_score_state.get("max_observed_in_flight", 0)))
+        _score_state.update(
+            {
+                "in_flight": in_flight,
+                "max_observed_in_flight": max_observed,
+                "last_started_at_ms": int(time.time() * 1000),
+                "last_status": "running",
+                "last_error": None,
+            }
+        )
+    return True
+
+
+def _finish_score_request(*, ok: bool, duration_ms: float, error: str | None = None) -> None:
+    complete_ms = int(time.time() * 1000)
+    with _SCORE_STATE_LOCK:
+        in_flight = max(0, int(_score_state.get("in_flight", 0)) - 1)
+        _score_state["in_flight"] = in_flight
+        _score_state["last_completed_at_ms"] = complete_ms
+        _score_state["last_duration_ms"] = round(duration_ms, 3)
+        if ok:
+            _score_state["last_status"] = "ok"
+            _score_state["last_error"] = None
+            _score_state["success_count"] = int(_score_state.get("success_count", 0)) + 1
+        else:
+            _score_state["last_status"] = "error"
+            _score_state["last_error"] = error
+            _score_state["failure_count"] = int(_score_state.get("failure_count", 0)) + 1
+    _SCORE_GATE.release()
 
 
 @asynccontextmanager
@@ -1287,7 +1357,7 @@ def _log_prediction(event: dict, result: dict) -> None:
 
 
 @app.get("/health")
-def health():
+async def health():
     registry_snapshot = registry.snapshot()
     manifest = registry_snapshot.get("manifest")
     if not isinstance(manifest, dict):
@@ -1318,6 +1388,7 @@ def health():
         "manifest_path": manifest_path,
         "models": models,
         "reload": _reload_state_snapshot(),
+        "score": _score_state_snapshot(),
         "regime_policy_mode": ML_REGIME_POLICY_MODE,
         "regime_threshold_max_delta": ML_REGIME_THRESHOLD_MAX_DELTA,
         "atr_zone_bounds": {
@@ -2613,26 +2684,57 @@ async def score(request: Request):
     has_models = any(horizons for horizons in models.values())
     if manifest is None or not has_models:
         raise HTTPException(status_code=503, detail="Models not loaded. Train artifacts first.")
-    payload = await _read_score_payload(request)
 
-    mode, normalized = _validate_score_payload(payload)
+    if not _try_begin_score_request():
+        return JSONResponse(
+            status_code=429,
+            content={
+                "status": "busy",
+                "message": "Score concurrency limit reached.",
+                "score": _score_state_snapshot(),
+            },
+        )
 
-    if mode == "single":
-        event = normalized
-        result = _score_event(event)
-        _log_prediction(event, result)
-        return JSONResponse(result)
+    started_at = time.perf_counter()
+    request_ok = False
+    request_error: str | None = None
+    try:
+        payload = await _read_score_payload(request)
+        mode, normalized = _validate_score_payload(payload)
 
-    if mode == "batch":
-        events = normalized
-        results = []
-        for ev in events:
-            res = _score_event(ev)
-            _log_prediction(ev, res)
-            results.append(res)
-        return JSONResponse({"results": results})
+        if mode == "single":
+            event = normalized
+            result = await asyncio.to_thread(_score_event, event)
+            await asyncio.to_thread(_log_prediction, event, result)
+            request_ok = True
+            return JSONResponse(result)
 
-    raise HTTPException(status_code=400, detail="Unsupported score payload mode.")
+        if mode == "batch":
+            events = normalized
+            results = await asyncio.to_thread(_score_events_batch, events)
+            request_ok = True
+            return JSONResponse({"results": results})
+
+        request_error = "HTTPException 400: Unsupported score payload mode."
+        raise HTTPException(status_code=400, detail="Unsupported score payload mode.")
+    except HTTPException as exc:
+        request_error = f"HTTPException {exc.status_code}: {exc.detail}"
+        raise
+    except Exception as exc:
+        request_error = f"{type(exc).__name__}: {exc}"
+        raise
+    finally:
+        duration_ms = (time.perf_counter() - started_at) * 1000.0
+        _finish_score_request(ok=request_ok, duration_ms=duration_ms, error=request_error)
+
+
+def _score_events_batch(events: list[dict]) -> list[dict]:
+    results: list[dict] = []
+    for ev in events:
+        res = _score_event(ev)
+        _log_prediction(ev, res)
+        results.append(res)
+    return results
 
 
 def run():

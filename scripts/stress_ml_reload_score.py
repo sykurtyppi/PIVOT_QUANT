@@ -20,12 +20,14 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 DEFAULT_BASE_URL = "http://127.0.0.1:5003"
+SCORE_BACKPRESSURE_CODES = {429}
 RELOAD_BACKPRESSURE_CODES = {409, 429}
 
 
 @dataclass
 class StressStats:
     score_ok: int = 0
+    score_backpressure: int = 0
     score_fail: int = 0
     reload_ok: int = 0
     reload_backpressure: int = 0
@@ -35,11 +37,19 @@ class StressStats:
     last_error: str | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
 
-    def record_score(self, *, ok: bool, latency_ms: float, error: str | None = None) -> None:
+    def record_score(
+        self,
+        *,
+        outcome: str,
+        latency_ms: float,
+        error: str | None = None,
+    ) -> None:
         with self.lock:
-            if ok:
+            if outcome == "ok":
                 self.score_ok += 1
                 self.score_latencies_ms.append(float(latency_ms))
+            elif outcome == "backpressure":
+                self.score_backpressure += 1
             else:
                 self.score_fail += 1
                 self.last_error = error or self.last_error
@@ -67,6 +77,7 @@ class StressStats:
             reload_latencies = list(self.reload_latencies_ms)
             return {
                 "score_ok": self.score_ok,
+                "score_backpressure": self.score_backpressure,
                 "score_fail": self.score_fail,
                 "reload_ok": self.reload_ok,
                 "reload_backpressure": self.reload_backpressure,
@@ -159,17 +170,23 @@ def _score_worker(
         try:
             status_code, latency_ms, body = _post_json_status(score_url, payload, timeout_sec)
             if status_code == 200:
-                stats.record_score(ok=True, latency_ms=latency_ms)
+                stats.record_score(outcome="ok", latency_ms=latency_ms)
+            elif status_code in SCORE_BACKPRESSURE_CODES:
+                stats.record_score(outcome="backpressure", latency_ms=latency_ms)
             else:
                 stats.record_score(
-                    ok=False,
+                    outcome="fail",
                     latency_ms=latency_ms,
                     error=f"HTTP {status_code}: {body or 'no body'}",
                 )
                 if error_backoff_sec > 0:
                     stop_event.wait(error_backoff_sec)
         except (HTTPError, URLError, OSError, TimeoutError) as exc:
-            stats.record_score(ok=False, latency_ms=0.0, error=f"{type(exc).__name__}: {exc}")
+            stats.record_score(
+                outcome="fail",
+                latency_ms=0.0,
+                error=f"{type(exc).__name__}: {exc}",
+            )
             if error_backoff_sec > 0:
                 stop_event.wait(error_backoff_sec)
         if interval_sec > 0:

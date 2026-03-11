@@ -1974,7 +1974,9 @@ class OpsSmokeTests(unittest.TestCase):
     def test_reload_score_stress_harness_contract_present(self) -> None:
         source = (REPO_ROOT / "scripts" / "stress_ml_reload_score.py").read_text(encoding="utf-8")
         self.assertIn("DEFAULT_BASE_URL", source)
+        self.assertIn("SCORE_BACKPRESSURE_CODES", source)
         self.assertIn("RELOAD_BACKPRESSURE_CODES", source)
+        self.assertIn("score_backpressure", source)
         self.assertIn("reload_backpressure", source)
         self.assertIn('"/score"', source)
         self.assertIn('"/reload"', source)
@@ -2043,6 +2045,21 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("\"status\": \"cooldown\"", reload_block)
         self.assertIn("last_status=\"running\"", reload_block)
         self.assertIn("\"status\": \"ok\"", reload_block)
+
+    def test_ml_server_score_endpoint_has_concurrency_backpressure(self) -> None:
+        source = (REPO_ROOT / "server" / "ml_server.py").read_text(encoding="utf-8")
+        self.assertIn("ML_SCORE_MAX_IN_FLIGHT", source)
+        self.assertIn("_SCORE_GATE = threading.BoundedSemaphore", source)
+        self.assertIn("\"score\": _score_state_snapshot()", source)
+        score_block = source.split("async def score(request: Request):", 1)[1].split(
+            "def _score_events_batch(",
+            1,
+        )[0]
+        self.assertIn("if not _try_begin_score_request():", score_block)
+        self.assertIn("status_code=429", score_block)
+        self.assertIn("Score concurrency limit reached.", score_block)
+        self.assertIn("await asyncio.to_thread(_score_event, event)", score_block)
+        self.assertIn("await asyncio.to_thread(_score_events_batch, events)", score_block)
 
     def test_ibkr_bridge_uses_timezone_aware_utc_datetimes(self) -> None:
         source = (REPO_ROOT / "server" / "ibkr_gamma_bridge.py").read_text(encoding="utf-8")
