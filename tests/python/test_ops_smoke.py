@@ -1974,9 +1974,14 @@ class OpsSmokeTests(unittest.TestCase):
     def test_reload_score_stress_harness_contract_present(self) -> None:
         source = (REPO_ROOT / "scripts" / "stress_ml_reload_score.py").read_text(encoding="utf-8")
         self.assertIn("DEFAULT_BASE_URL", source)
+        self.assertIn("RELOAD_BACKPRESSURE_CODES", source)
+        self.assertIn("reload_backpressure", source)
         self.assertIn('"/score"', source)
         self.assertIn('"/reload"', source)
         self.assertIn("--self-test", source)
+        self.assertIn("--score-interval-ms", source)
+        self.assertIn("--score-error-backoff-ms", source)
+        self.assertIn("\"status\": \"skipped\"", source)
         self.assertIn("ThreadingHTTPServer", source)
         self.assertIn("fail_on_error", source)
 
@@ -2021,6 +2026,23 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("registry_snapshot = registry.snapshot()", score_block)
         self.assertIn("snapshot_models = registry_snapshot.get(\"models\")", score_block)
         self.assertIn("snapshot_thresholds = registry_snapshot.get(\"thresholds\")", score_block)
+
+    def test_ml_server_reload_endpoint_has_busy_and_cooldown_backpressure(self) -> None:
+        source = (REPO_ROOT / "server" / "ml_server.py").read_text(encoding="utf-8")
+        self.assertIn("ML_RELOAD_MIN_INTERVAL_SEC", source)
+        self.assertIn("_RELOAD_LOCK = threading.Lock()", source)
+        self.assertIn("_reload_state", source)
+        reload_block = source.split("def reload_models():", 1)[1].split(
+            "def _check_feature_drift(",
+            1,
+        )[0]
+        self.assertIn("if not _RELOAD_LOCK.acquire(blocking=False):", reload_block)
+        self.assertIn("status_code=409", reload_block)
+        self.assertIn("\"status\": \"busy\"", reload_block)
+        self.assertIn("status_code=429", reload_block)
+        self.assertIn("\"status\": \"cooldown\"", reload_block)
+        self.assertIn("last_status=\"running\"", reload_block)
+        self.assertIn("\"status\": \"ok\"", reload_block)
 
     def test_ibkr_bridge_uses_timezone_aware_utc_datetimes(self) -> None:
         source = (REPO_ROOT / "server" / "ibkr_gamma_bridge.py").read_text(encoding="utf-8")

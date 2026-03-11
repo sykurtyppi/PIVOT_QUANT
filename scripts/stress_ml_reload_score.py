@@ -20,6 +20,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 DEFAULT_BASE_URL = "http://127.0.0.1:5003"
+RELOAD_BACKPRESSURE_CODES = {409, 429}
 
 
 @dataclass
@@ -27,6 +28,7 @@ class StressStats:
     score_ok: int = 0
     score_fail: int = 0
     reload_ok: int = 0
+    reload_backpressure: int = 0
     reload_fail: int = 0
     score_latencies_ms: list[float] = field(default_factory=list)
     reload_latencies_ms: list[float] = field(default_factory=list)
@@ -42,11 +44,19 @@ class StressStats:
                 self.score_fail += 1
                 self.last_error = error or self.last_error
 
-    def record_reload(self, *, ok: bool, latency_ms: float, error: str | None = None) -> None:
+    def record_reload(
+        self,
+        *,
+        outcome: str,
+        latency_ms: float,
+        error: str | None = None,
+    ) -> None:
         with self.lock:
-            if ok:
+            if outcome == "ok":
                 self.reload_ok += 1
                 self.reload_latencies_ms.append(float(latency_ms))
+            elif outcome == "backpressure":
+                self.reload_backpressure += 1
             else:
                 self.reload_fail += 1
                 self.last_error = error or self.last_error
@@ -59,6 +69,7 @@ class StressStats:
                 "score_ok": self.score_ok,
                 "score_fail": self.score_fail,
                 "reload_ok": self.reload_ok,
+                "reload_backpressure": self.reload_backpressure,
                 "reload_fail": self.reload_fail,
                 "score_latency_ms": summarize_latencies(score_latencies),
                 "reload_latency_ms": summarize_latencies(reload_latencies),
@@ -94,7 +105,9 @@ def _percentile(sorted_values: list[float], pct: float) -> float:
     return float(sorted_values[lo] * (1.0 - frac) + sorted_values[hi] * frac)
 
 
-def _post_json(url: str, payload: dict[str, Any], timeout_sec: float) -> float:
+def _post_json_status(
+    url: str, payload: dict[str, Any], timeout_sec: float
+) -> tuple[int, float, str | None]:
     body = json.dumps(payload).encode("utf-8")
     req = Request(
         url=url,
@@ -103,10 +116,15 @@ def _post_json(url: str, payload: dict[str, Any], timeout_sec: float) -> float:
         method="POST",
     )
     start = time.perf_counter()
-    with urlopen(req, timeout=timeout_sec) as resp:  # noqa: S310
-        # Read response body so connection state is fully consumed.
-        _ = resp.read()
-    return (time.perf_counter() - start) * 1000.0
+    try:
+        with urlopen(req, timeout=timeout_sec) as resp:  # noqa: S310
+            raw = resp.read()
+            body_text = raw.decode("utf-8", errors="replace") if raw else None
+            return int(resp.status), (time.perf_counter() - start) * 1000.0, body_text
+    except HTTPError as exc:
+        raw = exc.read()
+        body_text = raw.decode("utf-8", errors="replace") if raw else None
+        return int(exc.code), (time.perf_counter() - start) * 1000.0, body_text
 
 
 def _make_event(worker_id: int, seq: int) -> dict[str, Any]:
@@ -127,18 +145,35 @@ def _score_worker(
     worker_id: int,
     score_url: str,
     timeout_sec: float,
+    score_interval_ms: int,
+    error_backoff_ms: int,
     stop_event: threading.Event,
     stats: StressStats,
 ) -> None:
     seq = 0
+    interval_sec = max(0.0, score_interval_ms / 1000.0)
+    error_backoff_sec = max(0.0, error_backoff_ms / 1000.0)
     while not stop_event.is_set():
         seq += 1
         payload = {"event": _make_event(worker_id, seq)}
         try:
-            latency_ms = _post_json(score_url, payload, timeout_sec)
-            stats.record_score(ok=True, latency_ms=latency_ms)
+            status_code, latency_ms, body = _post_json_status(score_url, payload, timeout_sec)
+            if status_code == 200:
+                stats.record_score(ok=True, latency_ms=latency_ms)
+            else:
+                stats.record_score(
+                    ok=False,
+                    latency_ms=latency_ms,
+                    error=f"HTTP {status_code}: {body or 'no body'}",
+                )
+                if error_backoff_sec > 0:
+                    stop_event.wait(error_backoff_sec)
         except (HTTPError, URLError, OSError, TimeoutError) as exc:
             stats.record_score(ok=False, latency_ms=0.0, error=f"{type(exc).__name__}: {exc}")
+            if error_backoff_sec > 0:
+                stop_event.wait(error_backoff_sec)
+        if interval_sec > 0:
+            stop_event.wait(interval_sec)
 
 
 def _reload_worker(
@@ -152,10 +187,23 @@ def _reload_worker(
     interval_sec = max(0.01, interval_ms / 1000.0)
     while not stop_event.is_set():
         try:
-            latency_ms = _post_json(reload_url, {}, timeout_sec)
-            stats.record_reload(ok=True, latency_ms=latency_ms)
+            status_code, latency_ms, body = _post_json_status(reload_url, {}, timeout_sec)
+            if status_code == 200:
+                stats.record_reload(outcome="ok", latency_ms=latency_ms)
+            elif status_code in RELOAD_BACKPRESSURE_CODES:
+                stats.record_reload(outcome="backpressure", latency_ms=latency_ms)
+            else:
+                stats.record_reload(
+                    outcome="fail",
+                    latency_ms=latency_ms,
+                    error=f"HTTP {status_code}: {body or 'no body'}",
+                )
         except (HTTPError, URLError, OSError, TimeoutError) as exc:
-            stats.record_reload(ok=False, latency_ms=0.0, error=f"{type(exc).__name__}: {exc}")
+            stats.record_reload(
+                outcome="fail",
+                latency_ms=0.0,
+                error=f"{type(exc).__name__}: {exc}",
+            )
         stop_event.wait(interval_sec)
 
 
@@ -164,6 +212,8 @@ def run_stress(
     base_url: str,
     duration_sec: float,
     score_workers: int,
+    score_interval_ms: int,
+    score_error_backoff_ms: int,
     reload_interval_ms: int,
     timeout_sec: float,
     fail_on_error: bool,
@@ -181,6 +231,8 @@ def run_stress(
                 "worker_id": worker_id,
                 "score_url": score_url,
                 "timeout_sec": timeout_sec,
+                "score_interval_ms": score_interval_ms,
+                "error_backoff_ms": score_error_backoff_ms,
                 "stop_event": stop_event,
                 "stats": stats,
             },
@@ -216,6 +268,8 @@ def run_stress(
     summary["base_url"] = base_url
     summary["duration_sec"] = round(finished_at - started_at, 3)
     summary["score_workers"] = score_workers
+    summary["score_interval_ms"] = score_interval_ms
+    summary["score_error_backoff_ms"] = score_error_backoff_ms
     summary["reload_interval_ms"] = reload_interval_ms
     summary["timeout_sec"] = timeout_sec
     summary["fail_on_error"] = bool(fail_on_error)
@@ -274,6 +328,8 @@ def run_self_test(args: argparse.Namespace) -> int:
             base_url=f"http://{host}:{port}",
             duration_sec=max(0.5, float(args.duration_sec)),
             score_workers=max(1, int(args.score_workers)),
+            score_interval_ms=max(0, int(args.score_interval_ms)),
+            score_error_backoff_ms=max(0, int(args.score_error_backoff_ms)),
             reload_interval_ms=max(10, int(args.reload_interval_ms)),
             timeout_sec=max(0.1, float(args.timeout_sec)),
             fail_on_error=True,
@@ -293,6 +349,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="ML server base URL")
     parser.add_argument("--duration-sec", type=float, default=20.0, help="Stress duration in seconds")
     parser.add_argument("--score-workers", type=int, default=4, help="Concurrent /score workers")
+    parser.add_argument(
+        "--score-interval-ms",
+        type=int,
+        default=5,
+        help="Delay between score requests per worker (milliseconds).",
+    )
+    parser.add_argument(
+        "--score-error-backoff-ms",
+        type=int,
+        default=25,
+        help="Extra delay after score failure before retry (milliseconds).",
+    )
     parser.add_argument(
         "--reload-interval-ms",
         type=int,
@@ -322,6 +390,8 @@ def main() -> int:
         base_url=str(args.base_url),
         duration_sec=max(0.5, float(args.duration_sec)),
         score_workers=max(1, int(args.score_workers)),
+        score_interval_ms=max(0, int(args.score_interval_ms)),
+        score_error_backoff_ms=max(0, int(args.score_error_backoff_ms)),
         reload_interval_ms=max(10, int(args.reload_interval_ms)),
         timeout_sec=max(0.1, float(args.timeout_sec)),
         fail_on_error=bool(args.fail_on_error),

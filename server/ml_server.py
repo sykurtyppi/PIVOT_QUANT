@@ -164,6 +164,9 @@ _PREDICTION_LOG_SCHEMA_READY = False
 _PREDICTION_LOG_SCHEMA_LOCK = threading.Lock()
 SCORE_MAX_BATCH_EVENTS = max(1, int(os.getenv("ML_SCORE_MAX_BATCH_EVENTS", "256")))
 SCORE_MAX_BODY_BYTES = max(1024, int(os.getenv("ML_SCORE_MAX_BODY_BYTES", "262144")))
+ML_RELOAD_MIN_INTERVAL_SEC = max(
+    0.0, float(os.getenv("ML_RELOAD_MIN_INTERVAL_SEC", "1.5"))
+)
 ML_ANALOG_ENABLED = _env_bool("ML_ANALOG_ENABLED", True)
 ML_ANALOG_DB = Path(os.getenv("ML_ANALOG_DB", str(PREDICTION_LOG_DB)))
 ML_ANALOG_K = max(3, int(os.getenv("ML_ANALOG_K", "20")))
@@ -929,6 +932,31 @@ class AnalogEngine:
 registry = ModelRegistry()
 analog_engine = AnalogEngine(ML_ANALOG_DB)
 _startup_error: Optional[str] = None
+_RELOAD_LOCK = threading.Lock()
+_RELOAD_STATE_LOCK = threading.Lock()
+_reload_state: dict[str, object] = {
+    "in_progress": False,
+    "min_interval_sec": ML_RELOAD_MIN_INTERVAL_SEC,
+    "last_started_at_ms": None,
+    "last_completed_at_ms": None,
+    "last_duration_ms": None,
+    "last_status": "never",
+    "last_error": None,
+    "success_count": 0,
+    "failure_count": 0,
+    "busy_reject_count": 0,
+    "cooldown_reject_count": 0,
+}
+
+
+def _update_reload_state(**fields: object) -> None:
+    with _RELOAD_STATE_LOCK:
+        _reload_state.update(fields)
+
+
+def _reload_state_snapshot() -> dict[str, object]:
+    with _RELOAD_STATE_LOCK:
+        return dict(_reload_state)
 
 
 @asynccontextmanager
@@ -1289,6 +1317,7 @@ def health():
         "manifest": manifest,
         "manifest_path": manifest_path,
         "models": models,
+        "reload": _reload_state_snapshot(),
         "regime_policy_mode": ML_REGIME_POLICY_MODE,
         "regime_threshold_max_delta": ML_REGIME_THRESHOLD_MAX_DELTA,
         "atr_zone_bounds": {
@@ -1348,10 +1377,61 @@ def health():
 def reload_models():
     """Hot-reload model artifacts from disk without restarting the server."""
     global _startup_error
+    now_ms = int(time.time() * 1000)
+
+    state_before = _reload_state_snapshot()
+    last_started_ms = state_before.get("last_started_at_ms")
+    if isinstance(last_started_ms, (int, float)) and ML_RELOAD_MIN_INTERVAL_SEC > 0:
+        min_interval_ms = int(ML_RELOAD_MIN_INTERVAL_SEC * 1000)
+        if now_ms - int(last_started_ms) < min_interval_ms:
+            _update_reload_state(
+                cooldown_reject_count=int(state_before.get("cooldown_reject_count", 0)) + 1,
+            )
+            return JSONResponse(
+                status_code=429,
+                content={
+                    "status": "cooldown",
+                    "message": "Reload requested too frequently.",
+                    "reload": _reload_state_snapshot(),
+                },
+            )
+
+    if not _RELOAD_LOCK.acquire(blocking=False):
+        busy_before = _reload_state_snapshot()
+        _update_reload_state(
+            busy_reject_count=int(busy_before.get("busy_reject_count", 0)) + 1,
+        )
+        return JSONResponse(
+            status_code=409,
+            content={
+                "status": "busy",
+                "message": "Reload already in progress.",
+                "reload": _reload_state_snapshot(),
+            },
+        )
+
+    started_at = time.perf_counter()
+    _update_reload_state(
+        in_progress=True,
+        last_started_at_ms=now_ms,
+        last_status="running",
+        last_error=None,
+    )
     try:
         registry.load()
         analog_engine.refresh()
         _startup_error = None
+        duration_ms = (time.perf_counter() - started_at) * 1000.0
+        complete_ms = int(time.time() * 1000)
+        ok_before = _reload_state_snapshot()
+        _update_reload_state(
+            in_progress=False,
+            last_completed_at_ms=complete_ms,
+            last_duration_ms=round(duration_ms, 3),
+            last_status="ok",
+            last_error=None,
+            success_count=int(ok_before.get("success_count", 0)) + 1,
+        )
         registry_snapshot = registry.snapshot()
         manifest = registry_snapshot.get("manifest")
         if not isinstance(manifest, dict):
@@ -1369,13 +1449,31 @@ def reload_models():
             "models": models,
             "manifest": manifest,
             "analogs": analog_engine.health(),
+            "reload": _reload_state_snapshot(),
         }
     except Exception as exc:
         _startup_error = str(exc)
+        duration_ms = (time.perf_counter() - started_at) * 1000.0
+        complete_ms = int(time.time() * 1000)
+        err_before = _reload_state_snapshot()
+        _update_reload_state(
+            in_progress=False,
+            last_completed_at_ms=complete_ms,
+            last_duration_ms=round(duration_ms, 3),
+            last_status="error",
+            last_error=str(exc),
+            failure_count=int(err_before.get("failure_count", 0)) + 1,
+        )
         return JSONResponse(
             status_code=500,
-            content={"status": "error", "message": str(exc)},
+            content={
+                "status": "error",
+                "message": str(exc),
+                "reload": _reload_state_snapshot(),
+            },
         )
+    finally:
+        _RELOAD_LOCK.release()
 
 
 def _check_feature_drift(features: dict, payload: dict) -> list[str]:
