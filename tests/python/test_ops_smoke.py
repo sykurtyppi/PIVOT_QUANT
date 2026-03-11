@@ -2247,6 +2247,10 @@ class OpsSmokeTests(unittest.TestCase):
     def test_health_alert_watchdog_latency_regression_contract_present(self) -> None:
         watchdog = (REPO_ROOT / "scripts" / "health_alert_watchdog.py").read_text(encoding="utf-8")
         env_example = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+        self.assertIn("ML_ALERT_CONSECUTIVE_FAILS", watchdog)
+        self.assertIn("service_consecutive_fails", watchdog)
+        self.assertIn("down_streak", watchdog)
+        self.assertIn('result["status"] = f"{base_status}_pending"', watchdog)
         self.assertIn("ML_ALERT_ML_SCORE_LAST_DURATION_MAX_MS", watchdog)
         self.assertIn("ML_ALERT_ML_SCORE_MIN_SUCCESS_COUNT", watchdog)
         self.assertIn("ML_ALERT_ML_SCORE_CONSECUTIVE_FAILS", watchdog)
@@ -2254,6 +2258,7 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("score_latency_breached", watchdog)
         self.assertIn("ml_score_latency_streak", watchdog)
         self.assertIn("latency_regressed", watchdog)
+        self.assertIn("ML_ALERT_CONSECUTIVE_FAILS=2", env_example)
         self.assertIn("ML_ALERT_ML_SCORE_LAST_DURATION_MAX_MS", env_example)
         self.assertIn("ML_ALERT_ML_SCORE_MIN_SUCCESS_COUNT", env_example)
         self.assertIn("ML_ALERT_ML_SCORE_CONSECUTIVE_FAILS", env_example)

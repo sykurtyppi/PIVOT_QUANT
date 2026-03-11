@@ -508,6 +508,9 @@ def main() -> int:
     ml_score_consecutive_fails = max(
         1, int(os.getenv("ML_ALERT_ML_SCORE_CONSECUTIVE_FAILS", "3") or "3")
     )
+    service_consecutive_fails = max(
+        1, int(os.getenv("ML_ALERT_CONSECUTIVE_FAILS", "2") or "2")
+    )
 
     state = load_state(state_file)
     service_state = state.setdefault("services", {})
@@ -523,8 +526,6 @@ def main() -> int:
             ml_score_latency_max_ms=ml_score_latency_max_ms,
             ml_score_min_success_count=ml_score_min_success_count,
         )
-        summaries.append(f"{name}={result['status']}{'' if result['up'] else '(!)'}")
-
         previous = service_state.get(name, {})
         if not isinstance(previous, dict):
             previous = {}
@@ -543,6 +544,24 @@ def main() -> int:
                     )
             else:
                 previous["ml_score_latency_streak"] = 0
+
+        raw_is_down = not bool(result["up"])
+        down_streak = to_int(previous.get("down_streak"), 0)
+        if raw_is_down:
+            down_streak += 1
+        else:
+            down_streak = 0
+        previous["down_streak"] = down_streak
+        if raw_is_down and down_streak < service_consecutive_fails:
+            result["up"] = True
+            base_status = str(result.get("status") or "unknown")
+            base_reason = str(result.get("reason") or "health check failed")
+            result["status"] = f"{base_status}_pending"
+            result["reason"] = (
+                f"{base_reason}; down_streak={down_streak}/{service_consecutive_fails}"
+            )
+
+        summaries.append(f"{name}={result['status']}{'' if result['up'] else '(!)'}")
 
         previous_state = str(previous.get("state") or "unknown")
         current_state = "up" if result["up"] else "down"
