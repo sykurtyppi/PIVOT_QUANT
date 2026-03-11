@@ -3,6 +3,7 @@ import json
 import logging
 import math
 import os
+import queue
 import sqlite3
 import sys
 import time
@@ -174,6 +175,9 @@ PREDICTION_LOG_CONNECT_TIMEOUT_SEC = max(
 )
 PREDICTION_LOG_BUSY_TIMEOUT_MS = max(
     0, int(os.getenv("PREDICTION_LOG_BUSY_TIMEOUT_MS", "50"))
+)
+PREDICTION_LOG_QUEUE_MAX_SIZE = max(
+    64, int(os.getenv("PREDICTION_LOG_QUEUE_MAX_SIZE", "4096"))
 )
 ML_RELOAD_MIN_INTERVAL_SEC = max(
     0.0, float(os.getenv("ML_RELOAD_MIN_INTERVAL_SEC", "1.5"))
@@ -1006,6 +1010,26 @@ _score_state: dict[str, object] = {
     "failure_count": 0,
     "busy_reject_count": 0,
 }
+_PREDICTION_LOG_QUEUE: queue.Queue[tuple[dict, dict]] = queue.Queue(
+    maxsize=PREDICTION_LOG_QUEUE_MAX_SIZE
+)
+_PREDICTION_LOG_WRITER_STOP = threading.Event()
+_PREDICTION_LOG_WRITER_THREAD: threading.Thread | None = None
+_PREDICTION_LOG_STATE_LOCK = threading.Lock()
+_prediction_log_state: dict[str, object] = {
+    "queue_max_size": PREDICTION_LOG_QUEUE_MAX_SIZE,
+    "queue_high_watermark": 0,
+    "queued_total": 0,
+    "dropped_total": 0,
+    "written_total": 0,
+    "write_skip_total": 0,
+    "write_fail_total": 0,
+    "last_enqueued_at_ms": None,
+    "last_written_at_ms": None,
+    "last_error": None,
+    "writer_started_at_ms": None,
+    "writer_stopped_at_ms": None,
+}
 
 
 def _update_reload_state(**fields: object) -> None:
@@ -1026,6 +1050,20 @@ def _update_score_state(**fields: object) -> None:
 def _score_state_snapshot() -> dict[str, object]:
     with _SCORE_STATE_LOCK:
         return dict(_score_state)
+
+
+def _update_prediction_log_state(**fields: object) -> None:
+    with _PREDICTION_LOG_STATE_LOCK:
+        _prediction_log_state.update(fields)
+
+
+def _prediction_log_state_snapshot() -> dict[str, object]:
+    with _PREDICTION_LOG_STATE_LOCK:
+        snapshot = dict(_prediction_log_state)
+    snapshot["queue_depth"] = _PREDICTION_LOG_QUEUE.qsize()
+    writer = _PREDICTION_LOG_WRITER_THREAD
+    snapshot["writer_alive"] = bool(writer and writer.is_alive())
+    return snapshot
 
 
 def _try_begin_score_request() -> bool:
@@ -1074,6 +1112,7 @@ def _finish_score_request(*, ok: bool, duration_ms: float, error: str | None = N
 @asynccontextmanager
 async def lifespan(_app):
     global _startup_error
+    _start_prediction_log_writer()
     try:
         registry.load()
         analog_engine.refresh()
@@ -1081,7 +1120,10 @@ async def lifespan(_app):
     except Exception as exc:
         _startup_error = str(exc)
         print(f"ML server startup warning: {exc}")
-    yield
+    try:
+        yield
+    finally:
+        _stop_prediction_log_writer()
 
 
 app = FastAPI(title="PivotQuant ML Server", version="1.0.0", lifespan=lifespan)
@@ -1286,17 +1328,14 @@ def _ensure_prediction_log_schema(conn: sqlite3.Connection) -> None:
         _PREDICTION_LOG_SCHEMA_READY = True
 
 
-def _log_prediction(event: dict, result: dict) -> None:
-    """Append a prediction record to the prediction_log table.
+def _write_prediction_record(event: dict, result: dict) -> tuple[str, str | None]:
+    """Write one prediction record to SQLite.
 
-    Best-effort: failures are logged but never propagate to the caller.
-    This lets us reconcile live predictions against actual outcomes later.
-    The prediction_log table is created by migrate_db.py (migration v3);
-    CREATE IF NOT EXISTS is kept here as a safety net for standalone use.
+    Returns ("ok" | "skip" | "error", error_message).
     """
     event_id = event.get("event_id")
     if not event_id:
-        return
+        return "skip", "missing event_id"
 
     conn = None
     try:
@@ -1392,12 +1431,13 @@ def _log_prediction(event: dict, result: dict) -> None:
             ),
         )
         conn.commit()
+        return "ok", None
     except Exception as exc:
         if isinstance(exc, sqlite3.OperationalError):
             lowered = str(exc).lower()
             if "database is locked" in lowered or "database is busy" in lowered:
                 log.debug("Prediction log skipped due SQLite contention: %s", exc)
-                return
+                return "skip", str(exc)
         if conn is not None and getattr(_PREDICTION_LOG_LOCAL, "conn", None) is conn:
             try:
                 conn.close()
@@ -1405,6 +1445,106 @@ def _log_prediction(event: dict, result: dict) -> None:
                 pass
             _PREDICTION_LOG_LOCAL.conn = None
         log.warning("Prediction log write failed: %s", exc)
+        return "error", f"{type(exc).__name__}: {exc}"
+
+
+def _prediction_log_writer_loop() -> None:
+    try:
+        while True:
+            if _PREDICTION_LOG_WRITER_STOP.is_set() and _PREDICTION_LOG_QUEUE.empty():
+                return
+            try:
+                event, result = _PREDICTION_LOG_QUEUE.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            status, error = _write_prediction_record(event, result)
+            now_ms = int(time.time() * 1000)
+            state_before = _prediction_log_state_snapshot()
+            if status == "ok":
+                _update_prediction_log_state(
+                    written_total=int(state_before.get("written_total", 0)) + 1,
+                    last_written_at_ms=now_ms,
+                    last_error=None,
+                )
+            elif status == "skip":
+                _update_prediction_log_state(
+                    write_skip_total=int(state_before.get("write_skip_total", 0)) + 1,
+                    last_written_at_ms=now_ms,
+                    last_error=error,
+                )
+            else:
+                _update_prediction_log_state(
+                    write_fail_total=int(state_before.get("write_fail_total", 0)) + 1,
+                    last_written_at_ms=now_ms,
+                    last_error=error,
+                )
+            _PREDICTION_LOG_QUEUE.task_done()
+    finally:
+        _close_prediction_log_conn()
+
+
+def _start_prediction_log_writer() -> None:
+    global _PREDICTION_LOG_WRITER_THREAD
+    writer = _PREDICTION_LOG_WRITER_THREAD
+    if writer is not None and writer.is_alive():
+        return
+    _PREDICTION_LOG_WRITER_STOP.clear()
+    writer = threading.Thread(
+        target=_prediction_log_writer_loop,
+        name="prediction_log_writer",
+        daemon=True,
+    )
+    _PREDICTION_LOG_WRITER_THREAD = writer
+    _update_prediction_log_state(
+        writer_started_at_ms=int(time.time() * 1000),
+        writer_stopped_at_ms=None,
+        last_error=None,
+    )
+    writer.start()
+
+
+def _stop_prediction_log_writer(timeout_sec: float = 5.0) -> None:
+    global _PREDICTION_LOG_WRITER_THREAD
+    _PREDICTION_LOG_WRITER_STOP.set()
+    writer = _PREDICTION_LOG_WRITER_THREAD
+    if writer is not None:
+        writer.join(timeout=max(0.1, timeout_sec))
+    _PREDICTION_LOG_WRITER_THREAD = None
+    _update_prediction_log_state(writer_stopped_at_ms=int(time.time() * 1000))
+
+
+atexit.register(_stop_prediction_log_writer)
+
+
+def _enqueue_prediction(event: dict, result: dict) -> None:
+    event_id = event.get("event_id")
+    if not event_id:
+        return
+    try:
+        _PREDICTION_LOG_QUEUE.put_nowait((event, result))
+    except queue.Full:
+        state_before = _prediction_log_state_snapshot()
+        _update_prediction_log_state(
+            dropped_total=int(state_before.get("dropped_total", 0)) + 1,
+            last_error="prediction log queue full",
+        )
+        return
+
+    queue_depth = _PREDICTION_LOG_QUEUE.qsize()
+    state_before = _prediction_log_state_snapshot()
+    _update_prediction_log_state(
+        queued_total=int(state_before.get("queued_total", 0)) + 1,
+        queue_high_watermark=max(
+            int(state_before.get("queue_high_watermark", 0)),
+            queue_depth,
+        ),
+        last_enqueued_at_ms=int(time.time() * 1000),
+    )
+
+
+def _log_prediction(event: dict, result: dict) -> None:
+    """Compatibility path: write prediction record synchronously."""
+    _write_prediction_record(event, result)
 
 
 @app.get("/health")
@@ -1440,6 +1580,7 @@ async def health():
         "models": models,
         "reload": _reload_state_snapshot(),
         "score": _score_state_snapshot(),
+        "prediction_log": _prediction_log_state_snapshot(),
         "regime_policy_mode": ML_REGIME_POLICY_MODE,
         "regime_threshold_max_delta": ML_REGIME_THRESHOLD_MAX_DELTA,
         "atr_zone_bounds": {
@@ -2821,7 +2962,7 @@ def _score_events_batch(events: list[dict], disable_analogs: bool = False) -> li
         _SCORE_LOAD_SHED_LOCAL.disable_analogs = bool(disable_analogs)
         for ev in events:
             res = _score_event(ev)
-            _log_prediction(ev, res)
+            _enqueue_prediction(ev, res)
             results.append(res)
     finally:
         _SCORE_LOAD_SHED_LOCAL.disable_analogs = False
@@ -2832,7 +2973,7 @@ def _score_single_event_with_log(event: dict, disable_analogs: bool = False) -> 
     try:
         _SCORE_LOAD_SHED_LOCAL.disable_analogs = bool(disable_analogs)
         result = _score_event(event)
-        _log_prediction(event, result)
+        _enqueue_prediction(event, result)
         return result
     finally:
         _SCORE_LOAD_SHED_LOCAL.disable_analogs = False

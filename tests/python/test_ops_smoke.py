@@ -2064,9 +2064,13 @@ class OpsSmokeTests(unittest.TestCase):
         source = (REPO_ROOT / "server" / "ml_server.py").read_text(encoding="utf-8")
         self.assertIn("ML_SCORE_MAX_IN_FLIGHT", source)
         self.assertIn("ML_SCORE_ANALOG_DISABLE_IN_FLIGHT", source)
+        self.assertIn("PREDICTION_LOG_QUEUE_MAX_SIZE", source)
         self.assertIn("PREDICTION_LOG_CONNECT_TIMEOUT_SEC", source)
         self.assertIn("PREDICTION_LOG_BUSY_TIMEOUT_MS", source)
         self.assertIn("PRAGMA busy_timeout", source)
+        self.assertIn("_PREDICTION_LOG_QUEUE: queue.Queue", source)
+        self.assertIn("def _enqueue_prediction(event: dict, result: dict) -> None:", source)
+        self.assertIn("\"prediction_log\": _prediction_log_state_snapshot()", source)
         self.assertIn("_SCORE_LOAD_SHED_LOCAL = threading.local()", source)
         self.assertIn("ANALOG_LOAD_SHED", source)
         self.assertIn("_SCORE_GATE = threading.BoundedSemaphore", source)
@@ -3909,6 +3913,7 @@ class OpsSmokeTests(unittest.TestCase):
     def test_ml_prediction_log_registers_atexit_cleanup(self) -> None:
         source = (REPO_ROOT / "server" / "ml_server.py").read_text(encoding="utf-8")
         self.assertIn("atexit.register(_close_prediction_log_conn)", source)
+        self.assertIn("atexit.register(_stop_prediction_log_writer)", source)
 
     def test_report_regime_policy_summary_counts_divergence(self) -> None:
         report = load_module(
