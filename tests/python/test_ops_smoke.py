@@ -5199,6 +5199,11 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("- Timely prediction lag filter: <= 6.00 hours", text)
         self.assertIn("- Overall coverage: 100.00% (2/2)", text)
         self.assertIn("- Coverage status: PASS", text)
+        self.assertIn("## Prediction Lag Profile (First Live Prediction)", text)
+        self.assertIn("- <=1h: 2", text)
+        self.assertIn("- >6h: 0", text)
+        self.assertIn("- No prediction: 0", text)
+        self.assertIn("| 2026-03-06 | 1 | 1 | 0 | 0 | 0 | 0 |", text)
         self.assertIn("## Policy Comparison (Baseline vs Guardrail vs No-5m)", text)
         self.assertIn("## Cost Sweep", text)
         self.assertIn("## Stratified PnL (Regime x ATR Zone x Horizon)", text)
@@ -5340,6 +5345,10 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("- Coverage status: FAIL", text)
         self.assertIn("- Policy Change Gate: BLOCK POLICY CHANGES (coverage SLA FAIL)", text)
         self.assertIn("- Events (latest prediction per event): 0", text)
+        self.assertIn("## Prediction Lag Profile (First Live Prediction)", text)
+        self.assertIn("- >6h: 1", text)
+        self.assertIn("- No prediction: 0", text)
+        self.assertIn("| 2026-03-06 | 1 | 0 | 0 | 0 | 1 | 0 |", text)
 
     def test_model_governance_skips_regression_gates_when_support_is_low(self) -> None:
         module = load_module("model_governance", REPO_ROOT / "scripts" / "model_governance.py")

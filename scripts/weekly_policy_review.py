@@ -414,6 +414,145 @@ def load_prediction_coverage(
     }
 
 
+def load_prediction_lag_profile(
+    conn: sqlite3.Connection,
+    *,
+    symbol: str,
+    start_ms: int,
+    end_ms: int,
+    source: str,
+) -> dict[str, Any]:
+    src_filter = source_filter_sql(conn, source)
+    one_hour_ms = 3600 * 1000
+    three_hour_ms = 3 * 3600 * 1000
+    six_hour_ms = 6 * 3600 * 1000
+    rows = conn.execute(
+        f"""
+        WITH te AS (
+            SELECT
+                te.event_id AS event_id,
+                te.ts_event AS ts_event_ms,
+                date(te.ts_event/1000, 'unixepoch') AS day
+            FROM touch_events te
+            WHERE te.symbol = ?
+              AND te.ts_event >= ?
+              AND te.ts_event < ?
+        ),
+        first_pred AS (
+            SELECT
+                te.event_id AS event_id,
+                te.day AS day,
+                te.ts_event_ms AS ts_event_ms,
+                MIN(pl.ts_prediction) AS first_pred_ms
+            FROM te
+            LEFT JOIN prediction_log pl
+                ON pl.event_id = te.event_id
+                {src_filter}
+            GROUP BY te.event_id, te.day, te.ts_event_ms
+        )
+        SELECT
+            fp.day AS day,
+            COUNT(*) AS touch_n,
+            SUM(CASE WHEN fp.first_pred_ms IS NULL THEN 1 ELSE 0 END) AS no_pred_n,
+            SUM(
+                CASE
+                    WHEN fp.first_pred_ms IS NOT NULL
+                     AND (fp.first_pred_ms - fp.ts_event_ms) >= 0
+                     AND (fp.first_pred_ms - fp.ts_event_ms) <= ?
+                    THEN 1 ELSE 0
+                END
+            ) AS lag_le_1h_n,
+            SUM(
+                CASE
+                    WHEN fp.first_pred_ms IS NOT NULL
+                     AND (fp.first_pred_ms - fp.ts_event_ms) > ?
+                     AND (fp.first_pred_ms - fp.ts_event_ms) <= ?
+                    THEN 1 ELSE 0
+                END
+            ) AS lag_1_to_3h_n,
+            SUM(
+                CASE
+                    WHEN fp.first_pred_ms IS NOT NULL
+                     AND (fp.first_pred_ms - fp.ts_event_ms) > ?
+                     AND (fp.first_pred_ms - fp.ts_event_ms) <= ?
+                    THEN 1 ELSE 0
+                END
+            ) AS lag_3_to_6h_n,
+            SUM(
+                CASE
+                    WHEN fp.first_pred_ms IS NOT NULL
+                     AND (fp.first_pred_ms - fp.ts_event_ms) > ?
+                    THEN 1 ELSE 0
+                END
+            ) AS lag_gt_6h_n,
+            SUM(
+                CASE
+                    WHEN fp.first_pred_ms IS NOT NULL
+                     AND (fp.first_pred_ms - fp.ts_event_ms) < 0
+                    THEN 1 ELSE 0
+                END
+            ) AS lag_negative_n
+        FROM first_pred fp
+        GROUP BY fp.day
+        ORDER BY fp.day ASC
+        """,
+        (
+            symbol.upper(),
+            start_ms,
+            end_ms,
+            one_hour_ms,
+            one_hour_ms,
+            three_hour_ms,
+            three_hour_ms,
+            six_hour_ms,
+            six_hour_ms,
+        ),
+    ).fetchall()
+
+    day_rows: list[dict[str, Any]] = []
+    totals = {
+        "touch_total": 0,
+        "no_pred_total": 0,
+        "lag_le_1h_total": 0,
+        "lag_1_to_3h_total": 0,
+        "lag_3_to_6h_total": 0,
+        "lag_gt_6h_total": 0,
+        "lag_negative_total": 0,
+    }
+    for row in rows:
+        touch_n = int(row["touch_n"] or 0)
+        no_pred_n = int(row["no_pred_n"] or 0)
+        lag_le_1h_n = int(row["lag_le_1h_n"] or 0)
+        lag_1_to_3h_n = int(row["lag_1_to_3h_n"] or 0)
+        lag_3_to_6h_n = int(row["lag_3_to_6h_n"] or 0)
+        lag_gt_6h_n = int(row["lag_gt_6h_n"] or 0)
+        lag_negative_n = int(row["lag_negative_n"] or 0)
+        day_rows.append(
+            {
+                "day": str(row["day"]),
+                "touch_n": touch_n,
+                "no_pred_n": no_pred_n,
+                "lag_le_1h_n": lag_le_1h_n,
+                "lag_1_to_3h_n": lag_1_to_3h_n,
+                "lag_3_to_6h_n": lag_3_to_6h_n,
+                "lag_gt_6h_n": lag_gt_6h_n,
+                "lag_negative_n": lag_negative_n,
+            }
+        )
+        totals["touch_total"] += touch_n
+        totals["no_pred_total"] += no_pred_n
+        totals["lag_le_1h_total"] += lag_le_1h_n
+        totals["lag_1_to_3h_total"] += lag_1_to_3h_n
+        totals["lag_3_to_6h_total"] += lag_3_to_6h_n
+        totals["lag_gt_6h_total"] += lag_gt_6h_n
+        totals["lag_negative_total"] += lag_negative_n
+
+    return {
+        "days": day_rows,
+        **totals,
+    }
+
+
 def policy_trade(event: ScoredEvent, policy: str) -> bool:
     if policy == "baseline":
         return event.baseline_trade
@@ -474,6 +613,7 @@ def build_report(
     calibration_rows: list[dict[str, Any]],
     has_daily_ml_metrics: bool,
     coverage_summary: dict[str, Any],
+    lag_profile: dict[str, Any],
     coverage_sla_pct: float,
     max_pred_lag_hours: float,
     calibration_min_support: int,
@@ -497,6 +637,14 @@ def build_report(
         if isinstance(pct, (int, float)) and float(pct) < float(coverage_sla_pct):
             cov_below += 1
     coverage_status = "PASS" if cov_touch_total > 0 and cov_below == 0 else "FAIL"
+    lag_days = list(lag_profile.get("days") or [])
+    lag_touch_total = int(lag_profile.get("touch_total") or 0)
+    lag_no_pred_total = int(lag_profile.get("no_pred_total") or 0)
+    lag_le_1h_total = int(lag_profile.get("lag_le_1h_total") or 0)
+    lag_1_to_3h_total = int(lag_profile.get("lag_1_to_3h_total") or 0)
+    lag_3_to_6h_total = int(lag_profile.get("lag_3_to_6h_total") or 0)
+    lag_gt_6h_total = int(lag_profile.get("lag_gt_6h_total") or 0)
+    lag_negative_total = int(lag_profile.get("lag_negative_total") or 0)
     policy_gate_line = (
         "- Policy Change Gate: BLOCK POLICY CHANGES (coverage SLA FAIL)"
         if coverage_status == "FAIL"
@@ -540,6 +688,27 @@ def build_report(
                 f"{fmt(float(pct), 2) if pct is not None else 'n/a'} |"
             )
         lines.append("")
+
+    lines.append("## Prediction Lag Profile (First Live Prediction)")
+    lines.append("")
+    lines.append("- Buckets: <=1h, 1-3h, 3-6h, >6h from touch event time")
+    lines.append(f"- Touch events: {lag_touch_total}")
+    lines.append(f"- <=1h: {lag_le_1h_total}")
+    lines.append(f"- 1-3h: {lag_1_to_3h_total}")
+    lines.append(f"- 3-6h: {lag_3_to_6h_total}")
+    lines.append(f"- >6h: {lag_gt_6h_total}")
+    lines.append(f"- No prediction: {lag_no_pred_total}")
+    if lag_negative_total > 0:
+        lines.append(f"- Negative lag (data anomaly): {lag_negative_total}")
+    lines.append("")
+    lines.append("| Day (ET) | Touch Events | <=1h | 1-3h | 3-6h | >6h | No Prediction |")
+    lines.append("|---|---:|---:|---:|---:|---:|---:|")
+    for row in lag_days:
+        lines.append(
+            f"| {row['day']} | {int(row['touch_n'])} | {int(row['lag_le_1h_n'])} | {int(row['lag_1_to_3h_n'])} | "
+            f"{int(row['lag_3_to_6h_n'])} | {int(row['lag_gt_6h_n'])} | {int(row['no_pred_n'])} |"
+        )
+    lines.append("")
 
     lines.append("## Policy Comparison (Baseline vs Guardrail vs No-5m)")
     lines.append("")
@@ -747,6 +916,13 @@ def main() -> None:
             source=args.source,
             max_pred_lag_hours=float(args.max_pred_lag_hours),
         )
+        lag_profile = load_prediction_lag_profile(
+            conn,
+            symbol=args.symbol,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            source=args.source,
+        )
     finally:
         conn.close()
 
@@ -759,6 +935,7 @@ def main() -> None:
         calibration_rows=calibration_rows,
         has_daily_ml_metrics=has_daily_ml_metrics,
         coverage_summary=coverage_summary,
+        lag_profile=lag_profile,
         coverage_sla_pct=float(args.coverage_sla_pct),
         max_pred_lag_hours=float(args.max_pred_lag_hours),
         calibration_min_support=int(args.calibration_min_support),
