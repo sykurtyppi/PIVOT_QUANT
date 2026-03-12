@@ -17,6 +17,8 @@ MONITOR_CONSECUTIVE_FAIL_LIMIT="${MONITOR_CONSECUTIVE_FAIL_LIMIT:-3}"
 MONITOR_ML_HEALTH_TIMEOUT_SEC="${MONITOR_ML_HEALTH_TIMEOUT_SEC:-6}"
 MONITOR_ML_CONSECUTIVE_FAIL_LIMIT="${MONITOR_ML_CONSECUTIVE_FAIL_LIMIT:-6}"
 MONITOR_ML_FATAL="${MONITOR_ML_FATAL:-0}"
+MONITOR_EVENT_WRITER_FATAL="${MONITOR_EVENT_WRITER_FATAL:-0}"
+MONITOR_DASHBOARD_FATAL="${MONITOR_DASHBOARD_FATAL:-0}"
 MONITOR_LIVE_COLLECTOR_CONSECUTIVE_FAIL_LIMIT="${MONITOR_LIVE_COLLECTOR_CONSECUTIVE_FAIL_LIMIT:-}"
 MONITOR_LIVE_COLLECTOR_FATAL="${MONITOR_LIVE_COLLECTOR_FATAL:-0}"
 PIVOT_DB="${PIVOT_DB:-${ROOT_DIR}/data/pivot_events.sqlite}"
@@ -334,7 +336,11 @@ monitor_stack() {
       ew_failures=$((ew_failures + 1))
       echo "[WARN] event_writer health miss (${ew_failures}/${MONITOR_CONSECUTIVE_FAIL_LIMIT})"
       if [[ "${ew_failures}" -ge "${MONITOR_CONSECUTIVE_FAIL_LIMIT}" ]]; then
-        die "event_writer health check failed"
+        if is_truthy "${MONITOR_EVENT_WRITER_FATAL}"; then
+          die "event_writer health check failed"
+        fi
+        echo "[WARN] event_writer fail limit reached; continuing (MONITOR_EVENT_WRITER_FATAL=${MONITOR_EVENT_WRITER_FATAL})"
+        ew_failures=0
       fi
     fi
 
@@ -360,7 +366,11 @@ monitor_stack() {
       dash_failures=$((dash_failures + 1))
       echo "[WARN] dashboard health miss (${dash_failures}/${MONITOR_CONSECUTIVE_FAIL_LIMIT})"
       if [[ "${dash_failures}" -ge "${MONITOR_CONSECUTIVE_FAIL_LIMIT}" ]]; then
-        die "dashboard health check failed"
+        if is_truthy "${MONITOR_DASHBOARD_FATAL}"; then
+          die "dashboard health check failed"
+        fi
+        echo "[WARN] dashboard fail limit reached; continuing (MONITOR_DASHBOARD_FATAL=${MONITOR_DASHBOARD_FATAL})"
+        dash_failures=0
       fi
     fi
 
