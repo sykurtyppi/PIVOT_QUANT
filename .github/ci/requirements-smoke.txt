@@ -1,7 +1,1 @@
-fastapi==0.115.12
-ib-insync==0.9.86
-joblib==1.4.2
-numpy==1.26.4
-pandas==2.2.3
-scikit-learn==1.5.2
-uvicorn==0.30.6
+-r ../../requirements-runtime.txt

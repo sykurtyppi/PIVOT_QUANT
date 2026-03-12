@@ -2101,6 +2101,68 @@ class OpsSmokeTests(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 0, msg=f"{proc.stdout}\n{proc.stderr}")
 
+    def test_mathematical_models_risk_ratios_handle_zero_volatility(self) -> None:
+        if shutil.which("node") is None:
+            self.skipTest("node is not available in PATH")
+
+        node_script = textwrap.dedent(
+            """
+            import { MathematicalModels } from './src/math/MathematicalModels.js';
+            const model = new MathematicalModels({ precision: 6 });
+            const bars = [
+              { open: 100.0, high: 100.0, low: 100.0, close: 100.0 },
+              { open: 100.0, high: 100.0, low: 100.0, close: 100.0 },
+              { open: 100.0, high: 100.0, low: 100.0, close: 100.0 },
+              { open: 100.0, high: 100.0, low: 100.0, close: 100.0 },
+            ];
+
+            const sharpe = model.calculateSharpeRatio(bars);
+            const calmar = model.calculateCalmarRatio(bars);
+            const sortino = model.calculateSortinoRatio(bars);
+            const ratios = { sharpe, calmar, sortino };
+            for (const [name, value] of Object.entries(ratios)) {
+              if (!Number.isFinite(value)) {
+                throw new Error(`${name} should be finite, got ${value}`);
+              }
+              if (value !== 0) {
+                throw new Error(`${name} should resolve to 0 for flat series, got ${value}`);
+              }
+            }
+            console.log('ok');
+            """
+        ).strip()
+
+        proc = run_cmd(
+            ["node", "--input-type=module", "-e", node_script],
+            cwd=REPO_ROOT,
+        )
+        self.assertEqual(proc.returncode, 0, msg=f"{proc.stdout}\n{proc.stderr}")
+
+    def test_mathematical_models_zscore_handles_zero_variance(self) -> None:
+        if shutil.which("node") is None:
+            self.skipTest("node is not available in PATH")
+
+        node_script = textwrap.dedent(
+            """
+            import { MathematicalModels } from './src/math/MathematicalModels.js';
+            const model = new MathematicalModels({ precision: 6 });
+            const z = model._calculateZScore([7, 7, 7]);
+            if (!Array.isArray(z) || z.length !== 3) {
+              throw new Error(`Expected z-score array of length 3, got ${JSON.stringify(z)}`);
+            }
+            if (!z.every((value) => Number.isFinite(value) && value === 0)) {
+              throw new Error(`Expected all zero z-scores for zero variance input, got ${JSON.stringify(z)}`);
+            }
+            console.log('ok');
+            """
+        ).strip()
+
+        proc = run_cmd(
+            ["node", "--input-type=module", "-e", node_script],
+            cwd=REPO_ROOT,
+        )
+        self.assertEqual(proc.returncode, 0, msg=f"{proc.stdout}\n{proc.stderr}")
+
     def test_mathematical_models_level_accuracy_is_not_constant(self) -> None:
         if shutil.which("node") is None:
             self.skipTest("node is not available in PATH")
@@ -2565,6 +2627,9 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn('ENV_FILE="${ROOT_DIR}/.env"', retrain_script)
         self.assertIn("load_env_file()", retrain_script)
         self.assertIn('load_env_file "${ENV_FILE}"', retrain_script)
+        self.assertIn("RETRAIN_REQUIRED_MODULES=", retrain_script)
+        self.assertIn("RUN_OPS_SMOKE_ON_RETRAIN", retrain_script)
+        self.assertIn("RETRAIN_REQUIRED_MODULES+=(fastapi ib_insync uvicorn)", retrain_script)
         self.assertIn("--horizons 5 15 30 60 --incremental", retrain_script)
         self.assertIn("score_unscored_touch_events.py", retrain_script)
         self.assertIn("RETRAIN_SCORE_UNSCORED_VERIFY_ON_RETRAIN", retrain_script)
@@ -2575,6 +2640,19 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("--timeout-sec", retrain_script)
         self.assertIn("--max-attempts", retrain_script)
         self.assertIn("--fail-on-partial", retrain_script)
+
+    def test_runtime_requirements_contract_present(self) -> None:
+        runtime_reqs = (REPO_ROOT / "requirements-runtime.txt").read_text(encoding="utf-8")
+        smoke_reqs = (REPO_ROOT / ".github" / "ci" / "requirements-smoke.txt").read_text(encoding="utf-8")
+        self.assertIn("duckdb==", runtime_reqs)
+        self.assertIn("fastapi==", runtime_reqs)
+        self.assertIn("ib-insync==", runtime_reqs)
+        self.assertIn("joblib==", runtime_reqs)
+        self.assertIn("numpy==", runtime_reqs)
+        self.assertIn("pandas==", runtime_reqs)
+        self.assertIn("scikit-learn==", runtime_reqs)
+        self.assertIn("uvicorn==", runtime_reqs)
+        self.assertIn("-r ../../requirements-runtime.txt", smoke_reqs)
 
     def test_run_persistent_stack_sources_dotenv_safely(self) -> None:
         stack_script = (REPO_ROOT / "server" / "run_persistent_stack.sh").read_text(encoding="utf-8")

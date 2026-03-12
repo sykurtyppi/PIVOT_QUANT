@@ -4,7 +4,7 @@
 
 [![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)](./package.json)
 [![Tests](https://img.shields.io/badge/tests-passing-green.svg)](#testing)
-[![Coverage](https://img.shields.io/badge/coverage-90%25-brightgreen.svg)](#testing)
+[![Coverage](https://img.shields.io/badge/coverage-58%25%2B%20threshold-yellow.svg)](#testing)
 [![License](https://img.shields.io/badge/license-Proprietary-red.svg)](./LICENSE)
 
 ## 🎯 Overview
@@ -22,14 +22,18 @@ PIVOT_QUANT is a comprehensive, institutional-grade pivot point analysis system 
 
 ### Installation
 
+This repository is private (`"private": true` in `package.json`) and is not published to the public npm registry.
+
 ```bash
-npm install @pivot-quant/institutional-pivot-engine
+git clone https://github.com/sykurtyppi/PIVOT_QUANT.git
+cd PIVOT_QUANT
+npm install
 ```
 
 ### Basic Usage
 
 ```javascript
-import QuantPivot from '@pivot-quant/institutional-pivot-engine';
+import QuantPivot from './src/index.js';
 
 // Initialize for production environment
 const pivot = new QuantPivot({}, 'production');
@@ -49,7 +53,7 @@ console.log('Quality Scores:', results.analysis.qualityScores);
 ### Advanced Configuration
 
 ```javascript
-import { createProductionInstance } from '@pivot-quant/institutional-pivot-engine';
+import { createProductionInstance } from './src/index.js';
 
 const pivot = createProductionInstance({
   mathematical: {
@@ -107,7 +111,7 @@ PIVOT_QUANT/
 - **Data Validation**: Comprehensive OHLC validation
 - **Error Handling**: Graceful degradation and recovery
 - **Configuration Management**: Environment-specific configs
-- **Quality Assurance**: 90%+ test coverage
+- **Quality Assurance**: Automated Jest + Python smoke test suites with enforced coverage thresholds
 
 ## 📈 Supported Pivot Methodologies
 

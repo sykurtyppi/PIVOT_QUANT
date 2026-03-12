@@ -177,7 +177,13 @@ else
 fi
 
 run_step "python_env_check" "${PYTHON}" -c "import sys; assert sys.version_info >= (3, 10), f'Python {sys.version.split()[0]} too old; require >=3.10'; print(sys.executable, sys.version.split()[0])"
-run_step "python_deps_check" "${PYTHON}" -c "import importlib.util, sys; required=['duckdb','pandas','numpy','joblib','sklearn']; missing=[m for m in required if importlib.util.find_spec(m) is None]; print('deps ok' if not missing else 'missing deps: ' + ', '.join(missing)); sys.exit(0 if not missing else 1)"
+RETRAIN_REQUIRED_MODULES=(duckdb pandas numpy joblib sklearn)
+if is_truthy "${RUN_OPS_SMOKE_ON_RETRAIN}"; then
+  # Keep preflight aligned with ops smoke imports to fail fast on missing env deps.
+  RETRAIN_REQUIRED_MODULES+=(fastapi ib_insync uvicorn)
+fi
+RETRAIN_MODULES_CSV="$(IFS=,; echo "${RETRAIN_REQUIRED_MODULES[*]}")"
+run_step "python_deps_check" "${PYTHON}" -c "import importlib.util, sys; required=[m for m in sys.argv[1].split(',') if m]; missing=[m for m in required if importlib.util.find_spec(m) is None]; print('deps ok: ' + ', '.join(required) if not missing else 'missing deps: ' + ', '.join(missing)); sys.exit(0 if not missing else 1)" "${RETRAIN_MODULES_CSV}"
 
 if is_truthy "${RUN_OPS_SMOKE_ON_RETRAIN}"; then
   echo "[$(timestamp)] START ops_smoke" | tee -a "${LOG_DIR}/retrain.log"
@@ -242,6 +248,7 @@ fi
 
 if is_truthy "${SCORE_UNSCORED_ON_RETRAIN}" && [[ "${RELOAD_STATUS}" == "ok" ]]; then
   echo "[$(timestamp)] START score_unscored" | tee -a "${LOG_DIR}/retrain.log"
+  echo "[$(timestamp)] INFO score_unscored config lookback_days=${SCORE_UNSCORED_LOOKBACK_DAYS} limit=${SCORE_UNSCORED_LIMIT} batch_size=${SCORE_UNSCORED_BATCH_SIZE} timeout_sec=${SCORE_UNSCORED_TIMEOUT_SEC} max_attempts=${SCORE_UNSCORED_MAX_ATTEMPTS} verify=${SCORE_UNSCORED_VERIFY_ON_RETRAIN} max_remaining=${SCORE_UNSCORED_MAX_REMAINING}" | tee -a "${LOG_DIR}/retrain.log"
   score_unscored_args=(
     --db "${PIVOT_DB_PATH}"
     --lookback-days "${SCORE_UNSCORED_LOOKBACK_DAYS}"

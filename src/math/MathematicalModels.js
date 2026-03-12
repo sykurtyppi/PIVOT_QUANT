@@ -725,43 +725,68 @@ export class MathematicalModels {
     // =================================================================================
 
     calculateSharpeRatio(ohlcData, riskFreeRate = this.constants.RISK_FREE_RATE) {
+        if (!Array.isArray(ohlcData) || ohlcData.length < 2) {
+            return 0;
+        }
         const returns = this._calculateReturns(ohlcData);
         const excessReturns = returns.map(r => r - (riskFreeRate / this.constants.TRADING_DAYS_PER_YEAR));
 
         const meanExcessReturn = this._calculateMean(excessReturns);
         const stdDev = Math.sqrt(this._calculateVariance(excessReturns));
+        if (!Number.isFinite(stdDev) || stdDev <= 1e-12) {
+            return 0;
+        }
+        const sharpe = (meanExcessReturn / stdDev) * Math.sqrt(this.constants.TRADING_DAYS_PER_YEAR);
+        if (!Number.isFinite(sharpe)) {
+            return 0;
+        }
 
-        return this._roundToPrecision(
-            (meanExcessReturn / stdDev) * Math.sqrt(this.constants.TRADING_DAYS_PER_YEAR),
-            4
-        );
+        return this._roundToPrecision(sharpe, 4);
     }
 
     calculateCalmarRatio(ohlcData) {
+        if (!Array.isArray(ohlcData) || ohlcData.length < 2) {
+            return 0;
+        }
         const returns = this._calculateReturns(ohlcData);
         const annualizedReturn = this._calculateMean(returns) * this.constants.TRADING_DAYS_PER_YEAR;
         const maxDrawdown = this.calculateMaxDrawdown(ohlcData);
+        const drawdownRatio = maxDrawdown.percentage / 100;
+        if (!Number.isFinite(drawdownRatio) || drawdownRatio <= 1e-12) {
+            return 0;
+        }
+        const calmar = annualizedReturn / drawdownRatio;
+        if (!Number.isFinite(calmar)) {
+            return 0;
+        }
 
-        return this._roundToPrecision(
-            annualizedReturn / (maxDrawdown.percentage / 100),
-            4
-        );
+        return this._roundToPrecision(calmar, 4);
     }
 
     calculateSortinoRatio(ohlcData, targetReturn = 0) {
+        if (!Array.isArray(ohlcData) || ohlcData.length < 2) {
+            return 0;
+        }
         const returns = this._calculateReturns(ohlcData);
         const excessReturns = returns.map(r => r - targetReturn);
         const meanExcessReturn = this._calculateMean(excessReturns);
 
         const downsideReturns = excessReturns.filter(r => r < 0);
+        if (downsideReturns.length === 0) {
+            return 0;
+        }
         const downsideDeviation = Math.sqrt(
             downsideReturns.reduce((sum, r) => sum + (r * r), 0) / downsideReturns.length
         );
+        if (!Number.isFinite(downsideDeviation) || downsideDeviation <= 1e-12) {
+            return 0;
+        }
+        const sortino = (meanExcessReturn / downsideDeviation) * Math.sqrt(this.constants.TRADING_DAYS_PER_YEAR);
+        if (!Number.isFinite(sortino)) {
+            return 0;
+        }
 
-        return this._roundToPrecision(
-            (meanExcessReturn / downsideDeviation) * Math.sqrt(this.constants.TRADING_DAYS_PER_YEAR),
-            4
-        );
+        return this._roundToPrecision(sortino, 4);
     }
 
     // =================================================================================
@@ -992,8 +1017,14 @@ export class MathematicalModels {
     }
 
     _calculateZScore(array) {
+        if (!Array.isArray(array) || array.length === 0) {
+            return [];
+        }
         const mean = this._calculateMean(array);
         const stdDev = Math.sqrt(this._calculateVariance(array));
+        if (!Number.isFinite(stdDev) || stdDev <= 1e-12) {
+            return array.map(() => 0);
+        }
         return array.map(value => (value - mean) / stdDev);
     }
 
