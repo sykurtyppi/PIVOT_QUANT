@@ -2642,6 +2642,10 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("--timeout-sec", retrain_script)
         self.assertIn("--max-attempts", retrain_script)
         self.assertIn("--fail-on-partial", retrain_script)
+        self.assertIn("capture_ops_smoke_failure_details", retrain_script)
+        self.assertIn("build_ops_smoke_alert_body", retrain_script)
+        self.assertIn("summary=", retrain_script)
+        self.assertIn("hint=", retrain_script)
 
     def test_runtime_requirements_contract_present(self) -> None:
         runtime_reqs = (REPO_ROOT / "requirements-runtime.txt").read_text(encoding="utf-8")

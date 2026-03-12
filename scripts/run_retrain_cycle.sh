@@ -97,7 +97,59 @@ run_ops_smoke() {
       sleep 2
     fi
   done
+  capture_ops_smoke_failure_details
+  echo "[$(timestamp)] WARN ops_smoke summary: ${OPS_SMOKE_FAILURE_SUMMARY}" | tee -a "${LOG_DIR}/retrain.log"
+  echo "[$(timestamp)] WARN ops_smoke hint: ${OPS_SMOKE_FAILURE_HINT}" | tee -a "${LOG_DIR}/retrain.log"
   return 1
+}
+
+sanitize_single_line() {
+  local raw="${1:-}"
+  printf '%s' "${raw}" | tr '\n\r' '  ' | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//'
+}
+
+capture_ops_smoke_failure_details() {
+  local window summary hint
+  window="$(tail -n 800 "${LOG_DIR}/retrain.log" 2>/dev/null || true)"
+  summary=""
+  hint="Check retrain.log for the latest traceback."
+
+  if [[ -n "${window}" ]]; then
+    summary="$(printf '%s\n' "${window}" | grep -E "AssertionError: " | tail -n 1 || true)"
+    if [[ -z "${summary}" ]]; then
+      summary="$(printf '%s\n' "${window}" | grep -E "FAILED \\(failures=[0-9]+" | tail -n 1 || true)"
+    fi
+    if [[ -z "${summary}" ]]; then
+      summary="$(printf '%s\n' "${window}" | grep -E "(ModuleNotFoundError:|ImportError:)" | tail -n 1 || true)"
+    fi
+    if [[ -z "${summary}" ]]; then
+      summary="$(printf '%s\n' "${window}" | grep -E "^ERROR: " | tail -n 1 || true)"
+    fi
+  fi
+
+  summary="$(sanitize_single_line "${summary}")"
+  if [[ -z "${summary}" ]]; then
+    summary="ops_smoke failed after retry; no concise failure marker was found."
+  fi
+
+  if [[ "${summary}" == *"AssertionError:"* && "${summary}" == *" not found in "* ]]; then
+    hint="Likely smoke contract mismatch: local script/config is behind expected test contract. Pull latest main and rerun retrain."
+  elif [[ "${summary}" == *"ModuleNotFoundError:"* || "${summary}" == *"ImportError:"* ]]; then
+    hint="Missing Python dependency in retrain runtime env. Run deps check/install for .venv and rerun."
+  elif [[ "${summary}" == *"FAILED (failures="* ]]; then
+    hint="One or more ops smoke tests failed; inspect the last traceback block in retrain.log."
+  fi
+
+  OPS_SMOKE_FAILURE_SUMMARY="${summary}"
+  OPS_SMOKE_FAILURE_HINT="${hint}"
+}
+
+build_ops_smoke_alert_body() {
+  printf 'host=%s\nstep=ops_smoke\nstatus=failed\nsummary=%s\nhint=%s\nlog=%s\n' \
+    "$(hostname)" \
+    "${OPS_SMOKE_FAILURE_SUMMARY}" \
+    "${OPS_SMOKE_FAILURE_HINT}" \
+    "${LOG_DIR}/retrain.log"
 }
 
 is_truthy() {
@@ -129,6 +181,8 @@ SCORE_UNSCORED_RETRY_MAX_SEC="${RETRAIN_SCORE_UNSCORED_RETRY_MAX_SEC:-5}"
 SCORE_UNSCORED_VERIFY_ON_RETRAIN="${RETRAIN_SCORE_UNSCORED_VERIFY_ON_RETRAIN:-true}"
 SCORE_UNSCORED_MAX_REMAINING="${RETRAIN_SCORE_UNSCORED_MAX_REMAINING:-0}"
 SCORE_UNSCORED_FAIL_ON_PARTIAL="${RETRAIN_SCORE_UNSCORED_FAIL_ON_PARTIAL:-false}"
+OPS_SMOKE_FAILURE_SUMMARY=""
+OPS_SMOKE_FAILURE_HINT=""
 RELOAD_STATUS="not_attempted"
 
 ops_set() {
@@ -190,10 +244,11 @@ if is_truthy "${RUN_OPS_SMOKE_ON_RETRAIN}"; then
   if run_ops_smoke; then
     echo "[$(timestamp)] DONE  ops_smoke" | tee -a "${LOG_DIR}/retrain.log"
   else
+    ALERT_BODY="$(build_ops_smoke_alert_body)"
     echo "[$(timestamp)] ERROR ops_smoke failed; aborting retrain" | tee -a "${LOG_DIR}/retrain.log"
     "${PYTHON}" scripts/health_alert_watchdog.py \
       --notify-subject "${ML_ALERT_SUBJECT_PREFIX:-[ALERT]} OPS SMOKE FAILED" \
-      --notify-body "host=$(hostname) step=ops_smoke status=failed log=${LOG_DIR}/retrain.log" \
+      --notify-body "${ALERT_BODY}" \
       >> "${LOG_DIR}/retrain.log" 2>&1 || true
     exit 1
   fi
