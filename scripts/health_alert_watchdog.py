@@ -13,21 +13,28 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 import smtplib
 import socket
 import subprocess
 import time
-from datetime import datetime, timezone
+from datetime import datetime, time as dt_time, timezone
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
 from urllib import error, request
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # pragma: no cover
+    ZoneInfo = None  # type: ignore
 
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ENV_FILE = ROOT / ".env"
 DEFAULT_STATE_FILE = ROOT / "logs" / "health_alert_state.json"
 DEFAULT_LOG_FILE = ROOT / "logs" / "health_alert.log"
+ET_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone.utc
 
 
 def parse_csv(raw: str | None) -> list[str]:
@@ -54,8 +61,29 @@ def to_float(value: object, default: float | None = None) -> float | None:
         return default
 
 
+def to_bool(value: object, default: bool = False) -> bool:
+    if value is None:
+        return default
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
 def now_iso_utc() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def is_market_hours_et(now_utc: datetime) -> bool:
+    now_et = now_utc.astimezone(ET_TZ)
+    if now_et.weekday() >= 5:
+        return False
+    open_time = dt_time(hour=9, minute=30)
+    close_time = dt_time(hour=16, minute=0)
+    t = now_et.time()
+    return t >= open_time and t < close_time
 
 
 def load_env_file(path: Path) -> None:
@@ -95,6 +123,33 @@ def save_state(path: Path, state: dict[str, Any]) -> None:
     temp_path = path.with_suffix(path.suffix + ".tmp")
     temp_path.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
     temp_path.replace(path)
+
+
+def count_unscored_live_events(db_path: str, lookback_minutes: int) -> tuple[int | None, str | None]:
+    lookback_ms = max(1, int(lookback_minutes)) * 60 * 1000
+    min_ts_ms = int(time.time() * 1000) - lookback_ms
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            row = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM touch_events te
+                WHERE te.ts_event >= ?
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM prediction_log pl
+                    WHERE pl.event_id = te.event_id
+                      AND COALESCE(pl.is_preview, 0) = 0
+                  )
+                """,
+                (min_ts_ms,),
+            ).fetchone()
+            return int(row[0] or 0), None
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        return None, str(exc)
 
 
 def check_service(
@@ -432,6 +487,21 @@ def build_body(
         lines.append(f"Score duration threshold: {result['score_latency_threshold_ms']:.3f} ms")
     if result.get("score_success_count") is not None:
         lines.append(f"Score success count: {result['score_success_count']}")
+    if result.get("collector_unscored_count") is not None:
+        lines.append(
+            "Collector unscored (lookback): "
+            f"{result['collector_unscored_count']} "
+            f"(threshold={result.get('collector_unscored_threshold')}, "
+            f"lookback_min={result.get('collector_unscored_lookback_min')}, "
+            f"market_hours_only={result.get('collector_unscored_market_hours_only')})"
+        )
+    if result.get("collector_unscored_streak") is not None:
+        lines.append(
+            f"Collector unscored streak: {result['collector_unscored_streak']}/"
+            f"{result.get('collector_unscored_streak_threshold')}"
+        )
+    if result.get("collector_unscored_query_error"):
+        lines.append(f"Collector unscored query error: {result['collector_unscored_query_error']}")
     if prior:
         previous_state = prior.get("state")
         previous_reason = prior.get("last_reason")
@@ -482,7 +552,8 @@ def main() -> int:
     log_file = Path(args.log_file).expanduser()
     state_file = Path(args.state_file).expanduser()
     host = socket.gethostname()
-    checked_at = now_iso_utc()
+    now_dt_utc = datetime.now(timezone.utc)
+    checked_at = now_dt_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
     now_ts = int(time.time())
 
     if args.notify_subject.strip() and args.notify_body.strip():
@@ -510,6 +581,26 @@ def main() -> int:
     )
     service_consecutive_fails = max(
         1, int(os.getenv("ML_ALERT_CONSECUTIVE_FAILS", "2") or "2")
+    )
+    collector_unscored_guard_enabled = to_bool(
+        os.getenv("ML_ALERT_COLLECTOR_UNSCORED_GUARD", "true"),
+        default=True,
+    )
+    collector_unscored_max = max(
+        0, int(os.getenv("ML_ALERT_COLLECTOR_UNSCORED_MAX", "0") or "0")
+    )
+    collector_unscored_lookback_min = max(
+        1, int(os.getenv("ML_ALERT_COLLECTOR_UNSCORED_LOOKBACK_MIN", "120") or "120")
+    )
+    collector_unscored_consecutive_fails = max(
+        1, int(os.getenv("ML_ALERT_COLLECTOR_UNSCORED_CONSECUTIVE_FAILS", "3") or "3")
+    )
+    collector_unscored_market_hours_only = to_bool(
+        os.getenv("ML_ALERT_COLLECTOR_UNSCORED_MARKET_HOURS_ONLY", "true"),
+        default=True,
+    )
+    pivot_db_path = os.getenv("PIVOT_DB", str(ROOT / "data" / "pivot_events.sqlite")).strip() or str(
+        ROOT / "data" / "pivot_events.sqlite"
     )
 
     state = load_state(state_file)
@@ -544,6 +635,44 @@ def main() -> int:
                     )
             else:
                 previous["ml_score_latency_streak"] = 0
+        elif name == "collector":
+            previous_streak = to_int(previous.get("collector_unscored_streak"), 0)
+            guard_window_open = (not collector_unscored_market_hours_only) or is_market_hours_et(now_dt_utc)
+            result["collector_unscored_market_hours_only"] = collector_unscored_market_hours_only
+            result["collector_unscored_lookback_min"] = collector_unscored_lookback_min
+            result["collector_unscored_threshold"] = collector_unscored_max
+            result["collector_unscored_streak_threshold"] = collector_unscored_consecutive_fails
+            result["collector_unscored_streak"] = previous_streak
+
+            if collector_unscored_guard_enabled and guard_window_open and bool(result.get("up")):
+                unscored_count, unscored_error = count_unscored_live_events(
+                    db_path=pivot_db_path,
+                    lookback_minutes=collector_unscored_lookback_min,
+                )
+                result["collector_unscored_count"] = unscored_count
+                result["collector_unscored_query_error"] = unscored_error
+                if unscored_error:
+                    previous["collector_unscored_streak"] = 0
+                    result["collector_unscored_streak"] = 0
+                elif unscored_count is not None and unscored_count > collector_unscored_max:
+                    next_streak = previous_streak + 1
+                    previous["collector_unscored_streak"] = next_streak
+                    result["collector_unscored_streak"] = next_streak
+                    if next_streak >= collector_unscored_consecutive_fails:
+                        result["up"] = False
+                        result["status"] = "scoring_lagging"
+                        result["reason"] = (
+                            f"unscored_count={unscored_count} exceeds threshold={collector_unscored_max} "
+                            f"(lookback={collector_unscored_lookback_min}m); "
+                            f"streak={next_streak}/{collector_unscored_consecutive_fails}"
+                        )
+                        result["skip_pending_downgrade"] = True
+                else:
+                    previous["collector_unscored_streak"] = 0
+                    result["collector_unscored_streak"] = 0
+            else:
+                previous["collector_unscored_streak"] = 0
+                result["collector_unscored_streak"] = 0
 
         raw_is_down = not bool(result["up"])
         down_streak = to_int(previous.get("down_streak"), 0)
@@ -552,7 +681,7 @@ def main() -> int:
         else:
             down_streak = 0
         previous["down_streak"] = down_streak
-        if raw_is_down and down_streak < service_consecutive_fails:
+        if raw_is_down and down_streak < service_consecutive_fails and not bool(result.get("skip_pending_downgrade")):
             result["up"] = True
             base_status = str(result.get("status") or "unknown")
             base_reason = str(result.get("reason") or "health check failed")
