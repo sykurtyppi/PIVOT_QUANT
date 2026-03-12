@@ -2348,6 +2348,8 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("\"status\": \"skipped\"", source)
         self.assertIn("ThreadingHTTPServer", source)
         self.assertIn("fail_on_error", source)
+        self.assertIn("def do_GET(self)", source)
+        self.assertIn('if self.path == "/health"', source)
 
     def test_ci_runs_reload_score_stress_harness_self_test(self) -> None:
         ci = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")

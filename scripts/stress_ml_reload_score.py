@@ -368,6 +368,12 @@ class _SelfTestHandler(BaseHTTPRequestHandler):
             return
         self._json_response(404, {"status": "error", "message": "not found"})
 
+    def do_GET(self) -> None:  # noqa: N802
+        if self.path == "/health":
+            self._json_response(200, {"status": "ok"})
+            return
+        self._json_response(404, {"status": "error", "message": "not found"})
+
     def log_message(self, _format: str, *_args: Any) -> None:
         return
 
