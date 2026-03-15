@@ -547,7 +547,8 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None):
         if isinstance(exc, urllib.error.HTTPError):
             retry_after = _parse_retry_after_seconds(exc.headers.get("Retry-After"))
             if retry_after is not None:
-                backoff_sec = max(backoff_sec, int(retry_after))
+                # Respect upstream cooldown guidance when present.
+                backoff_sec = max(1, int(retry_after))
         with _mda_gamma_cache_lock:
             _mda_gamma_error_backoff_until[cache_key] = time.monotonic() + max(1, backoff_sec)
         if stale_payload is not None:
@@ -740,7 +741,7 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None):
     with _mda_gamma_cache_lock:
         _mda_gamma_cache[cache_key] = (deepcopy(payload), time.monotonic() + MDA_GAMMA_CACHE_TTL_SEC)
 
-    return deepcopy(payload)
+    return payload
 
 
 class GammaHandler(BaseHTTPRequestHandler):

@@ -1650,6 +1650,15 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("?dte={GAMMA_HISTORY_LIVE_DTE_DAYS}", fetch_block)
         self.assertNotIn("?expiration=all", fetch_block)
 
+    def test_backfill_gamma_context_avoids_marketdata_when_bridge_reports_cooldown(self) -> None:
+        source = (REPO_ROOT / "scripts" / "backfill_events.py").read_text(encoding="utf-8")
+        block = source.split("def fetch_gamma_context(", 1)[1].split("def et_date", 1)[0]
+        self.assertIn("bridge_marketdata_cooldown", block)
+        self.assertIn("cooldown active", block)
+        self.assertIn("daily request limit", block)
+        self.assertIn("if bridge_marketdata_cooldown:", block)
+        self.assertIn("_merge_context_with_carry(snapshot_context, carry_context, today_et)", block)
+
     def test_enrich_touch_events_uses_carry_and_does_not_null_overwrite(self) -> None:
         db = self.tmp / "enrich_gamma.sqlite"
         conn = sqlite3.connect(str(db))
@@ -2558,7 +2567,7 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("from copy import deepcopy", source)
         self.assertIn("return deepcopy(cached_entry[0])", source)
         self.assertIn("_mda_gamma_cache[cache_key] = (deepcopy(payload),", source)
-        self.assertIn("return deepcopy(payload)", source)
+        self.assertIn("return payload", source)
 
     def test_ibkr_bridge_marketdata_uses_stale_cache_on_upstream_error(self) -> None:
         source = (REPO_ROOT / "server" / "ibkr_gamma_bridge.py").read_text(encoding="utf-8")
@@ -2570,6 +2579,7 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("_mda_gamma_error_backoff_until", source)
         self.assertIn("MDA_GAMMA_ERROR_BACKOFF_SEC", source)
         self.assertIn("cooldown active", block)
+        self.assertIn("backoff_sec = max(1, int(retry_after))", block)
 
     def test_ibkr_bridge_market_close_uses_new_york_timezone(self) -> None:
         bridge = load_module(

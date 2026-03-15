@@ -8,12 +8,14 @@ import math
 import os
 import sqlite3
 import sys
+import threading
 import time
 import traceback
 import hashlib
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Iterable
+from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -63,6 +65,11 @@ GAMMA_CONTEXT_CARRY_MAX_DAYS = int(os.getenv("GAMMA_CONTEXT_CARRY_MAX_DAYS", "1"
 GAMMA_CONTEXT_CARRY_CONFIDENCE_DECAY_PER_DAY = int(
     os.getenv("GAMMA_CONTEXT_CARRY_CONFIDENCE_DECAY_PER_DAY", "20")
 )
+GAMMA_CONTEXT_MARKETDATA_ERROR_BACKOFF_SEC = int(
+    os.getenv("GAMMA_CONTEXT_MARKETDATA_ERROR_BACKOFF_SEC", "900")
+)
+_gamma_context_marketdata_backoff_until: dict[str, float] = {}
+_gamma_context_marketdata_backoff_lock = threading.Lock()
 
 
 def now_ms() -> int:
@@ -247,6 +254,31 @@ def fetch_json(url: str, timeout: int = 12, retries: int = 2) -> dict:
                 time.sleep(wait)
             else:
                 raise ConnectionError(f"fetch_json failed after {retries + 1} attempts: {url}") from last_err
+
+
+def _decode_http_error_json(exc: HTTPError) -> dict | None:
+    try:
+        raw = exc.read()
+    except Exception:
+        return None
+
+
+def _parse_retry_after_seconds(raw_value: object) -> int | None:
+    if raw_value is None:
+        return None
+    try:
+        seconds = int(float(str(raw_value).strip()))
+    except Exception:
+        return None
+    if seconds <= 0:
+        return None
+    return seconds
+    if not raw:
+        return None
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except Exception:
+        return None
 
 
 def fetch_market(symbol: str, interval: str, range_str: str, source: str) -> tuple[dict, str]:
@@ -571,6 +603,12 @@ def _fetch_gamma_context_marketdata_live(
 ) -> dict | None:
     if not MARKETDATA_APP_TOKEN or summarize_gamma_chain is None:
         return None
+    cache_key = symbol.upper()
+    now_mono = time.monotonic()
+    with _gamma_context_marketdata_backoff_lock:
+        cooldown_until = float(_gamma_context_marketdata_backoff_until.get(cache_key, 0.0) or 0.0)
+        if cooldown_until > now_mono:
+            return None
     url = f"{MARKETDATA_APP_BASE}/options/chain/{symbol.upper()}/?dte={GAMMA_CONTEXT_DTE_DAYS}"
     req = Request(
         url,
@@ -600,6 +638,8 @@ def _fetch_gamma_context_marketdata_live(
             ensure_gamma_snapshots_schema(conn)
             upsert_gamma_snapshot(conn, snap)
             conn.commit()
+        with _gamma_context_marketdata_backoff_lock:
+            _gamma_context_marketdata_backoff_until.pop(cache_key, None)
         return {
             "symbol": symbol.upper(),
             "gamma_flip": _to_float(snap.get("gamma_flip")),
@@ -616,6 +656,14 @@ def _fetch_gamma_context_marketdata_live(
             "generated_at_date_et": snapshot_date,
             "source_name": "marketdata_live",
         }
+    except HTTPError as exc:
+        backoff_sec = GAMMA_CONTEXT_MARKETDATA_ERROR_BACKOFF_SEC
+        retry_after = _parse_retry_after_seconds(exc.headers.get("Retry-After"))
+        if retry_after is not None:
+            backoff_sec = max(1, retry_after)
+        with _gamma_context_marketdata_backoff_lock:
+            _gamma_context_marketdata_backoff_until[cache_key] = time.monotonic() + max(1, backoff_sec)
+        return None
     except Exception:
         return None
 
@@ -724,22 +772,30 @@ def fetch_gamma_context(
     base_url = (os.getenv("GAMMA_BRIDGE_URL") or GAMMA_BRIDGE_URL).strip()
     sep = "&" if "?" in base_url else "?"
     url = f"{base_url}{sep}symbol={symbol}&expiry=front&limit=60"
+    bridge_payload = None
+    bridge_error_message = ""
+    bridge_marketdata_cooldown = False
     try:
-        payload = fetch_json(url, timeout=timeout, retries=0)
-    except Exception:
-        payload = None
+        req = Request(url, headers={"User-Agent": "PivotQuantBackfill/1.0"})
+        with urlopen(req, timeout=timeout) as resp:
+            bridge_payload = json.loads(resp.read().decode("utf-8"))
+    except HTTPError as exc:
+        bridge_payload = _decode_http_error_json(exc)
+        bridge_error_message = str((bridge_payload or {}).get("message") or str(exc))
+    except Exception as exc:
+        bridge_error_message = str(exc)
 
-    if payload is not None:
-        gamma_flip = _to_float(payload.get("gammaFlip"))
+    if bridge_payload is not None:
+        gamma_flip = _to_float(bridge_payload.get("gammaFlip"))
         if gamma_flip is not None:
-            generated_at_ms = _parse_generated_at_ms(payload.get("generatedAt"))
-            atm_iv_raw = _to_float((payload.get("stats") or {}).get("atmIV"))
+            generated_at_ms = _parse_generated_at_ms(bridge_payload.get("generatedAt"))
+            atm_iv_raw = _to_float((bridge_payload.get("stats") or {}).get("atmIV"))
             return {
                 "symbol": symbol.upper(),
                 "gamma_flip": gamma_flip,
-                "gamma_confidence": _derive_gamma_confidence(payload),
-                "oi_concentration_top5": _to_float((payload.get("stats") or {}).get("oiConcentration")),
-                "zero_dte_share": _to_float((payload.get("stats") or {}).get("zeroDteShare")),
+                "gamma_confidence": _derive_gamma_confidence(bridge_payload),
+                "oi_concentration_top5": _to_float((bridge_payload.get("stats") or {}).get("oiConcentration")),
+                "zero_dte_share": _to_float((bridge_payload.get("stats") or {}).get("zeroDteShare")),
                 "atm_iv_pct": _to_atm_iv_pct(atm_iv_raw),
                 "generated_at_ms": generated_at_ms,
                 "generated_at_date_et": (
@@ -749,6 +805,13 @@ def fetch_gamma_context(
                 ),
                 "source_name": "ibkr_bridge",
             }
+        bridge_error_message = str(bridge_payload.get("message") or bridge_payload.get("error") or bridge_error_message)
+    bridge_err_text = bridge_error_message.lower()
+    bridge_marketdata_cooldown = (
+        "cooldown active" in bridge_err_text
+        or "too many requests" in bridge_err_text
+        or "daily request limit" in bridge_err_text
+    )
 
     snapshot_context = _fetch_gamma_context_from_snapshots(symbol=symbol, conn=conn)
     today_et = datetime.now(NY_TZ).date()
@@ -763,6 +826,8 @@ def fetch_gamma_context(
             if _context_has_signal_fields(snapshot_context):
                 return snapshot_context
             # Snapshot for today exists but misses greeks/IV. Try live refresh.
+            if bridge_marketdata_cooldown:
+                return _merge_context_with_carry(snapshot_context, carry_context, today_et)
             live_context = _fetch_gamma_context_marketdata_live(
                 symbol=symbol,
                 timeout=max(timeout, GAMMA_CONTEXT_MARKETDATA_TIMEOUT_SEC),
@@ -771,12 +836,17 @@ def fetch_gamma_context(
             return _merge_context_with_carry(live_context or snapshot_context, carry_context, today_et)
 
         # Snapshot exists but is stale; try live refresh before falling back.
+        if bridge_marketdata_cooldown:
+            return _merge_context_with_carry(snapshot_context, carry_context, today_et)
         live_context = _fetch_gamma_context_marketdata_live(
             symbol=symbol,
             timeout=max(timeout, GAMMA_CONTEXT_MARKETDATA_TIMEOUT_SEC),
             conn=conn,
         )
         return _merge_context_with_carry(live_context or snapshot_context, carry_context, today_et)
+
+    if bridge_marketdata_cooldown:
+        return _merge_context_with_carry(None, carry_context, today_et)
 
     live_context = _fetch_gamma_context_marketdata_live(
         symbol=symbol,
