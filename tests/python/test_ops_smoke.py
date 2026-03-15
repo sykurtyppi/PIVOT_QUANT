@@ -1643,6 +1643,13 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(len(sleep_calls), 2)
         self.assertTrue(all(abs(seconds - 0.001) < 1e-9 for seconds in sleep_calls))
 
+    def test_collect_gamma_history_fallback_uses_dte_filter(self) -> None:
+        source = (REPO_ROOT / "scripts" / "collect_gamma_history.py").read_text(encoding="utf-8")
+        self.assertIn("GAMMA_HISTORY_LIVE_DTE_DAYS", source)
+        fetch_block = source.split("def fetch_marketdata_chain(", 1)[1].split("def _to_float", 1)[0]
+        self.assertIn("?dte={GAMMA_HISTORY_LIVE_DTE_DAYS}", fetch_block)
+        self.assertNotIn("?expiration=all", fetch_block)
+
     def test_enrich_touch_events_uses_carry_and_does_not_null_overwrite(self) -> None:
         db = self.tmp / "enrich_gamma.sqlite"
         conn = sqlite3.connect(str(db))
@@ -2545,6 +2552,24 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("with ib_lock:", ensure_block)
         self.assertIn("if ib.isConnected()", ensure_block)
         self.assertIn("ib.connect(IB_HOST, IB_PORT, clientId=IB_CLIENT_ID)", ensure_block)
+
+    def test_ibkr_bridge_marketdata_cache_returns_copy(self) -> None:
+        source = (REPO_ROOT / "server" / "ibkr_gamma_bridge.py").read_text(encoding="utf-8")
+        self.assertIn("from copy import deepcopy", source)
+        self.assertIn("return deepcopy(cached_entry[0])", source)
+        self.assertIn("_mda_gamma_cache[cache_key] = (deepcopy(payload),", source)
+        self.assertIn("return deepcopy(payload)", source)
+
+    def test_ibkr_bridge_marketdata_uses_stale_cache_on_upstream_error(self) -> None:
+        source = (REPO_ROOT / "server" / "ibkr_gamma_bridge.py").read_text(encoding="utf-8")
+        block = source.split("def fetch_gamma_marketdata(", 1)[1].split("class GammaHandler", 1)[0]
+        self.assertIn("stale_payload = None", block)
+        self.assertIn("if stale_payload is not None:", block)
+        self.assertIn("stale_payload[\"cacheStale\"] = True", block)
+        self.assertIn("stale_payload[\"cacheStaleReason\"] = str(exc)", block)
+        self.assertIn("_mda_gamma_error_backoff_until", source)
+        self.assertIn("MDA_GAMMA_ERROR_BACKOFF_SEC", source)
+        self.assertIn("cooldown active", block)
 
     def test_ibkr_bridge_market_close_uses_new_york_timezone(self) -> None:
         bridge = load_module(
@@ -5221,7 +5246,8 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("- >6h: 0", text)
         self.assertIn("- No prediction: 0", text)
         self.assertIn("| 2026-03-06 | 1 | 1 | 0 | 0 | 0 | 0 |", text)
-        self.assertIn("## Policy Comparison (Baseline vs Guardrail vs No-5m)", text)
+        self.assertIn("## What-if Policy Comparison (Baseline vs Guardrail vs No-5m)", text)
+        self.assertIn("## Runtime Applied Policy Summary", text)
         self.assertIn("## Cost Sweep", text)
         self.assertIn("## Stratified PnL (Regime x ATR Zone x Horizon)", text)
         self.assertIn("## Daily Expectancy", text)

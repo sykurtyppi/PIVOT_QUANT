@@ -181,7 +181,8 @@ def fetch_marketdata_chain(
         return _request(url)
     except HTTPError as exc:
         # Same-day date queries can fail with 400 for some accounts.
-        # Fall back to the live chain endpoint so today's snapshot can still persist.
+        # Fall back to a DTE-filtered live chain endpoint so today's snapshot can
+        # still persist without consuming full-chain credits.
         if exc.code != 400:
             raise
         live_url = f"{MARKETDATA_APP_BASE}/options/chain/{symbol.upper()}/?dte={GAMMA_HISTORY_LIVE_DTE_DAYS}"

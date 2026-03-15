@@ -41,11 +41,16 @@ MDA_GAMMA_DTE_DAYS = int(os.getenv("MDA_GAMMA_DTE_DAYS", "30"))
 # dashboard auto-refresh (default 60s). 1800s = 30 min; tune down to 300 if
 # you want faster reaction to intraday gamma shifts.
 MDA_GAMMA_CACHE_TTL_SEC = int(os.getenv("MDA_GAMMA_CACHE_TTL_SEC", "1800"))
+# After an upstream marketdata.app failure (for example 429), suppress new
+# upstream requests for this many seconds per symbol and serve stale cache when
+# available to avoid a request loop.
+MDA_GAMMA_ERROR_BACKOFF_SEC = int(os.getenv("MDA_GAMMA_ERROR_BACKOFF_SEC", "900"))
 _DEFAULT_CORS_ORIGINS = "http://127.0.0.1:3000,http://localhost:3000"
 
 # In-process gamma cache: symbol -> (payload_dict, expires_monotonic_sec)
 _mda_gamma_cache: dict = {}
 _mda_gamma_cache_lock = threading.Lock()
+_mda_gamma_error_backoff_until: dict = {}
 NY_TZ = ZoneInfo("America/New_York") if ZoneInfo else None
 
 ib = IB()
@@ -62,6 +67,21 @@ def _utc_iso_z() -> str:
 
 def _utc_today_yyyymmdd() -> str:
     return _utc_now().strftime("%Y%m%d")
+
+
+def _parse_retry_after_seconds(raw_value) -> float | None:
+    if raw_value is None:
+        return None
+    text = str(raw_value).strip()
+    if not text:
+        return None
+    try:
+        seconds = float(text)
+        if seconds > 0:
+            return seconds
+    except Exception:
+        return None
+    return None
 
 
 def _is_market_session_closed(now_utc: datetime) -> bool:
@@ -482,10 +502,27 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None):
     # 60s auto-refresh that would exhaust a 100k daily quota in under an hour.
     cache_key = symbol.upper()
     now_mono = time.monotonic()
+    stale_payload = None
     with _mda_gamma_cache_lock:
         cached_entry = _mda_gamma_cache.get(cache_key)
-        if cached_entry is not None and now_mono < cached_entry[1]:
-            return deepcopy(cached_entry[0])
+        if cached_entry is not None:
+            if now_mono < cached_entry[1]:
+                return deepcopy(cached_entry[0])
+            stale_payload = deepcopy(cached_entry[0])
+        cooldown_until = float(_mda_gamma_error_backoff_until.get(cache_key, 0.0) or 0.0)
+        if cooldown_until > now_mono:
+            remaining_sec = int(cooldown_until - now_mono)
+            if stale_payload is not None:
+                stale_payload["cacheStale"] = True
+                stale_payload["cacheStaleReason"] = (
+                    f"marketdata cooldown active ({remaining_sec}s remaining)"
+                )
+                stale_payload["cacheStaleAt"] = _utc_iso_z()
+                return stale_payload
+            raise ValueError(
+                f"marketdata.app cooldown active for {remaining_sec}s; "
+                "upstream call suppressed after recent error"
+            )
 
     sr = strike_range or IB_STRIKE_RANGE
     ms = max_strikes or IB_MAX_STRIKES
@@ -495,14 +532,30 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None):
     # of ~20+, reducing credit cost from ~8,000 rows to ~1,500 rows per call.
     url = f"{MARKETDATA_APP_BASE}/options/chain/{symbol.upper()}/?dte={MDA_GAMMA_DTE_DAYS}"
     req = urllib.request.Request(url, headers={"Authorization": f"Token {MARKETDATA_APP_TOKEN}"})
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        data = json.loads(resp.read())
-
-    if data.get("s") != "ok":
-        raise ValueError(
-            f"marketdata.app options chain error for {symbol}: "
-            f"{data.get('errmsg', data.get('s', 'unknown'))}"
-        )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read())
+        if data.get("s") != "ok":
+            raise ValueError(
+                f"marketdata.app options chain error for {symbol}: "
+                f"{data.get('errmsg', data.get('s', 'unknown'))}"
+            )
+        with _mda_gamma_cache_lock:
+            _mda_gamma_error_backoff_until.pop(cache_key, None)
+    except Exception as exc:
+        backoff_sec = MDA_GAMMA_ERROR_BACKOFF_SEC
+        if isinstance(exc, urllib.error.HTTPError):
+            retry_after = _parse_retry_after_seconds(exc.headers.get("Retry-After"))
+            if retry_after is not None:
+                backoff_sec = max(backoff_sec, int(retry_after))
+        with _mda_gamma_cache_lock:
+            _mda_gamma_error_backoff_until[cache_key] = time.monotonic() + max(1, backoff_sec)
+        if stale_payload is not None:
+            stale_payload["cacheStale"] = True
+            stale_payload["cacheStaleReason"] = str(exc)
+            stale_payload["cacheStaleAt"] = _utc_iso_z()
+            return stale_payload
+        raise
 
     # Extract arrays from the response
     strikes = data.get("strike", [])
