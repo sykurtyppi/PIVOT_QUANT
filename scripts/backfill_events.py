@@ -719,7 +719,7 @@ def fetch_gamma_context(
     Priority:
       1) local gamma bridge
       2) recent row in gamma_snapshots table
-      3) marketdata.app live chain snapshot (expiration=all)
+      3) marketdata.app live chain snapshot (dte-filtered)
     """
     base_url = (os.getenv("GAMMA_BRIDGE_URL") or GAMMA_BRIDGE_URL).strip()
     sep = "&" if "?" in base_url else "?"

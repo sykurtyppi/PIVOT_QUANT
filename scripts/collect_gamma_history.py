@@ -23,6 +23,7 @@ DEFAULT_DB = os.getenv("PIVOT_DB", "data/pivot_events.sqlite")
 DEFAULT_SYMBOLS = os.getenv("LIVE_COLLECTOR_SYMBOLS", "SPY")
 DEFAULT_RANGE_PCT = float(os.getenv("GAMMA_HISTORY_STRIKE_RANGE_PCT", "0.2"))
 DEFAULT_MAX_STRIKES = int(os.getenv("GAMMA_HISTORY_MAX_STRIKES", "120"))
+GAMMA_HISTORY_LIVE_DTE_DAYS = max(1, int(os.getenv("GAMMA_HISTORY_LIVE_DTE_DAYS", "30")))
 DEFAULT_TIMEOUT = int(os.getenv("GAMMA_HISTORY_HTTP_TIMEOUT_SEC", "60"))
 DEFAULT_HTTP_MAX_ATTEMPTS = max(1, int(os.getenv("GAMMA_HISTORY_HTTP_MAX_ATTEMPTS", "6")))
 DEFAULT_HTTP_RETRY_BASE_SEC = max(0.0, float(os.getenv("GAMMA_HISTORY_HTTP_RETRY_BASE_SEC", "1.0")))
@@ -183,7 +184,7 @@ def fetch_marketdata_chain(
         # Fall back to the live chain endpoint so today's snapshot can still persist.
         if exc.code != 400:
             raise
-        live_url = f"{MARKETDATA_APP_BASE}/options/chain/{symbol.upper()}/?expiration=all"
+        live_url = f"{MARKETDATA_APP_BASE}/options/chain/{symbol.upper()}/?dte={GAMMA_HISTORY_LIVE_DTE_DAYS}"
         return _request(live_url)
 
 

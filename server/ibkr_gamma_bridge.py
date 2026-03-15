@@ -4,6 +4,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from copy import deepcopy
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -484,7 +485,7 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None):
     with _mda_gamma_cache_lock:
         cached_entry = _mda_gamma_cache.get(cache_key)
         if cached_entry is not None and now_mono < cached_entry[1]:
-            return cached_entry[0]
+            return deepcopy(cached_entry[0])
 
     sr = strike_range or IB_STRIKE_RANGE
     ms = max_strikes or IB_MAX_STRIKES
@@ -684,9 +685,9 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None):
     # Store in cache so subsequent dashboard refreshes within the TTL window
     # don't burn API credits on a full chain re-download.
     with _mda_gamma_cache_lock:
-        _mda_gamma_cache[cache_key] = (payload, time.monotonic() + MDA_GAMMA_CACHE_TTL_SEC)
+        _mda_gamma_cache[cache_key] = (deepcopy(payload), time.monotonic() + MDA_GAMMA_CACHE_TTL_SEC)
 
-    return payload
+    return deepcopy(payload)
 
 
 class GammaHandler(BaseHTTPRequestHandler):
@@ -739,6 +740,7 @@ class GammaHandler(BaseHTTPRequestHandler):
                 try:
                     payload = fetch_gamma_marketdata(symbol)
                     if ibkr_err:
+                        payload = dict(payload)
                         payload["ibkrFallbackReason"] = ibkr_err
                     self._send_json(200, payload)
                     return
