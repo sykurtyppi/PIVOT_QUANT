@@ -52,6 +52,11 @@ MARKETDATA_APP_TOKEN = os.getenv("MARKETDATA_APP_TOKEN", "").strip()
 MARKETDATA_APP_BASE = "https://api.marketdata.app/v1"
 GAMMA_CONTEXT_MARKETDATA_TIMEOUT_SEC = int(os.getenv("GAMMA_CONTEXT_MARKETDATA_TIMEOUT_SEC", "12"))
 GAMMA_CONTEXT_MAX_SNAPSHOT_AGE_DAYS = int(os.getenv("GAMMA_CONTEXT_MAX_SNAPSHOT_AGE_DAYS", "3"))
+# Limit live chain fetches to options expiring within this many days.
+# ?expiration=all was the previous value — it downloads the full SPY chain
+# (~8,000 rows = 8,000 credits). ?dte=30 returns only near-term expiries
+# (~1,500 rows) while retaining all the gamma signal that matters.
+GAMMA_CONTEXT_DTE_DAYS = int(os.getenv("GAMMA_CONTEXT_DTE_DAYS", "30"))
 GAMMA_CONTEXT_STRIKE_RANGE_PCT = float(os.getenv("GAMMA_HISTORY_STRIKE_RANGE_PCT", "0.2"))
 GAMMA_CONTEXT_MAX_STRIKES = int(os.getenv("GAMMA_HISTORY_MAX_STRIKES", "120"))
 GAMMA_CONTEXT_CARRY_MAX_DAYS = int(os.getenv("GAMMA_CONTEXT_CARRY_MAX_DAYS", "1"))
@@ -566,7 +571,7 @@ def _fetch_gamma_context_marketdata_live(
 ) -> dict | None:
     if not MARKETDATA_APP_TOKEN or summarize_gamma_chain is None:
         return None
-    url = f"{MARKETDATA_APP_BASE}/options/chain/{symbol.upper()}/?expiration=all"
+    url = f"{MARKETDATA_APP_BASE}/options/chain/{symbol.upper()}/?dte={GAMMA_CONTEXT_DTE_DAYS}"
     req = Request(
         url,
         headers={

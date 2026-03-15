@@ -1,6 +1,7 @@
 import json
 import os
 import threading
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -31,7 +32,19 @@ IB_USE_RTH = os.getenv("IB_USE_RTH", "1") != "0"
 IB_DATA_TYPE = os.getenv("IB_DATA_TYPE", "").strip()
 MARKETDATA_APP_TOKEN = os.getenv("MARKETDATA_APP_TOKEN", "").strip()
 MARKETDATA_APP_BASE = "https://api.marketdata.app/v1"
+# Limit options chain to options expiring within this many days.
+# Keeps ~4-6 near-term weekly expiries instead of the full chain (~20 expiries).
+# Reduces per-call credit cost from ~8,000 → ~1,500 rows.
+MDA_GAMMA_DTE_DAYS = int(os.getenv("MDA_GAMMA_DTE_DAYS", "30"))
+# Cache gamma results for this many seconds to avoid burning credits on every
+# dashboard auto-refresh (default 60s). 1800s = 30 min; tune down to 300 if
+# you want faster reaction to intraday gamma shifts.
+MDA_GAMMA_CACHE_TTL_SEC = int(os.getenv("MDA_GAMMA_CACHE_TTL_SEC", "1800"))
 _DEFAULT_CORS_ORIGINS = "http://127.0.0.1:3000,http://localhost:3000"
+
+# In-process gamma cache: symbol -> (payload_dict, expires_monotonic_sec)
+_mda_gamma_cache: dict = {}
+_mda_gamma_cache_lock = threading.Lock()
 NY_TZ = ZoneInfo("America/New_York") if ZoneInfo else None
 
 ib = IB()
@@ -463,11 +476,23 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None):
     if not MARKETDATA_APP_TOKEN:
         raise ValueError("MARKETDATA_APP_TOKEN not set — cannot use marketdata.app fallback")
 
+    # Serve from in-process cache if still fresh. The full options chain for
+    # SPY costs ~1,500 credits per call with DTE filtering; at the dashboard's
+    # 60s auto-refresh that would exhaust a 100k daily quota in under an hour.
+    cache_key = symbol.upper()
+    now_mono = time.monotonic()
+    with _mda_gamma_cache_lock:
+        cached_entry = _mda_gamma_cache.get(cache_key)
+        if cached_entry is not None and now_mono < cached_entry[1]:
+            return cached_entry[0]
+
     sr = strike_range or IB_STRIKE_RANGE
     ms = max_strikes or IB_MAX_STRIKES
 
-    # Fetch the options chain for the symbol
-    url = f"{MARKETDATA_APP_BASE}/options/chain/{symbol.upper()}/"
+    # Limit to near-term expiries via ?dte= to avoid fetching the full chain
+    # (all expiries). For SPY, ?dte=30 returns ~5-6 weekly expirations instead
+    # of ~20+, reducing credit cost from ~8,000 rows to ~1,500 rows per call.
+    url = f"{MARKETDATA_APP_BASE}/options/chain/{symbol.upper()}/?dte={MDA_GAMMA_DTE_DAYS}"
     req = urllib.request.Request(url, headers={"Authorization": f"Token {MARKETDATA_APP_TOKEN}"})
     with urllib.request.urlopen(req, timeout=30) as resp:
         data = json.loads(resp.read())
@@ -630,7 +655,7 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None):
     oi_concentration = round((top_oi / total_oi) * 100, 2) if total_oi else None
     zero_dte_share = round((zero_dte_oi / total_oi) * 100, 2) if total_oi else None
 
-    return {
+    payload = {
         "source": "marketdata.app",
         "symbol": symbol.upper(),
         "spot": spot,
@@ -655,6 +680,13 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None):
             "expiries": sorted(expiries_seen),
         },
     }
+
+    # Store in cache so subsequent dashboard refreshes within the TTL window
+    # don't burn API credits on a full chain re-download.
+    with _mda_gamma_cache_lock:
+        _mda_gamma_cache[cache_key] = (payload, time.monotonic() + MDA_GAMMA_CACHE_TTL_SEC)
+
+    return payload
 
 
 class GammaHandler(BaseHTTPRequestHandler):
