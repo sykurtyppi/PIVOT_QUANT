@@ -49,6 +49,7 @@ class ScoredEvent:
     guardrail_applied: bool
     guardrail_mode: str
     guardrail_strategy: str
+    selected_policy_runtime: str
 
 
 def parse_args() -> argparse.Namespace:
@@ -233,6 +234,10 @@ def load_scored_events(
 ) -> list[ScoredEvent]:
     src_filter = source_filter_sql(conn, source)
     max_pred_lag_ms = int(float(max_pred_lag_hours) * 3600 * 1000)
+    pred_cols = table_columns(conn, "prediction_log")
+    trade_regime_expr = "lp.trade_regime AS trade_regime" if "trade_regime" in pred_cols else "NULL AS trade_regime"
+    regime_policy_expr = "lp.regime_policy_json AS regime_policy_json" if "regime_policy_json" in pred_cols else "NULL AS regime_policy_json"
+    selected_policy_expr = "lp.selected_policy AS selected_policy" if "selected_policy" in pred_cols else "NULL AS selected_policy"
     rows = conn.execute(
         f"""
         WITH scoped_touch AS (
@@ -268,8 +273,9 @@ def load_scored_events(
             st.ts_event,
             lp.best_horizon,
             lp.abstain,
-            lp.trade_regime,
-            lp.regime_policy_json,
+            {trade_regime_expr},
+            {regime_policy_expr},
+            {selected_policy_expr},
             lp.signal_5m,
             lp.signal_15m,
             lp.signal_30m,
@@ -312,6 +318,7 @@ def load_scored_events(
         guardrail_applied = bool(guardrail_obj.get("applied"))
         guardrail_mode = str(guardrail_obj.get("mode") or "").strip().lower()
         guardrail_strategy = str(guardrail_obj.get("strategy") or "").strip().lower()
+        selected_policy_runtime = str(row["selected_policy"] or "").strip().lower()
 
         baseline_trade = bool(int(row["abstain"] or 0) == 0 and selected_signal in {"reject", "break"} and gross_bps is not None)
         guardrail_trade = bool(baseline_trade and not (trade_regime == "expansion" and atr_zone == "near"))
@@ -334,6 +341,7 @@ def load_scored_events(
                 guardrail_applied=guardrail_applied,
                 guardrail_mode=guardrail_mode,
                 guardrail_strategy=guardrail_strategy,
+                selected_policy_runtime=selected_policy_runtime,
             )
         )
     return out
@@ -710,7 +718,9 @@ def build_report(
         )
     lines.append("")
 
-    lines.append("## Policy Comparison (Baseline vs Guardrail vs No-5m)")
+    lines.append("## What-if Policy Comparison (Baseline vs Guardrail vs No-5m)")
+    lines.append("")
+    lines.append("- Interpretation: hypothetical trade filters applied over the same scored event set.")
     lines.append("")
     lines.append("| Policy | Trades | Avg Net/Trade | Avg Net/Event | Total Net (bps) | Net Win % |")
     lines.append("|---|---:|---:|---:|---:|---:|")
@@ -721,10 +731,29 @@ def build_report(
             f"{fmt(bucket['avg_net_event'])} | {fmt(float(bucket['total_net'] or 0.0))} | {fmt(bucket['win_rate'], 2)} |"
         )
     lines.append("")
-    lines.append(f"- Delta Guardrail vs Baseline (total bps): {guardrail_total - baseline_total:.3f}")
-    lines.append(f"- Delta No-5m vs Baseline (total bps): {no5m_total - baseline_total:.3f}")
-    lines.append(f"- Filtered trades by guardrail: {int(summary['meta']['filtered_by_guardrail'] or 0)}")
-    lines.append(f"- Filtered trades by no-5m filter: {int(summary['meta']['filtered_by_no5m'] or 0)}")
+    lines.append(f"- What-if delta Guardrail vs Baseline (total bps): {guardrail_total - baseline_total:.3f}")
+    lines.append(f"- What-if delta No-5m vs Baseline (total bps): {no5m_total - baseline_total:.3f}")
+    lines.append(f"- What-if filtered trades by guardrail: {int(summary['meta']['filtered_by_guardrail'] or 0)}")
+    lines.append(f"- What-if filtered trades by no-5m filter: {int(summary['meta']['filtered_by_no5m'] or 0)}")
+    lines.append("")
+
+    lines.append("## Runtime Applied Policy Summary")
+    lines.append("")
+    lines.append("- Interpretation: rows grouped by persisted `selected_policy` from runtime scoring.")
+    lines.append("| Runtime Policy | Rows | Tradeable Signals | Avg Net/Event | Total Net (bps) |")
+    lines.append("|---|---:|---:|---:|---:|")
+    runtime_groups: dict[str, list[ScoredEvent]] = {}
+    for event in events:
+        key = event.selected_policy_runtime or "unknown"
+        runtime_groups.setdefault(key, []).append(event)
+    for runtime_policy in sorted(runtime_groups.keys()):
+        bucket_events = runtime_groups[runtime_policy]
+        nets = [policy_net(e, "baseline", base_cost_bps) for e in bucket_events]
+        traded = [n for e, n in zip(bucket_events, nets) if e.baseline_trade]
+        lines.append(
+            f"| {runtime_policy} | {len(bucket_events)} | {len(traded)} | "
+            f"{fmt(safe_mean(nets))} | {fmt(sum(nets))} |"
+        )
     lines.append("")
 
     lines.append("## Cost Sweep")
@@ -863,8 +892,13 @@ def build_report(
             lines.append("- Low-support horizons: none")
         lines.append("")
 
-    lines.append("## Guardrail Leak Audit")
+    lines.append("## Runtime Guardrail Audit")
     lines.append("")
+    runtime_guardrail_selected = sum(
+        1 for e in events if (e.selected_policy_runtime or "").startswith("guardrail_")
+    )
+    runtime_regime_active_selected = sum(1 for e in events if e.selected_policy_runtime == "regime_active")
+    runtime_baseline_selected = sum(1 for e in events if e.selected_policy_runtime == "baseline")
     triggered = sum(1 for e in events if e.guardrail_triggered)
     applied = sum(1 for e in events if e.guardrail_applied)
     leaked = sum(1 for e in events if e.guardrail_applied and e.selected_signal in {"reject", "break"})
@@ -873,6 +907,9 @@ def build_report(
         for e in events
         if e.guardrail_mode == "active" and e.guardrail_strategy == "no_trade" and e.guardrail_triggered
     )
+    lines.append(f"- Runtime selected_policy baseline rows: {runtime_baseline_selected}")
+    lines.append(f"- Runtime selected_policy regime_active rows: {runtime_regime_active_selected}")
+    lines.append(f"- Runtime selected_policy guardrail_* rows: {runtime_guardrail_selected}")
     lines.append(f"- Guardrail triggered rows: {triggered}")
     lines.append(f"- Guardrail applied rows: {applied}")
     lines.append(f"- Active+no_trade triggered rows: {active_no_trade}")
