@@ -411,6 +411,13 @@ def _persist_state_and_ops(
     ops_db: str | None,
     result: dict[str, Any],
 ) -> None:
+    reason = str(result.get("reason") or "")
+    gate_failures = result.get("gate_failures")
+    if isinstance(gate_failures, list):
+        details = [str(item).strip() for item in gate_failures if str(item).strip()]
+        if details:
+            reason = f"{reason}: {'; '.join(details)}" if reason else "; ".join(details)
+
     atomic_write_json(state_path, state)
     if ops_db:
         _ops_set(
@@ -419,7 +426,7 @@ def _persist_state_and_ops(
                 "model_active_version": str(result.get("active_version") or ""),
                 "model_candidate_version": str(result.get("candidate_version") or ""),
                 "model_governance_last_action": str(result.get("action") or ""),
-                "model_governance_last_reason": str(result.get("reason") or ""),
+                "model_governance_last_reason": reason,
                 "model_governance_last_checked_ms": str(now_ms()),
             },
         )

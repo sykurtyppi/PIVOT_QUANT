@@ -2580,6 +2580,7 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("MDA_GAMMA_ERROR_BACKOFF_SEC", source)
         self.assertIn("cooldown active", block)
         self.assertIn("backoff_sec = max(1, int(retry_after))", block)
+        self.assertIn("parsedate_to_datetime", source)
 
     def test_ibkr_bridge_market_close_uses_new_york_timezone(self) -> None:
         bridge = load_module(
@@ -2701,6 +2702,8 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("load_env_file()", stack_script)
         self.assertIn('load_env_file "${ENV_FILE}"', stack_script)
         self.assertNotIn('source "${ROOT_DIR}/.env"', stack_script)
+        self.assertIn('if [[ "${#value}" -ge 2 ]]; then', stack_script)
+        self.assertIn('value="${value:1:${#value}-2}"', stack_script)
 
         proc = run_cmd(["bash", "-n", "server/run_persistent_stack.sh"], cwd=REPO_ROOT)
         self.assertEqual(proc.returncode, 0, msg=f"{proc.stdout}\n{proc.stderr}")

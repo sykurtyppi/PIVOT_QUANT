@@ -6,6 +6,7 @@ import urllib.error
 import urllib.request
 from copy import deepcopy
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse, parse_qs
 try:
@@ -80,7 +81,15 @@ def _parse_retry_after_seconds(raw_value) -> float | None:
         if seconds > 0:
             return seconds
     except Exception:
-        return None
+        try:
+            dt = parsedate_to_datetime(text)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            seconds = (dt - _utc_now()).total_seconds()
+            if seconds > 0:
+                return seconds
+        except Exception:
+            return None
     return None
 
 

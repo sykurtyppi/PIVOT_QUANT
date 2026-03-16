@@ -20,6 +20,14 @@ load_env_file() {
 
     key="${line%%=*}"
     value="${line#*=}"
+    # Accept quoted .env values (single/double) without exporting quote chars.
+    if [[ "${#value}" -ge 2 ]]; then
+      if [[ "${value:0:1}" == "\"" && "${value: -1}" == "\"" ]]; then
+        value="${value:1:${#value}-2}"
+      elif [[ "${value:0:1}" == "'" && "${value: -1}" == "'" ]]; then
+        value="${value:1:${#value}-2}"
+      fi
+    fi
     export "${key}=${value}"
   done < "${env_path}"
 }

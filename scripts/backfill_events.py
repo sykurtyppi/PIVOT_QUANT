@@ -261,6 +261,12 @@ def _decode_http_error_json(exc: HTTPError) -> dict | None:
         raw = exc.read()
     except Exception:
         return None
+    if not raw:
+        return None
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except Exception:
+        return None
 
 
 def _parse_retry_after_seconds(raw_value: object) -> int | None:
@@ -273,12 +279,6 @@ def _parse_retry_after_seconds(raw_value: object) -> int | None:
     if seconds <= 0:
         return None
     return seconds
-    if not raw:
-        return None
-    try:
-        return json.loads(raw.decode("utf-8"))
-    except Exception:
-        return None
 
 
 def fetch_market(symbol: str, interval: str, range_str: str, source: str) -> tuple[dict, str]:
