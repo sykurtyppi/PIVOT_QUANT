@@ -6065,6 +6065,46 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("non_positive_utility", str(meta.get("guard_reason")))
         self.assertTrue(bool(meta.get("fallback")))
 
+    def test_threshold_selector_prefers_utility_above_floor_before_stability(self) -> None:
+        module = load_module(
+            "thresholds_prefer_utility_floor",
+            REPO_ROOT / "ml" / "thresholds.py",
+        )
+        y_true = np.asarray([1, 1, 1, 1], dtype=int)
+        y_prob = np.asarray([0.95, 0.85, 0.75, 0.65], dtype=float)
+        utility = np.asarray([20.0, -21.0, 21.0, -120.0], dtype=float)
+
+        # Without floor preference, stability-first ranking can pick a slightly
+        # negative candidate even when positive alternatives exist.
+        baseline = module.select_threshold(
+            y_true,
+            y_prob,
+            objective="utility_bps",
+            precision_floor=0.0,
+            min_signals=1,
+            default_threshold=0.5,
+            utility_per_signal=utility,
+            stability_band=0.11,
+            top_k=5,
+        )
+        self.assertAlmostEqual(float(baseline.threshold), 0.85, places=9)
+        self.assertLessEqual(float(baseline.score), 0.0)
+
+        preferred = module.select_threshold(
+            y_true,
+            y_prob,
+            objective="utility_bps",
+            precision_floor=0.0,
+            min_signals=1,
+            default_threshold=0.5,
+            utility_per_signal=utility,
+            stability_band=0.11,
+            top_k=5,
+            preferred_min_score=0.0,
+        )
+        self.assertAlmostEqual(float(preferred.threshold), 0.95, places=9)
+        self.assertGreater(float(preferred.score), 0.0)
+
     def test_train_artifacts_threshold_guard_disables_fallback_threshold(self) -> None:
         module = load_module(
             "train_rf_artifacts_threshold_guard_fallback",

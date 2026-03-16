@@ -226,6 +226,18 @@ def main() -> None:
         default=_env_float("CALIB_REFIT_THRESHOLD_STABILITY_BAND", _env_float("RF_THRESHOLD_STABILITY_BAND", 0.0)),
     )
     parser.add_argument(
+        "--threshold-min-utility-score",
+        type=float,
+        default=_env_float(
+            "CALIB_REFIT_THRESHOLD_MIN_UTILITY_SCORE",
+            _env_float("RF_THRESHOLD_MIN_UTILITY_SCORE", 0.0),
+        ),
+        help=(
+            "Utility score floor used to prefer threshold candidates during retune. "
+            "Candidates above this value are ranked ahead of lower-score options."
+        ),
+    )
+    parser.add_argument(
         "--retune-thresholds",
         action="store_true",
         default=_env_bool("CALIB_REFIT_RETUNE_THRESHOLDS", False),
@@ -447,6 +459,7 @@ def main() -> None:
             "threshold_tune_size": int(len(X_calib_tune)),
             "search_enabled": bool(args.retune_thresholds),
             "search_skip_reason": "",
+            "min_utility_score": float(args.threshold_min_utility_score),
         }
         if not args.retune_thresholds:
             threshold_meta["search_enabled"] = False
@@ -486,6 +499,11 @@ def main() -> None:
                         default_threshold=optimal_threshold,
                         utility_per_signal=utility_values,
                         stability_band=float(threshold_stability_band),
+                        preferred_min_score=(
+                            float(args.threshold_min_utility_score)
+                            if args.threshold_objective == "utility_bps"
+                            else None
+                        ),
                     )
                     optimal_threshold = float(selection.threshold)
                     threshold_meta.update(
@@ -528,6 +546,7 @@ def main() -> None:
             "threshold_min_signals": int(args.threshold_min_signals),
             "threshold_trade_cost_bps": float(args.threshold_trade_cost_bps),
             "threshold_stability_band": float(threshold_stability_band),
+            "threshold_min_utility_score": float(args.threshold_min_utility_score),
             "target": target,
             "horizon": horizon,
         }

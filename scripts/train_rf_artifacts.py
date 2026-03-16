@@ -649,6 +649,11 @@ def main() -> None:
                             default_threshold=0.5,
                             utility_per_signal=utility_values,
                             stability_band=float(threshold_stability_band),
+                            preferred_min_score=(
+                                float(args.threshold_min_utility_score)
+                                if args.threshold_objective == "utility_bps"
+                                else None
+                            ),
                         )
                         optimal_threshold = float(selection.threshold)
                         threshold_meta.update(

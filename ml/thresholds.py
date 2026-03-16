@@ -104,8 +104,14 @@ def select_threshold(
     utility_per_signal=None,
     stability_band: float = 0.0,
     top_k: int = 5,
+    preferred_min_score: float | None = None,
 ) -> ThresholdSelection:
-    """Select a probability threshold using either F1 or cost-aware utility."""
+    """Select a probability threshold using either F1 or cost-aware utility.
+
+    When ``preferred_min_score`` is set for ``utility_bps``, candidates above the
+    floor are preferred before stability/score tie-breaks. This avoids selecting
+    a negative-utility threshold when positive-utility alternatives exist.
+    """
     y_true_arr = np.asarray(y_true, dtype=int)
     y_prob_arr = np.asarray(y_prob, dtype=float)
     if y_true_arr.size == 0 or y_prob_arr.size == 0 or y_true_arr.size != y_prob_arr.size:
@@ -159,14 +165,27 @@ def select_threshold(
             else:
                 candidate.stability_score = candidate.score
 
+        preferred_floor = float(preferred_min_score) if preferred_min_score is not None else None
+        has_preferred_candidates = bool(
+            objective == "utility_bps"
+            and preferred_floor is not None
+            and any(c.score > preferred_floor for c in kept)
+        )
+
+        def _rank_key(candidate: ThresholdCandidate) -> tuple[float, ...]:
+            base_key = (
+                float(candidate.stability_score if candidate.stability_score is not None else candidate.score),
+                float(candidate.score),
+                float(candidate.precision),
+                float(candidate.signals),
+            )
+            if has_preferred_candidates and preferred_floor is not None:
+                return (float(candidate.score > preferred_floor),) + base_key
+            return base_key
+
         ranked = sorted(
             kept,
-            key=lambda c: (
-                float(c.stability_score if c.stability_score is not None else c.score),
-                c.score,
-                c.precision,
-                c.signals,
-            ),
+            key=_rank_key,
             reverse=True,
         )
 
