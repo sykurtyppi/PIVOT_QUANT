@@ -19,7 +19,7 @@ import shutil
 import sqlite3
 import sys
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +50,33 @@ DEFAULT_MIN_POSITIVE_SAMPLES_BREAK = int(
 DEFAULT_ALLOW_FEATURE_VERSION_CHANGE = os.getenv(
     "MODEL_GOV_ALLOW_FEATURE_VERSION_CHANGE", "false"
 ).strip().lower() in {"1", "true", "yes", "y", "on"}
+DEFAULT_REGIME_AWARE = os.getenv(
+    "MODEL_GOV_REGIME_AWARE", "false"
+).strip().lower() in {"1", "true", "yes", "y", "on"}
+DEFAULT_REGIME_BUCKETS = os.getenv(
+    "MODEL_GOV_REGIME_BUCKETS", "compression,expansion,neutral"
+)
+DEFAULT_REGIME_MIN_TOTAL_SAMPLES = int(
+    os.getenv("MODEL_GOV_REGIME_MIN_TOTAL_SAMPLES", "0")
+)
+DEFAULT_REGIME_MIN_POSITIVE_SAMPLES = int(
+    os.getenv("MODEL_GOV_REGIME_MIN_POSITIVE_SAMPLES", "0")
+)
+DEFAULT_REGIME_MIN_POSITIVE_SAMPLES_REJECT = int(
+    os.getenv(
+        "MODEL_GOV_REGIME_MIN_POSITIVE_SAMPLES_REJECT",
+        str(DEFAULT_REGIME_MIN_POSITIVE_SAMPLES),
+    )
+)
+DEFAULT_REGIME_MIN_POSITIVE_SAMPLES_BREAK = int(
+    os.getenv(
+        "MODEL_GOV_REGIME_MIN_POSITIVE_SAMPLES_BREAK",
+        str(DEFAULT_REGIME_MIN_POSITIVE_SAMPLES),
+    )
+)
+DEFAULT_REGIME_MIN_COMPARED_BUCKETS = int(
+    os.getenv("MODEL_GOV_REGIME_MIN_COMPARED_BUCKETS", "1")
+)
 DEFAULT_DB = os.getenv("PIVOT_DB", str(ROOT / "data" / "pivot_events.sqlite"))
 STATE_SCHEMA_VERSION = 1
 MAX_HISTORY = 200
@@ -67,6 +94,14 @@ class GateConfig:
     min_positive_samples_reject: int
     min_positive_samples_break: int
     allow_feature_version_change: bool
+    regime_aware: bool = False
+    regime_buckets: list[str] = field(
+        default_factory=lambda: ["compression", "expansion", "neutral"]
+    )
+    regime_min_total_samples: int = 0
+    regime_min_positive_samples_reject: int = 0
+    regime_min_positive_samples_break: int = 0
+    regime_min_compared_buckets: int = 1
 
 
 def now_ms() -> int:
@@ -143,6 +178,169 @@ def to_int(value: Any) -> int | None:
             return int(float(value))
         except (TypeError, ValueError):
             return None
+
+
+def _regime_positive_floor(gates: GateConfig, target: str) -> int:
+    if target == "reject":
+        return int(gates.regime_min_positive_samples_reject)
+    return int(gates.regime_min_positive_samples_break)
+
+
+def _regime_bucket_blocks(block: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    raw = block.get("by_regime")
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for bucket, payload in raw.items():
+        if isinstance(bucket, str) and isinstance(payload, dict):
+            out[bucket] = payload
+    return out
+
+
+def _regime_support_ok(
+    *,
+    bucket_block: dict[str, Any],
+    target: str,
+    gates: GateConfig,
+) -> tuple[bool, str | None]:
+    sample_size = to_int(bucket_block.get("sample_size"))
+    min_total = int(gates.regime_min_total_samples)
+    if min_total > 0 and (sample_size is None or sample_size < min_total):
+        return False, f"sample_size<{min_total}"
+
+    min_positive = _regime_positive_floor(gates, target)
+    if min_positive > 0:
+        pos_key = f"{target}_count"
+        pos_count = to_int(bucket_block.get(pos_key))
+        if pos_count is None or pos_count < min_positive:
+            return False, f"{pos_key}<{min_positive}"
+
+    return True, None
+
+
+def _is_metric_regression(
+    *,
+    active_value: float,
+    candidate_value: float,
+    tolerance: float,
+) -> bool:
+    return candidate_value < (active_value - tolerance)
+
+
+def _evaluate_regime_metric(
+    *,
+    target: str,
+    horizon: int,
+    metric_key: str,
+    failure_label: str,
+    tolerance: float,
+    active_block: dict[str, Any],
+    candidate_block: dict[str, Any],
+    gates: GateConfig,
+) -> tuple[bool, str | None, list[str]]:
+    """Evaluate one metric with optional regime-aware waivers.
+
+    Returns:
+      (failed, message_if_failed, skip_messages)
+    """
+    active_metric = to_float(active_block.get(metric_key))
+    candidate_metric = to_float(candidate_block.get(metric_key))
+    if active_metric is None or candidate_metric is None:
+        return False, None, []
+
+    aggregate_failed = _is_metric_regression(
+        active_value=active_metric,
+        candidate_value=candidate_metric,
+        tolerance=tolerance,
+    )
+    if not aggregate_failed:
+        return False, None, []
+
+    # Default behavior: fail on aggregate regression.
+    aggregate_message = (
+        f"{target}:{horizon}m {metric_key} {failure_label} "
+        f"{active_metric:.2f} -> {candidate_metric:.2f} (>{tolerance:.2f} bps)"
+    )
+
+    if not gates.regime_aware:
+        return True, aggregate_message, []
+
+    active_regimes = _regime_bucket_blocks(active_block)
+    candidate_regimes = _regime_bucket_blocks(candidate_block)
+    if not active_regimes or not candidate_regimes:
+        return True, aggregate_message, []
+
+    bucket_failures: list[str] = []
+    bucket_skips: list[str] = []
+    compared = 0
+    for bucket in gates.regime_buckets:
+        active_bucket = active_regimes.get(bucket)
+        candidate_bucket = candidate_regimes.get(bucket)
+        if active_bucket is None or candidate_bucket is None:
+            bucket_skips.append(f"{bucket}:missing_bucket")
+            continue
+        active_ok, active_reason = _regime_support_ok(
+            bucket_block=active_bucket,
+            target=target,
+            gates=gates,
+        )
+        candidate_ok, candidate_reason = _regime_support_ok(
+            bucket_block=candidate_bucket,
+            target=target,
+            gates=gates,
+        )
+        if not active_ok or not candidate_ok:
+            reason = (
+                f"{bucket}:support(active={active_reason or 'ok'},"
+                f"candidate={candidate_reason or 'ok'})"
+            )
+            bucket_skips.append(reason)
+            continue
+
+        active_bucket_metric = to_float(active_bucket.get(metric_key))
+        candidate_bucket_metric = to_float(candidate_bucket.get(metric_key))
+        if active_bucket_metric is None or candidate_bucket_metric is None:
+            bucket_skips.append(f"{bucket}:missing_metric")
+            continue
+
+        compared += 1
+        if _is_metric_regression(
+            active_value=active_bucket_metric,
+            candidate_value=candidate_bucket_metric,
+            tolerance=tolerance,
+        ):
+            bucket_failures.append(
+                f"{target}:{horizon}m {metric_key} {failure_label} in {bucket} "
+                f"{active_bucket_metric:.2f} -> {candidate_bucket_metric:.2f} "
+                f"(>{tolerance:.2f} bps)"
+            )
+
+    if compared < max(1, int(gates.regime_min_compared_buckets)):
+        return True, aggregate_message, [
+            f"{target}:{horizon}m regime-aware check skipped "
+            f"(compared_buckets={compared} < min_compared={max(1, int(gates.regime_min_compared_buckets))}; "
+            f"details={';'.join(bucket_skips) if bucket_skips else 'none'})"
+        ]
+
+    if bucket_failures:
+        details = "; ".join(bucket_failures)
+        return True, details, []
+
+    major_active_bucket = max(
+        active_regimes.items(),
+        key=lambda item: to_int(item[1].get("sample_size")) or 0,
+    )[0]
+    major_candidate_bucket = max(
+        candidate_regimes.items(),
+        key=lambda item: to_int(item[1].get("sample_size")) or 0,
+    )[0]
+    skip_detail = (
+        f"{target}:{horizon}m {metric_key} aggregate {failure_label} waived by regime-aware check "
+        f"(compared_buckets={compared}, major_bucket={major_active_bucket}->{major_candidate_bucket})"
+    )
+    if bucket_skips:
+        skip_detail += f"; skipped={';'.join(bucket_skips)}"
+    return False, None, [skip_detail]
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -334,24 +532,36 @@ def evaluate_gates(
                 mfe_key = "mfe_bps_break"
                 mae_key = "mae_bps_break"
 
-            active_mfe = to_float(active_block.get(mfe_key))
-            cand_mfe = to_float(cand_block.get(mfe_key))
-            if active_mfe is not None and cand_mfe is not None:
-                if cand_mfe < (active_mfe - gates.max_mfe_regression_bps):
-                    failures.append(
-                        f"{target}:{horizon}m {mfe_key} regressed "
-                        f"{active_mfe:.2f} -> {cand_mfe:.2f} (>{gates.max_mfe_regression_bps:.2f} bps)"
-                    )
+            mfe_failed, mfe_message, mfe_skips = _evaluate_regime_metric(
+                target=target,
+                horizon=horizon,
+                metric_key=mfe_key,
+                failure_label="regressed",
+                tolerance=gates.max_mfe_regression_bps,
+                active_block=active_block,
+                candidate_block=cand_block,
+                gates=gates,
+            )
+            if mfe_failed and mfe_message:
+                failures.append(mfe_message)
+            if mfe_skips:
+                skips.extend(mfe_skips)
 
-            active_mae = to_float(active_block.get(mae_key))
-            cand_mae = to_float(cand_block.get(mae_key))
-            if active_mae is not None and cand_mae is not None:
-                # MAE is typically negative bps. More negative is worse.
-                if cand_mae < (active_mae - gates.max_mae_worsening_bps):
-                    failures.append(
-                        f"{target}:{horizon}m {mae_key} worsened "
-                        f"{active_mae:.2f} -> {cand_mae:.2f} (>{gates.max_mae_worsening_bps:.2f} bps)"
-                    )
+            # MAE is typically negative bps. More negative is worse.
+            mae_failed, mae_message, mae_skips = _evaluate_regime_metric(
+                target=target,
+                horizon=horizon,
+                metric_key=mae_key,
+                failure_label="worsened",
+                tolerance=gates.max_mae_worsening_bps,
+                active_block=active_block,
+                candidate_block=cand_block,
+                gates=gates,
+            )
+            if mae_failed and mae_message:
+                failures.append(mae_message)
+            if mae_skips:
+                skips.extend(mae_skips)
 
     return failures, skips
 
@@ -490,6 +700,22 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
             int(args.min_positive_samples), int(args.min_positive_samples_break)
         ),
         allow_feature_version_change=args.allow_feature_version_change,
+        regime_aware=bool(args.regime_aware),
+        regime_buckets=parse_csv_list(args.regime_buckets) or [
+            "compression",
+            "expansion",
+            "neutral",
+        ],
+        regime_min_total_samples=int(args.regime_min_total_samples),
+        regime_min_positive_samples_reject=max(
+            int(args.regime_min_positive_samples),
+            int(args.regime_min_positive_samples_reject),
+        ),
+        regime_min_positive_samples_break=max(
+            int(args.regime_min_positive_samples),
+            int(args.regime_min_positive_samples_break),
+        ),
+        regime_min_compared_buckets=max(1, int(args.regime_min_compared_buckets)),
     )
     state = load_state(state_path)
 
@@ -829,6 +1055,48 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-feature-version-change",
         action="store_true",
         default=DEFAULT_ALLOW_FEATURE_VERSION_CHANGE,
+    )
+    eval_cmd.add_argument(
+        "--regime-aware",
+        action="store_true",
+        default=DEFAULT_REGIME_AWARE,
+        help=(
+            "Evaluate MAE/MFE regressions within configured regime buckets and waive "
+            "aggregate regressions when no supported bucket regresses."
+        ),
+    )
+    eval_cmd.add_argument(
+        "--regime-buckets",
+        default=DEFAULT_REGIME_BUCKETS,
+        help="Comma-separated buckets for regime-aware checks (e.g. compression,expansion,neutral).",
+    )
+    eval_cmd.add_argument(
+        "--regime-min-total-samples",
+        type=int,
+        default=DEFAULT_REGIME_MIN_TOTAL_SAMPLES,
+        help="Minimum per-bucket sample_size required before comparing bucket metrics.",
+    )
+    eval_cmd.add_argument(
+        "--regime-min-positive-samples",
+        type=int,
+        default=DEFAULT_REGIME_MIN_POSITIVE_SAMPLES,
+        help="Global minimum per-bucket positive-label count for regime-aware regression checks.",
+    )
+    eval_cmd.add_argument(
+        "--regime-min-positive-samples-reject",
+        type=int,
+        default=DEFAULT_REGIME_MIN_POSITIVE_SAMPLES_REJECT,
+    )
+    eval_cmd.add_argument(
+        "--regime-min-positive-samples-break",
+        type=int,
+        default=DEFAULT_REGIME_MIN_POSITIVE_SAMPLES_BREAK,
+    )
+    eval_cmd.add_argument(
+        "--regime-min-compared-buckets",
+        type=int,
+        default=DEFAULT_REGIME_MIN_COMPARED_BUCKETS,
+        help="Minimum number of supported buckets required to waive aggregate regressions.",
     )
     eval_cmd.add_argument("--force-promote", action="store_true", default=False)
     eval_cmd.set_defaults(func=cmd_evaluate)

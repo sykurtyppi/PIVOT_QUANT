@@ -207,28 +207,64 @@ def atomic_copy_file(src: Path, dst: Path) -> None:
             tmp_path.unlink()
 
 
+def _regime_bucket(regime_type_value) -> str:
+    regime_type = None
+    try:
+        if regime_type_value is not None:
+            regime_type = int(regime_type_value)
+    except (TypeError, ValueError):
+        regime_type = None
+    if regime_type in (1, 2, 4):
+        return "expansion"
+    if regime_type == 3:
+        return "compression"
+    return "neutral"
+
+
+def _compute_target_stats(sub_df, target: str) -> dict:
+    stats = {}
+    if sub_df.empty or target not in sub_df.columns:
+        return stats
+
+    pos = sub_df[sub_df[target] == 1]
+    neg = sub_df[sub_df[target] == 0]
+    stats["sample_size"] = int(sub_df.shape[0])
+    stats[f"{target}_count"] = int(pos.shape[0])
+    stats[f"{target}_other_count"] = int(neg.shape[0])
+    stats[f"{target}_rate"] = float(pos.shape[0] / max(1, sub_df.shape[0]))
+    for metric in ["mfe_bps", "mae_bps"]:
+        pos_metric = float(pos[metric].mean()) if (not pos.empty and metric in pos.columns) else None
+        neg_metric = float(neg[metric].mean()) if (not neg.empty and metric in neg.columns) else None
+        stats[f"{metric}_{target}"] = pos_metric
+        # Target-scoped "other" bucket avoids cross-target overwrites when
+        # reject/break stats are merged into a single payload.
+        stats[f"{metric}_{target}_other"] = neg_metric
+    return stats
+
+
 def compute_horizon_stats(df, target, horizon):
     stats = {}
     sub = df[df["horizon_min"] == horizon]
     if sub.empty:
         return stats
 
-    stats["sample_size"] = int(sub.shape[0])
+    stats.update(_compute_target_stats(sub, target))
     if target not in sub.columns:
         return stats
 
-    pos = sub[sub[target] == 1]
-    neg = sub[sub[target] == 0]
-    stats[f"{target}_count"] = int(pos.shape[0])
-    stats[f"{target}_other_count"] = int(neg.shape[0])
-    stats[f"{target}_rate"] = float(pos.shape[0] / max(1, sub.shape[0]))
-    for metric in ["mfe_bps", "mae_bps"]:
-        pos_metric = float(pos[metric].mean()) if not pos.empty else None
-        neg_metric = float(neg[metric].mean()) if not neg.empty else None
-        stats[f"{metric}_{target}"] = pos_metric
-        # Target-scoped "other" bucket avoids cross-target overwrites when
-        # reject/break stats are merged into a single payload.
-        stats[f"{metric}_{target}_other"] = neg_metric
+    if "regime_type" in sub.columns:
+        with_regime = sub.copy()
+        with_regime["_regime_bucket"] = with_regime["regime_type"].map(_regime_bucket)
+        by_regime: dict[str, dict] = {}
+        for bucket in ("compression", "expansion", "neutral"):
+            bucket_df = with_regime[with_regime["_regime_bucket"] == bucket]
+            bucket_stats = _compute_target_stats(bucket_df, target)
+            if not bucket_stats:
+                continue
+            bucket_stats["sample_share"] = float(bucket_stats["sample_size"] / max(1, stats["sample_size"]))
+            by_regime[bucket] = bucket_stats
+        if by_regime:
+            stats["by_regime"] = by_regime
     return stats
 
 

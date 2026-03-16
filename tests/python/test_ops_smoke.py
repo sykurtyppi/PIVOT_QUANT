@@ -5863,6 +5863,70 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertNotIn("mfe_bps_other", break_stats)
         self.assertNotIn("mae_bps_other", break_stats)
 
+    def test_train_artifacts_horizon_stats_emit_by_regime(self) -> None:
+        module = load_module("train_rf_artifacts_stats_regime", REPO_ROOT / "scripts" / "train_rf_artifacts.py")
+        try:
+            import pandas as pd
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"pandas unavailable: {exc}")
+
+        df = pd.DataFrame(
+            [
+                {
+                    "horizon_min": 5,
+                    "reject": 0,
+                    "break": 1,
+                    "mfe_bps": 10.0,
+                    "mae_bps": -4.0,
+                    "regime_type": 1,
+                },
+                {
+                    "horizon_min": 5,
+                    "reject": 0,
+                    "break": 0,
+                    "mfe_bps": 8.0,
+                    "mae_bps": -3.0,
+                    "regime_type": 1,
+                },
+                {
+                    "horizon_min": 5,
+                    "reject": 0,
+                    "break": 1,
+                    "mfe_bps": 6.0,
+                    "mae_bps": -6.0,
+                    "regime_type": 3,
+                },
+                {
+                    "horizon_min": 5,
+                    "reject": 0,
+                    "break": 0,
+                    "mfe_bps": 4.0,
+                    "mae_bps": -5.0,
+                    "regime_type": 3,
+                },
+            ]
+        )
+
+        stats = module.compute_horizon_stats(df, "break", 5)
+        by_regime = stats.get("by_regime")
+        self.assertIsInstance(by_regime, dict)
+        self.assertIn("compression", by_regime)
+        self.assertIn("expansion", by_regime)
+
+        compression = by_regime["compression"]
+        self.assertEqual(int(compression["sample_size"]), 2)
+        self.assertEqual(int(compression["break_count"]), 1)
+        self.assertAlmostEqual(float(compression["mfe_bps_break"]), 6.0, places=6)
+        self.assertAlmostEqual(float(compression["mfe_bps_break_other"]), 4.0, places=6)
+        self.assertAlmostEqual(float(compression["sample_share"]), 0.5, places=6)
+
+        expansion = by_regime["expansion"]
+        self.assertEqual(int(expansion["sample_size"]), 2)
+        self.assertEqual(int(expansion["break_count"]), 1)
+        self.assertAlmostEqual(float(expansion["mfe_bps_break"]), 10.0, places=6)
+        self.assertAlmostEqual(float(expansion["mfe_bps_break_other"]), 8.0, places=6)
+        self.assertAlmostEqual(float(expansion["sample_share"]), 0.5, places=6)
+
     def test_model_governance_skips_regression_gates_when_support_is_low(self) -> None:
         module = load_module("model_governance", REPO_ROOT / "scripts" / "model_governance.py")
         gates = module.GateConfig(
@@ -5907,6 +5971,164 @@ class OpsSmokeTests(unittest.TestCase):
         failures, skips = module.evaluate_gates(active, candidate, gates)
         self.assertEqual(failures, [])
         self.assertTrue(any("break:5m skipped regression gates" in item for item in skips))
+
+    def test_model_governance_regime_aware_waives_aggregate_mfe_regression(self) -> None:
+        module = load_module("model_governance_regime_waive", REPO_ROOT / "scripts" / "model_governance.py")
+        gates = module.GateConfig(
+            required_targets=["break"],
+            required_horizons=[5],
+            min_trained_end_delta_ms=0,
+            max_mfe_regression_bps=1.5,
+            max_mae_worsening_bps=2.0,
+            min_total_samples=0,
+            min_positive_samples_reject=0,
+            min_positive_samples_break=0,
+            allow_feature_version_change=False,
+            regime_aware=True,
+            regime_buckets=["compression", "expansion"],
+            regime_min_total_samples=20,
+            regime_min_positive_samples_break=10,
+            regime_min_compared_buckets=2,
+        )
+        active = {
+            "feature_version": "v3",
+            "trained_end_ts": 1000,
+            "stats": {
+                "5": {
+                    "break": {
+                        "sample_size": 200,
+                        "break_count": 80,
+                        "mfe_bps_break": 8.0,
+                        "mae_bps_break": -20.0,
+                        "by_regime": {
+                            "compression": {
+                                "sample_size": 160,
+                                "break_count": 64,
+                                "mfe_bps_break": 9.0,
+                                "mae_bps_break": -19.0,
+                            },
+                            "expansion": {
+                                "sample_size": 40,
+                                "break_count": 16,
+                                "mfe_bps_break": 6.0,
+                                "mae_bps_break": -24.0,
+                            },
+                        },
+                    }
+                }
+            },
+        }
+        candidate = {
+            "feature_version": "v3",
+            "trained_end_ts": 2000,
+            "stats": {
+                "5": {
+                    "break": {
+                        "sample_size": 200,
+                        "break_count": 80,
+                        "mfe_bps_break": 6.0,
+                        "mae_bps_break": -20.0,
+                        "by_regime": {
+                            "compression": {
+                                "sample_size": 80,
+                                "break_count": 32,
+                                "mfe_bps_break": 9.2,
+                                "mae_bps_break": -18.5,
+                            },
+                            "expansion": {
+                                "sample_size": 120,
+                                "break_count": 48,
+                                "mfe_bps_break": 6.3,
+                                "mae_bps_break": -23.0,
+                            },
+                        },
+                    }
+                }
+            },
+        }
+        failures, skips = module.evaluate_gates(active, candidate, gates)
+        self.assertEqual(failures, [])
+        self.assertTrue(
+            any("break:5m mfe_bps_break aggregate regressed waived by regime-aware check" in item for item in skips)
+        )
+
+    def test_model_governance_regime_aware_blocks_bucket_mfe_regression(self) -> None:
+        module = load_module("model_governance_regime_fail", REPO_ROOT / "scripts" / "model_governance.py")
+        gates = module.GateConfig(
+            required_targets=["break"],
+            required_horizons=[5],
+            min_trained_end_delta_ms=0,
+            max_mfe_regression_bps=1.5,
+            max_mae_worsening_bps=2.0,
+            min_total_samples=0,
+            min_positive_samples_reject=0,
+            min_positive_samples_break=0,
+            allow_feature_version_change=False,
+            regime_aware=True,
+            regime_buckets=["compression", "expansion"],
+            regime_min_total_samples=20,
+            regime_min_positive_samples_break=10,
+            regime_min_compared_buckets=2,
+        )
+        active = {
+            "feature_version": "v3",
+            "trained_end_ts": 1000,
+            "stats": {
+                "5": {
+                    "break": {
+                        "sample_size": 200,
+                        "break_count": 80,
+                        "mfe_bps_break": 8.0,
+                        "mae_bps_break": -20.0,
+                        "by_regime": {
+                            "compression": {
+                                "sample_size": 160,
+                                "break_count": 64,
+                                "mfe_bps_break": 9.0,
+                                "mae_bps_break": -19.0,
+                            },
+                            "expansion": {
+                                "sample_size": 40,
+                                "break_count": 16,
+                                "mfe_bps_break": 6.0,
+                                "mae_bps_break": -24.0,
+                            },
+                        },
+                    }
+                }
+            },
+        }
+        candidate = {
+            "feature_version": "v3",
+            "trained_end_ts": 2000,
+            "stats": {
+                "5": {
+                    "break": {
+                        "sample_size": 200,
+                        "break_count": 80,
+                        "mfe_bps_break": 6.0,
+                        "mae_bps_break": -20.0,
+                        "by_regime": {
+                            "compression": {
+                                "sample_size": 80,
+                                "break_count": 32,
+                                "mfe_bps_break": 6.8,
+                                "mae_bps_break": -18.5,
+                            },
+                            "expansion": {
+                                "sample_size": 120,
+                                "break_count": 48,
+                                "mfe_bps_break": 6.3,
+                                "mae_bps_break": -23.0,
+                            },
+                        },
+                    }
+                }
+            },
+        }
+        failures, skips = module.evaluate_gates(active, candidate, gates)
+        self.assertTrue(any("break:5m mfe_bps_break regressed in compression" in item for item in failures))
+        self.assertEqual(skips, [])
 
     def test_model_governance_enforces_regression_gates_when_support_is_high(self) -> None:
         module = load_module("model_governance", REPO_ROOT / "scripts" / "model_governance.py")
