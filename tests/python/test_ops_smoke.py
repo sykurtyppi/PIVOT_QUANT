@@ -1436,6 +1436,8 @@ class OpsSmokeTests(unittest.TestCase):
         original_fetch_json = backfill.fetch_json
         original_proxy_url = backfill.YAHOO_PROXY_URL
         original_failopen_sec = backfill.YAHOO_PROXY_AUTH_FAILOPEN_SEC
+        original_skip_auth_required = backfill.YAHOO_PROXY_SKIP_AUTH_REQUIRED
+        original_service_token = backfill.YAHOO_PROXY_SERVICE_TOKEN
         try:
             with backfill._yahoo_proxy_auth_failopen_lock:
                 backfill._yahoo_proxy_auth_failopen_until = 0.0
@@ -1443,6 +1445,9 @@ class OpsSmokeTests(unittest.TestCase):
 
             backfill.YAHOO_PROXY_URL = "http://127.0.0.1:3000/api/market"
             backfill.YAHOO_PROXY_AUTH_FAILOPEN_SEC = 300
+            # Keep this test deterministic regardless of local dashboard auth settings.
+            backfill.YAHOO_PROXY_SKIP_AUTH_REQUIRED = False
+            backfill.YAHOO_PROXY_SERVICE_TOKEN = ""
 
             def _fake_fetch_json(url: str, timeout: int = 12, retries: int = 2) -> dict:
                 calls.append(url)
@@ -1477,6 +1482,8 @@ class OpsSmokeTests(unittest.TestCase):
             backfill.fetch_json = original_fetch_json
             backfill.YAHOO_PROXY_URL = original_proxy_url
             backfill.YAHOO_PROXY_AUTH_FAILOPEN_SEC = original_failopen_sec
+            backfill.YAHOO_PROXY_SKIP_AUTH_REQUIRED = original_skip_auth_required
+            backfill.YAHOO_PROXY_SERVICE_TOKEN = original_service_token
             with backfill._yahoo_proxy_auth_failopen_lock:
                 backfill._yahoo_proxy_auth_failopen_until = 0.0
                 backfill._yahoo_proxy_auth_failopen_reason = ""
