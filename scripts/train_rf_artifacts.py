@@ -214,17 +214,22 @@ def compute_horizon_stats(df, target, horizon):
         return stats
 
     stats["sample_size"] = int(sub.shape[0])
-    for label in ["reject", "break"]:
-        if label not in sub.columns:
-            continue
-        pos = sub[sub[label] == 1]
-        neg = sub[sub[label] == 0]
-        stats[f"{label}_count"] = int(pos.shape[0])
-        stats[f"{label}_other_count"] = int(neg.shape[0])
-        stats[f"{label}_rate"] = float(pos.shape[0] / max(1, sub.shape[0]))
-        for metric in ["mfe_bps", "mae_bps"]:
-            stats[f"{metric}_{label}"] = float(pos[metric].mean()) if not pos.empty else None
-            stats[f"{metric}_other"] = float(neg[metric].mean()) if not neg.empty else None
+    if target not in sub.columns:
+        return stats
+
+    pos = sub[sub[target] == 1]
+    neg = sub[sub[target] == 0]
+    stats[f"{target}_count"] = int(pos.shape[0])
+    stats[f"{target}_other_count"] = int(neg.shape[0])
+    stats[f"{target}_rate"] = float(pos.shape[0] / max(1, sub.shape[0]))
+    for metric in ["mfe_bps", "mae_bps"]:
+        pos_metric = float(pos[metric].mean()) if not pos.empty else None
+        neg_metric = float(neg[metric].mean()) if not neg.empty else None
+        stats[f"{metric}_{target}"] = pos_metric
+        # Backward-compatible alias used by runtime for no_edge expectancy.
+        stats[f"{metric}_other"] = neg_metric
+        # Explicit target-specific alias for downstream consumers.
+        stats[f"{metric}_{target}_other"] = neg_metric
     return stats
 
 

@@ -3203,6 +3203,27 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(result["signals"].get("signal_60m"), "no_edge")
         self.assertTrue(result["abstain"])
 
+        # Break-only opportunities must still select a break horizon (not no_edge).
+        set_registry(
+            reject_probs={5: 0.10, 15: 0.10, 30: 0.10, 60: 0.10},
+            break_probs={5: 0.20, 15: 0.20, 30: 0.20, 60: 0.80},
+        )
+        result = ml_server._score_event({"event_id": "break_only_case"})
+        self.assertEqual(result["signals"].get("signal_60m"), "break")
+        self.assertEqual(result["best_horizon"], 60)
+        self.assertFalse(result["abstain"])
+
+        # Stronger break edge should outrank a weaker reject edge.
+        set_registry(
+            reject_probs={5: 0.56, 15: 0.10, 30: 0.10, 60: 0.10},
+            break_probs={5: 0.10, 15: 0.10, 30: 0.10, 60: 0.90},
+        )
+        result = ml_server._score_event({"event_id": "break_stronger_than_reject"})
+        self.assertEqual(result["signals"].get("signal_5m"), "reject")
+        self.assertEqual(result["signals"].get("signal_60m"), "break")
+        self.assertEqual(result["best_horizon"], 60)
+        self.assertFalse(result["abstain"])
+
     def test_regime_policy_shadow_and_active_runtime_behavior(self) -> None:
         ml_server = load_module("ml_server_regime_policy_runtime", REPO_ROOT / "server" / "ml_server.py")
 
@@ -3673,6 +3694,22 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("vwap_side", features_used)
         self.assertIn("ema_stack", features_used)
         self.assertGreater(float(result["scores"]["analog_reject_5m"]), float(result["scores"]["analog_break_5m"]))
+
+    def test_analog_blend_weight_reaches_configured_max(self) -> None:
+        ml_server = load_module("ml_server_blend_weight_contract", REPO_ROOT / "server" / "ml_server.py")
+        ml_server.ML_ANALOG_BLEND_WEIGHT_BASE = 0.30
+        ml_server.ML_ANALOG_BLEND_WEIGHT_MAX = 0.60
+        ml_server.ML_ANALOG_BLEND_N_EFF_REF = 10.0
+        ml_server.ML_ANALOG_MAX_CI_WIDTH = 0.20
+
+        # Max confidence should reach configured max weight.
+        weight_max = ml_server._compute_analog_blend_weight(n_eff=10.0, ci_width=0.0)
+        self.assertAlmostEqual(float(weight_max), 0.60, places=6)
+
+        # Mid confidence should interpolate between base and max.
+        # eff_scale=0.5, ci_scale=0.5 -> blend_scale=0.25 => 0.30 + (0.30*0.25)=0.375
+        weight_mid = ml_server._compute_analog_blend_weight(n_eff=5.0, ci_width=0.10)
+        self.assertAlmostEqual(float(weight_mid), 0.375, places=6)
 
     def test_analog_blend_active_respects_promotion_gate(self) -> None:
         ml_server = load_module("ml_server_analog_blend_runtime", REPO_ROOT / "server" / "ml_server.py")
@@ -4594,6 +4631,22 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIsNotNone(s.guard_reject_brier_delta)
         self.assertIsNotNone(s.guard_break_brier_delta)
 
+    def test_report_blend_weight_reaches_configured_max(self) -> None:
+        report = load_module(
+            "pq_daily_report_blend_weight_contract",
+            REPO_ROOT / "scripts" / "generate_daily_ml_report.py",
+        )
+        report.ANALOG_BLEND_WEIGHT_BASE = 0.30
+        report.ANALOG_BLEND_WEIGHT_MAX = 0.60
+        report.ANALOG_BLEND_N_EFF_REF = 10.0
+        report.ANALOG_BLEND_CI_WIDTH_REF = 0.20
+
+        weight_max = report._compute_report_blend_weight(10.0, 0.0)
+        self.assertAlmostEqual(float(weight_max), 0.60, places=6)
+
+        weight_mid = report._compute_report_blend_weight(5.0, 0.10)
+        self.assertAlmostEqual(float(weight_mid), 0.375, places=6)
+
     def test_report_analog_shadow_uses_raw_model_probs_from_payload_when_present(self) -> None:
         report = load_module(
             "pq_daily_report_analog_model_baseline_test",
@@ -5405,6 +5458,36 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("- >6h: 1", text)
         self.assertIn("- No prediction: 0", text)
         self.assertIn("| 2026-03-06 | 1 | 0 | 0 | 0 | 1 | 0 |", text)
+
+    def test_train_artifacts_horizon_stats_use_target_specific_other_bucket(self) -> None:
+        module = load_module("train_rf_artifacts_stats", REPO_ROOT / "scripts" / "train_rf_artifacts.py")
+        try:
+            import pandas as pd
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"pandas unavailable: {exc}")
+
+        df = pd.DataFrame(
+            [
+                {"horizon_min": 5, "reject": 1, "break": 0, "mfe_bps": 10.0, "mae_bps": -2.0},
+                {"horizon_min": 5, "reject": 0, "break": 1, "mfe_bps": 30.0, "mae_bps": -20.0},
+                {"horizon_min": 5, "reject": 0, "break": 0, "mfe_bps": 40.0, "mae_bps": -30.0},
+            ]
+        )
+
+        reject_stats = module.compute_horizon_stats(df, "reject", 5)
+        break_stats = module.compute_horizon_stats(df, "break", 5)
+
+        # Reject "other" must come from reject==0 rows only (30, 40), not break==0 rows.
+        self.assertAlmostEqual(float(reject_stats["mfe_bps_other"]), 35.0, places=6)
+        self.assertAlmostEqual(float(reject_stats["mae_bps_other"]), -25.0, places=6)
+        self.assertAlmostEqual(float(reject_stats["mfe_bps_reject_other"]), 35.0, places=6)
+        self.assertAlmostEqual(float(reject_stats["mae_bps_reject_other"]), -25.0, places=6)
+
+        # Break "other" comes from break==0 rows (10, 40).
+        self.assertAlmostEqual(float(break_stats["mfe_bps_other"]), 25.0, places=6)
+        self.assertAlmostEqual(float(break_stats["mae_bps_other"]), -16.0, places=6)
+        self.assertAlmostEqual(float(break_stats["mfe_bps_break_other"]), 25.0, places=6)
+        self.assertAlmostEqual(float(break_stats["mae_bps_break_other"]), -16.0, places=6)
 
     def test_model_governance_skips_regression_gates_when_support_is_low(self) -> None:
         module = load_module("model_governance", REPO_ROOT / "scripts" / "model_governance.py")

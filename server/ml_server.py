@@ -1271,7 +1271,10 @@ def _compute_analog_blend_weight(
         ci_scale = 1.0
     else:
         ci_scale = max(0.0, 1.0 - float(ci_width) / ML_ANALOG_MAX_CI_WIDTH)
-    weight = ML_ANALOG_BLEND_WEIGHT_BASE * eff_scale * ci_scale
+    blend_scale = eff_scale * ci_scale
+    weight = ML_ANALOG_BLEND_WEIGHT_BASE + (
+        ML_ANALOG_BLEND_WEIGHT_MAX - ML_ANALOG_BLEND_WEIGHT_BASE
+    ) * blend_scale
     return max(0.0, min(ML_ANALOG_BLEND_WEIGHT_MAX, weight))
 
 
@@ -2185,6 +2188,8 @@ def _pick_best_horizon(
 ) -> tuple[int | None, bool]:
     best_horizon = None
     best_score = None
+    best_signal_horizon = None
+    best_signal_score = None
     for horizon in scored_horizons:
         pr = scores.get(f"prob_reject_{horizon}m")
         pb = scores.get(f"prob_break_{horizon}m")
@@ -2198,21 +2203,29 @@ def _pick_best_horizon(
         break_thresh = threshold_map["break"].get(horizon, 0.5)
 
         if signal == "reject":
-            edge = (pr - reject_thresh) + 1.0
+            signal_edge = pr - reject_thresh
         elif signal == "break":
-            edge = -(pb - break_thresh) - 1.0
+            signal_edge = pb - break_thresh
         else:
-            edge = pr - pb
+            signal_edge = None
+
+        # Fallback ranking used only when all horizons are no_edge.
+        edge = max(pr - reject_thresh, pb - break_thresh)
 
         if best_score is None or edge > best_score:
             best_score = edge
             best_horizon = horizon
 
-    has_signal = any(
-        signals.get(f"signal_{h}m") in ("reject", "break")
-        for h in scored_horizons
-    )
-    return best_horizon, not has_signal
+        if signal_edge is not None and (
+            best_signal_score is None or signal_edge > best_signal_score
+        ):
+            best_signal_score = signal_edge
+            best_signal_horizon = horizon
+
+    has_signal = best_signal_horizon is not None
+    if has_signal:
+        return best_signal_horizon, False
+    return best_horizon, True
 
 
 def _score_event(event: dict):

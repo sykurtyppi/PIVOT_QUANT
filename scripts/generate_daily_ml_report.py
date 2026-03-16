@@ -340,7 +340,10 @@ def _compute_report_blend_weight(n_eff: float | None, ci_width: float | None) ->
         ci_scale = 1.0
     else:
         ci_scale = max(0.0, 1.0 - (float(ci_width) / ANALOG_BLEND_CI_WIDTH_REF))
-    weight = ANALOG_BLEND_WEIGHT_BASE * eff_scale * ci_scale
+    blend_scale = eff_scale * ci_scale
+    weight = ANALOG_BLEND_WEIGHT_BASE + (
+        ANALOG_BLEND_WEIGHT_MAX - ANALOG_BLEND_WEIGHT_BASE
+    ) * blend_scale
     return max(0.0, min(ANALOG_BLEND_WEIGHT_MAX, weight))
 
 
@@ -426,18 +429,6 @@ def fetch_labeled_records(
     trade_regime_expr = _prediction_log_expr(pred_cols, "trade_regime")
     selected_policy_expr = _prediction_log_expr(pred_cols, "selected_policy")
     regime_policy_json_expr = _prediction_log_expr(pred_cols, "regime_policy_json")
-    analog_json_expr = _prediction_log_expr(pred_cols, "analog_json")
-    analog_best_reject_expr = _prediction_log_expr(pred_cols, "analog_best_reject_prob")
-    analog_best_break_expr = _prediction_log_expr(pred_cols, "analog_best_break_prob")
-    analog_best_n_expr = _prediction_log_expr(pred_cols, "analog_best_n")
-    analog_best_ci_width_expr = _prediction_log_expr(pred_cols, "analog_best_ci_width")
-    analog_best_disagreement_expr = _prediction_log_expr(pred_cols, "analog_best_disagreement")
-    analog_json_expr = _prediction_log_expr(pred_cols, "analog_json")
-    analog_best_reject_expr = _prediction_log_expr(pred_cols, "analog_best_reject_prob")
-    analog_best_break_expr = _prediction_log_expr(pred_cols, "analog_best_break_prob")
-    analog_best_n_expr = _prediction_log_expr(pred_cols, "analog_best_n")
-    analog_best_ci_width_expr = _prediction_log_expr(pred_cols, "analog_best_ci_width")
-    analog_best_disagreement_expr = _prediction_log_expr(pred_cols, "analog_best_disagreement")
     analog_json_expr = _prediction_log_expr(pred_cols, "analog_json")
     analog_best_reject_expr = _prediction_log_expr(pred_cols, "analog_best_reject_prob")
     analog_best_break_expr = _prediction_log_expr(pred_cols, "analog_best_break_prob")
