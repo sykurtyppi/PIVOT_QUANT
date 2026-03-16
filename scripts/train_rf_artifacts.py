@@ -226,9 +226,8 @@ def compute_horizon_stats(df, target, horizon):
         pos_metric = float(pos[metric].mean()) if not pos.empty else None
         neg_metric = float(neg[metric].mean()) if not neg.empty else None
         stats[f"{metric}_{target}"] = pos_metric
-        # Backward-compatible alias used by runtime for no_edge expectancy.
-        stats[f"{metric}_other"] = neg_metric
-        # Explicit target-specific alias for downstream consumers.
+        # Target-scoped "other" bucket avoids cross-target overwrites when
+        # reject/break stats are merged into a single payload.
         stats[f"{metric}_{target}_other"] = neg_metric
     return stats
 

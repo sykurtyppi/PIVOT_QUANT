@@ -140,7 +140,12 @@ def build_feature_row(event: dict[str, Any]) -> dict[str, Any]:
 
     # VWAP z-score: distance normalized by session volatility
     session_std = event.get("session_std")
-    if vwap is not None and touch_price is not None and session_std and session_std > 0:
+    if (
+        vwap is not None
+        and touch_price is not None
+        and session_std is not None
+        and session_std > 0
+    ):
         row["vwap_zscore"] = (touch_price - vwap) / session_std
     else:
         row["vwap_zscore"] = None
@@ -219,7 +224,7 @@ def build_feature_row(event: dict[str, Any]) -> dict[str, Any]:
     # ── ATR features (normalized to bps, not raw dollars) ──
     atr = event.get("atr")
     distance_bps = event.get("distance_bps")
-    if atr and atr > 0 and touch_price and touch_price > 0:
+    if atr is not None and atr > 0 and touch_price is not None and touch_price > 0:
         atr_bps = atr / touch_price * 1e4
         row["atr_bps"] = atr_bps
         row["distance_atr_ratio"] = distance_bps / atr_bps if atr_bps > 0 and distance_bps is not None else None

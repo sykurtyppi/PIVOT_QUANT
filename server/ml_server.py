@@ -1225,7 +1225,13 @@ def _is_model_stale() -> bool:
     if not isinstance(manifest, dict):
         return False
     trained_end_ts = manifest.get("trained_end_ts")
-    if not trained_end_ts:
+    if trained_end_ts is None:
+        return False
+    try:
+        trained_end_ts = float(trained_end_ts)
+    except (TypeError, ValueError):
+        return False
+    if trained_end_ts <= 0:
         return False
     age_hours = (time.time() * 1000 - trained_end_ts) / (3600 * 1000)
     return age_hours > STALE_MODEL_HOURS
@@ -2798,9 +2804,16 @@ def _score_event(event: dict):
             mfe = stats_reject.get("mfe_bps_reject") or 0.0
             mae = stats_reject.get("mae_bps_reject") or 0.0
         else:
-            # no_edge: use "other" (non-reject) stats as baseline
-            mfe = stats_reject.get("mfe_bps_other") or 0.0
-            mae = stats_reject.get("mae_bps_other") or 0.0
+            # no_edge: use reject-specific "other" bucket when available.
+            # Fallback to legacy unscoped keys for older manifests.
+            mfe = stats_reject.get("mfe_bps_reject_other")
+            if mfe is None:
+                mfe = stats_reject.get("mfe_bps_other")
+            mae = stats_reject.get("mae_bps_reject_other")
+            if mae is None:
+                mae = stats_reject.get("mae_bps_other")
+            mfe = mfe or 0.0
+            mae = mae or 0.0
 
         scores[f"exp_mfe_bps_{horizon}m"] = float(mfe)
         scores[f"exp_mae_bps_{horizon}m"] = float(mae)

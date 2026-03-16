@@ -3224,6 +3224,71 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(result["best_horizon"], 60)
         self.assertFalse(result["abstain"])
 
+    def test_ml_server_no_edge_expectancy_prefers_target_specific_other_stats(self) -> None:
+        ml_server = load_module("ml_server_no_edge_expectancy_runtime", REPO_ROOT / "server" / "ml_server.py")
+
+        class DummyModel:
+            classes_ = np.array([0, 1])
+
+            def __init__(self, prob: float) -> None:
+                self.prob = prob
+
+            def predict_proba(self, _df):
+                return np.array([[1.0 - self.prob, self.prob]], dtype=float)
+
+        ml_server.build_feature_row = lambda _event: {"x": 1.0}
+        ml_server.collect_missing = lambda _features: []
+        ml_server.ML_SHADOW_HORIZONS = set()
+
+        ml_server.registry.models = {
+            "reject": {
+                5: {
+                    "feature_columns": ["x"],
+                    "pipeline": DummyModel(0.1),
+                    "calibration": "sigmoid",
+                }
+            },
+            "break": {
+                5: {
+                    "feature_columns": ["x"],
+                    "pipeline": DummyModel(0.1),
+                    "calibration": "sigmoid",
+                }
+            },
+        }
+        ml_server.registry.thresholds = {"reject": {5: 0.5}, "break": {5: 0.5}}
+        ml_server.registry.manifest = {
+            "version": "vtest",
+            "trained_end_ts": int(time.time() * 1000),
+            "stats": {
+                "5": {
+                    "reject": {
+                        "mfe_bps_reject_other": 11.0,
+                        "mae_bps_reject_other": -7.0,
+                        # Legacy unscoped aliases intentionally disagree.
+                        "mfe_bps_other": 999.0,
+                        "mae_bps_other": -999.0,
+                    },
+                    "break": {},
+                }
+            },
+        }
+
+        result = ml_server._score_event({"event_id": "no_edge_specific_other"})
+        self.assertEqual(result["signals"].get("signal_5m"), "no_edge")
+        self.assertAlmostEqual(float(result["scores"]["exp_mfe_bps_5m"]), 11.0, places=6)
+        self.assertAlmostEqual(float(result["scores"]["exp_mae_bps_5m"]), -7.0, places=6)
+
+        # Backward compatibility: legacy manifests without target-specific keys still work.
+        ml_server.registry.manifest["stats"]["5"]["reject"] = {
+            "mfe_bps_other": 13.0,
+            "mae_bps_other": -8.0,
+        }
+        result = ml_server._score_event({"event_id": "no_edge_legacy_other"})
+        self.assertEqual(result["signals"].get("signal_5m"), "no_edge")
+        self.assertAlmostEqual(float(result["scores"]["exp_mfe_bps_5m"]), 13.0, places=6)
+        self.assertAlmostEqual(float(result["scores"]["exp_mae_bps_5m"]), -8.0, places=6)
+
     def test_regime_policy_shadow_and_active_runtime_behavior(self) -> None:
         ml_server = load_module("ml_server_regime_policy_runtime", REPO_ROOT / "server" / "ml_server.py")
 
@@ -5478,16 +5543,16 @@ class OpsSmokeTests(unittest.TestCase):
         break_stats = module.compute_horizon_stats(df, "break", 5)
 
         # Reject "other" must come from reject==0 rows only (30, 40), not break==0 rows.
-        self.assertAlmostEqual(float(reject_stats["mfe_bps_other"]), 35.0, places=6)
-        self.assertAlmostEqual(float(reject_stats["mae_bps_other"]), -25.0, places=6)
         self.assertAlmostEqual(float(reject_stats["mfe_bps_reject_other"]), 35.0, places=6)
         self.assertAlmostEqual(float(reject_stats["mae_bps_reject_other"]), -25.0, places=6)
 
         # Break "other" comes from break==0 rows (10, 40).
-        self.assertAlmostEqual(float(break_stats["mfe_bps_other"]), 25.0, places=6)
-        self.assertAlmostEqual(float(break_stats["mae_bps_other"]), -16.0, places=6)
         self.assertAlmostEqual(float(break_stats["mfe_bps_break_other"]), 25.0, places=6)
         self.assertAlmostEqual(float(break_stats["mae_bps_break_other"]), -16.0, places=6)
+        self.assertNotIn("mfe_bps_other", reject_stats)
+        self.assertNotIn("mae_bps_other", reject_stats)
+        self.assertNotIn("mfe_bps_other", break_stats)
+        self.assertNotIn("mae_bps_other", break_stats)
 
     def test_model_governance_skips_regression_gates_when_support_is_low(self) -> None:
         module = load_module("model_governance", REPO_ROOT / "scripts" / "model_governance.py")
