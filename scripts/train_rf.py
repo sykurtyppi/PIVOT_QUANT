@@ -497,7 +497,24 @@ def main() -> None:
 
         y_pred = (y_prob >= 0.5).astype(int) if y_prob is not None else model.predict(X_test)
 
-        fold_metrics = metrics_for_fold(y_test, y_prob, y_pred, optimal_threshold=None)
+        optimal_threshold = None
+        if (
+            y_prob is not None
+            and len(X_calib) > 0
+            and hasattr(model, "predict_proba")
+            and len(set(y_calib)) == 2
+        ):
+            # Tune threshold on calibration fold only to avoid test-fold leakage.
+            calib_probs = model.predict_proba(X_calib)
+            if getattr(calib_probs, "shape", (0, 0))[1] == 2:
+                optimal_threshold = find_optimal_threshold(y_calib, calib_probs[:, 1])
+
+        fold_metrics = metrics_for_fold(
+            y_test,
+            y_prob,
+            y_pred,
+            optimal_threshold=optimal_threshold,
+        )
         fold_metrics.update(
             {
                 "fold": fold_idx,

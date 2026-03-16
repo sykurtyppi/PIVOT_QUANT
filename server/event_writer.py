@@ -33,6 +33,13 @@ _SCHEMA_LOCK = threading.Lock()
 _THREAD_LOCAL = threading.local()
 _DEFAULT_CORS_ORIGINS = "http://127.0.0.1:3000,http://localhost:3000"
 MAX_BODY_BYTES = int(os.getenv("EVENT_WRITER_MAX_BODY_BYTES", str(2 * 1024 * 1024)))
+EVENT_WRITER_SQLITE_SYNC = (os.getenv("EVENT_WRITER_SQLITE_SYNC", "FULL") or "FULL").strip().upper()
+if EVENT_WRITER_SQLITE_SYNC not in {"OFF", "NORMAL", "FULL", "EXTRA"}:
+    EVENT_WRITER_SQLITE_SYNC = "FULL"
+EVENT_WRITER_WAL_AUTOCHECKPOINT = max(
+    100,
+    int(os.getenv("EVENT_WRITER_WAL_AUTOCHECKPOINT", "1000")),
+)
 NY_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone.utc
 RTH_OPEN = time(9, 30)
 RTH_CLOSE = time(16, 0)
@@ -94,7 +101,8 @@ def connect():
     _THREAD_LOCAL.conn_db_path = DB_PATH
     conn.execute("PRAGMA foreign_keys=ON;")
     conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute(f"PRAGMA synchronous={EVENT_WRITER_SQLITE_SYNC};")
+    conn.execute(f"PRAGMA wal_autocheckpoint={EVENT_WRITER_WAL_AUTOCHECKPOINT};")
     conn.execute("PRAGMA temp_store=MEMORY;")
     conn.execute("PRAGMA cache_size=-200000;")
 

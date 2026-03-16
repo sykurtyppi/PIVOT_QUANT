@@ -13,7 +13,7 @@ import time
 import traceback
 import hashlib
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Iterable
 from urllib.error import HTTPError
 from urllib.parse import urlencode
@@ -67,6 +67,14 @@ GAMMA_CONTEXT_CARRY_CONFIDENCE_DECAY_PER_DAY = int(
 )
 GAMMA_CONTEXT_MARKETDATA_ERROR_BACKOFF_SEC = int(
     os.getenv("GAMMA_CONTEXT_MARKETDATA_ERROR_BACKOFF_SEC", "900")
+)
+HIST_ACCURACY_MIN_SAMPLE_SIZE = max(0, int(os.getenv("HIST_ACCURACY_MIN_SAMPLE_SIZE", "20")))
+BACKFILL_SQLITE_SYNC = (os.getenv("BACKFILL_SQLITE_SYNC", "FULL") or "FULL").strip().upper()
+if BACKFILL_SQLITE_SYNC not in {"OFF", "NORMAL", "FULL", "EXTRA"}:
+    BACKFILL_SQLITE_SYNC = "FULL"
+BACKFILL_WAL_AUTOCHECKPOINT = max(
+    100,
+    int(os.getenv("BACKFILL_WAL_AUTOCHECKPOINT", "1000")),
 )
 _gamma_context_marketdata_backoff_until: dict[str, float] = {}
 _gamma_context_marketdata_backoff_lock = threading.Lock()
@@ -483,6 +491,19 @@ def _parse_generated_at_ms(value: str | None) -> int | None:
         return None
 
 
+def _coerce_et_date(value) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.strptime(value, "%Y-%m-%d").date()
+        except ValueError:
+            return None
+    return None
+
+
 def _derive_gamma_confidence(payload: dict) -> int | None:
     call_strength = _to_float((payload.get("callWall") or {}).get("strength"))
     put_strength = _to_float((payload.get("putWall") or {}).get("strength"))
@@ -861,9 +882,19 @@ def et_date(epoch_seconds: int):
     return dt.date()
 
 
+def is_rth_bar(epoch_seconds: int) -> bool:
+    dt = datetime.fromtimestamp(epoch_seconds, tz=NY_TZ)
+    if dt.weekday() >= 5:
+        return False
+    minutes = dt.hour * 60 + dt.minute
+    return 9 * 60 + 30 <= minutes < 16 * 60
+
+
 def build_daily_bars(candles: Iterable[dict]) -> list[dict]:
     grouped = defaultdict(list)
     for bar in candles:
+        if not is_rth_bar(int(bar["time"])):
+            continue
         grouped[et_date(bar["time"])].append(bar)
 
     sessions = []
@@ -1208,6 +1239,16 @@ def compute_historical_accuracy(
     return reject_count / sample_size, break_count / sample_size, sample_size
 
 
+def ensure_touch_event_indexes(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_touch_symbol_level_ts
+        ON touch_events(symbol, level_type, ts_event)
+        """
+    )
+    conn.commit()
+
+
 def calculate_pivots(high: float, low: float, close: float) -> dict:
     pivot = (high + low + close) / 3
     r1 = 2 * pivot - low
@@ -1514,8 +1555,6 @@ def build_events(
 
     # Compute daily EMAs from session closes (matches dashboard daily chart)
     daily_emas = compute_daily_emas(sessions)
-    latest_session_date = sessions[-1]["date"] if sessions else None
-
     for idx in range(1, len(sessions)):
         base = sessions[idx - 1]
         session = sessions[idx]
@@ -1547,20 +1586,13 @@ def build_events(
         rv_for_session = rv_by_date.get(base["date"]) if rv_by_date else None
         rv_regime_for_session = rv_regime_by_date.get(base["date"]) if rv_regime_by_date else None
         sigma_bands = compute_sigma_bands(base["close"], session_atr, rv_for_session)
-        gamma_context_date = gamma_context.get("generated_at_date_et") if gamma_context else None
+        gamma_context_date = _coerce_et_date(
+            gamma_context.get("generated_at_date_et") if gamma_context else None
+        )
         use_gamma_context = bool(
             gamma_context
-            and (
-                gamma_context_date is None
-                or gamma_context_date == session["date"]
-                or (
-                    latest_session_date is not None
-                    and gamma_context_date is not None
-                    and session["date"] == latest_session_date
-                    and gamma_context_date > latest_session_date
-                    and (gamma_context_date - latest_session_date).days <= 3
-                )
-            )
+            and gamma_context_date is not None
+            and gamma_context_date <= session["date"]
         )
 
         for bar in session["bars"]:
@@ -1697,6 +1729,9 @@ def build_events(
                     hist_reject_rate, hist_break_rate, hist_sample_size = (
                         compute_historical_accuracy(conn, symbol, label, ts_event)
                     )
+                    if hist_sample_size < HIST_ACCURACY_MIN_SAMPLE_SIZE:
+                        hist_reject_rate = None
+                        hist_break_rate = None
 
                 touch_counts[label] += 1
 
@@ -1814,12 +1849,14 @@ def main() -> None:
     conn = sqlite3.connect(args.db)
     conn.execute("PRAGMA foreign_keys=ON;")
     conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute(f"PRAGMA synchronous={BACKFILL_SQLITE_SYNC};")
+    conn.execute(f"PRAGMA wal_autocheckpoint={BACKFILL_WAL_AUTOCHECKPOINT};")
     if migrate_connection is not None:
         migrate_connection(conn, verbose=False)
     else:
         ensure_schema(conn)
         ensure_new_columns(conn)
+    ensure_touch_event_indexes(conn)
 
     total_bars = 0
     total_events = 0

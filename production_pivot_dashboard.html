@@ -4404,10 +4404,26 @@
                 const coverage = stats.totalContracts
                     ? Math.round((stats.withGreeks / stats.totalContracts) * 100)
                     : 0;
-                const qualityLabel = coverage >= 80 ? 'Fresh' : coverage >= 50 ? 'Partial' : 'Stale';
+                const cacheStale = !!state.gammaData?.cacheStale;
+                const cacheStaleReason = state.gammaData?.cacheStaleReason;
+                let qualityLabel = coverage >= 80 ? 'Fresh' : coverage >= 50 ? 'Partial' : 'Stale';
+                if (cacheStale) {
+                    qualityLabel = 'Stale (cached)';
+                }
                 state.lastDataQualityLabel = qualityLabel;
                 state.lastDataCoverage = coverage;
-                setLabeledText('data-quality', 'Data Quality', `${qualityLabel} (${coverage}%)`);
+                if (cacheStale && cacheStaleReason) {
+                    setLabeledTextWithNote(
+                        'data-quality',
+                        'Data Quality',
+                        `${qualityLabel} (${coverage}%)`,
+                        cacheStaleReason
+                    );
+                    document.getElementById('data-quality').title = cacheStaleReason;
+                } else {
+                    setLabeledText('data-quality', 'Data Quality', `${qualityLabel} (${coverage}%)`);
+                    document.getElementById('data-quality').title = '';
+                }
 
                 // Gamma Confidence Score (0-100) with quality cap
                 const clamp = (v, min = 0, max = 1) => Math.min(max, Math.max(min, v));
@@ -5174,6 +5190,8 @@
                         usedOpenInterest: data.usedOpenInterest,
                         stats: data.stats || null,
                         expiryMode: data.expiryMode || expiryMode,
+                        cacheStale: !!data.cacheStale,
+                        cacheStaleReason: data.cacheStaleReason ? String(data.cacheStaleReason) : null,
                     };
                 }
                 state.gammaFetchError = 'Gamma response missing stats';
@@ -5335,7 +5353,7 @@
                 state.intradayBars = data.candles;
                 const intradayEma9 = calculateEMA(data.candles, 9);
                 const intradayEma21 = calculateEMA(data.candles, 21);
-                const intradayVwap = calculateVWAP(data.candles, data.session?.timeZone || state.timeZone);
+                const intradayVwap = calculateVWAP(data.candles, 'America/New_York');
                 state.lastEma9 = intradayEma9.length ? intradayEma9[intradayEma9.length - 1].value : state.lastEma9;
                 state.lastEma21 = intradayEma21.length ? intradayEma21[intradayEma21.length - 1].value : state.lastEma21;
                 state.lastVwap = intradayVwap.length ? intradayVwap[intradayVwap.length - 1].value : state.lastVwap;
@@ -6568,7 +6586,7 @@
                     state.ema200Series.setData(ema200Series);
                 }
 
-                const vwapSeries = calculateVWAP(state.candles, state.timeZone);
+                const vwapSeries = calculateVWAP(state.candles, 'America/New_York');
                 if (state.vwapSeries) {
                     state.vwapSeries.setData(vwapSeries);
                 }

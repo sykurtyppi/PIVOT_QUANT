@@ -1267,6 +1267,111 @@ class OpsSmokeTests(unittest.TestCase):
             backfill.MARKETDATA_APP_TOKEN = original_token
             conn.close()
 
+    def test_backfill_build_daily_bars_filters_non_rth(self) -> None:
+        backfill = load_module(
+            "pq_backfill_rth_filter_test",
+            REPO_ROOT / "scripts" / "backfill_events.py",
+        )
+
+        base_date = date(2026, 3, 10)
+
+        def _et_ts(hour: int, minute: int) -> int:
+            dt = datetime(
+                base_date.year,
+                base_date.month,
+                base_date.day,
+                hour,
+                minute,
+                tzinfo=backfill.NY_TZ,
+            )
+            return int(dt.timestamp())
+
+        bars = [
+            {"time": _et_ts(8, 0), "open": 100, "high": 101, "low": 99, "close": 100, "volume": 10},
+            {"time": _et_ts(9, 30), "open": 100, "high": 101, "low": 99, "close": 100, "volume": 10},
+            {"time": _et_ts(15, 59), "open": 100, "high": 101, "low": 99, "close": 100, "volume": 10},
+            {"time": _et_ts(16, 0), "open": 100, "high": 101, "low": 99, "close": 100, "volume": 10},
+        ]
+
+        sessions = backfill.build_daily_bars(bars)
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(len(sessions[0]["bars"]), 2)
+
+    def test_backfill_events_reject_future_gamma_context_date(self) -> None:
+        backfill = load_module(
+            "pq_backfill_future_gamma_guard_test",
+            REPO_ROOT / "scripts" / "backfill_events.py",
+        )
+
+        base_date = date(2026, 3, 10)
+        session_date = date(2026, 3, 11)
+        future_gamma_date = date(2026, 3, 12)
+        bar_ts = int(datetime(2026, 3, 11, 10, 0, tzinfo=backfill.NY_TZ).timestamp())
+
+        sessions = [
+            {
+                "date": base_date,
+                "open": 100.0,
+                "high": 101.0,
+                "low": 99.0,
+                "close": 100.0,
+                "bars": [
+                    {
+                        "time": int(datetime(2026, 3, 10, 10, 0, tzinfo=backfill.NY_TZ).timestamp()),
+                        "open": 100.0,
+                        "high": 101.0,
+                        "low": 99.0,
+                        "close": 100.0,
+                        "volume": 1000.0,
+                    }
+                ],
+            },
+            {
+                "date": session_date,
+                "open": 100.0,
+                "high": 101.0,
+                "low": 99.0,
+                "close": 100.0,
+                "bars": [
+                    {
+                        "time": bar_ts,
+                        "open": 100.0,
+                        "high": 100.2,
+                        "low": 99.8,
+                        "close": 100.0,
+                        "volume": 1000.0,
+                    }
+                ],
+            },
+        ]
+
+        events = backfill.build_events(
+            symbol="SPY",
+            sessions=sessions,
+            interval_sec=60,
+            threshold_bps=10.0,
+            cooldown_min=10,
+            source="yahoo",
+            atr_by_date={base_date: 1.0},
+            conn=None,
+            rv_by_date={},
+            rv_regime_by_date={},
+            gamma_context={
+                "gamma_flip": 500.0,
+                "generated_at_date_et": datetime(
+                    future_gamma_date.year,
+                    future_gamma_date.month,
+                    future_gamma_date.day,
+                    8,
+                    30,
+                    tzinfo=backfill.NY_TZ,
+                ),
+                "source_name": "marketdata_live",
+            },
+        )
+        self.assertTrue(events)
+        self.assertTrue(all(ev.get("gamma_flip") is None for ev in events))
+
     def test_backfill_gamma_context_prefers_live_when_snapshot_is_stale(self) -> None:
         backfill = load_module(
             "pq_backfill_gamma_live_refresh_test",
@@ -2333,6 +2438,9 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("function setLabeledText(id, label, value)", dashboard)
         self.assertIn("setOpsField(id, label, value)", dashboard)
         self.assertIn("setLabeledText(id, label, value ?? '--');", dashboard)
+        self.assertIn("cacheStale: !!data.cacheStale", dashboard)
+        self.assertIn("cacheStaleReason: data.cacheStaleReason ? String(data.cacheStaleReason) : null", dashboard)
+        self.assertIn("Stale (cached)", dashboard)
 
     def test_dashboard_proxy_ops_status_uses_async_file_reads(self) -> None:
         proxy_source = (REPO_ROOT / "server" / "yahoo_proxy.js").read_text(encoding="utf-8")
@@ -2585,7 +2693,8 @@ class OpsSmokeTests(unittest.TestCase):
         ensure_block = source.split("def ensure_connected()", 1)[1].split("def fetch_spot", 1)[0]
         self.assertIn("with ib_lock:", ensure_block)
         self.assertIn("if ib.isConnected()", ensure_block)
-        self.assertIn("ib.connect(IB_HOST, IB_PORT, clientId=IB_CLIENT_ID)", ensure_block)
+        self.assertIn("timeout=IB_CONNECT_TIMEOUT_SEC", ensure_block)
+        self.assertIn("IBKR reconnect cooldown active", ensure_block)
 
     def test_ibkr_bridge_marketdata_cache_returns_copy(self) -> None:
         source = (REPO_ROOT / "server" / "ibkr_gamma_bridge.py").read_text(encoding="utf-8")
@@ -2732,9 +2841,17 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn('DASH_AUTH_ENFORCE_STRONG_PASSWORD', stack_script)
         self.assertIn('DASH_AUTH_LOCAL_BYPASS=true is not allowed when HOST is non-loopback', stack_script)
         self.assertIn('DASH_AUTH_PASSWORD length', stack_script)
+        self.assertNotIn("${value,,}", stack_script)
+        self.assertNotIn("${host_value,,}", stack_script)
 
         proc = run_cmd(["bash", "-n", "server/run_persistent_stack.sh"], cwd=REPO_ROOT)
         self.assertEqual(proc.returncode, 0, msg=f"{proc.stdout}\n{proc.stderr}")
+
+    def test_train_rf_threshold_tuning_uses_calibration_fold(self) -> None:
+        source = (REPO_ROOT / "scripts" / "train_rf.py").read_text(encoding="utf-8")
+        self.assertIn("find_optimal_threshold(y_calib, calib_probs[:, 1])", source)
+        self.assertIn("optimal_threshold=optimal_threshold", source)
+        self.assertNotIn("metrics_for_fold(y_test, y_prob, y_pred, optimal_threshold=None)", source)
 
     def test_run_all_health_probe_retry_contract_present(self) -> None:
         run_all = (REPO_ROOT / "server" / "run_all.sh").read_text(encoding="utf-8")

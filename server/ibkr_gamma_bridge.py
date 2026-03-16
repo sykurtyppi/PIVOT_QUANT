@@ -32,6 +32,8 @@ IB_WEIGHT_MONTHLY = float(os.getenv("IB_WEIGHT_MONTHLY", "0.35"))
 IB_WEIGHT_OTHER = float(os.getenv("IB_WEIGHT_OTHER", "0.2"))
 IB_USE_RTH = os.getenv("IB_USE_RTH", "1") != "0"
 IB_DATA_TYPE = os.getenv("IB_DATA_TYPE", "").strip()
+IB_CONNECT_TIMEOUT_SEC = max(0.5, float(os.getenv("IB_CONNECT_TIMEOUT_SEC", "5.0")))
+IB_CONNECT_RETRY_BACKOFF_SEC = max(1.0, float(os.getenv("IB_CONNECT_RETRY_BACKOFF_SEC", "5.0")))
 MARKETDATA_APP_TOKEN = os.getenv("MARKETDATA_APP_TOKEN", "").strip()
 MARKETDATA_APP_BASE = "https://api.marketdata.app/v1"
 # Limit options chain to options expiring within this many days.
@@ -56,6 +58,7 @@ NY_TZ = ZoneInfo("America/New_York") if ZoneInfo else None
 
 ib = IB()
 ib_lock = threading.RLock()
+_ib_connect_backoff_until_mono = 0.0
 
 
 def _utc_now() -> datetime:
@@ -165,10 +168,27 @@ def _fetch_ticker_price(contract):
 
 
 def ensure_connected():
+    global _ib_connect_backoff_until_mono
     with ib_lock:
         if ib.isConnected():
             return
-        ib.connect(IB_HOST, IB_PORT, clientId=IB_CLIENT_ID)
+        now_mono = time.monotonic()
+        if _ib_connect_backoff_until_mono > now_mono:
+            remaining = int(_ib_connect_backoff_until_mono - now_mono)
+            raise RuntimeError(
+                f"IBKR reconnect cooldown active ({remaining}s remaining)"
+            )
+        try:
+            ib.connect(
+                IB_HOST,
+                IB_PORT,
+                clientId=IB_CLIENT_ID,
+                timeout=IB_CONNECT_TIMEOUT_SEC,
+            )
+        except Exception:
+            _ib_connect_backoff_until_mono = now_mono + IB_CONNECT_RETRY_BACKOFF_SEC
+            raise
+        _ib_connect_backoff_until_mono = 0.0
 
 
 def fetch_spot(symbol):

@@ -32,6 +32,13 @@ DEFAULT_HTTP_RETRY_MAX_SEC = max(
     float(os.getenv("GAMMA_HISTORY_HTTP_RETRY_MAX_SEC", "30.0")),
 )
 DEFAULT_HTTP_RETRY_JITTER_SEC = max(0.0, float(os.getenv("GAMMA_HISTORY_HTTP_RETRY_JITTER_SEC", "0.25")))
+GAMMA_HISTORY_SQLITE_SYNC = (os.getenv("GAMMA_HISTORY_SQLITE_SYNC", "FULL") or "FULL").strip().upper()
+if GAMMA_HISTORY_SQLITE_SYNC not in {"OFF", "NORMAL", "FULL", "EXTRA"}:
+    GAMMA_HISTORY_SQLITE_SYNC = "FULL"
+GAMMA_HISTORY_WAL_AUTOCHECKPOINT = max(
+    100,
+    int(os.getenv("GAMMA_HISTORY_WAL_AUTOCHECKPOINT", "1000")),
+)
 TRANSIENT_HTTP_CODES = {429, 500, 502, 503, 504}
 GAMMA_COMPUTE_FALLBACK = (
     (os.getenv("GAMMA_COMPUTE_FALLBACK", "false") or "false").strip().lower()
@@ -684,7 +691,8 @@ def main() -> None:
     conn = sqlite3.connect(str(db_path))
     try:
         conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA synchronous=NORMAL;")
+        conn.execute(f"PRAGMA synchronous={GAMMA_HISTORY_SQLITE_SYNC};")
+        conn.execute(f"PRAGMA wal_autocheckpoint={GAMMA_HISTORY_WAL_AUTOCHECKPOINT};")
         ensure_schema(conn)
 
         inserted = 0

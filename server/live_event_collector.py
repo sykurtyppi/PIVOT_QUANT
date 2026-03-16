@@ -87,6 +87,13 @@ SCORE_UNSCORED_LOOKBACK_DAYS = max(0, int(os.getenv("LIVE_COLLECTOR_SCORE_UNSCOR
 SCORE_UNSCORED_MAX_PER_CYCLE = max(0, int(os.getenv("LIVE_COLLECTOR_SCORE_UNSCORED_MAX_PER_CYCLE", "12")))
 GAMMA_REFRESH_SEC = max(30, int(os.getenv("LIVE_COLLECTOR_GAMMA_REFRESH_SEC", "300")))
 GAMMA_RETRY_SEC = max(30, int(os.getenv("LIVE_COLLECTOR_GAMMA_RETRY_SEC", "1800")))
+LIVE_COLLECTOR_SQLITE_SYNC = (os.getenv("LIVE_COLLECTOR_SQLITE_SYNC", "FULL") or "FULL").strip().upper()
+if LIVE_COLLECTOR_SQLITE_SYNC not in {"OFF", "NORMAL", "FULL", "EXTRA"}:
+    LIVE_COLLECTOR_SQLITE_SYNC = "FULL"
+LIVE_COLLECTOR_WAL_AUTOCHECKPOINT = max(
+    100,
+    int(os.getenv("LIVE_COLLECTOR_WAL_AUTOCHECKPOINT", "1000")),
+)
 INTERVAL_SEC = _interval_to_seconds(INTERVAL)
 _DEFAULT_CORS_ORIGINS = "http://127.0.0.1:3000,http://localhost:3000"
 
@@ -131,7 +138,8 @@ def _connect_db() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.execute("PRAGMA foreign_keys=ON;")
     conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute(f"PRAGMA synchronous={LIVE_COLLECTOR_SQLITE_SYNC};")
+    conn.execute(f"PRAGMA wal_autocheckpoint={LIVE_COLLECTOR_WAL_AUTOCHECKPOINT};")
     conn.execute("PRAGMA busy_timeout=30000;")
     conn.row_factory = sqlite3.Row
     if migrate_connection is not None:

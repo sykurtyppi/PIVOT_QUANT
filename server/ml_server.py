@@ -193,6 +193,12 @@ PREDICTION_LOG_CONNECT_TIMEOUT_SEC = max(
 PREDICTION_LOG_BUSY_TIMEOUT_MS = max(
     0, int(os.getenv("PREDICTION_LOG_BUSY_TIMEOUT_MS", "50"))
 )
+PREDICTION_LOG_SQLITE_SYNC = (os.getenv("PREDICTION_LOG_SQLITE_SYNC", "FULL") or "FULL").strip().upper()
+if PREDICTION_LOG_SQLITE_SYNC not in {"OFF", "NORMAL", "FULL", "EXTRA"}:
+    PREDICTION_LOG_SQLITE_SYNC = "FULL"
+PREDICTION_LOG_WAL_AUTOCHECKPOINT = max(
+    100, int(os.getenv("PREDICTION_LOG_WAL_AUTOCHECKPOINT", "1000"))
+)
 PREDICTION_LOG_QUEUE_MAX_SIZE = max(
     64, int(os.getenv("PREDICTION_LOG_QUEUE_MAX_SIZE", "4096"))
 )
@@ -1410,7 +1416,8 @@ def _get_prediction_log_conn() -> sqlite3.Connection:
     )
     conn.execute(f"PRAGMA busy_timeout={int(PREDICTION_LOG_BUSY_TIMEOUT_MS)};")
     conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute(f"PRAGMA synchronous={PREDICTION_LOG_SQLITE_SYNC};")
+    conn.execute(f"PRAGMA wal_autocheckpoint={PREDICTION_LOG_WAL_AUTOCHECKPOINT};")
     conn.execute("PRAGMA temp_store=MEMORY;")
     conn.execute("PRAGMA cache_size=-200000;")
     _PREDICTION_LOG_LOCAL.conn = conn
@@ -1677,11 +1684,21 @@ def _start_prediction_log_writer() -> None:
 def _stop_prediction_log_writer(timeout_sec: float = 5.0) -> None:
     global _PREDICTION_LOG_WRITER_THREAD
     _PREDICTION_LOG_WRITER_STOP.set()
+    deadline = time.monotonic() + max(0.1, timeout_sec)
+    while time.monotonic() < deadline:
+        if getattr(_PREDICTION_LOG_QUEUE, "unfinished_tasks", 0) <= 0:
+            break
+        time.sleep(0.05)
     writer = _PREDICTION_LOG_WRITER_THREAD
     if writer is not None:
-        writer.join(timeout=max(0.1, timeout_sec))
+        remaining = max(0.1, deadline - time.monotonic())
+        writer.join(timeout=remaining)
+    remaining_tasks = int(getattr(_PREDICTION_LOG_QUEUE, "unfinished_tasks", 0))
     _PREDICTION_LOG_WRITER_THREAD = None
-    _update_prediction_log_state(writer_stopped_at_ms=int(time.time() * 1000))
+    updates = {"writer_stopped_at_ms": int(time.time() * 1000)}
+    if remaining_tasks > 0:
+        updates["last_error"] = f"prediction log flush timeout (remaining={remaining_tasks})"
+    _update_prediction_log_state(**updates)
 
 
 atexit.register(_stop_prediction_log_writer)
