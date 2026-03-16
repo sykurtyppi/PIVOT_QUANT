@@ -267,8 +267,18 @@ def _evaluate_regime_metric(
 
     active_regimes = _regime_bucket_blocks(active_block)
     candidate_regimes = _regime_bucket_blocks(candidate_block)
-    if not active_regimes or not candidate_regimes:
+    if not candidate_regimes:
+        # Candidate has no per-regime stats — cannot waive aggregate gate.
         return True, aggregate_message, []
+    if not active_regimes:
+        # Active predates by_regime stats (bootstrap case). Waive the aggregate
+        # gate so regime-aware governance is not blocked by legacy manifests.
+        skip_msg = (
+            f"{target}:{horizon}m {metric_key} regime-aware gate waived "
+            f"(active_no_regime_data; aggregate {active_metric:.2f} -> "
+            f"{candidate_metric:.2f})"
+        )
+        return False, aggregate_message, [skip_msg]
 
     bucket_failures: list[str] = []
     bucket_skips: list[str] = []

@@ -6326,6 +6326,79 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertTrue(any("break:5m mfe_bps_break regressed in compression" in item for item in failures))
         self.assertEqual(skips, [])
 
+    def test_model_governance_regime_aware_waives_gate_when_active_has_no_regime_data(self) -> None:
+        """Regime-aware gate must be waived (not fail) when active manifest predates
+        by_regime stats — prevents legacy models from permanently blocking promotion."""
+        module = load_module(
+            "model_governance_bootstrap_waive",
+            REPO_ROOT / "scripts" / "model_governance.py",
+        )
+        gates = module.GateConfig(
+            required_targets=["break"],
+            required_horizons=[5],
+            min_trained_end_delta_ms=0,
+            max_mfe_regression_bps=1.5,
+            max_mae_worsening_bps=2.0,
+            min_total_samples=0,
+            min_positive_samples_reject=0,
+            min_positive_samples_break=0,
+            allow_feature_version_change=False,
+            regime_aware=True,
+            regime_buckets=["compression", "expansion"],
+            regime_min_compared_buckets=1,
+        )
+        # Active has no by_regime (pre-dates the feature)
+        active = {
+            "feature_version": "v3",
+            "trained_end_ts": 1000,
+            "stats": {
+                "5": {
+                    "break": {
+                        "sample_size": 200,
+                        "break_count": 80,
+                        "mfe_bps_break": 8.0,
+                        "mae_bps_break": -27.6,
+                    }
+                }
+            },
+        }
+        # Candidate has full by_regime data
+        candidate = {
+            "feature_version": "v3",
+            "trained_end_ts": 2000,
+            "stats": {
+                "5": {
+                    "break": {
+                        "sample_size": 200,
+                        "break_count": 80,
+                        "mfe_bps_break": 6.0,
+                        "mae_bps_break": -30.9,
+                        "by_regime": {
+                            "compression": {
+                                "sample_size": 120,
+                                "break_count": 48,
+                                "mfe_bps_break": 8.5,
+                                "mae_bps_break": -24.6,
+                            },
+                            "expansion": {
+                                "sample_size": 80,
+                                "break_count": 32,
+                                "mfe_bps_break": 5.2,
+                                "mae_bps_break": -33.8,
+                            },
+                        },
+                    }
+                }
+            },
+        }
+        failures, skips = module.evaluate_gates(active, candidate, gates)
+        # Gate must be waived (no failures) with an explanatory skip message
+        self.assertEqual(failures, [], "bootstrap waive: should have no failures")
+        self.assertTrue(
+            any("active_no_regime_data" in item for item in skips),
+            f"expected active_no_regime_data skip, got: {skips}",
+        )
+
     def test_model_governance_enforces_regression_gates_when_support_is_high(self) -> None:
         module = load_module("model_governance", REPO_ROOT / "scripts" / "model_governance.py")
         gates = module.GateConfig(
