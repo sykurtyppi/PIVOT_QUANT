@@ -2260,6 +2260,10 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("Retry-After", proxy_source)
         self.assertIn("url.pathname === '/auth/login'", proxy_source)
         self.assertIn("auth_method: 'password_cookie'", proxy_source)
+        self.assertIn("auth_policy_ok", proxy_source)
+        self.assertIn("auth_policy_issues", proxy_source)
+        self.assertIn("runtime_architecture_governance_state", proxy_source)
+        self.assertIn("local_bypass_with_non_loopback_bind", proxy_source)
         self.assertIn(
             "DASH_AUTH_ENFORCE_STRONG_PASSWORD=false while auth is enabled; weak passwords are allowed.",
             proxy_source,
@@ -2278,6 +2282,9 @@ class OpsSmokeTests(unittest.TestCase):
             health = self._wait_for_dashboard_proxy_health(port, proc)
             self.assertEqual(health.get("runtime_architecture_mode"), "dashboard_globals")
             self.assertIn("runtime_dashboard_script_count", health)
+            self.assertIn("runtime_architecture_governance_state", health)
+            self.assertIn("auth_policy_ok", health)
+            self.assertIn("auth_policy_issues", health)
 
             status, payload = self._read_json_url(
                 f"http://127.0.0.1:{port}/api/runtime/architecture",
@@ -2286,6 +2293,7 @@ class OpsSmokeTests(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertEqual(payload.get("status"), "ok")
             self.assertEqual(payload.get("runtime_mode"), "dashboard_globals")
+            self.assertIn("runtime_governance_state", payload)
 
             total = int(payload.get("dashboard_script_count_total", -1))
             external = int(payload.get("dashboard_script_count_external", -1))
@@ -2316,6 +2324,15 @@ class OpsSmokeTests(unittest.TestCase):
             self.assertIn("restricted to local requests", body)
         finally:
             self._stop_process(proc)
+
+    def test_dashboard_toast_and_ops_fields_avoid_dynamic_innerhtml(self) -> None:
+        dashboard = (REPO_ROOT / "production_pivot_dashboard.html").read_text(encoding="utf-8")
+        self.assertIn("msgDiv.textContent = message;", dashboard)
+        self.assertNotIn("if (opts.html)", dashboard)
+        self.assertIn("closeBtn.textContent = '×';", dashboard)
+        self.assertIn("function setLabeledText(id, label, value)", dashboard)
+        self.assertIn("setOpsField(id, label, value)", dashboard)
+        self.assertIn("setLabeledText(id, label, value ?? '--');", dashboard)
 
     def test_dashboard_proxy_ops_status_uses_async_file_reads(self) -> None:
         proxy_source = (REPO_ROOT / "server" / "yahoo_proxy.js").read_text(encoding="utf-8")
@@ -2375,6 +2392,10 @@ class OpsSmokeTests(unittest.TestCase):
     def test_ml_server_analog_engine_refresh_and_score_use_lock(self) -> None:
         source = (REPO_ROOT / "server" / "ml_server.py").read_text(encoding="utf-8")
         self.assertIn("self._lock = threading.RLock()", source)
+        self.assertIn("ML_ANALOG_PREFILTER_ENABLED", source)
+        self.assertIn("ML_ANALOG_PREFILTER_MAX_ROWS", source)
+        self.assertIn("ML_ANALOG_PREFILTER_FEATURE_LIMIT", source)
+        self.assertIn("def _prefilter_candidates(", source)
         refresh_block = source.split("def refresh(self) -> None:", 1)[1].split(
             "def health(self) -> dict[str, object]:",
             1,
@@ -2453,12 +2474,16 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("ML_INFERENCE_N_JOBS", source)
         self.assertIn("\"inference_n_jobs\": ML_INFERENCE_N_JOBS", source)
         self.assertIn("PREDICTION_LOG_QUEUE_MAX_SIZE", source)
+        self.assertIn("PREDICTION_LOG_ALERT_QUEUE_DEPTH", source)
+        self.assertIn("PREDICTION_LOG_ALERT_WRITE_FAIL_TOTAL", source)
+        self.assertIn("PREDICTION_LOG_ALERT_DROPPED_TOTAL", source)
         self.assertIn("PREDICTION_LOG_CONNECT_TIMEOUT_SEC", source)
         self.assertIn("PREDICTION_LOG_BUSY_TIMEOUT_MS", source)
         self.assertIn("PRAGMA busy_timeout", source)
         self.assertIn("_PREDICTION_LOG_QUEUE: queue.Queue", source)
         self.assertIn("def _enqueue_prediction(event: dict, result: dict) -> None:", source)
-        self.assertIn("\"prediction_log\": _prediction_log_state_snapshot()", source)
+        self.assertIn("\"prediction_log\": prediction_log_state", source)
+        self.assertIn("\"prediction_log_alerts\": prediction_log_alerts", source)
         self.assertIn("_SCORE_LOAD_SHED_LOCAL = threading.local()", source)
         self.assertIn("ANALOG_LOAD_SHED", source)
         self.assertIn("_SCORE_GATE = threading.BoundedSemaphore", source)
@@ -2704,6 +2729,9 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertNotIn('source "${ROOT_DIR}/.env"', stack_script)
         self.assertIn('if [[ "${#value}" -ge 2 ]]; then', stack_script)
         self.assertIn('value="${value:1:${#value}-2}"', stack_script)
+        self.assertIn('DASH_AUTH_ENFORCE_STRONG_PASSWORD', stack_script)
+        self.assertIn('DASH_AUTH_LOCAL_BYPASS=true is not allowed when HOST is non-loopback', stack_script)
+        self.assertIn('DASH_AUTH_PASSWORD length', stack_script)
 
         proc = run_cmd(["bash", "-n", "server/run_persistent_stack.sh"], cwd=REPO_ROOT)
         self.assertEqual(proc.returncode, 0, msg=f"{proc.stdout}\n{proc.stderr}")
@@ -3759,6 +3787,43 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("vwap_side", features_used)
         self.assertIn("ema_stack", features_used)
         self.assertGreater(float(result["scores"]["analog_reject_5m"]), float(result["scores"]["analog_break_5m"]))
+
+    def test_analog_prefilter_caps_candidate_pool(self) -> None:
+        ml_server = load_module("ml_server_analog_prefilter_contract", REPO_ROOT / "server" / "ml_server.py")
+        ml_server.ML_ANALOG_PREFILTER_ENABLED = True
+        ml_server.ML_ANALOG_PREFILTER_MAX_ROWS = 3
+        ml_server.ML_ANALOG_PREFILTER_FEATURE_LIMIT = 2
+        ml_server.ML_ANALOG_FEATURE_WEIGHTS = {
+            "distance_bps": 1.0,
+            "distance_atr_ratio": 1.0,
+            "vwap_side": 0.0,
+            "ema_stack": 0.0,
+            "rv_30": 0.0,
+            "or_size_atr": 0.0,
+            "overnight_gap_atr": 0.0,
+        }
+        rows = [
+            {"event_id": f"pref_{idx}", "distance_bps": float(idx), "distance_atr_ratio": float(idx)}
+            for idx in range(10)
+        ]
+        query_features = {"distance_bps": 0.0, "distance_atr_ratio": 0.0}
+        feature_names = ["distance_bps", "distance_atr_ratio"]
+        feature_stats = {
+            "distance_bps": (0.0, 1.0),
+            "distance_atr_ratio": (0.0, 1.0),
+        }
+
+        filtered = ml_server.AnalogEngine._prefilter_candidates(
+            rows,
+            query_features=query_features,
+            feature_names=feature_names,
+            feature_stats=feature_stats,
+        )
+        self.assertEqual(len(filtered), 3)
+        ids = {row["event_id"] for row in filtered}
+        self.assertIn("pref_0", ids)
+        self.assertIn("pref_1", ids)
+        self.assertIn("pref_2", ids)
 
     def test_analog_blend_weight_reaches_configured_max(self) -> None:
         ml_server = load_module("ml_server_blend_weight_contract", REPO_ROOT / "server" / "ml_server.py")

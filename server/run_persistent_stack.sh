@@ -79,6 +79,49 @@ export LIVE_COLLECTOR_SCORE_ENABLED="${LIVE_COLLECTOR_SCORE_ENABLED:-1}"
 export EVENT_WRITER_BIND="${EVENT_WRITER_BIND:-127.0.0.1}"
 export IB_BRIDGE_BIND="${IB_BRIDGE_BIND:-127.0.0.1}"
 
+is_truthy() {
+  local value="${1:-}"
+  case "${value,,}" in
+    1|true|yes|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+is_loopback_bind() {
+  local host_value="${1:-}"
+  case "${host_value,,}" in
+    localhost|127.0.0.1|::1|127.*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+if is_truthy "${DASH_AUTH_ENABLED:-false}"; then
+  DASH_AUTH_PASSWORD="${DASH_AUTH_PASSWORD:-${DASH_AUTH_PASS:-}}"
+  DASH_AUTH_MIN_PASSWORD_LEN="${DASH_AUTH_MIN_PASSWORD_LEN:-20}"
+  DASH_AUTH_ENFORCE_STRONG_PASSWORD="${DASH_AUTH_ENFORCE_STRONG_PASSWORD:-true}"
+
+  if is_truthy "${DASH_AUTH_ENFORCE_STRONG_PASSWORD}"; then
+    if [[ "${#DASH_AUTH_PASSWORD}" -lt "${DASH_AUTH_MIN_PASSWORD_LEN}" ]]; then
+      echo "[run_persistent_stack] ERROR: DASH_AUTH_PASSWORD length (${#DASH_AUTH_PASSWORD}) must be >= ${DASH_AUTH_MIN_PASSWORD_LEN} when DASH_AUTH_ENFORCE_STRONG_PASSWORD=true."
+      exit 1
+    fi
+  fi
+
+  DASH_AUTH_LOCAL_BYPASS="${DASH_AUTH_LOCAL_BYPASS:-}"
+  if [[ -z "${DASH_AUTH_LOCAL_BYPASS}" ]]; then
+    if is_loopback_bind "${HOST}"; then
+      DASH_AUTH_LOCAL_BYPASS="true"
+    else
+      DASH_AUTH_LOCAL_BYPASS="false"
+    fi
+  fi
+
+  if ! is_loopback_bind "${HOST}" && is_truthy "${DASH_AUTH_LOCAL_BYPASS}"; then
+    echo "[run_persistent_stack] ERROR: DASH_AUTH_LOCAL_BYPASS=true is not allowed when HOST is non-loopback (${HOST})."
+    exit 1
+  fi
+fi
+
 if [[ -z "${ML_CORS_ORIGINS:-}" ]]; then
   origins=("http://localhost:3000" "http://127.0.0.1:3000")
   if [[ -n "${LOCAL_HOSTNAME}" ]]; then

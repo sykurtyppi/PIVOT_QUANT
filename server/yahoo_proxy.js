@@ -87,6 +87,15 @@ const RESPONSE_SECURITY_HEADERS = Object.freeze({
 const FORM_URLENCODED = 'application/x-www-form-urlencoded';
 const ENV_FILE_VALUES = loadEnvMap(ENV_FILE);
 const SECURITY = buildSecurityConfig(process.env, ENV_FILE_VALUES);
+const ET_TIME_ZONE = 'America/New_York';
+const ML_STALENESS_WARN_SESSION_HOURS = toNumber(
+  process.env.ML_STALENESS_WARN_SESSION_HOURS,
+  13
+);
+const ML_STALENESS_KILL_SESSION_HOURS = toNumber(
+  process.env.ML_STALENESS_KILL_SESSION_HOURS,
+  19.5
+);
 
 function extractScriptTagSummaryFromHtml(rawHtml) {
   const summary = {
@@ -145,9 +154,13 @@ function buildRuntimeArchitectureSnapshot() {
       || /import\(\s*['"](?:\.\/)?src\//.test(body);
   });
   const usesSrcLibrary = usesSrcLibraryByPath || usesSrcLibraryByInlineImport;
+  const runtimeGovernanceState = usesSrcLibrary
+    ? 'src_runtime'
+    : (fs.existsSync(srcEntrypoint) ? 'dashboard_globals_with_src_library' : 'dashboard_globals_only');
 
   return {
     runtime_mode: 'dashboard_globals',
+    runtime_governance_state: runtimeGovernanceState,
     dashboard_entrypoint: path.relative(ROOT_DIR, DASHBOARD_FILE),
     dashboard_script_count: scriptSummary.total,
     dashboard_script_count_total: scriptSummary.total,
@@ -228,6 +241,14 @@ function parsePositiveInt(value, fallback, min = 1) {
   return Math.max(min, parsed);
 }
 
+function isLoopbackBindHost(hostValue) {
+  const raw = String(hostValue || '').trim().toLowerCase();
+  if (!raw) return false;
+  if (raw === 'localhost' || raw === '127.0.0.1' || raw === '::1') return true;
+  if (raw.startsWith('127.')) return true;
+  return false;
+}
+
 function readSetting(procEnv, fileEnv, key, fallback = '') {
   if (typeof procEnv?.[key] === 'string' && procEnv[key] !== '') {
     return procEnv[key];
@@ -254,6 +275,18 @@ function buildSecurityConfig(procEnv = process.env, fileEnv = {}) {
   );
   const authPasswordStrongEnough =
     !authCredentialsConfigured || authPassword.length >= authPasswordMinLength;
+  const authEnabled = authEnabledFlag || authCredentialsConfigured;
+  const authPasswordPolicyEnforced = parseBool(
+    readSetting(procEnv, fileEnv, 'DASH_AUTH_ENFORCE_STRONG_PASSWORD', 'true'),
+    true
+  );
+  const bindHost = readSetting(procEnv, fileEnv, 'HOST', HOST).trim() || HOST;
+  const bindIsLoopback = isLoopbackBindHost(bindHost);
+  const authBypassLocal = parseBool(
+    readSetting(procEnv, fileEnv, 'DASH_AUTH_LOCAL_BYPASS', bindIsLoopback ? 'true' : 'false'),
+    bindIsLoopback
+  );
+  const authCookieSecure = parseBool(readSetting(procEnv, fileEnv, 'DASH_AUTH_COOKIE_SECURE', 'true'), true);
   const authRateLimitWindowSec = parsePositiveInt(
     readSetting(procEnv, fileEnv, 'DASH_AUTH_RATE_LIMIT_WINDOW_SEC', '300'),
     300,
@@ -289,16 +322,27 @@ function buildSecurityConfig(procEnv = process.env, fileEnv = {}) {
     authRateLimitMaxTrackedClients,
     100
   );
+  const authPolicyIssues = [];
+  if (authEnabled && !authCredentialsConfigured) {
+    authPolicyIssues.push('missing_password');
+  }
+  if (authEnabled && authPasswordPolicyEnforced && !authPasswordStrongEnough) {
+    authPolicyIssues.push('weak_password');
+  }
+  if (authEnabled && authBypassLocal && !bindIsLoopback) {
+    authPolicyIssues.push('local_bypass_with_non_loopback_bind');
+  }
+  if (authEnabled && !authCookieSecure && !bindIsLoopback) {
+    authPolicyIssues.push('insecure_cookie_with_non_loopback_bind');
+  }
+
   return {
-    authEnabled: authEnabledFlag || authCredentialsConfigured,
+    authEnabled,
     authCredentialsConfigured,
     authPassword,
     authPasswordMinLength,
     authPasswordStrongEnough,
-    authPasswordPolicyEnforced: parseBool(
-      readSetting(procEnv, fileEnv, 'DASH_AUTH_ENFORCE_STRONG_PASSWORD', 'true'),
-      true
-    ),
+    authPasswordPolicyEnforced,
     authCookieName: readSetting(procEnv, fileEnv, 'DASH_AUTH_COOKIE_NAME', 'pq_dash_auth').trim() || 'pq_dash_auth',
     authCookieTtlSec: Math.max(
       300,
@@ -307,16 +351,20 @@ function buildSecurityConfig(procEnv = process.env, fileEnv = {}) {
     authSessionPath: '/',
     authPageTitle: readSetting(procEnv, fileEnv, 'DASH_AUTH_PAGE_TITLE', 'PivotQuant Dashboard Access'),
     authPageSubtitle: readSetting(procEnv, fileEnv, 'DASH_AUTH_PAGE_SUBTITLE', 'Enter password to continue.'),
-    authBypassLocal: parseBool(readSetting(procEnv, fileEnv, 'DASH_AUTH_LOCAL_BYPASS', 'true'), true),
+    authBypassLocal,
     writeEndpointsLocalOnly: parseBool(
       readSetting(procEnv, fileEnv, 'DASH_WRITE_ENDPOINTS_LOCAL_ONLY', 'true'),
       true
     ),
-    authCookieSecure: parseBool(readSetting(procEnv, fileEnv, 'DASH_AUTH_COOKIE_SECURE', 'true'), true),
+    authCookieSecure,
     authRateLimitEnabled: parseBool(
       readSetting(procEnv, fileEnv, 'DASH_AUTH_RATE_LIMIT_ENABLED', 'true'),
       true
     ),
+    bindHost,
+    bindIsLoopback,
+    authPolicyIssues,
+    authPolicyOk: authPolicyIssues.length === 0,
     authRateLimitWindowSec,
     authRateLimitMaxAttempts,
     authRateLimitLockoutSec,
@@ -1144,6 +1192,76 @@ function formatYmd(epochSeconds, timeZone) {
   });
   const parts = Object.fromEntries(formatter.formatToParts(date).map((p) => [p.type, p.value]));
   return `${parts.year}-${parts.month}-${parts.day}`;
+}
+
+function addDaysToYmd(ymd, days) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(ymd || ''))) {
+    return null;
+  }
+  const [year, month, day] = ymd.split('-').map((v) => Number(v));
+  const dt = new Date(Date.UTC(year, month - 1, day));
+  dt.setUTCDate(dt.getUTCDate() + Number(days || 0));
+  const y = dt.getUTCFullYear();
+  const m = String(dt.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(dt.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+function getTimeZoneOffsetMs(epochMs, timeZone) {
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
+  const parts = Object.fromEntries(
+    formatter.formatToParts(new Date(epochMs)).map((part) => [part.type, part.value])
+  );
+  const asUtc = Date.UTC(
+    Number(parts.year),
+    Number(parts.month) - 1,
+    Number(parts.day),
+    Number(parts.hour),
+    Number(parts.minute),
+    Number(parts.second)
+  );
+  return asUtc - epochMs;
+}
+
+function zonedMidnightEpochMs(ymd, timeZone) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(ymd || ''))) {
+    return null;
+  }
+  const [year, month, day] = ymd.split('-').map((v) => Number(v));
+  let guess = Date.UTC(year, month - 1, day, 0, 0, 0);
+  for (let i = 0; i < 3; i += 1) {
+    const offsetMs = getTimeZoneOffsetMs(guess, timeZone);
+    guess = Date.UTC(year, month - 1, day, 0, 0, 0) - offsetMs;
+  }
+  return guess;
+}
+
+function getEtDayWindowMs(nowMs = Date.now()) {
+  const dayEt = formatYmd(Math.floor(nowMs / 1000), ET_TIME_ZONE);
+  const nextDayEt = addDaysToYmd(dayEt, 1);
+  const startMs = zonedMidnightEpochMs(dayEt, ET_TIME_ZONE);
+  const endMs = zonedMidnightEpochMs(nextDayEt, ET_TIME_ZONE);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) {
+    return {
+      dayEt,
+      startMs: nowMs - (24 * 3600 * 1000),
+      endMs: nowMs,
+    };
+  }
+  return {
+    dayEt,
+    startMs,
+    endMs,
+  };
 }
 
 function mapSymbol(rawSymbol) {
@@ -2148,6 +2266,77 @@ async function readOpsStatusRows() {
   }
 }
 
+async function readMlDashboardHealth() {
+  const dayWindow = getEtDayWindowMs(Date.now());
+  const out = {
+    source: 'dashboard_proxy',
+    staleness_warn_session_hours: Number.isFinite(ML_STALENESS_WARN_SESSION_HOURS)
+      ? ML_STALENESS_WARN_SESSION_HOURS
+      : 13,
+    staleness_kill_session_hours: Number.isFinite(ML_STALENESS_KILL_SESSION_HOURS)
+      ? ML_STALENESS_KILL_SESSION_HOURS
+      : 19.5,
+    score_day_et: dayWindow.dayEt,
+    score_window_start_ms: dayWindow.startMs,
+    score_window_end_ms: dayWindow.endMs,
+    predictions_live_today: null,
+    flagged_live_today: null,
+    predictions_h5_live_today: null,
+    last_prediction_ts_ms: null,
+    db_available: false,
+  };
+
+  let Database;
+  try {
+    const mod = await import('better-sqlite3');
+    Database = mod.default;
+  } catch (_err) {
+    return out;
+  }
+
+  if (!fs.existsSync(SQLITE_DB)) {
+    return out;
+  }
+
+  const db = new Database(SQLITE_DB, { readonly: true });
+  try {
+    const exists = db.prepare(
+      "SELECT 1 FROM sqlite_master WHERE type='table' AND name='prediction_log' LIMIT 1"
+    ).get();
+    if (!exists) {
+      return out;
+    }
+    const row = db.prepare(`
+      SELECT
+        COUNT(*) AS predictions_live_today,
+        SUM(CASE WHEN best_horizon = 5 THEN 1 ELSE 0 END) AS predictions_h5_live_today,
+        SUM(
+          CASE
+            WHEN quality_flags IS NOT NULL
+             AND TRIM(quality_flags) <> ''
+             AND LOWER(TRIM(quality_flags)) <> 'null'
+             AND TRIM(quality_flags) <> '[]'
+            THEN 1 ELSE 0
+          END
+        ) AS flagged_live_today,
+        MAX(ts_prediction) AS last_prediction_ts_ms
+      FROM prediction_log
+      WHERE COALESCE(is_preview, 0) = 0
+        AND ts_prediction >= ?
+        AND ts_prediction < ?
+    `).get(dayWindow.startMs, dayWindow.endMs);
+
+    out.db_available = true;
+    out.predictions_live_today = toNonNegativeInt(row?.predictions_live_today);
+    out.predictions_h5_live_today = toNonNegativeInt(row?.predictions_h5_live_today);
+    out.flagged_live_today = toNonNegativeInt(row?.flagged_live_today);
+    out.last_prediction_ts_ms = toNumber(row?.last_prediction_ts_ms, null);
+    return out;
+  } finally {
+    db.close();
+  }
+}
+
 async function queryOpsStatus() {
   const [
     env,
@@ -2159,6 +2348,7 @@ async function queryOpsStatus() {
     reportLogLines,
     alertLogLines,
     drillLogLines,
+    mlHealth,
   ] = await Promise.all([
     loadEnvMapAsync(ENV_FILE),
     readOpsStatusRows(),
@@ -2169,6 +2359,13 @@ async function queryOpsStatus() {
     readTailLinesAsync(REPORT_DELIVERY_LOG_FILE, 200),
     readTailLinesAsync(HEALTH_ALERT_LOG_FILE, 200),
     readTailLinesAsync(RESTORE_DRILL_LOG_FILE, 200),
+    (async () => {
+      try {
+        return await fetchLocalJson('http://127.0.0.1:5003/health');
+      } catch (_error) {
+        return null;
+      }
+    })(),
   ]);
   const reportLog = summarizeReportDelivery(reportLogLines);
   const alertLog = summarizeHealthAlert(alertLogLines);
@@ -2233,6 +2430,13 @@ async function queryOpsStatus() {
         last_line: alertLog.line,
         services: alertState?.services || {},
       },
+    },
+    prediction_log: {
+      queue_depth: toNumber(mlHealth?.prediction_log?.queue_depth, null),
+      queue_high_watermark: toNumber(mlHealth?.prediction_log?.queue_high_watermark, null),
+      dropped_total: toNumber(mlHealth?.prediction_log?.dropped_total, null),
+      write_fail_total: toNumber(mlHealth?.prediction_log?.write_fail_total, null),
+      alerts: mlHealth?.prediction_log_alerts || null,
     },
   };
 }
@@ -2482,12 +2686,19 @@ const server = http.createServer(async (req, res) => {
       auth_password_policy_enforced: SECURITY.authPasswordPolicyEnforced,
       auth_password_strong_enough: SECURITY.authPasswordStrongEnough,
       auth_password_min_length: SECURITY.authPasswordMinLength,
+      auth_local_bypass: SECURITY.authBypassLocal,
+      auth_cookie_secure: SECURITY.authCookieSecure,
+      auth_bind_host: SECURITY.bindHost,
+      auth_bind_is_loopback: SECURITY.bindIsLoopback,
+      auth_policy_ok: SECURITY.authPolicyOk,
+      auth_policy_issues: SECURITY.authPolicyIssues,
       auth_rate_limit_enabled: SECURITY.authRateLimitEnabled,
       auth_rate_limit_window_sec: SECURITY.authRateLimitWindowSec,
       auth_rate_limit_max_attempts: SECURITY.authRateLimitMaxAttempts,
       auth_rate_limit_lockout_sec: SECURITY.authRateLimitLockoutSec,
       write_endpoints_local_only: SECURITY.writeEndpointsLocalOnly,
       runtime_architecture_mode: RUNTIME_ARCHITECTURE.runtime_mode,
+      runtime_architecture_governance_state: RUNTIME_ARCHITECTURE.runtime_governance_state,
       runtime_dashboard_uses_src_library: RUNTIME_ARCHITECTURE.dashboard_uses_src_library,
       runtime_dashboard_script_count: RUNTIME_ARCHITECTURE.dashboard_script_count,
       ...authAudit,
@@ -2543,6 +2754,20 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, 500, {
         error: 'Authentication misconfigured',
         message: `DASH_AUTH_PASSWORD must be at least ${SECURITY.authPasswordMinLength} characters when DASH_AUTH_ENFORCE_STRONG_PASSWORD=true`,
+      });
+      return;
+    }
+    if (SECURITY.authBypassLocal && !SECURITY.bindIsLoopback) {
+      sendJson(res, 500, {
+        error: 'Authentication misconfigured',
+        message: 'DASH_AUTH_LOCAL_BYPASS=true is not allowed when HOST is not loopback.',
+      });
+      return;
+    }
+    if (!SECURITY.authCookieSecure && !SECURITY.bindIsLoopback) {
+      sendJson(res, 500, {
+        error: 'Authentication misconfigured',
+        message: 'DASH_AUTH_COOKIE_SECURE must be true when HOST is not loopback.',
       });
       return;
     }
@@ -2717,8 +2942,14 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     try {
-      const data = await fetchLocalJson('http://127.0.0.1:5003/health');
-      sendJson(res, 200, data);
+      const [data, dashboardHealth] = await Promise.all([
+        fetchLocalJson('http://127.0.0.1:5003/health'),
+        readMlDashboardHealth(),
+      ]);
+      sendJson(res, 200, {
+        ...(data && typeof data === 'object' ? data : {}),
+        dashboard_health: dashboardHealth,
+      });
     } catch (error) {
       sendProxyError(res, error, 'ML health unavailable');
     }
@@ -2998,6 +3229,18 @@ server.listen(PORT, HOST, () => {
     /* eslint-disable-next-line no-console */
     console.warn(
       `[security] weak DASH_AUTH_PASSWORD detected (len=${SECURITY.authPassword.length}). Recommended length is >=${SECURITY.authPasswordMinLength}.`
+    );
+  }
+  if (SECURITY.authEnabled && SECURITY.authPolicyIssues.length > 0) {
+    /* eslint-disable-next-line no-console */
+    console.error(
+      `[security] policy issues detected: ${SECURITY.authPolicyIssues.join(', ')}`
+    );
+  }
+  if (RUNTIME_ARCHITECTURE.runtime_governance_state === 'dashboard_globals_with_src_library') {
+    /* eslint-disable-next-line no-console */
+    console.warn(
+      '[runtime] dashboard_globals is active while src/ library exists; choose one runtime path to avoid drift.'
     );
   }
   /* eslint-disable-next-line no-console */

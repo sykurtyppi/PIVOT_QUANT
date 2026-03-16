@@ -1,4 +1,5 @@
 import asyncio
+import heapq
 import json
 import logging
 import math
@@ -195,6 +196,15 @@ PREDICTION_LOG_BUSY_TIMEOUT_MS = max(
 PREDICTION_LOG_QUEUE_MAX_SIZE = max(
     64, int(os.getenv("PREDICTION_LOG_QUEUE_MAX_SIZE", "4096"))
 )
+PREDICTION_LOG_ALERT_QUEUE_DEPTH = max(
+    1, int(os.getenv("PREDICTION_LOG_ALERT_QUEUE_DEPTH", "512"))
+)
+PREDICTION_LOG_ALERT_WRITE_FAIL_TOTAL = max(
+    0, int(os.getenv("PREDICTION_LOG_ALERT_WRITE_FAIL_TOTAL", "0"))
+)
+PREDICTION_LOG_ALERT_DROPPED_TOTAL = max(
+    0, int(os.getenv("PREDICTION_LOG_ALERT_DROPPED_TOTAL", "0"))
+)
 ML_RELOAD_MIN_INTERVAL_SEC = max(
     0.0, float(os.getenv("ML_RELOAD_MIN_INTERVAL_SEC", "1.5"))
 )
@@ -212,6 +222,13 @@ ML_ANALOG_MIN_FEATURE_OVERLAP = max(
 )
 ML_ANALOG_MIN_FEATURE_SUPPORT = max(
     3, int(os.getenv("ML_ANALOG_MIN_FEATURE_SUPPORT", "20"))
+)
+ML_ANALOG_PREFILTER_ENABLED = _env_bool("ML_ANALOG_PREFILTER_ENABLED", True)
+ML_ANALOG_PREFILTER_MAX_ROWS = max(
+    100, int(os.getenv("ML_ANALOG_PREFILTER_MAX_ROWS", "600"))
+)
+ML_ANALOG_PREFILTER_FEATURE_LIMIT = max(
+    1, int(os.getenv("ML_ANALOG_PREFILTER_FEATURE_LIMIT", "4"))
 )
 ML_ANALOG_MAX_MEAN_DISTANCE = max(
     0.1, float(os.getenv("ML_ANALOG_MAX_MEAN_DISTANCE", "2.5"))
@@ -756,6 +773,62 @@ class AnalogEngine:
             stats[name] = (mean, std)
         return selected, stats
 
+    @staticmethod
+    def _prefilter_candidates(
+        rows: list[dict[str, object]],
+        *,
+        query_features: dict[str, float | None],
+        feature_names: list[str],
+        feature_stats: dict[str, tuple[float, float]],
+    ) -> list[dict[str, object]]:
+        if (
+            not ML_ANALOG_PREFILTER_ENABLED
+            or len(rows) <= ML_ANALOG_PREFILTER_MAX_ROWS
+            or ML_ANALOG_PREFILTER_MAX_ROWS <= 0
+        ):
+            return rows
+
+        ranked_features = sorted(
+            [
+                name
+                for name in feature_names
+                if query_features.get(name) is not None
+            ],
+            key=lambda name: ML_ANALOG_FEATURE_WEIGHTS.get(name, 0.0),
+            reverse=True,
+        )
+        prefilter_features = ranked_features[:ML_ANALOG_PREFILTER_FEATURE_LIMIT]
+        if not prefilter_features:
+            return rows
+
+        coarse_ranked: list[tuple[float, dict[str, object]]] = []
+        for row in rows:
+            score = 0.0
+            overlap = 0
+            total_w = 0.0
+            for name in prefilter_features:
+                q_value = query_features.get(name)
+                c_value = _to_float(row.get(name))
+                if q_value is None or c_value is None:
+                    continue
+                mean, std = feature_stats.get(name, (0.0, 1.0))
+                qz = (q_value - mean) / std
+                cz = (c_value - mean) / std
+                weight = ML_ANALOG_FEATURE_WEIGHTS.get(name, 1.0)
+                score += weight * abs(qz - cz)
+                total_w += weight
+                overlap += 1
+            if overlap == 0 or total_w <= 0:
+                continue
+            coarse_ranked.append((score / total_w, row))
+
+        if not coarse_ranked:
+            return rows
+
+        keep_count = min(ML_ANALOG_PREFILTER_MAX_ROWS, len(coarse_ranked))
+        top_rows = heapq.nsmallest(keep_count, coarse_ranked, key=lambda item: item[0])
+        return [item[1] for item in top_rows]
+
     def _score_horizon(
         self,
         *,
@@ -813,8 +886,15 @@ class AnalogEngine:
                 "reasons": ["insufficient_feature_support"],
             }
 
+        candidate_rows = self._prefilter_candidates(
+            stage_rows,
+            query_features=query_features,
+            feature_names=feature_names,
+            feature_stats=feature_stats,
+        )
+
         ranked: list[dict[str, object]] = []
-        for row in stage_rows:
+        for row in candidate_rows:
             overlap = 0
             weighted_sq = 0.0
             total_w = 0.0
@@ -957,6 +1037,7 @@ class AnalogEngine:
             "stage": stage_name,
             "features": feature_names,
             "n": n,
+            "candidate_pool_n": len(candidate_rows),
             "n_eff": float(n_eff),
             "mean_distance": mean_distance,
             "reject_prob": reject_prob,
@@ -1662,6 +1743,30 @@ async def health():
         status = "stale"
     else:
         status = "ok"
+    prediction_log_state = _prediction_log_state_snapshot()
+    queue_depth = int(prediction_log_state.get("queue_depth", 0) or 0)
+    dropped_total = int(prediction_log_state.get("dropped_total", 0) or 0)
+    write_fail_total = int(prediction_log_state.get("write_fail_total", 0) or 0)
+    prediction_log_alerts = {
+        "queue_depth": queue_depth,
+        "queue_depth_limit": PREDICTION_LOG_ALERT_QUEUE_DEPTH,
+        "queue_depth_exceeded": queue_depth > PREDICTION_LOG_ALERT_QUEUE_DEPTH,
+        "dropped_total": dropped_total,
+        "dropped_total_limit": PREDICTION_LOG_ALERT_DROPPED_TOTAL,
+        "dropped_total_exceeded": dropped_total > PREDICTION_LOG_ALERT_DROPPED_TOTAL,
+        "write_fail_total": write_fail_total,
+        "write_fail_total_limit": PREDICTION_LOG_ALERT_WRITE_FAIL_TOTAL,
+        "write_fail_total_exceeded": write_fail_total > PREDICTION_LOG_ALERT_WRITE_FAIL_TOTAL,
+    }
+    prediction_log_alerts["ok"] = not any(
+        bool(prediction_log_alerts[key])
+        for key in (
+            "queue_depth_exceeded",
+            "dropped_total_exceeded",
+            "write_fail_total_exceeded",
+        )
+    )
+
     result = {
         "status": status,
         "feature_version": FEATURE_VERSION,
@@ -1671,7 +1776,8 @@ async def health():
         "reload": _reload_state_snapshot(),
         "score": _score_state_snapshot(),
         "inference_n_jobs": ML_INFERENCE_N_JOBS,
-        "prediction_log": _prediction_log_state_snapshot(),
+        "prediction_log": prediction_log_state,
+        "prediction_log_alerts": prediction_log_alerts,
         "regime_policy_mode": ML_REGIME_POLICY_MODE,
         "regime_threshold_max_delta": ML_REGIME_THRESHOLD_MAX_DELTA,
         "atr_zone_bounds": {
@@ -1697,6 +1803,9 @@ async def health():
             "min_features": ML_ANALOG_MIN_FEATURES,
             "min_feature_overlap": ML_ANALOG_MIN_FEATURE_OVERLAP,
             "min_feature_support": ML_ANALOG_MIN_FEATURE_SUPPORT,
+            "prefilter_enabled": ML_ANALOG_PREFILTER_ENABLED,
+            "prefilter_max_rows": ML_ANALOG_PREFILTER_MAX_ROWS,
+            "prefilter_feature_limit": ML_ANALOG_PREFILTER_FEATURE_LIMIT,
             "max_mean_distance": ML_ANALOG_MAX_MEAN_DISTANCE,
             "max_ci_width": ML_ANALOG_MAX_CI_WIDTH,
             "recency_tau_days": ML_ANALOG_RECENCY_TAU_DAYS,

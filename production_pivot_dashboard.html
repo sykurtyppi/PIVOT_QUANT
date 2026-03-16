@@ -2155,6 +2155,11 @@
             mlScoresToday: 0,
             mlFlaggedScores: 0,
             mlScoreDate: null,
+            mlScoresSource: 'local',
+            mlHealthPolicy: {
+                staleness_warn_session_hours: 13,
+                staleness_kill_session_hours: 19.5,
+            },
             mlHealthTimer: null,
             collectorHealthTimer: null,
             opsStatus: null,
@@ -2227,12 +2232,7 @@
 
             const msgDiv = document.createElement('div');
             msgDiv.className = 'toast-message';
-            if (opts.html) {
-                // Only used by internal callers with controlled markup (e.g. keyboard help)
-                msgDiv.innerHTML = message;
-            } else {
-                msgDiv.textContent = message;
-            }
+            msgDiv.textContent = message;
 
             body.appendChild(titleDiv);
             body.appendChild(msgDiv);
@@ -2268,7 +2268,7 @@
             const closeBtn = document.createElement('button');
             closeBtn.className = 'toast-close';
             closeBtn.setAttribute('aria-label', 'Dismiss');
-            closeBtn.innerHTML = '&times;';
+            closeBtn.textContent = '×';
 
             toast.appendChild(iconSpan);
             toast.appendChild(body);
@@ -2290,6 +2290,36 @@
             }
 
             setTimeout(dismiss, duration);
+        }
+
+        function setLabeledText(id, label, value) {
+            const el = document.getElementById(id);
+            if (!el) return;
+            while (el.firstChild) el.removeChild(el.firstChild);
+            const strong = document.createElement('strong');
+            strong.textContent = String(label || '');
+            el.appendChild(strong);
+            const tail = value == null ? '--' : String(value);
+            el.appendChild(document.createTextNode(tail));
+        }
+
+        function setLabeledTextWithNote(id, label, value, noteText) {
+            const el = document.getElementById(id);
+            if (!el) return;
+            while (el.firstChild) el.removeChild(el.firstChild);
+            const strong = document.createElement('strong');
+            strong.textContent = String(label || '');
+            el.appendChild(strong);
+            const tail = value == null ? '--' : String(value);
+            el.appendChild(document.createTextNode(tail));
+            if (noteText != null && String(noteText).trim() !== '') {
+                el.appendChild(document.createElement('br'));
+                const note = document.createElement('span');
+                note.style.color = 'var(--muted)';
+                note.style.fontSize = '11px';
+                note.textContent = String(noteText);
+                el.appendChild(note);
+            }
         }
 
         const RANGE_ORDER = ['1mo', '3mo', '6mo', '1y'];
@@ -3956,14 +3986,38 @@
             levels.forEach((level) => {
                 const color = strengthColor(level.strength);
                 const row = document.createElement('tr');
-                row.innerHTML = `
-                    <td>
-                        <span class="tag ${level.type}">${level.label}</span>
-                    </td>
-                    <td>${formatNumber(level.value)}</td>
-                    <td>${formatPercent(level.distance)}</td>
-                    <td><div class="strength" style="--strength-color: ${color}"><div class="strength-bar" style="width: ${level.strength}%; background: ${color}"></div>${level.strength}</div></td>
-                `;
+
+                const tagCell = document.createElement('td');
+                const tag = document.createElement('span');
+                tag.className = `tag ${level.type}`;
+                tag.textContent = String(level.label ?? '--');
+                tagCell.appendChild(tag);
+
+                const valueCell = document.createElement('td');
+                valueCell.textContent = formatNumber(level.value);
+
+                const distCell = document.createElement('td');
+                distCell.textContent = formatPercent(level.distance);
+
+                const strengthCell = document.createElement('td');
+                const strengthWrap = document.createElement('div');
+                strengthWrap.className = 'strength';
+                strengthWrap.style.setProperty('--strength-color', color);
+                const strengthBar = document.createElement('div');
+                strengthBar.className = 'strength-bar';
+                const strengthValue = Number.isFinite(Number(level.strength))
+                    ? Number(level.strength)
+                    : 0;
+                strengthBar.style.width = `${Math.max(0, Math.min(100, strengthValue))}%`;
+                strengthBar.style.background = color;
+                strengthWrap.appendChild(strengthBar);
+                strengthWrap.appendChild(document.createTextNode(String(strengthValue)));
+                strengthCell.appendChild(strengthWrap);
+
+                row.appendChild(tagCell);
+                row.appendChild(valueCell);
+                row.appendChild(distCell);
+                row.appendChild(strengthCell);
                 tbody.appendChild(row);
             });
         }
@@ -3979,21 +4033,37 @@
             const strongestResistance = resistances.sort((a, b) => b.strength - a.strength)[0];
             const strongestSupport = supports.sort((a, b) => b.strength - a.strength)[0];
 
-            document.getElementById('nearest-resistance').innerHTML = nearestResistance
-                ? `<strong>Nearest resistance:</strong> ${nearestResistance.label} ${formatNumber(nearestResistance.value)} (${formatPercent(nearestResistance.distance)})`
-                : '<strong>Nearest resistance:</strong> --';
+            setLabeledText(
+                'nearest-resistance',
+                'Nearest resistance:',
+                nearestResistance
+                    ? `${nearestResistance.label} ${formatNumber(nearestResistance.value)} (${formatPercent(nearestResistance.distance)})`
+                    : '--'
+            );
 
-            document.getElementById('nearest-support').innerHTML = nearestSupport
-                ? `<strong>Nearest support:</strong> ${nearestSupport.label} ${formatNumber(nearestSupport.value)} (${formatPercent(nearestSupport.distance)})`
-                : '<strong>Nearest support:</strong> --';
+            setLabeledText(
+                'nearest-support',
+                'Nearest support:',
+                nearestSupport
+                    ? `${nearestSupport.label} ${formatNumber(nearestSupport.value)} (${formatPercent(nearestSupport.distance)})`
+                    : '--'
+            );
 
-            document.getElementById('strongest-resistance').innerHTML = strongestResistance
-                ? `<strong>Strongest resistance:</strong> ${strongestResistance.label} ${formatNumber(strongestResistance.value)} (${strongestResistance.strength})`
-                : '<strong>Strongest resistance:</strong> --';
+            setLabeledText(
+                'strongest-resistance',
+                'Strongest resistance:',
+                strongestResistance
+                    ? `${strongestResistance.label} ${formatNumber(strongestResistance.value)} (${strongestResistance.strength})`
+                    : '--'
+            );
 
-            document.getElementById('strongest-support').innerHTML = strongestSupport
-                ? `<strong>Strongest support:</strong> ${strongestSupport.label} ${formatNumber(strongestSupport.value)} (${strongestSupport.strength})`
-                : '<strong>Strongest support:</strong> --';
+            setLabeledText(
+                'strongest-support',
+                'Strongest support:',
+                strongestSupport
+                    ? `${strongestSupport.label} ${formatNumber(strongestSupport.value)} (${strongestSupport.strength})`
+                    : '--'
+            );
         }
 
         function updateMarketSnapshot(data, sessionEntry, atr) {
@@ -4178,7 +4248,7 @@
             const gammaLabel = Number.isFinite(gammaLevel)
                 ? `${formatNumber(gammaLevel)} (${gammaSource})`
                 : '--';
-            document.getElementById('gamma-level').innerHTML = `<strong>Gamma flip:</strong> ${gammaLabel}`;
+            setLabeledText('gamma-level', 'Gamma flip:', gammaLabel);
 
             updateGammaPanel(windowCandles, gammaLevel, state.referencePrice, gammaSource);
             renderGammaWalls(state.lastWalls);
@@ -4288,36 +4358,48 @@
             state.lastIvRv = ivLabel;
             state.lastFlipDistance = flipDistance;
 
-            document.getElementById('gamma-mode').innerHTML = `<strong>Gamma Mode</strong>${gammaMode} (${sourceLabel})`;
-            document.getElementById('gamma-distance').innerHTML = `<strong>Flip Distance</strong>${flipDistance}`;
-            document.getElementById('vol-regime').innerHTML = `<strong>Vol Regime</strong>${rvLabel}`;
-            document.getElementById('iv-rv').innerHTML = `<strong>IV vs RV</strong>${ivLabel}`;
+            setLabeledText('gamma-mode', 'Gamma Mode', `${gammaMode} (${sourceLabel})`);
+            setLabeledText('gamma-distance', 'Flip Distance', flipDistance);
+            setLabeledText('vol-regime', 'Vol Regime', rvLabel);
+            setLabeledText('iv-rv', 'IV vs RV', ivLabel);
 
             const walls = state.lastWalls;
-            document.getElementById('wall-call').innerHTML = `<strong>Call Wall</strong>${walls?.callWall ? `${formatNumber(walls.callWall.price)} (${walls.callWall.strength})` : '--'}`;
-            document.getElementById('wall-put').innerHTML = `<strong>Put Wall</strong>${walls?.putWall ? `${formatNumber(walls.putWall.price)} (${walls.putWall.strength})` : '--'}`;
-            document.getElementById('wall-pin').innerHTML = `<strong>Pin Candidate</strong>${walls?.pin ? `${formatNumber(walls.pin.price)} (${walls.pin.strength})` : '--'}`;
-            document.getElementById('playbook').innerHTML = `<strong>Playbook</strong>${playbook}`;
+            setLabeledText(
+                'wall-call',
+                'Call Wall',
+                walls?.callWall ? `${formatNumber(walls.callWall.price)} (${walls.callWall.strength})` : '--'
+            );
+            setLabeledText(
+                'wall-put',
+                'Put Wall',
+                walls?.putWall ? `${formatNumber(walls.putWall.price)} (${walls.putWall.strength})` : '--'
+            );
+            setLabeledText(
+                'wall-pin',
+                'Pin Candidate',
+                walls?.pin ? `${formatNumber(walls.pin.price)} (${walls.pin.strength})` : '--'
+            );
+            setLabeledText('playbook', 'Playbook', playbook);
 
             const stats = state.gammaData?.stats;
             if (stats) {
                 const oiCall = stats.oiCall ? formatNumber(stats.oiCall, 0) : '--';
                 const oiPut = stats.oiPut ? formatNumber(stats.oiPut, 0) : '--';
-                document.getElementById('oi-total').innerHTML = `<strong>Total OI</strong>C ${oiCall} | P ${oiPut}`;
+                setLabeledText('oi-total', 'Total OI', `C ${oiCall} | P ${oiPut}`);
 
                 const concentration = Number.isFinite(stats.oiConcentration)
                     ? `${formatNumber(stats.oiConcentration, 2)}%`
                     : '--';
-                document.getElementById('oi-concentration').innerHTML = `<strong>OI Concentration</strong>${concentration}`;
+                setLabeledText('oi-concentration', 'OI Concentration', concentration);
 
                 const atmIv = Number.isFinite(stats.atmIV) ? `${formatNumber(stats.atmIV * 100, 2)}%` : '--';
-                document.getElementById('atm-iv').innerHTML = `<strong>ATM IV</strong>${atmIv}`;
+                setLabeledText('atm-iv', 'ATM IV', atmIv);
 
                 const skew = Number.isFinite(stats.skew25d) ? `${formatNumber(stats.skew25d * 100, 2)}%` : '--';
-                document.getElementById('skew-25d').innerHTML = `<strong>25Δ Skew</strong>${skew}`;
+                setLabeledText('skew-25d', '25Δ Skew', skew);
 
                 const zeroDte = Number.isFinite(stats.zeroDteShare) ? `${formatNumber(stats.zeroDteShare, 2)}%` : '--';
-                document.getElementById('zero-dte-share').innerHTML = `<strong>0DTE Share</strong>${zeroDte}`;
+                setLabeledText('zero-dte-share', '0DTE Share', zeroDte);
 
                 const coverage = stats.totalContracts
                     ? Math.round((stats.withGreeks / stats.totalContracts) * 100)
@@ -4325,7 +4407,7 @@
                 const qualityLabel = coverage >= 80 ? 'Fresh' : coverage >= 50 ? 'Partial' : 'Stale';
                 state.lastDataQualityLabel = qualityLabel;
                 state.lastDataCoverage = coverage;
-                document.getElementById('data-quality').innerHTML = `<strong>Data Quality</strong>${qualityLabel} (${coverage}%)`;
+                setLabeledText('data-quality', 'Data Quality', `${qualityLabel} (${coverage}%)`);
 
                 // Gamma Confidence Score (0-100) with quality cap
                 const clamp = (v, min = 0, max = 1) => Math.min(max, Math.max(min, v));
@@ -4371,7 +4453,12 @@
                 state.lastGammaScore = score;
                 state.lastGammaScoreLabel = scoreLabel;
                 state.lastGammaDrivers = driverText;
-                document.getElementById('gamma-confidence').innerHTML = `<strong>Gamma Confidence</strong>${Math.round(score)} (${scoreLabel})<br><span style="color: var(--muted); font-size: 11px;">Drivers: ${driverText}</span>`;
+                setLabeledTextWithNote(
+                    'gamma-confidence',
+                    'Gamma Confidence',
+                    `${Math.round(score)} (${scoreLabel})`,
+                    `Drivers: ${driverText}`
+                );
             } else {
                 const rawReason = String(state.gammaFetchError || '').trim();
                 let reasonLabel = 'Unavailable';
@@ -4391,14 +4478,14 @@
                         reasonLabel = `Unavailable (${rawReason})`;
                     }
                 }
-                document.getElementById('oi-total').innerHTML = `<strong>Total OI</strong>N/A`;
-                document.getElementById('oi-concentration').innerHTML = `<strong>OI Concentration</strong>N/A`;
-                document.getElementById('atm-iv').innerHTML = `<strong>ATM IV</strong>N/A`;
-                document.getElementById('skew-25d').innerHTML = `<strong>25Δ Skew</strong>N/A`;
-                document.getElementById('zero-dte-share').innerHTML = `<strong>0DTE Share</strong>N/A`;
-                document.getElementById('data-quality').innerHTML = `<strong>Data Quality</strong>${reasonLabel}`;
+                setLabeledText('oi-total', 'Total OI', 'N/A');
+                setLabeledText('oi-concentration', 'OI Concentration', 'N/A');
+                setLabeledText('atm-iv', 'ATM IV', 'N/A');
+                setLabeledText('skew-25d', '25Δ Skew', 'N/A');
+                setLabeledText('zero-dte-share', '0DTE Share', 'N/A');
+                setLabeledText('data-quality', 'Data Quality', reasonLabel);
                 document.getElementById('data-quality').title = rawReason || 'Gamma/OI feed unavailable';
-                document.getElementById('gamma-confidence').innerHTML = `<strong>Gamma Confidence</strong>--`;
+                setLabeledText('gamma-confidence', 'Gamma Confidence', '--');
                 state.lastGammaScore = null;
                 state.lastGammaScoreLabel = '--';
                 state.lastGammaDrivers = '--';
@@ -5697,9 +5784,7 @@
         }
 
         function setOpsField(id, label, value) {
-            const el = document.getElementById(id);
-            if (!el) return;
-            el.innerHTML = `<strong>${label}</strong>${value ?? '--'}`;
+            setLabeledText(id, label, value ?? '--');
         }
 
         function updateOpsPanel(payload) {
@@ -5728,6 +5813,8 @@
             const slo = payload.slo || {};
             const release = payload.release || {};
             const audit = payload.audit || {};
+            const predictionLog = payload.prediction_log || {};
+            const predictionAlerts = predictionLog.alerts || {};
             const alerts = payload.alerts || {};
             const reportAlerts = alerts.daily_report || {};
             const immediateAlerts = alerts.immediate || {};
@@ -5783,7 +5870,16 @@
                     ? `${release.active_commit} (${release.active_env || 'unknown'})`
                     : 'none';
                 const auditText = String(audit.chain_status || 'unknown').toUpperCase();
-                alertNote.textContent = `Alert note: report@${reportTs} | immediate@${immediateTs} | slo=${sloText} | release=${releaseText} | audit=${auditText}`;
+                const queueDepth = Number(predictionLog.queue_depth);
+                const droppedTotal = Number(predictionLog.dropped_total || 0);
+                const writeFailTotal = Number(predictionLog.write_fail_total || 0);
+                let queueText = 'OK';
+                if (predictionAlerts && predictionAlerts.ok === false) {
+                    queueText = `ALERT depth=${Number.isFinite(queueDepth) ? queueDepth : '--'} dropped=${droppedTotal} fail=${writeFailTotal}`;
+                } else if (Number.isFinite(queueDepth)) {
+                    queueText = `depth=${queueDepth} dropped=${droppedTotal} fail=${writeFailTotal}`;
+                }
+                alertNote.textContent = `Alert note: report@${reportTs} | immediate@${immediateTs} | slo=${sloText} | release=${releaseText} | audit=${auditText} | prediction_log=${queueText}`;
             }
         }
 
@@ -5832,8 +5928,24 @@
 
         // Session-aware staleness: count only regular market hours (9:30-16:00 ET, weekdays)
         // Matches generate_daily_ml_report.py compute_session_staleness_hours()
-        const SESSION_STALE_WARN_H = 13;   // matches ML_STALENESS_WARN_SESSION_HOURS
-        const SESSION_STALE_KILL_H = 19.5; // matches ML_STALENESS_KILL_SESSION_HOURS
+        const DEFAULT_SESSION_STALE_WARN_H = 13;
+        const DEFAULT_SESSION_STALE_KILL_H = 19.5;
+
+        function resolveSessionStalenessThresholds() {
+            const policy = state.mlHealthPolicy || {};
+            const warnRaw = Number(policy.staleness_warn_session_hours);
+            const killRaw = Number(policy.staleness_kill_session_hours);
+            const warnHours = Number.isFinite(warnRaw) && warnRaw > 0
+                ? warnRaw
+                : DEFAULT_SESSION_STALE_WARN_H;
+            let killHours = Number.isFinite(killRaw) && killRaw > 0
+                ? killRaw
+                : DEFAULT_SESSION_STALE_KILL_H;
+            if (killHours <= warnHours) {
+                killHours = Math.max(DEFAULT_SESSION_STALE_KILL_H, warnHours + 0.5);
+            }
+            return { warnHours, killHours };
+        }
 
         // NYSE full-closure holidays — mirrors generate_daily_ml_report.py NYSE_HOLIDAYS
         // Format: 'YYYY-MM-DD' strings for fast Set lookup. Update annually.
@@ -5934,11 +6046,12 @@
         function computeHealthState() {
             const sessionH = computeSessionStalenessHours();
             const wallH = computeWallClockAgeHours();
+            const { warnHours, killHours } = resolveSessionStalenessThresholds();
             const notes = [];
 
             // Kill-switch: session staleness exceeds kill threshold
-            if (sessionH != null && sessionH >= SESSION_STALE_KILL_H) {
-                return { health: 'kill-switch', note: `Session staleness ${sessionH.toFixed(1)}h exceeds ${SESSION_STALE_KILL_H}h` };
+            if (sessionH != null && sessionH >= killHours) {
+                return { health: 'kill-switch', note: `Session staleness ${sessionH.toFixed(1)}h exceeds ${killHours}h` };
             }
 
             // Kill-switch: ML service offline
@@ -5947,12 +6060,12 @@
             }
 
             // Degrading: session staleness above warn threshold
-            if (sessionH != null && sessionH >= SESSION_STALE_WARN_H) {
+            if (sessionH != null && sessionH >= warnHours) {
                 notes.push(`Session staleness elevated (${sessionH.toFixed(1)}h)`);
             }
 
             // Info: wall clock high but gated by session staleness (weekends/holidays)
-            if (wallH != null && wallH >= 72 && sessionH != null && sessionH < SESSION_STALE_KILL_H) {
+            if (wallH != null && wallH >= 72 && sessionH != null && sessionH < killHours) {
                 notes.push(`Wall-clock ${wallH.toFixed(0)}h (session ${sessionH.toFixed(1)}h OK)`);
             }
 
@@ -5983,6 +6096,7 @@
 
         function updateHealthWidget() {
             const { health, note } = computeHealthState();
+            const { warnHours, killHours } = resolveSessionStalenessThresholds();
             state.mlHealthState = health;
             state.mlHealthNote = note;
 
@@ -6003,9 +6117,9 @@
                 ageEl.title = wallH != null
                     ? `Wall-clock: ${formatModelAge(wallH)} | Session: ${sessionH != null ? sessionH.toFixed(1) + 'h' : '--'}`
                     : '';
-                if (sessionH != null && sessionH >= SESSION_STALE_KILL_H) {
+                if (sessionH != null && sessionH >= killHours) {
                     ageEl.style.color = 'var(--danger)';
-                } else if (sessionH != null && sessionH >= SESSION_STALE_WARN_H) {
+                } else if (sessionH != null && sessionH >= warnHours) {
                     ageEl.style.color = 'var(--warning)';
                 } else {
                     ageEl.style.color = '';
@@ -6038,6 +6152,7 @@
         }
 
         function trackMlScore(panelPayload) {
+            if (state.mlScoresSource === 'db') return;
             if (!panelPayload || panelPayload.preview) return;
             const today = new Date().toISOString().slice(0, 10);
             if (state.mlScoreDate !== today) {
@@ -6280,6 +6395,33 @@
             try {
                 const payload = await fetchJson(apiUrl, 5000);
                 state.mlMeta = payload?.manifest || null;
+                const dashboardHealth = payload?.dashboard_health;
+                if (dashboardHealth && typeof dashboardHealth === 'object') {
+                    const warnRaw = Number(dashboardHealth.staleness_warn_session_hours);
+                    const killRaw = Number(dashboardHealth.staleness_kill_session_hours);
+                    state.mlHealthPolicy = {
+                        staleness_warn_session_hours: Number.isFinite(warnRaw) && warnRaw > 0
+                            ? warnRaw
+                            : DEFAULT_SESSION_STALE_WARN_H,
+                        staleness_kill_session_hours: Number.isFinite(killRaw) && killRaw > 0
+                            ? killRaw
+                            : DEFAULT_SESSION_STALE_KILL_H,
+                    };
+
+                    const scoresToday = Number(dashboardHealth.predictions_live_today);
+                    const flaggedToday = Number(dashboardHealth.flagged_live_today);
+                    if (Number.isFinite(scoresToday) && Number.isFinite(flaggedToday)) {
+                        state.mlScoresToday = Math.max(0, Math.floor(scoresToday));
+                        state.mlFlaggedScores = Math.max(0, Math.floor(flaggedToday));
+                        const scoreDayEt = String(dashboardHealth.score_day_et || '').trim();
+                        if (scoreDayEt) {
+                            state.mlScoreDate = scoreDayEt;
+                        }
+                        state.mlScoresSource = 'db';
+                    } else {
+                        state.mlScoresSource = 'local';
+                    }
+                }
                 if (state.mlScoreWriteBlocked) {
                     setMlServiceState('degraded', state.mlServiceMessage || 'Remote read-only mode: score endpoint blocked by policy.');
                 } else {
@@ -6496,11 +6638,11 @@
                 const userMsg = `Market data request failed (${detail}).`;
                 const tbody = document.getElementById('pivot-table-body');
                 tbody.innerHTML = `<tr><td colspan="4" style="text-align: center; color: var(--danger); padding: 20px;">Data unavailable</td></tr>`;
-                document.getElementById('nearest-resistance').innerHTML = `<strong>Nearest resistance:</strong> --`;
-                document.getElementById('nearest-support').innerHTML = `<strong>Nearest support:</strong> --`;
-                document.getElementById('strongest-resistance').innerHTML = `<strong>Strongest resistance:</strong> --`;
-                document.getElementById('strongest-support').innerHTML = `<strong>Strongest support:</strong> --`;
-                document.getElementById('gamma-level').innerHTML = `<strong>Gamma flip:</strong> --`;
+                setLabeledText('nearest-resistance', 'Nearest resistance:', '--');
+                setLabeledText('nearest-support', 'Nearest support:', '--');
+                setLabeledText('strongest-resistance', 'Strongest resistance:', '--');
+                setLabeledText('strongest-support', 'Strongest support:', '--');
+                setLabeledText('gamma-level', 'Gamma flip:', '--');
                 showToast(userMsg, 'error', {
                     title: 'Data Fetch Failed',
                     duration: 12000,
