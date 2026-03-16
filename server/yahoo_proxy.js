@@ -268,6 +268,8 @@ function buildSecurityConfig(procEnv = process.env, fileEnv = {}) {
   ).trim();
   const authEnabledFlag = parseBool(readSetting(procEnv, fileEnv, 'DASH_AUTH_ENABLED', ''), false);
   const authCredentialsConfigured = authPassword.length > 0;
+  const authServiceToken = readSetting(procEnv, fileEnv, 'DASH_AUTH_SERVICE_TOKEN', '').trim();
+  const authServiceTokenConfigured = authServiceToken.length > 0;
   const authPasswordMinLength = parsePositiveInt(
     readSetting(procEnv, fileEnv, 'DASH_AUTH_MIN_PASSWORD_LEN', '20'),
     20,
@@ -340,6 +342,8 @@ function buildSecurityConfig(procEnv = process.env, fileEnv = {}) {
     authEnabled,
     authCredentialsConfigured,
     authPassword,
+    authServiceToken,
+    authServiceTokenConfigured,
     authPasswordMinLength,
     authPasswordStrongEnough,
     authPasswordPolicyEnforced,
@@ -477,6 +481,16 @@ function hasValidSession(req) {
     upsertAuthSession(req, parts, nowMs);
   }
   return valid;
+}
+
+function hasValidServiceToken(req, url, requestIsLocal) {
+  if (!SECURITY.authEnabled) return false;
+  if (!SECURITY.authServiceTokenConfigured) return false;
+  if (!requestIsLocal) return false;
+  if (!isApiPath(url?.pathname)) return false;
+  const token = String(req?.headers?.['x-pivot-service-token'] || '').trim();
+  if (!token) return false;
+  return safeEqual(token, SECURITY.authServiceToken);
 }
 
 function encodeHtml(text) {
@@ -1014,10 +1028,11 @@ async function handleAuthRoutes(req, res, url) {
   return false;
 }
 
-function isAuthorizedRequest(req) {
+function isAuthorizedRequest(req, url, requestIsLocal) {
   if (!SECURITY.authEnabled) return true;
   if (!SECURITY.authCredentialsConfigured) return false;
-  return hasValidSession(req);
+  if (hasValidSession(req)) return true;
+  return hasValidServiceToken(req, url, requestIsLocal);
 }
 
 function normalizeMethod(req) {
@@ -2683,6 +2698,8 @@ const server = http.createServer(async (req, res) => {
       auth_enabled: SECURITY.authEnabled,
       auth_credentials_configured: SECURITY.authCredentialsConfigured,
       auth_method: 'password_cookie',
+      auth_service_token_configured: SECURITY.authServiceTokenConfigured,
+      auth_service_token_scope: 'local_api_only',
       auth_password_policy_enforced: SECURITY.authPasswordPolicyEnforced,
       auth_password_strong_enough: SECURITY.authPasswordStrongEnough,
       auth_password_min_length: SECURITY.authPasswordMinLength,
@@ -2772,7 +2789,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     const localBypassAllowed = SECURITY.authBypassLocal && requestIsLocal;
-    if (!localBypassAllowed && !isAuthorizedRequest(req)) {
+    if (!localBypassAllowed && !isAuthorizedRequest(req, url, requestIsLocal)) {
       sendLoginRequired(res, req, url);
       return;
     }
@@ -3245,7 +3262,7 @@ server.listen(PORT, HOST, () => {
   }
   /* eslint-disable-next-line no-console */
   console.log(
-    `[security] auth_enabled=${SECURITY.authEnabled} auth_credentials_configured=${SECURITY.authCredentialsConfigured} auth_local_bypass=${SECURITY.authBypassLocal} write_endpoints_local_only=${SECURITY.writeEndpointsLocalOnly}`
+    `[security] auth_enabled=${SECURITY.authEnabled} auth_credentials_configured=${SECURITY.authCredentialsConfigured} auth_service_token_configured=${SECURITY.authServiceTokenConfigured} auth_local_bypass=${SECURITY.authBypassLocal} write_endpoints_local_only=${SECURITY.writeEndpointsLocalOnly}`
   );
   /* eslint-disable-next-line no-console */
   console.log(

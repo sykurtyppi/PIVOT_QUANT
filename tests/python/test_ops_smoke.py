@@ -1490,6 +1490,118 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(len(proxy_calls), 1)
         self.assertEqual(len(direct_calls), 2)
 
+    def test_backfill_fetch_json_attaches_service_token_for_local_proxy(self) -> None:
+        backfill = load_module(
+            "pq_backfill_proxy_service_token_header_test",
+            REPO_ROOT / "scripts" / "backfill_events.py",
+        )
+
+        captured_headers: list[dict[str, str]] = []
+        original_urlopen = backfill.urlopen
+        original_token = backfill.YAHOO_PROXY_SERVICE_TOKEN
+        try:
+            backfill.YAHOO_PROXY_SERVICE_TOKEN = "svc_token_123"
+
+            class _FakeResp:
+                def read(self) -> bytes:
+                    return b"{}"
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb) -> bool:
+                    return False
+
+            def _fake_urlopen(req, timeout=0):  # noqa: ANN001
+                captured_headers.append({k.lower(): v for k, v in req.header_items()})
+                return _FakeResp()
+
+            backfill.urlopen = _fake_urlopen
+            backfill.fetch_json("http://127.0.0.1:3000/api/market?source=yahoo&symbol=SPY")
+            backfill.fetch_json("https://query1.finance.yahoo.com/v8/finance/chart/SPY?range=1d&interval=1m")
+        finally:
+            backfill.urlopen = original_urlopen
+            backfill.YAHOO_PROXY_SERVICE_TOKEN = original_token
+
+        self.assertGreaterEqual(len(captured_headers), 2)
+        self.assertEqual(captured_headers[0].get("x-pivot-service-token"), "svc_token_123")
+        self.assertNotIn("x-pivot-service-token", captured_headers[1])
+
+    def test_backfill_fetch_market_skips_proxy_when_auth_required_without_service_token(self) -> None:
+        backfill = load_module(
+            "pq_backfill_proxy_auth_skip_test",
+            REPO_ROOT / "scripts" / "backfill_events.py",
+        )
+
+        calls: list[str] = []
+        original_fetch_json = backfill.fetch_json
+        original_proxy_url = backfill.YAHOO_PROXY_URL
+        original_skip_auth_required = backfill.YAHOO_PROXY_SKIP_AUTH_REQUIRED
+        original_service_token = backfill.YAHOO_PROXY_SERVICE_TOKEN
+        original_env = {
+            "DASH_AUTH_ENABLED": os.environ.get("DASH_AUTH_ENABLED"),
+            "DASH_AUTH_LOCAL_BYPASS": os.environ.get("DASH_AUTH_LOCAL_BYPASS"),
+            "DASH_AUTH_PASSWORD": os.environ.get("DASH_AUTH_PASSWORD"),
+            "HOST": os.environ.get("HOST"),
+        }
+        try:
+            backfill.YAHOO_PROXY_URL = "http://127.0.0.1:3000/api/market"
+            backfill.YAHOO_PROXY_SKIP_AUTH_REQUIRED = True
+            backfill.YAHOO_PROXY_SERVICE_TOKEN = ""
+            with backfill._yahoo_proxy_auth_skip_lock:
+                backfill._yahoo_proxy_auth_skip_logged = False
+
+            os.environ["DASH_AUTH_ENABLED"] = "true"
+            os.environ["DASH_AUTH_LOCAL_BYPASS"] = "false"
+            os.environ["DASH_AUTH_PASSWORD"] = "test-password"
+            os.environ["HOST"] = "127.0.0.1"
+
+            def _fake_fetch_json(url: str, timeout: int = 12, retries: int = 2) -> dict:
+                calls.append(url)
+                if "/api/market" in url:
+                    raise AssertionError("proxy should be skipped when auth is required and no token is configured")
+                return {
+                    "chart": {
+                        "result": [
+                            {
+                                "timestamp": [1_777_700_000],
+                                "indicators": {
+                                    "quote": [
+                                        {
+                                            "open": [100.0],
+                                            "high": [101.0],
+                                            "low": [99.0],
+                                            "close": [100.5],
+                                            "volume": [1000.0],
+                                        }
+                                    ]
+                                },
+                            }
+                        ],
+                        "error": None,
+                    }
+                }
+
+            backfill.fetch_json = _fake_fetch_json
+            payload, source = backfill.fetch_market("SPY", "1m", "1d", "yahoo")
+        finally:
+            backfill.fetch_json = original_fetch_json
+            backfill.YAHOO_PROXY_URL = original_proxy_url
+            backfill.YAHOO_PROXY_SKIP_AUTH_REQUIRED = original_skip_auth_required
+            backfill.YAHOO_PROXY_SERVICE_TOKEN = original_service_token
+            for key, value in original_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+            with backfill._yahoo_proxy_auth_skip_lock:
+                backfill._yahoo_proxy_auth_skip_logged = False
+
+        self.assertEqual(source, "Yahoo")
+        self.assertEqual(len(payload.get("candles") or []), 1)
+        self.assertTrue(any("query1.finance.yahoo.com" in url for url in calls))
+        self.assertFalse(any("/api/market" in url for url in calls))
+
     def test_backfill_gamma_context_prefers_live_when_snapshot_is_stale(self) -> None:
         backfill = load_module(
             "pq_backfill_gamma_live_refresh_test",
@@ -5926,6 +6038,43 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertAlmostEqual(float(expansion["mfe_bps_break"]), 10.0, places=6)
         self.assertAlmostEqual(float(expansion["mfe_bps_break_other"]), 8.0, places=6)
         self.assertAlmostEqual(float(expansion["sample_share"]), 0.5, places=6)
+
+    def test_train_artifacts_threshold_guard_disables_nonpositive_utility(self) -> None:
+        module = load_module(
+            "train_rf_artifacts_threshold_guard_negative",
+            REPO_ROOT / "scripts" / "train_rf_artifacts.py",
+        )
+        threshold, meta = module.apply_threshold_risk_guards(
+            objective="utility_bps",
+            threshold=0.63,
+            threshold_meta={"score": -12.5, "fallback": False},
+            no_trade_threshold=1.0,
+            min_utility_score=0.0,
+            disable_on_nonpositive_utility=True,
+            disable_on_fallback=True,
+        )
+        self.assertEqual(float(threshold), 1.0)
+        self.assertTrue(bool(meta.get("guard_applied")))
+        self.assertIn("non_positive_utility", str(meta.get("guard_reason")))
+        self.assertTrue(bool(meta.get("fallback")))
+
+    def test_train_artifacts_threshold_guard_disables_fallback_threshold(self) -> None:
+        module = load_module(
+            "train_rf_artifacts_threshold_guard_fallback",
+            REPO_ROOT / "scripts" / "train_rf_artifacts.py",
+        )
+        threshold, meta = module.apply_threshold_risk_guards(
+            objective="utility_bps",
+            threshold=0.5,
+            threshold_meta={"score": None, "fallback": True},
+            no_trade_threshold=0.99,
+            min_utility_score=0.0,
+            disable_on_nonpositive_utility=True,
+            disable_on_fallback=True,
+        )
+        self.assertEqual(float(threshold), 0.99)
+        self.assertTrue(bool(meta.get("guard_applied")))
+        self.assertIn("fallback_threshold", str(meta.get("guard_reason")))
 
     def test_model_governance_skips_regression_gates_when_support_is_low(self) -> None:
         module = load_module("model_governance", REPO_ROOT / "scripts" / "model_governance.py")

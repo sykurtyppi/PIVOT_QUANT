@@ -16,7 +16,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from typing import Iterable
 from urllib.error import HTTPError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
 logging.basicConfig(
@@ -81,11 +81,85 @@ BACKFILL_WAL_AUTOCHECKPOINT = max(
     100,
     int(os.getenv("BACKFILL_WAL_AUTOCHECKPOINT", "1000")),
 )
+YAHOO_PROXY_SERVICE_TOKEN = (
+    os.getenv("YAHOO_PROXY_SERVICE_TOKEN")
+    or os.getenv("DASH_AUTH_SERVICE_TOKEN")
+    or ""
+).strip()
+YAHOO_PROXY_SKIP_AUTH_REQUIRED = (
+    os.getenv("YAHOO_PROXY_SKIP_AUTH_REQUIRED", "true").strip().lower()
+    in {"1", "true", "yes", "y", "on"}
+)
 _gamma_context_marketdata_backoff_until: dict[str, float] = {}
 _gamma_context_marketdata_backoff_lock = threading.Lock()
 _yahoo_proxy_auth_failopen_until: float = 0.0
 _yahoo_proxy_auth_failopen_reason: str = ""
 _yahoo_proxy_auth_failopen_lock = threading.Lock()
+_yahoo_proxy_auth_skip_logged = False
+_yahoo_proxy_auth_skip_lock = threading.Lock()
+
+
+def _is_loopback_host(hostname: str | None) -> bool:
+    host = str(hostname or "").strip().lower()
+    if not host:
+        return False
+    if host in {"localhost", "127.0.0.1", "::1"}:
+        return True
+    return host.startswith("127.")
+
+
+def _is_local_proxy_url(url: str) -> bool:
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+    return _is_loopback_host(parsed.hostname) and parsed.path.startswith("/api/")
+
+
+def _dashboard_auth_effective() -> bool:
+    enabled_flag = str(os.getenv("DASH_AUTH_ENABLED", "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
+    password = (os.getenv("DASH_AUTH_PASSWORD") or os.getenv("DASH_AUTH_PASS") or "").strip()
+    return bool(enabled_flag or password)
+
+
+def _dashboard_auth_local_bypass_effective() -> bool:
+    host = (os.getenv("HOST") or "127.0.0.1").strip()
+    bind_is_loopback = _is_loopback_host(host)
+    raw = os.getenv("DASH_AUTH_LOCAL_BYPASS")
+    if raw is None or str(raw).strip() == "":
+        return bind_is_loopback
+    return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _should_skip_proxy_due_auth_requirement() -> bool:
+    return bool(
+        YAHOO_PROXY_SKIP_AUTH_REQUIRED
+        and YAHOO_PROXY_URL
+        and _is_local_proxy_url(YAHOO_PROXY_URL)
+        and _dashboard_auth_effective()
+        and not _dashboard_auth_local_bypass_effective()
+        and not YAHOO_PROXY_SERVICE_TOKEN
+    )
+
+
+def _log_proxy_auth_skip_once(symbol: str) -> None:
+    global _yahoo_proxy_auth_skip_logged
+    with _yahoo_proxy_auth_skip_lock:
+        if _yahoo_proxy_auth_skip_logged:
+            return
+        _yahoo_proxy_auth_skip_logged = True
+    log.info(
+        "Yahoo proxy auth required and no service token configured; "
+        "skipping proxy and using direct Yahoo API for %s. "
+        "Set YAHOO_PROXY_SERVICE_TOKEN (or DASH_AUTH_SERVICE_TOKEN) to use proxy with auth.",
+        symbol,
+    )
 
 
 def now_ms() -> int:
@@ -255,7 +329,10 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
 
 
 def fetch_json(url: str, timeout: int = 12, retries: int = 2) -> dict:
-    req = Request(url, headers={"User-Agent": "PivotQuantBackfill/1.0"})
+    headers = {"User-Agent": "PivotQuantBackfill/1.0"}
+    if YAHOO_PROXY_SERVICE_TOKEN and _is_local_proxy_url(url):
+        headers["X-Pivot-Service-Token"] = YAHOO_PROXY_SERVICE_TOKEN
+    req = Request(url, headers=headers)
     last_err = None
     for attempt in range(1, retries + 2):
         try:
@@ -385,6 +462,10 @@ def fetch_market(symbol: str, interval: str, range_str: str, source: str) -> tup
         return fetch_market_marketdata(symbol, interval, range_str)
     if source == "yahoo":
         if YAHOO_PROXY_URL:
+            if _should_skip_proxy_due_auth_requirement():
+                _log_proxy_auth_skip_once(symbol)
+                return fetch_market_yahoo_direct()
+
             failopen_state = _get_yahoo_proxy_auth_failopen()
             if failopen_state is not None:
                 remaining_sec, reason = failopen_state

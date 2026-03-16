@@ -35,6 +35,13 @@ def _env_float(name: str, default: float) -> float:
         return float(default)
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return bool(default)
+    return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 def require(module_name: str, hint: str):
     try:
         return __import__(module_name)
@@ -287,6 +294,43 @@ def split_calibration_slices(X_calib, y_calib, *, fit_fraction: float, min_fit_e
     return X_fit, y_fit, X_tune, y_tune, True
 
 
+def apply_threshold_risk_guards(
+    *,
+    objective: str,
+    threshold: float,
+    threshold_meta: dict,
+    no_trade_threshold: float,
+    min_utility_score: float,
+    disable_on_nonpositive_utility: bool,
+    disable_on_fallback: bool,
+) -> tuple[float, dict]:
+    guarded_threshold = min(1.0, max(0.0, float(no_trade_threshold)))
+    reasons: list[str] = []
+
+    if objective == "utility_bps":
+        selected_score = threshold_meta.get("score")
+        score_value = float(selected_score) if selected_score is not None else None
+        if disable_on_fallback and bool(threshold_meta.get("fallback")):
+            reasons.append("fallback_threshold")
+        if (
+            disable_on_nonpositive_utility
+            and score_value is not None
+            and score_value <= float(min_utility_score)
+        ):
+            reasons.append(
+                f"non_positive_utility({score_value:.6f}<={float(min_utility_score):.6f})"
+            )
+
+    threshold_meta["guard_applied"] = bool(reasons)
+    threshold_meta["guard_reason"] = ";".join(reasons)
+    threshold_meta["guard_no_trade_threshold"] = float(guarded_threshold)
+
+    if reasons:
+        threshold_meta["fallback"] = True
+        return guarded_threshold, threshold_meta
+    return float(threshold), threshold_meta
+
+
 def main() -> None:
     default_trade_cost_bps = _env_float(
         "RF_THRESHOLD_TRADE_COST_BPS",
@@ -336,6 +380,47 @@ def main() -> None:
         type=float,
         default=_env_float("RF_THRESHOLD_STABILITY_BAND", 0.0),
         help="Average score over +/- band around threshold to avoid knife-edge picks.",
+    )
+    parser.add_argument(
+        "--threshold-min-utility-score",
+        type=float,
+        default=_env_float("RF_THRESHOLD_MIN_UTILITY_SCORE", 0.0),
+        help=(
+            "Minimum utility_bps score required for a live threshold. "
+            "When score <= this value and guard is enabled, threshold is set to no-trade."
+        ),
+    )
+    parser.add_argument(
+        "--threshold-no-trade-threshold",
+        type=float,
+        default=_env_float("RF_THRESHOLD_NO_TRADE_THRESHOLD", 1.0),
+        help="Threshold used when risk guard disables a model/target horizon (typically 1.0).",
+    )
+    parser.add_argument(
+        "--threshold-disable-on-nonpositive-utility",
+        dest="threshold_disable_on_nonpositive_utility",
+        action="store_true",
+        default=_env_bool("RF_THRESHOLD_DISABLE_ON_NONPOSITIVE_UTILITY", True),
+        help="Disable thresholds whose selected utility_bps score is <= threshold-min-utility-score.",
+    )
+    parser.add_argument(
+        "--no-threshold-disable-on-nonpositive-utility",
+        dest="threshold_disable_on_nonpositive_utility",
+        action="store_false",
+        help="Allow non-positive selected utility_bps thresholds.",
+    )
+    parser.add_argument(
+        "--threshold-disable-on-fallback",
+        dest="threshold_disable_on_fallback",
+        action="store_true",
+        default=_env_bool("RF_THRESHOLD_DISABLE_ON_FALLBACK", True),
+        help="Disable fallback thresholds (e.g. 0.5) by setting them to no-trade threshold.",
+    )
+    parser.add_argument(
+        "--no-threshold-disable-on-fallback",
+        dest="threshold_disable_on_fallback",
+        action="store_false",
+        help="Allow fallback thresholds to remain live.",
     )
     parser.add_argument(
         "--calib-fit-fraction",
@@ -525,6 +610,9 @@ def main() -> None:
                 "threshold_tune_size": int(len(X_calib_tune)) if X_calib_tune is not None else 0,
                 "search_enabled": True,
                 "search_skip_reason": "",
+                "min_utility_score": float(args.threshold_min_utility_score),
+                "disable_on_nonpositive_utility": bool(args.threshold_disable_on_nonpositive_utility),
+                "disable_on_fallback": bool(args.threshold_disable_on_fallback),
             }
             model_obj = calibrator if calibrator is not None else pipeline
             X_calib_set = X_calib_tune if X_calib_tune is not None else X.loc[calib_mask_sub]
@@ -586,6 +674,16 @@ def main() -> None:
                     optimal_threshold = 0.5
                     threshold_meta["search_enabled"] = False
                     threshold_meta["search_skip_reason"] = "threshold_selection_exception"
+
+            optimal_threshold, threshold_meta = apply_threshold_risk_guards(
+                objective=args.threshold_objective,
+                threshold=optimal_threshold,
+                threshold_meta=threshold_meta,
+                no_trade_threshold=float(args.threshold_no_trade_threshold),
+                min_utility_score=float(args.threshold_min_utility_score),
+                disable_on_nonpositive_utility=bool(args.threshold_disable_on_nonpositive_utility),
+                disable_on_fallback=bool(args.threshold_disable_on_fallback),
+            )
 
             # Compute per-feature quantile bounds for drift detection at inference.
             # Uses the full training set (not calib) since we want the broadest
