@@ -81,7 +81,8 @@ export IB_BRIDGE_BIND="${IB_BRIDGE_BIND:-127.0.0.1}"
 
 is_truthy() {
   local value="${1:-}"
-  case "${value,,}" in
+  value="$(printf '%s' "${value}" | tr '[:upper:]' '[:lower:]')"
+  case "${value}" in
     1|true|yes|on) return 0 ;;
     *) return 1 ;;
   esac
@@ -89,7 +90,8 @@ is_truthy() {
 
 is_loopback_bind() {
   local host_value="${1:-}"
-  case "${host_value,,}" in
+  host_value="$(printf '%s' "${host_value}" | tr '[:upper:]' '[:lower:]')"
+  case "${host_value}" in
     localhost|127.0.0.1|::1|127.*) return 0 ;;
     *) return 1 ;;
   esac
