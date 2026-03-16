@@ -1205,12 +1205,14 @@ class OpsSmokeTests(unittest.TestCase):
         )
 
         original_fetch_json = backfill.fetch_json
+        original_urlopen = backfill.urlopen
         original_token = backfill.MARKETDATA_APP_TOKEN
         backfill.MARKETDATA_APP_TOKEN = ""
 
         def _bridge_down(*_args, **_kwargs):
             raise RuntimeError("bridge unavailable")
 
+        backfill.urlopen = _bridge_down
         backfill.fetch_json = _bridge_down
         conn = sqlite3.connect(":memory:")
         try:
@@ -1263,6 +1265,7 @@ class OpsSmokeTests(unittest.TestCase):
             self.assertEqual(ctx["generated_at_date_et"].strftime("%Y-%m-%d"), snapshot_date)
             self.assertAlmostEqual(float(ctx["atm_iv_pct"]), 22.0, places=6)
         finally:
+            backfill.urlopen = original_urlopen
             backfill.fetch_json = original_fetch_json
             backfill.MARKETDATA_APP_TOKEN = original_token
             conn.close()
@@ -1379,6 +1382,7 @@ class OpsSmokeTests(unittest.TestCase):
         )
 
         original_fetch_json = backfill.fetch_json
+        original_urlopen = backfill.urlopen
         original_live_fetch = backfill._fetch_gamma_context_marketdata_live
         original_token = backfill.MARKETDATA_APP_TOKEN
         backfill.MARKETDATA_APP_TOKEN = "dummy_token"
@@ -1402,6 +1406,7 @@ class OpsSmokeTests(unittest.TestCase):
                 "source_name": "marketdata_live",
             }
 
+        backfill.urlopen = _bridge_down
         backfill.fetch_json = _bridge_down
         backfill._fetch_gamma_context_marketdata_live = _fake_live_fetch
         conn = sqlite3.connect(":memory:")
@@ -1453,6 +1458,7 @@ class OpsSmokeTests(unittest.TestCase):
             self.assertAlmostEqual(float(ctx["gamma_flip"]), 512.0, places=6)
             self.assertEqual(ctx["generated_at_date_et"], today)
         finally:
+            backfill.urlopen = original_urlopen
             backfill.fetch_json = original_fetch_json
             backfill._fetch_gamma_context_marketdata_live = original_live_fetch
             backfill.MARKETDATA_APP_TOKEN = original_token
@@ -1465,12 +1471,14 @@ class OpsSmokeTests(unittest.TestCase):
         )
 
         original_fetch_json = backfill.fetch_json
+        original_urlopen = backfill.urlopen
         original_token = backfill.MARKETDATA_APP_TOKEN
         backfill.MARKETDATA_APP_TOKEN = ""
 
         def _bridge_down(*_args, **_kwargs):
             raise RuntimeError("bridge unavailable")
 
+        backfill.urlopen = _bridge_down
         backfill.fetch_json = _bridge_down
         conn = sqlite3.connect(":memory:")
         try:
@@ -1523,6 +1531,7 @@ class OpsSmokeTests(unittest.TestCase):
             self.assertAlmostEqual(float(ctx["atm_iv_pct"]), 19.0, places=6)
             self.assertAlmostEqual(float(ctx["oi_concentration_top5"]), 17.0, places=6)
         finally:
+            backfill.urlopen = original_urlopen
             backfill.fetch_json = original_fetch_json
             backfill.MARKETDATA_APP_TOKEN = original_token
             conn.close()
@@ -1534,12 +1543,14 @@ class OpsSmokeTests(unittest.TestCase):
         )
 
         original_fetch_json = backfill.fetch_json
+        original_urlopen = backfill.urlopen
         original_token = backfill.MARKETDATA_APP_TOKEN
         backfill.MARKETDATA_APP_TOKEN = ""
 
         def _bridge_down(*_args, **_kwargs):
             raise RuntimeError("bridge unavailable")
 
+        backfill.urlopen = _bridge_down
         backfill.fetch_json = _bridge_down
         conn = sqlite3.connect(":memory:")
         try:
@@ -1618,6 +1629,7 @@ class OpsSmokeTests(unittest.TestCase):
             self.assertEqual(ctx["generated_at_date_et"], today)
             self.assertEqual(ctx["carried_from_date_et"], yesterday)
         finally:
+            backfill.urlopen = original_urlopen
             backfill.fetch_json = original_fetch_json
             backfill.MARKETDATA_APP_TOKEN = original_token
             conn.close()
