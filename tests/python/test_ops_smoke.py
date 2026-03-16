@@ -1375,6 +1375,94 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertTrue(events)
         self.assertTrue(all(ev.get("gamma_flip") is None for ev in events))
 
+    def test_backfill_fetch_json_does_not_retry_auth_errors(self) -> None:
+        backfill = load_module(
+            "pq_backfill_fetch_json_auth_no_retry_test",
+            REPO_ROOT / "scripts" / "backfill_events.py",
+        )
+
+        attempts = {"count": 0}
+        original_urlopen = backfill.urlopen
+        original_sleep = backfill.time.sleep
+        try:
+            def _fake_urlopen(req, timeout=0):
+                attempts["count"] += 1
+                raise backfill.HTTPError(req.full_url, 401, "Unauthorized", {}, None)
+
+            backfill.urlopen = _fake_urlopen
+            backfill.time.sleep = lambda _seconds: None
+            with self.assertRaises(backfill.HTTPError):
+                backfill.fetch_json("http://127.0.0.1:3000/api/market?source=yahoo&symbol=SPY")
+        finally:
+            backfill.urlopen = original_urlopen
+            backfill.time.sleep = original_sleep
+
+        self.assertEqual(attempts["count"], 1)
+
+    def test_backfill_fetch_market_bypasses_proxy_after_auth_failure(self) -> None:
+        backfill = load_module(
+            "pq_backfill_market_proxy_failopen_test",
+            REPO_ROOT / "scripts" / "backfill_events.py",
+        )
+
+        calls: list[str] = []
+        original_fetch_json = backfill.fetch_json
+        original_proxy_url = backfill.YAHOO_PROXY_URL
+        original_failopen_sec = backfill.YAHOO_PROXY_AUTH_FAILOPEN_SEC
+        try:
+            with backfill._yahoo_proxy_auth_failopen_lock:
+                backfill._yahoo_proxy_auth_failopen_until = 0.0
+                backfill._yahoo_proxy_auth_failopen_reason = ""
+
+            backfill.YAHOO_PROXY_URL = "http://127.0.0.1:3000/api/market"
+            backfill.YAHOO_PROXY_AUTH_FAILOPEN_SEC = 300
+
+            def _fake_fetch_json(url: str, timeout: int = 12, retries: int = 2) -> dict:
+                calls.append(url)
+                if "/api/market" in url:
+                    raise backfill.HTTPError(url, 401, "Unauthorized", {}, None)
+                return {
+                    "chart": {
+                        "result": [
+                            {
+                                "timestamp": [1_777_700_000],
+                                "indicators": {
+                                    "quote": [
+                                        {
+                                            "open": [100.0],
+                                            "high": [101.0],
+                                            "low": [99.0],
+                                            "close": [100.5],
+                                            "volume": [1000.0],
+                                        }
+                                    ]
+                                },
+                            }
+                        ],
+                        "error": None,
+                    }
+                }
+
+            backfill.fetch_json = _fake_fetch_json
+            payload1, source1 = backfill.fetch_market("SPY", "1m", "1d", "yahoo")
+            payload2, source2 = backfill.fetch_market("SPY", "1m", "1d", "yahoo")
+        finally:
+            backfill.fetch_json = original_fetch_json
+            backfill.YAHOO_PROXY_URL = original_proxy_url
+            backfill.YAHOO_PROXY_AUTH_FAILOPEN_SEC = original_failopen_sec
+            with backfill._yahoo_proxy_auth_failopen_lock:
+                backfill._yahoo_proxy_auth_failopen_until = 0.0
+                backfill._yahoo_proxy_auth_failopen_reason = ""
+
+        self.assertEqual(source1, "Yahoo")
+        self.assertEqual(source2, "Yahoo")
+        self.assertEqual(len(payload1.get("candles") or []), 1)
+        self.assertEqual(len(payload2.get("candles") or []), 1)
+        proxy_calls = [u for u in calls if "/api/market" in u]
+        direct_calls = [u for u in calls if "query1.finance.yahoo.com" in u]
+        self.assertEqual(len(proxy_calls), 1)
+        self.assertEqual(len(direct_calls), 2)
+
     def test_backfill_gamma_context_prefers_live_when_snapshot_is_stale(self) -> None:
         backfill = load_module(
             "pq_backfill_gamma_live_refresh_test",

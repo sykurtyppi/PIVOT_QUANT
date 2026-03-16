@@ -52,6 +52,11 @@ GAMMA_IV_RV_HIGH_RATIO = float(os.getenv("GAMMA_IV_RV_HIGH_RATIO", "1.15"))
 GAMMA_IV_RV_LOW_RATIO = float(os.getenv("GAMMA_IV_RV_LOW_RATIO", "0.85"))
 MARKETDATA_APP_TOKEN = os.getenv("MARKETDATA_APP_TOKEN", "").strip()
 MARKETDATA_APP_BASE = "https://api.marketdata.app/v1"
+YAHOO_PROXY_URL = (os.getenv("YAHOO_PROXY_URL") or "http://127.0.0.1:3000/api/market").strip()
+YAHOO_PROXY_AUTH_FAILOPEN_SEC = max(
+    30,
+    int(os.getenv("YAHOO_PROXY_AUTH_FAILOPEN_SEC", "900")),
+)
 GAMMA_CONTEXT_MARKETDATA_TIMEOUT_SEC = int(os.getenv("GAMMA_CONTEXT_MARKETDATA_TIMEOUT_SEC", "12"))
 GAMMA_CONTEXT_MAX_SNAPSHOT_AGE_DAYS = int(os.getenv("GAMMA_CONTEXT_MAX_SNAPSHOT_AGE_DAYS", "3"))
 # Limit live chain fetches to options expiring within this many days.
@@ -78,6 +83,9 @@ BACKFILL_WAL_AUTOCHECKPOINT = max(
 )
 _gamma_context_marketdata_backoff_until: dict[str, float] = {}
 _gamma_context_marketdata_backoff_lock = threading.Lock()
+_yahoo_proxy_auth_failopen_until: float = 0.0
+_yahoo_proxy_auth_failopen_reason: str = ""
+_yahoo_proxy_auth_failopen_lock = threading.Lock()
 
 
 def now_ms() -> int:
@@ -254,6 +262,17 @@ def fetch_json(url: str, timeout: int = 12, retries: int = 2) -> dict:
             with urlopen(req, timeout=timeout) as resp:
                 raw = resp.read()
             return json.loads(raw.decode("utf-8"))
+        except HTTPError as exc:
+            # 4xx auth/config errors are deterministic; retrying only adds noise.
+            if int(getattr(exc, "code", 0) or 0) in {400, 401, 403, 404}:
+                raise
+            last_err = exc
+            if attempt <= retries:
+                wait = min(2 ** attempt, 8)
+                log.warning("fetch_json attempt %d/%d failed (%s), retrying in %ds...", attempt, retries + 1, exc, wait)
+                time.sleep(wait)
+            else:
+                raise ConnectionError(f"fetch_json failed after {retries + 1} attempts: {url}") from last_err
         except Exception as exc:
             last_err = exc
             if attempt <= retries:
@@ -287,6 +306,25 @@ def _parse_retry_after_seconds(raw_value: object) -> int | None:
     if seconds <= 0:
         return None
     return seconds
+
+
+def _set_yahoo_proxy_auth_failopen(reason: str) -> None:
+    global _yahoo_proxy_auth_failopen_until
+    global _yahoo_proxy_auth_failopen_reason
+    with _yahoo_proxy_auth_failopen_lock:
+        _yahoo_proxy_auth_failopen_until = time.monotonic() + max(30, YAHOO_PROXY_AUTH_FAILOPEN_SEC)
+        _yahoo_proxy_auth_failopen_reason = reason
+
+
+def _get_yahoo_proxy_auth_failopen(now_mono: float | None = None) -> tuple[int, str] | None:
+    current = now_mono if now_mono is not None else time.monotonic()
+    with _yahoo_proxy_auth_failopen_lock:
+        until = float(_yahoo_proxy_auth_failopen_until or 0.0)
+        reason = str(_yahoo_proxy_auth_failopen_reason or "")
+    if until <= current:
+        return None
+    remaining = int(max(1, round(until - current)))
+    return remaining, reason
 
 
 def fetch_market(symbol: str, interval: str, range_str: str, source: str) -> tuple[dict, str]:
@@ -346,17 +384,42 @@ def fetch_market(symbol: str, interval: str, range_str: str, source: str) -> tup
     if source == "marketdata":
         return fetch_market_marketdata(symbol, interval, range_str)
     if source == "yahoo":
-        proxy_url = (
-            "http://127.0.0.1:3000/api/market"
-            f"?source=yahoo&symbol={symbol}&range={range_str}&interval={interval}"
-        )
-        try:
-            return fetch_json(proxy_url), "Yahoo"
-        except Exception as exc:
-            # Launchd retrain may run before the dashboard proxy is accepting connections.
-            # Fall back to Yahoo's public chart endpoint so retrain remains autonomous.
-            log.warning("Yahoo proxy unavailable for %s (%s); falling back to direct Yahoo API", symbol, exc)
-            return fetch_market_yahoo_direct()
+        if YAHOO_PROXY_URL:
+            failopen_state = _get_yahoo_proxy_auth_failopen()
+            if failopen_state is not None:
+                remaining_sec, reason = failopen_state
+                log.info(
+                    "Yahoo proxy bypass active for %ss (%s); using direct Yahoo API for %s",
+                    remaining_sec,
+                    reason or "auth fail-open",
+                    symbol,
+                )
+                return fetch_market_yahoo_direct()
+
+            proxy_url = (
+                f"{YAHOO_PROXY_URL}"
+                f"?source=yahoo&symbol={symbol}&range={range_str}&interval={interval}"
+            )
+            try:
+                return fetch_json(proxy_url), "Yahoo"
+            except HTTPError as exc:
+                code = int(getattr(exc, "code", 0) or 0)
+                if code in {401, 403}:
+                    _set_yahoo_proxy_auth_failopen(f"HTTP {code}")
+                    log.warning(
+                        "Yahoo proxy auth failure for %s (HTTP %d); bypassing proxy for %ss and using direct Yahoo API",
+                        symbol,
+                        code,
+                        YAHOO_PROXY_AUTH_FAILOPEN_SEC,
+                    )
+                else:
+                    log.warning("Yahoo proxy unavailable for %s (%s); falling back to direct Yahoo API", symbol, exc)
+            except Exception as exc:
+                # Launchd retrain may run before the dashboard proxy is accepting connections.
+                # Fall back to Yahoo's public chart endpoint so retrain remains autonomous.
+                log.warning("Yahoo proxy unavailable for %s (%s); falling back to direct Yahoo API", symbol, exc)
+
+        return fetch_market_yahoo_direct()
 
     # auto
     try:
