@@ -20,6 +20,7 @@ import time
 import unittest
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 from urllib.error import HTTPError, URLError
 import urllib.request
 
@@ -429,6 +430,32 @@ class OpsSmokeTests(unittest.TestCase):
         log_text = (logs_dir / "report_delivery.log").read_text(encoding="utf-8")
         self.assertIn("DONE  daily_report_send", log_text)
         self.assertIn("report already sent", log_text)
+
+    def test_generate_daily_report_default_date_uses_latest_completed_market_day(self) -> None:
+        daily_report = load_module(
+            "pq_generate_daily_report_default_date_test",
+            REPO_ROOT / "scripts" / "generate_daily_ml_report.py",
+        )
+
+        class _BeforeCloseDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                base = datetime(2026, 3, 16, 15, 59, tzinfo=daily_report.ET_TZ)
+                return base if tz else base.replace(tzinfo=None)
+
+        class _AfterCloseDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                base = datetime(2026, 3, 16, 16, 1, tzinfo=daily_report.ET_TZ)
+                return base if tz else base.replace(tzinfo=None)
+
+        with patch.object(daily_report, "datetime", _BeforeCloseDateTime):
+            # Before close, Monday should resolve to previous completed session (Friday).
+            self.assertEqual(daily_report.parse_report_date(None), date(2026, 3, 13))
+
+        with patch.object(daily_report, "datetime", _AfterCloseDateTime):
+            # After close, same-day report should be selected.
+            self.assertEqual(daily_report.parse_report_date(None), date(2026, 3, 16))
 
     def test_daily_report_impact_is_direction_aware(self) -> None:
         db = self.tmp / "impact.sqlite"

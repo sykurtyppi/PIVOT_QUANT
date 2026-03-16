@@ -841,19 +841,19 @@ def build_trend_summary(
     lines.append(f"Staleness: {format_delta(cur_stale, prev_stale, mode='lower_better')}")
 
     lines.append(
-        "Bars today vs prior: "
+        "Bars in report window vs prior: "
         f"{format_delta(parse_float_or_none(db_current.get('bars_today')), parse_float_or_none(db_previous.get('bars_today')), mode='higher_better')}"
     )
     lines.append(
-        "Events today vs prior: "
+        "Events in report window vs prior: "
         f"{format_delta(parse_float_or_none(db_current.get('events_today')), parse_float_or_none(db_previous.get('events_today')), mode='neutral')}"
     )
     lines.append(
-        "Predictions today vs prior: "
+        "Predictions in report window vs prior: "
         f"{format_delta(parse_float_or_none(db_current.get('predictions_today')), parse_float_or_none(db_previous.get('predictions_today')), mode='higher_better')}"
     )
     lines.append(
-        "Score failures today vs prior: "
+        "Score failures in report window vs prior: "
         f"{format_delta(fails_current.get('failures'), fails_previous.get('failures'), mode='lower_better')}"
     )
     return lines
@@ -1205,13 +1205,13 @@ def build_compact_email_body(
         lines.append(f"- DB note: {db_progress['error']}")
     lines.append("")
 
-    lines.append("Daily Throughput")
+    lines.append("Report Window Throughput")
     bars_today = db_progress.get("bars_today")
     events_today = db_progress.get("events_today")
     predictions_today = db_progress.get("predictions_today")
-    lines.append(f"- Bars ingested today: {bars_today if bars_today is not None else '--'}")
-    lines.append(f"- Events detected today: {events_today if events_today is not None else '--'}")
-    lines.append(f"- Predictions logged today: {predictions_today if predictions_today is not None else '--'}")
+    lines.append(f"- Bars ingested in report window: {bars_today if bars_today is not None else '--'}")
+    lines.append(f"- Events detected in report window: {events_today if events_today is not None else '--'}")
+    lines.append(f"- Predictions logged in report window: {predictions_today if predictions_today is not None else '--'}")
     live_count = db_progress.get("predictions_live_today")
     preview_count = db_progress.get("predictions_preview_today")
     eligible = db_progress.get("eligible_events_today")
@@ -1232,12 +1232,12 @@ def build_compact_email_body(
 
     if live_count is not None or preview_count is not None:
         lines.append(
-            f"- Live vs Preview predictions: "
+            f"- Live vs Preview predictions (report window): "
             f"{live_count if live_count is not None else '--'} / {preview_count if preview_count is not None else '--'}"
         )
-    lines.append(f"- Eligible events today: {eligible if eligible is not None else '--'}")
-    lines.append(f"- Scored live today: {scored_live if scored_live is not None else '--'}")
-    lines.append(f"- Unscored eligible today: {unscored if unscored is not None else '--'}")
+    lines.append(f"- Eligible events in report window: {eligible if eligible is not None else '--'}")
+    lines.append(f"- Scored live in report window: {scored_live if scored_live is not None else '--'}")
+    lines.append(f"- Unscored eligible in report window: {unscored if unscored is not None else '--'}")
     lines.append(f"- Score failures (log tail): {score_failures_tail}")
     lines.append(f"- Score timeouts (log tail): {score_timeouts_tail}")
     lines.append("")

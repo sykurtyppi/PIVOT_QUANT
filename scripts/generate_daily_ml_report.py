@@ -280,14 +280,20 @@ def ensure_daily_metrics_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _roll_back_to_weekday(day: date) -> date:
+    while day.weekday() >= 5:
+        day -= timedelta(days=1)
+    return day
+
+
 def parse_report_date(date_arg: str | None) -> date:
     now_et = datetime.now(ET_TZ)
     if date_arg:
         return datetime.strptime(date_arg, "%Y-%m-%d").date()
-    # Default to the latest completed market day.
-    if now_et.hour < 18:
-        return (now_et - timedelta(days=1)).date()
-    return now_et.date()
+    # Default to the latest completed market day (>= 16:00 ET).
+    market_close_et = dtime(16, 0)
+    candidate = now_et.date() if now_et.time() >= market_close_et else (now_et - timedelta(days=1)).date()
+    return _roll_back_to_weekday(candidate)
 
 
 def day_bounds_ms(report_day: date) -> tuple[int, int]:
