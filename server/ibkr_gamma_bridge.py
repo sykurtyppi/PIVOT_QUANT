@@ -516,7 +516,14 @@ def compute_gamma_walls(symbol, expiry_mode, limit):
     }
 
 
-def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None):
+_EXPIRY_MODE_DTE = {
+    "front":     7,   # current week (Mon/Wed/Fri SPY weeklies)
+    "weekly":    7,
+    "monthly":  30,   # nearest monthly expiry
+    "quarterly": 90,  # nearest quarterly expiry
+}
+
+def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None, expiry_mode=None):
     """Compute gamma walls from marketdata.app options chain — fallback when IBKR
     returns Error 10089 (missing options market-data subscription).
 
@@ -526,10 +533,16 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None):
     if not MARKETDATA_APP_TOKEN:
         raise ValueError("MARKETDATA_APP_TOKEN not set — cannot use marketdata.app fallback")
 
+    # Map expiry_mode → DTE parameter so we fetch the right expiry.
+    # Default falls back to MDA_GAMMA_DTE_DAYS env var (default 30).
+    mode = (expiry_mode or "").lower()
+    dte_days = _EXPIRY_MODE_DTE.get(mode, MDA_GAMMA_DTE_DAYS)
+
     # Serve from in-process cache if still fresh. The full options chain for
     # SPY costs ~1,500 credits per call with DTE filtering; at the dashboard's
     # 60s auto-refresh that would exhaust a 100k daily quota in under an hour.
-    cache_key = symbol.upper()
+    # Include expiry_mode in the cache key so front/monthly/quarterly are independent.
+    cache_key = f"{symbol.upper()}:{mode or 'default'}"
     now_mono = time.monotonic()
     stale_payload = None
     with _mda_gamma_cache_lock:
@@ -559,7 +572,7 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None):
     # Limit to near-term expiries via ?dte= to avoid fetching the full chain
     # (all expiries). For SPY, ?dte=30 returns ~5-6 weekly expirations instead
     # of ~20+, reducing credit cost from ~8,000 rows to ~1,500 rows per call.
-    url = f"{MARKETDATA_APP_BASE}/options/chain/{symbol.upper()}/?dte={MDA_GAMMA_DTE_DAYS}"
+    url = f"{MARKETDATA_APP_BASE}/options/chain/{symbol.upper()}/?dte={dte_days}"
     req = urllib.request.Request(url, headers={"Authorization": f"Token {MARKETDATA_APP_TOKEN}"})
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
@@ -752,7 +765,7 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None):
         "source": "marketdata.app",
         "symbol": symbol.upper(),
         "spot": spot,
-        "expiryMode": "front",
+        "expiryMode": mode or "front",
         "generatedAt": _utc_iso_z(),
         "gammaFlip": flip,
         "callWall": wall_payload(call_wall),
@@ -832,7 +845,7 @@ class GammaHandler(BaseHTTPRequestHandler):
             # Fallback to marketdata.app when IBKR fails or when explicitly requested
             if MARKETDATA_APP_TOKEN:
                 try:
-                    payload = fetch_gamma_marketdata(symbol)
+                    payload = fetch_gamma_marketdata(symbol, expiry_mode=expiry)
                     if ibkr_err:
                         payload = dict(payload)
                         payload["ibkrFallbackReason"] = ibkr_err
