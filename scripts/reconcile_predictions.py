@@ -110,18 +110,23 @@ def reconcile(
             pl.abstain,
             pl.signal_5m,
             pl.signal_15m,
+            pl.signal_30m,
             pl.signal_60m,
             pl.prob_reject_5m,
             pl.prob_reject_15m,
+            pl.prob_reject_30m,
             pl.prob_reject_60m,
             pl.prob_break_5m,
             pl.prob_break_15m,
+            pl.prob_break_30m,
             pl.prob_break_60m,
             pl.threshold_reject_5m,
             pl.threshold_reject_15m,
+            pl.threshold_reject_30m,
             pl.threshold_reject_60m,
             pl.threshold_break_5m,
             pl.threshold_break_15m,
+            pl.threshold_break_30m,
             pl.threshold_break_60m,
             pl.quality_flags,
             {is_preview_select},
@@ -414,6 +419,11 @@ def main() -> None:
                         help="Round-trip slippage cost in bps")
     parser.add_argument("--commission-bps", type=float, default=0.1,
                         help="Round-trip commissions/fees in bps")
+    parser.add_argument(
+        "--model-version",
+        default="",
+        help="Optional model version filter (e.g. v158 or v157,v158)",
+    )
     args = parser.parse_args()
 
     db_path = resolve_repo_path(args.db)
@@ -465,6 +475,18 @@ def main() -> None:
         dedupe_policy=args.dedupe_policy,
         has_preview_column=has_preview_column,
     )
+    if args.model_version.strip():
+        allowed_versions = {
+            token.strip()
+            for token in args.model_version.split(",")
+            if token.strip()
+        }
+        records = [
+            row for row in records
+            if (row.get("model_version") or "") in allowed_versions
+        ]
+        requested = ", ".join(sorted(allowed_versions))
+        print(f"Model version filter applied: {requested}")
     print(f"Predictions with outcome labels: {len(records)}")
 
     if args.csv and records:

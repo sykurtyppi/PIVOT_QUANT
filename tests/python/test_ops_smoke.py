@@ -6105,6 +6105,32 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertAlmostEqual(float(preferred.threshold), 0.95, places=9)
         self.assertGreater(float(preferred.score), 0.0)
 
+    def test_threshold_selector_uses_utility_tiebreak_within_preferred_floor(self) -> None:
+        module = load_module(
+            "thresholds_prefer_highest_utility_among_preferred",
+            REPO_ROOT / "ml" / "thresholds.py",
+        )
+        y_true = np.asarray([1, 1, 1, 1, 1, 1], dtype=int)
+        y_prob = np.asarray([0.99, 0.98, 0.97, 0.96, 0.95, 0.94], dtype=float)
+        utility = np.asarray([12.0, -1.0, 12.0, -1.0, 12.0, -40.0], dtype=float)
+
+        selection = module.select_threshold(
+            y_true,
+            y_prob,
+            objective="utility_bps",
+            precision_floor=0.0,
+            min_signals=1,
+            default_threshold=0.5,
+            utility_per_signal=utility,
+            stability_band=0.011,
+            top_k=6,
+            preferred_min_score=0.0,
+        )
+        # Both 0.97 and 0.95 are above the preferred floor, but 0.95 has higher
+        # utility score while 0.97 has a slightly higher stability score.
+        self.assertAlmostEqual(float(selection.threshold), 0.95, places=9)
+        self.assertAlmostEqual(float(selection.score), 34.0, places=9)
+
     def test_train_artifacts_threshold_guard_disables_fallback_threshold(self) -> None:
         module = load_module(
             "train_rf_artifacts_threshold_guard_fallback",

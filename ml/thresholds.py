@@ -173,15 +173,27 @@ def select_threshold(
         )
 
         def _rank_key(candidate: ThresholdCandidate) -> tuple[float, ...]:
-            base_key = (
-                float(candidate.stability_score if candidate.stability_score is not None else candidate.score),
+            stability_value = float(
+                candidate.stability_score if candidate.stability_score is not None else candidate.score
+            )
+            if has_preferred_candidates and preferred_floor is not None:
+                # For utility objectives, once candidates clear the preferred floor,
+                # maximize utility first and use stability as tie-break. This prevents
+                # selecting a much lower-utility threshold solely because its
+                # neighborhood average is marginally higher.
+                return (
+                    float(candidate.score > preferred_floor),
+                    float(candidate.score),
+                    stability_value,
+                    float(candidate.precision),
+                    float(candidate.signals),
+                )
+            return (
+                stability_value,
                 float(candidate.score),
                 float(candidate.precision),
                 float(candidate.signals),
             )
-            if has_preferred_candidates and preferred_floor is not None:
-                return (float(candidate.score > preferred_floor),) + base_key
-            return base_key
 
         ranked = sorted(
             kept,
