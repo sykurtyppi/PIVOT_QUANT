@@ -4317,14 +4317,31 @@
         }
 
         function updateGammaPanel(windowCandles, gammaLevel, referencePrice, gammaSource) {
-            const volInfo = classifyVolRegime(windowCandles, 20, 60);
+            // Use full pivot history for RV so we always have enough candles.
+            // windowCandles is capped at lookbackSessions (default 20) which is
+            // one short of the 21 needed by calculateRealizedVol — causing the
+            // perpetual "Unknown" label. Fall back to windowCandles only when
+            // pivot history is unavailable.
+            const historyCandles = (state.pivotHistory || [])
+                .slice(-62)
+                .map((item) => item.baseCandle)
+                .filter((c) => Number.isFinite(c?.high) && Number.isFinite(c?.close));
+            const rvCandles = historyCandles.length >= 22 ? historyCandles : windowCandles;
+            const volInfo = classifyVolRegime(rvCandles, 20, 60);
             const rv = volInfo.value;
             state.lastRv30 = rv;
             const vix = state.vixLevel;
 
+            // Prefer ATM IV from the gamma payload (marketdata.app or IBKR) over
+            // VIX proxy. atmIV is annualized in 0–1 form so multiply by 100.
+            const atmIvRaw = state.gammaData?.stats?.atmIV;
+            const atmIv = Number.isFinite(atmIvRaw) && atmIvRaw > 0 ? atmIvRaw * 100 : null;
+            const iv = atmIv ?? vix;
+            const ivSource = atmIv != null ? 'ATM IV' : 'VIX';
+
             let ivRv = 'Unavailable';
-            if (Number.isFinite(vix) && Number.isFinite(rv)) {
-                const ratio = vix / rv;
+            if (Number.isFinite(iv) && Number.isFinite(rv)) {
+                const ratio = iv / rv;
                 if (ratio >= 1.1) ivRv = 'Rich';
                 else if (ratio <= 0.9) ivRv = 'Cheap';
                 else ivRv = 'Fair';
@@ -4349,7 +4366,9 @@
             }
 
             const rvLabel = Number.isFinite(rv) ? `${volInfo.label} (${formatNumber(rv, 2)}%)` : volInfo.label;
-            const ivLabel = Number.isFinite(vix) ? `${ivRv} (VIX ${formatNumber(vix, 2)})` : ivRv;
+            const ivLabel = Number.isFinite(iv)
+                ? `${ivRv} (${ivSource} ${formatNumber(iv, 2)}%)`
+                : ivRv;
 
             const sourceLabel = gammaSource === 'IBKR' ? 'IBKR' : gammaSource === 'Yahoo' ? 'Yahoo' : 'Proxy';
             state.lastGammaMode = `${gammaMode} (${sourceLabel})`;
