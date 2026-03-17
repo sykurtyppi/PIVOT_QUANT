@@ -4319,9 +4319,15 @@
         function updateGammaPanel(windowCandles, gammaLevel, referencePrice, gammaSource) {
             // Use full pivot history for RV so we always have enough candles.
             // windowCandles is capped at lookbackSessions (default 20) which is
-            // one short of the 21 needed by calculateRealizedVol — causing the
-            // perpetual "Unknown" label. Fall back to windowCandles only when
-            // pivot history is unavailable.
+            // one short of the 21 needed by calculateRealizedVol — causing a
+            // perpetual "Unknown" label during live sessions. Fall back to
+            // windowCandles only when pivot history is unavailable.
+            //
+            // Trade-off (P3): when reviewing historical sessions, rvCandles
+            // reflects trailing global history rather than the volatility at
+            // that exact session. Acceptable for the primary live-trading use
+            // case. A future improvement could slice pivotHistory up to
+            // entry.baseSessionPosition to make historical review context-accurate.
             const historyCandles = (state.pivotHistory || [])
                 .slice(-62)
                 .map((item) => item.baseCandle)

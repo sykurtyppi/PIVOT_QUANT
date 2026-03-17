@@ -78,6 +78,22 @@ def _date_predicate(column: str, start: str, end: str) -> tuple[str, list[object
     return " AND " + " AND ".join(clauses), params
 
 
+def _ms_epoch_date_predicate(ms_column: str, start: str, end: str) -> tuple[str, list[object]]:
+    """Date predicate for columns stored as Unix millisecond timestamps."""
+    clauses: list[str] = []
+    params: list[object] = []
+    expr = f"date({ms_column}/1000, 'unixepoch')"
+    if start:
+        clauses.append(f"{expr} >= ?")
+        params.append(start)
+    if end:
+        clauses.append(f"{expr} <= ?")
+        params.append(end)
+    if not clauses:
+        return "", params
+    return " AND " + " AND ".join(clauses), params
+
+
 def _single_row(conn: sqlite3.Connection, sql: str, params: list[object]) -> sqlite3.Row:
     row = conn.execute(sql, params).fetchone()
     if row is None:
@@ -92,6 +108,7 @@ def main() -> int:
     conn.execute("PRAGMA busy_timeout=30000;")
 
     snap_date_pred, snap_date_params = _date_predicate("snapshot_date", args.start_date, args.end_date)
+    touch_date_pred, touch_date_params = _ms_epoch_date_predicate("ts_event", args.start_date, args.end_date)
 
     snap_sql = f"""
         SELECT
@@ -107,7 +124,7 @@ def main() -> int:
     """
     snap_row = _single_row(conn, snap_sql, [args.symbol.upper(), *snap_date_params])
 
-    touch_sql = """
+    touch_sql = f"""
         SELECT
             COUNT(*) AS touch_rows,
             SUM(CASE WHEN gamma_flip IS NOT NULL THEN 1 ELSE 0 END) AS touch_gamma_nonnull,
@@ -116,8 +133,9 @@ def main() -> int:
             SUM(CASE WHEN gamma_confidence = 0 THEN 1 ELSE 0 END) AS conf0_rows
         FROM touch_events
         WHERE symbol = ?
+        {touch_date_pred}
     """
-    touch_row = _single_row(conn, touch_sql, [args.symbol.upper()])
+    touch_row = _single_row(conn, touch_sql, [args.symbol.upper(), *touch_date_params])
 
     snaps = int(snap_row["snaps"] or 0)
     flip_nonnull = int(snap_row["flip_nonnull"] or 0)
