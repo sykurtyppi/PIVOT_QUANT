@@ -947,6 +947,75 @@ class OpsSmokeTests(unittest.TestCase):
         abs_path = Path("/tmp/pq_reconcile_abs.sqlite")
         self.assertEqual(reconcile_predictions.resolve_repo_path(str(abs_path)), abs_path)
 
+    def test_audit_gamma_quality_touch_window_scopes_ts_event_date(self) -> None:
+        db = self.tmp / "gamma_audit.sqlite"
+        conn = sqlite3.connect(str(db))
+        try:
+            conn.execute(
+                """
+                CREATE TABLE gamma_snapshots(
+                    symbol TEXT,
+                    snapshot_date TEXT,
+                    gamma_flip REAL,
+                    with_greeks INTEGER,
+                    with_iv INTEGER,
+                    payload_json TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE touch_events(
+                    symbol TEXT,
+                    ts_event INTEGER,
+                    gamma_flip REAL,
+                    gamma_confidence INTEGER
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO gamma_snapshots(symbol, snapshot_date, gamma_flip, with_greeks, with_iv, payload_json)
+                VALUES(?, ?, ?, ?, ?, ?)
+                """,
+                ("SPY", "2026-03-10", 550.0, 1, 1, '{"computed_gamma_count": 10}'),
+            )
+
+            in_window_ms = int(datetime(2026, 3, 10, 12, 0, tzinfo=timezone.utc).timestamp() * 1000)
+            out_window_ms = int(datetime(2026, 1, 15, 12, 0, tzinfo=timezone.utc).timestamp() * 1000)
+            conn.execute(
+                "INSERT INTO touch_events(symbol, ts_event, gamma_flip, gamma_confidence) VALUES(?, ?, ?, ?)",
+                ("SPY", in_window_ms, 555.0, 1),
+            )
+            conn.execute(
+                "INSERT INTO touch_events(symbol, ts_event, gamma_flip, gamma_confidence) VALUES(?, ?, ?, ?)",
+                ("SPY", out_window_ms, 560.0, 1),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        proc = run_cmd(
+            [
+                PYTHON,
+                "scripts/audit_gamma_quality.py",
+                "--db",
+                str(db),
+                "--symbol",
+                "SPY",
+                "--start-date",
+                "2026-03-01",
+                "--end-date",
+                "2026-03-31",
+            ],
+            cwd=REPO_ROOT,
+        )
+        self.assertEqual(proc.returncode, 0, msg=f"{proc.stdout}\n{proc.stderr}")
+        payload = json.loads(proc.stdout)
+        touch = payload.get("touch_events") or {}
+        self.assertEqual(int(touch.get("touch_rows") or 0), 1)
+        self.assertEqual(int(touch.get("touch_gamma_nonnull") or 0), 1)
+
     def test_audit_log_prune_preserves_chain_with_anchor(self) -> None:
         audit_log = load_module("pq_audit_log_retention_test", REPO_ROOT / "scripts" / "audit_log.py")
         db = self.tmp / "audit.sqlite"
@@ -2961,6 +3030,17 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("cooldown active", block)
         self.assertIn("backoff_sec = max(1, int(retry_after))", block)
         self.assertIn("parsedate_to_datetime", source)
+
+    def test_ibkr_bridge_marketdata_cache_key_is_expiry_mode_scoped(self) -> None:
+        source = (REPO_ROOT / "server" / "ibkr_gamma_bridge.py").read_text(encoding="utf-8")
+        self.assertIn("_EXPIRY_MODE_DTE = {", source)
+        self.assertIn('"front":     7', source)
+        self.assertIn('"weekly":    7', source)
+        self.assertIn('"monthly":  30', source)
+        self.assertIn('"quarterly": 90', source)
+        self.assertIn("dte_days = _EXPIRY_MODE_DTE.get(mode, MDA_GAMMA_DTE_DAYS)", source)
+        self.assertIn('cache_key = f"{symbol.upper()}:{mode or \'default\'}"', source)
+        self.assertIn("payload = fetch_gamma_marketdata(symbol, expiry_mode=expiry)", source)
 
     def test_ibkr_bridge_market_close_uses_new_york_timezone(self) -> None:
         bridge = load_module(
