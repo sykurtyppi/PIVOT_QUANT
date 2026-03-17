@@ -222,9 +222,30 @@ def _norm_pdf(x: float) -> float:
 def _to_date(raw: object) -> date | None:
     if raw is None:
         return None
+
+    # Handle unix timestamps (seconds/ms) from some option-chain payloads.
+    if isinstance(raw, (int, float)):
+        try:
+            ts = float(raw)
+            if ts > 10_000_000_000:
+                ts /= 1000.0
+            return datetime.fromtimestamp(ts, timezone.utc).date()
+        except Exception:
+            pass
+
     text = str(raw).strip()
     if not text:
         return None
+
+    if text.isdigit():
+        try:
+            ts = float(text)
+            if ts > 10_000_000_000:
+                ts /= 1000.0
+            return datetime.fromtimestamp(ts, timezone.utc).date()
+        except Exception:
+            pass
+
     try:
         return parse_yyyy_mm_dd(text[:10])
     except Exception:
