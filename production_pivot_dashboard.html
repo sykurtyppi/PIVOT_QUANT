@@ -4364,20 +4364,22 @@
             setLabeledText('iv-rv', 'IV vs RV', ivLabel);
 
             const walls = state.lastWalls;
+            const gammaOnly = !!state.gammaData?.gammaOnlyMode;
+            const wallSuffix = gammaOnly ? ' (γ only)' : '';
             setLabeledText(
                 'wall-call',
                 'Call Wall',
-                walls?.callWall ? `${formatNumber(walls.callWall.price)} (${walls.callWall.strength})` : '--'
+                walls?.callWall ? `${formatNumber(walls.callWall.price)} (${walls.callWall.strength})${wallSuffix}` : '--'
             );
             setLabeledText(
                 'wall-put',
                 'Put Wall',
-                walls?.putWall ? `${formatNumber(walls.putWall.price)} (${walls.putWall.strength})` : '--'
+                walls?.putWall ? `${formatNumber(walls.putWall.price)} (${walls.putWall.strength})${wallSuffix}` : '--'
             );
             setLabeledText(
                 'wall-pin',
                 'Pin Candidate',
-                walls?.pin ? `${formatNumber(walls.pin.price)} (${walls.pin.strength})` : '--'
+                walls?.pin ? `${formatNumber(walls.pin.price)} (${walls.pin.strength})${wallSuffix}` : '--'
             );
             setLabeledText('playbook', 'Playbook', playbook);
 
@@ -5188,6 +5190,7 @@
                             pin: data.pin,
                         },
                         usedOpenInterest: data.usedOpenInterest,
+                        gammaOnlyMode: !!data.gammaOnlyMode,
                         stats: data.stats || null,
                         expiryMode: data.expiryMode || expiryMode,
                         cacheStale: !!data.cacheStale,

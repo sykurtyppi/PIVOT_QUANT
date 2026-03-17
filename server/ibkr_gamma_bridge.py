@@ -616,6 +616,7 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None):
     with_greeks = 0
     with_iv = 0
     with_oi = 0
+    nonzero_oi = 0
     oi_call = 0.0
     oi_put = 0.0
     oi_by_strike = {}
@@ -650,9 +651,17 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None):
             with_iv += 1
             iv_samples.append((strike, side, delta, float(iv)))
 
-        size = float(oi) if oi is not None else 1.0
-        if oi is not None:
+        # Use OI as the contract size for GEX weighting. When the API returns
+        # oi=0 (field present but value zero — common when the data provider
+        # does not supply open interest), fall back to size=1.0 so the GEX
+        # formula uses raw gamma weighting instead of collapsing to zero and
+        # producing degenerate all-zero walls.
+        raw_oi = float(oi) if oi is not None else None
+        size = max(raw_oi, 1.0) if raw_oi is not None else 1.0
+        if raw_oi is not None:
             with_oi += 1
+            if raw_oi > 0:
+                nonzero_oi += 1
             oi_by_strike[strike] = oi_by_strike.get(strike, 0.0) + size
 
         # GEX = gamma * OI * multiplier * spot^2
@@ -749,12 +758,14 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None):
         "callWall": wall_payload(call_wall),
         "putWall": wall_payload(put_wall),
         "pin": wall_payload(pin),
-        "usedOpenInterest": with_oi > 0,
+        "usedOpenInterest": nonzero_oi > 0,
+        "gammaOnlyMode": nonzero_oi == 0,
         "stats": {
             "totalContracts": total_contracts,
             "withGreeks": with_greeks,
             "withIV": with_iv,
             "withOI": with_oi,
+            "nonzeroOI": nonzero_oi,
             "oiCall": oi_call,
             "oiPut": oi_put,
             "oiConcentration": oi_concentration,
