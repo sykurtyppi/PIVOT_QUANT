@@ -586,20 +586,41 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None, expiry_m
         with _mda_gamma_cache_lock:
             _mda_gamma_error_backoff_until.pop(cache_key, None)
     except Exception as exc:
-        backoff_sec = MDA_GAMMA_ERROR_BACKOFF_SEC
-        if isinstance(exc, urllib.error.HTTPError):
-            retry_after = _parse_retry_after_seconds(exc.headers.get("Retry-After"))
-            if retry_after is not None:
-                # Respect upstream cooldown guidance when present.
-                backoff_sec = max(1, int(retry_after))
-        with _mda_gamma_cache_lock:
-            _mda_gamma_error_backoff_until[cache_key] = time.monotonic() + max(1, backoff_sec)
-        if stale_payload is not None:
-            stale_payload["cacheStale"] = True
-            stale_payload["cacheStaleReason"] = str(exc)
-            stale_payload["cacheStaleAt"] = _utc_iso_z()
-            return stale_payload
-        raise
+        # marketdata.app rejects dte=0; retry with dte=1 for intraday fallback
+        if dte_days == 0 and isinstance(exc, urllib.error.HTTPError) and exc.code == 400:
+            print(
+                "[gamma_bridge] 0DTE unavailable from marketdata.app, falling back to dte=1",
+                flush=True,
+            )
+            fallback_url = f"{MARKETDATA_APP_BASE}/options/chain/{symbol.upper()}/?dte=1"
+            fallback_req = urllib.request.Request(
+                fallback_url,
+                headers={"Authorization": f"Token {MARKETDATA_APP_TOKEN}"}
+            )
+            with urllib.request.urlopen(fallback_req, timeout=30) as resp:
+                data = json.loads(resp.read())
+            if data.get("s") != "ok":
+                raise ValueError(
+                    f"marketdata.app options chain error for {symbol}: "
+                    f"{data.get('errmsg', data.get('s', 'unknown'))}"
+                )
+            data["dteFallback"] = 1
+            data["dteFallbackReason"] = "marketdata.app rejected dte=0; used dte=1"
+        else:
+            backoff_sec = MDA_GAMMA_ERROR_BACKOFF_SEC
+            if isinstance(exc, urllib.error.HTTPError):
+                retry_after = _parse_retry_after_seconds(exc.headers.get("Retry-After"))
+                if retry_after is not None:
+                    # Respect upstream cooldown guidance when present.
+                    backoff_sec = max(1, int(retry_after))
+            with _mda_gamma_cache_lock:
+                _mda_gamma_error_backoff_until[cache_key] = time.monotonic() + max(1, backoff_sec)
+            if stale_payload is not None:
+                stale_payload["cacheStale"] = True
+                stale_payload["cacheStaleReason"] = str(exc)
+                stale_payload["cacheStaleAt"] = _utc_iso_z()
+                return stale_payload
+            raise
 
     # Extract arrays from the response
     strikes = data.get("strike", [])

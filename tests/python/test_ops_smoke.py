@@ -3031,6 +3031,15 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("backoff_sec = max(1, int(retry_after))", block)
         self.assertIn("parsedate_to_datetime", source)
 
+    def test_ibkr_bridge_marketdata_logs_0dte_fallback_warning(self) -> None:
+        source = (REPO_ROOT / "server" / "ibkr_gamma_bridge.py").read_text(encoding="utf-8")
+        block = source.split("def fetch_gamma_marketdata(", 1)[1].split("class GammaHandler", 1)[0]
+        self.assertIn("if dte_days == 0 and isinstance(exc, urllib.error.HTTPError) and exc.code == 400:", block)
+        self.assertIn(
+            "[gamma_bridge] 0DTE unavailable from marketdata.app, falling back to dte=1",
+            block,
+        )
+
     def test_ibkr_bridge_marketdata_cache_key_is_expiry_mode_scoped(self) -> None:
         source = (REPO_ROOT / "server" / "ibkr_gamma_bridge.py").read_text(encoding="utf-8")
         self.assertIn("_EXPIRY_MODE_DTE = {", source)
