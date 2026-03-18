@@ -39,6 +39,7 @@ const LOCAL_CHART_PATH = path.join(
 const EXPORT_DIR = path.join(ROOT_DIR, 'data', 'exports');
 const METRICS_FILE = path.join(EXPORT_DIR, 'rf_walkforward_metrics.json');
 const CALIB_FILE = path.join(EXPORT_DIR, 'rf_calibration_curve.json');
+const ACTIVE_MANIFEST_FILE = path.join(ROOT_DIR, 'data', 'models', 'manifest_active.json');
 const SQLITE_DB = path.join(ROOT_DIR, 'data', 'pivot_events.sqlite');
 const ENV_FILE = path.join(ROOT_DIR, '.env');
 const BACKUP_STATE_FILE = path.join(ROOT_DIR, 'logs', 'backup_state.json');
@@ -2142,6 +2143,31 @@ async function readJsonFileAsync(filePath) {
   return JSON.parse(raw);
 }
 
+async function readJsonFileWithMetaAsync(filePath) {
+  let raw = null;
+  let stat = null;
+  try {
+    [raw, stat] = await Promise.all([fsp.readFile(filePath, 'utf8'), fsp.stat(filePath)]);
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      return {
+        data: null,
+        filePath,
+        mtimeMs: null,
+        sizeBytes: null,
+      };
+    }
+    throw error;
+  }
+
+  return {
+    data: JSON.parse(raw),
+    filePath,
+    mtimeMs: Number.isFinite(stat?.mtimeMs) ? Number(stat.mtimeMs) : null,
+    sizeBytes: Number.isFinite(stat?.size) ? Number(stat.size) : null,
+  };
+}
+
 async function readJsonFileSafeAsync(filePath, fallback = null) {
   try {
     const value = await readJsonFileAsync(filePath);
@@ -2478,11 +2504,27 @@ function computeEce(rows) {
   return weighted / total;
 }
 
-function summarizeMlMetrics(metrics, calibRows) {
+function summarizeMlMetrics(metrics, calibRows, options = {}) {
+  const updatedAtMs = Number(options?.updatedAtMs);
+  const updatedAt = Number.isFinite(updatedAtMs) && updatedAtMs > 0
+    ? new Date(updatedAtMs).toISOString()
+    : null;
+  const staleSeconds = Number.isFinite(updatedAtMs) && updatedAtMs > 0
+    ? Math.max(0, Math.round((Date.now() - updatedAtMs) / 1000))
+    : null;
+  const sourceFiles = options?.sourceFiles || null;
+  const activeModelVersion = options?.activeModelVersion ?? null;
+  const activeModelTrainedEndTs = options?.activeModelTrainedEndTs ?? null;
+
   if (!Array.isArray(metrics) || metrics.length === 0) {
     return {
       status: 'empty',
       folds: 0,
+      updated_at: updatedAt,
+      stale_seconds: staleSeconds,
+      source_files: sourceFiles,
+      active_model_version: activeModelVersion,
+      active_model_trained_end_ts: activeModelTrainedEndTs,
     };
   }
 
@@ -2539,7 +2581,11 @@ function summarizeMlMetrics(metrics, calibRows) {
         }))
         .filter((row) => Number.isFinite(row.value)),
     },
-    updated_at: new Date().toISOString(),
+    updated_at: updatedAt,
+    stale_seconds: staleSeconds,
+    source_files: sourceFiles,
+    active_model_version: activeModelVersion,
+    active_model_trained_end_ts: activeModelTrainedEndTs,
   };
 }
 
@@ -2931,15 +2977,50 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     try {
-      const [metrics, calib] = await Promise.all([
-        readJsonFileAsync(METRICS_FILE),
-        readJsonFileAsync(CALIB_FILE),
+      const [metricsSource, calibSource, manifestSource] = await Promise.all([
+        readJsonFileWithMetaAsync(METRICS_FILE),
+        readJsonFileWithMetaAsync(CALIB_FILE),
+        readJsonFileWithMetaAsync(ACTIVE_MANIFEST_FILE),
       ]);
-      const summary = summarizeMlMetrics(metrics, calib);
+      const latestSourceMs = Math.max(
+        Number(metricsSource?.mtimeMs) || 0,
+        Number(calibSource?.mtimeMs) || 0
+      );
+      const sourceFiles = {
+        metrics: {
+          path: path.relative(ROOT_DIR, String(metricsSource?.filePath || METRICS_FILE)),
+          mtime_ms: metricsSource?.mtimeMs ?? null,
+          size_bytes: metricsSource?.sizeBytes ?? null,
+        },
+        calibration: {
+          path: path.relative(ROOT_DIR, String(calibSource?.filePath || CALIB_FILE)),
+          mtime_ms: calibSource?.mtimeMs ?? null,
+          size_bytes: calibSource?.sizeBytes ?? null,
+        },
+        active_manifest: {
+          path: path.relative(ROOT_DIR, String(manifestSource?.filePath || ACTIVE_MANIFEST_FILE)),
+          mtime_ms: manifestSource?.mtimeMs ?? null,
+          size_bytes: manifestSource?.sizeBytes ?? null,
+        },
+      };
+      const manifestPayload = (manifestSource?.data && typeof manifestSource.data === 'object')
+        ? manifestSource.data
+        : null;
+      const summary = summarizeMlMetrics(metricsSource?.data, calibSource?.data, {
+        updatedAtMs: latestSourceMs > 0 ? latestSourceMs : null,
+        sourceFiles,
+        activeModelVersion: manifestPayload?.version ?? null,
+        activeModelTrainedEndTs: manifestPayload?.trained_end_ts ?? null,
+      });
       if (summary.status === 'empty') {
         sendJson(res, 404, {
           error: 'ML metrics unavailable',
           message: 'Run the training script to generate metrics.',
+          updated_at: summary.updated_at,
+          stale_seconds: summary.stale_seconds,
+          source_files: summary.source_files,
+          active_model_version: summary.active_model_version,
+          active_model_trained_end_ts: summary.active_model_trained_end_ts,
         });
         return;
       }

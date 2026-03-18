@@ -548,6 +548,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         remaining_value = remaining_unscored if remaining_unscored is not None else eligible_total
         if remaining_value > int(args.max_remaining):
             status = "error"
+            threshold_msg = (
+                f"remaining_unscored {remaining_value} exceeds max_remaining {int(args.max_remaining)}"
+            )
+            last_error = threshold_msg if not last_error else f"{last_error}; {threshold_msg}"
 
     return {
         "status": status,

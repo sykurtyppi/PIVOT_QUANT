@@ -187,15 +187,75 @@ SCORE_UNSCORED_RETRY_MAX_SEC="${RETRAIN_SCORE_UNSCORED_RETRY_MAX_SEC:-5}"
 SCORE_UNSCORED_VERIFY_ON_RETRAIN="${RETRAIN_SCORE_UNSCORED_VERIFY_ON_RETRAIN:-true}"
 SCORE_UNSCORED_MAX_REMAINING="${RETRAIN_SCORE_UNSCORED_MAX_REMAINING:-0}"
 SCORE_UNSCORED_FAIL_ON_PARTIAL="${RETRAIN_SCORE_UNSCORED_FAIL_ON_PARTIAL:-false}"
+SCORE_UNSCORED_BACKLOG_SWEEP_ON_RETRAIN="${RETRAIN_SCORE_UNSCORED_BACKLOG_SWEEP_ON_RETRAIN:-true}"
+SCORE_UNSCORED_BACKLOG_SWEEP_LIMIT="${RETRAIN_SCORE_UNSCORED_BACKLOG_SWEEP_LIMIT:-10000}"
+SCORE_UNSCORED_BACKLOG_SWEEP_MIN_BACKLOG="${RETRAIN_SCORE_UNSCORED_BACKLOG_SWEEP_MIN_BACKLOG:-1}"
 OPS_SMOKE_FAILURE_SUMMARY=""
 OPS_SMOKE_FAILURE_HINT=""
 RELOAD_STATUS="not_attempted"
+RETRAIN_LAST_STATUS="ok"
+RETRAIN_LAST_ERROR=""
 
 ops_set() {
   if [[ -z "${PYTHON}" ]]; then
     return 0
   fi
   "${PYTHON}" scripts/ops_status.py --db "${PIVOT_DB_PATH}" "$@" >> "${LOG_DIR}/retrain.log" 2>&1 || true
+}
+
+append_retrain_error() {
+  local message="${1:-}"
+  [[ -n "${message}" ]] || return 0
+  if [[ -z "${RETRAIN_LAST_ERROR}" ]]; then
+    RETRAIN_LAST_ERROR="${message}"
+  else
+    RETRAIN_LAST_ERROR="${RETRAIN_LAST_ERROR}; ${message}"
+  fi
+}
+
+mark_soft_failure() {
+  local reason="${1:-unknown_soft_failure}"
+  RETRAIN_LAST_STATUS="failed"
+  append_retrain_error "${reason}"
+}
+
+count_unscored_non_preview() {
+  if [[ -z "${PYTHON}" ]]; then
+    echo 0
+    return 0
+  fi
+  "${PYTHON}" - "${PIVOT_DB_PATH}" <<'PY'
+import sqlite3
+import sys
+
+db_path = str(sys.argv[1]) if len(sys.argv) > 1 else ""
+
+try:
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='touch_events'")
+    if cur.fetchone() is None:
+        print(0)
+        raise SystemExit(0)
+    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='prediction_log'")
+    if cur.fetchone() is None:
+        cur.execute("SELECT COUNT(*) FROM touch_events")
+        print(int(cur.fetchone()[0] or 0))
+        raise SystemExit(0)
+    cur.execute(
+        """
+        SELECT COUNT(*)
+        FROM touch_events t
+        LEFT JOIN prediction_log p
+          ON p.event_id = t.event_id
+         AND COALESCE(p.is_preview, 0) = 0
+        WHERE p.event_id IS NULL
+        """
+    )
+    print(int(cur.fetchone()[0] or 0))
+except Exception:
+    print(0)
+PY
 }
 
 mark_failure() {
@@ -295,6 +355,7 @@ fi
 echo "[$(timestamp)] Reloading ML server models..." | tee -a "${LOG_DIR}/retrain.log"
 curl -sf -X POST http://127.0.0.1:5003/reload >> "${LOG_DIR}/retrain.log" 2>&1 || {
   RELOAD_STATUS="failed"
+  mark_soft_failure "ml_reload_failed"
   ops_set \
     --set "reload_last_status=failed" \
     --set "reload_last_at_ms=$(now_ms)"
@@ -334,11 +395,57 @@ if is_truthy "${SCORE_UNSCORED_ON_RETRAIN}" && [[ "${RELOAD_STATUS}" == "ok" ]];
     echo "[$(timestamp)] DONE  score_unscored" | tee -a "${LOG_DIR}/retrain.log"
   else
     echo "[$(timestamp)] WARN: score_unscored failed (continuing retrain)" | tee -a "${LOG_DIR}/retrain.log"
+    mark_soft_failure "score_unscored_failed"
   fi
 elif is_truthy "${SCORE_UNSCORED_ON_RETRAIN}"; then
   echo "[$(timestamp)] INFO score_unscored skipped (reload status: ${RELOAD_STATUS})" | tee -a "${LOG_DIR}/retrain.log"
 else
   echo "[$(timestamp)] INFO score_unscored skipped (RETRAIN_SCORE_UNSCORED_ON_RETRAIN=false)" | tee -a "${LOG_DIR}/retrain.log"
+fi
+
+if is_truthy "${SCORE_UNSCORED_ON_RETRAIN}" && is_truthy "${SCORE_UNSCORED_BACKLOG_SWEEP_ON_RETRAIN}" && [[ "${RELOAD_STATUS}" == "ok" ]]; then
+  backlog_before="$(count_unscored_non_preview)"
+  min_backlog="${SCORE_UNSCORED_BACKLOG_SWEEP_MIN_BACKLOG}"
+  if ! [[ "${min_backlog}" =~ ^[0-9]+$ ]]; then
+    min_backlog=1
+  fi
+  echo "[$(timestamp)] INFO score_unscored backlog before sweep=${backlog_before}" | tee -a "${LOG_DIR}/retrain.log"
+  if [[ "${backlog_before}" =~ ^[0-9]+$ ]] && (( backlog_before >= min_backlog )); then
+    sweep_limit="${SCORE_UNSCORED_BACKLOG_SWEEP_LIMIT}"
+    if ! [[ "${sweep_limit}" =~ ^[0-9]+$ ]]; then
+      sweep_limit=0
+    fi
+    if (( sweep_limit <= 0 || sweep_limit > backlog_before )); then
+      sweep_limit="${backlog_before}"
+    fi
+    if (( sweep_limit > 0 )); then
+      echo "[$(timestamp)] START score_unscored_backlog_sweep" | tee -a "${LOG_DIR}/retrain.log"
+      echo "[$(timestamp)] INFO score_unscored_backlog_sweep config limit=${sweep_limit} batch_size=${SCORE_UNSCORED_BATCH_SIZE} timeout_sec=${SCORE_UNSCORED_TIMEOUT_SEC} max_attempts=${SCORE_UNSCORED_MAX_ATTEMPTS}" | tee -a "${LOG_DIR}/retrain.log"
+      if "${PYTHON}" scripts/score_unscored_touch_events.py \
+          --db "${PIVOT_DB_PATH}" \
+          --lookback-days 0 \
+          --limit "${sweep_limit}" \
+          --batch-size "${SCORE_UNSCORED_BATCH_SIZE}" \
+          --timeout-sec "${SCORE_UNSCORED_TIMEOUT_SEC}" \
+          --max-attempts "${SCORE_UNSCORED_MAX_ATTEMPTS}" \
+          --retry-base-sec "${SCORE_UNSCORED_RETRY_BASE_SEC}" \
+          --retry-max-sec "${SCORE_UNSCORED_RETRY_MAX_SEC}" \
+          --score-url "http://127.0.0.1:5003/score" \
+          --single-fallback-on-failure \
+          >> "${LOG_DIR}/retrain.log" 2>&1; then
+        echo "[$(timestamp)] DONE  score_unscored_backlog_sweep" | tee -a "${LOG_DIR}/retrain.log"
+      else
+        echo "[$(timestamp)] WARN: score_unscored_backlog_sweep failed (continuing retrain)" | tee -a "${LOG_DIR}/retrain.log"
+        mark_soft_failure "score_unscored_backlog_sweep_failed"
+      fi
+      backlog_after="$(count_unscored_non_preview)"
+      echo "[$(timestamp)] INFO score_unscored backlog after sweep=${backlog_after}" | tee -a "${LOG_DIR}/retrain.log"
+    else
+      echo "[$(timestamp)] INFO score_unscored_backlog_sweep skipped (limit resolved to 0)" | tee -a "${LOG_DIR}/retrain.log"
+    fi
+  else
+    echo "[$(timestamp)] INFO score_unscored_backlog_sweep skipped (backlog below threshold)" | tee -a "${LOG_DIR}/retrain.log"
+  fi
 fi
 
 echo "[$(timestamp)] Generating daily ML report..." | tee -a "${LOG_DIR}/retrain.log"
@@ -364,9 +471,14 @@ else
   echo "[$(timestamp)] WARN: skipped notification (report path missing)" | tee -a "${LOG_DIR}/retrain.log"
 fi
 
-echo "[$(timestamp)] Retrain cycle complete." | tee -a "${LOG_DIR}/retrain.log"
+if [[ "${RETRAIN_LAST_STATUS}" == "ok" ]]; then
+  echo "[$(timestamp)] Retrain cycle complete." | tee -a "${LOG_DIR}/retrain.log"
+else
+  echo "[$(timestamp)] WARN: Retrain cycle completed with issues (${RETRAIN_LAST_ERROR})" | tee -a "${LOG_DIR}/retrain.log"
+fi
 ops_set \
   --set "retrain_state=idle" \
-  --set "retrain_last_status=ok" \
+  --set "retrain_last_status=${RETRAIN_LAST_STATUS}" \
   --set "retrain_last_end_ms=$(now_ms)" \
+  --set "retrain_last_error=${RETRAIN_LAST_ERROR}" \
   --set "reload_last_status=${RELOAD_STATUS}"

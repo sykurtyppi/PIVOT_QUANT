@@ -2788,8 +2788,12 @@ class OpsSmokeTests(unittest.TestCase):
             1,
         )[0]
         self.assertIn("await Promise.all([", metrics_block)
-        self.assertIn("readJsonFileAsync(METRICS_FILE)", metrics_block)
-        self.assertIn("readJsonFileAsync(CALIB_FILE)", metrics_block)
+        self.assertIn("readJsonFileWithMetaAsync(METRICS_FILE)", metrics_block)
+        self.assertIn("readJsonFileWithMetaAsync(CALIB_FILE)", metrics_block)
+        self.assertIn("readJsonFileWithMetaAsync(ACTIVE_MANIFEST_FILE)", metrics_block)
+        self.assertIn("updatedAtMs:", metrics_block)
+        self.assertIn("sourceFiles,", metrics_block)
+        self.assertIn("activeModelVersion:", metrics_block)
         self.assertNotIn("readJsonFile(METRICS_FILE)", metrics_block)
         self.assertNotIn("readJsonFile(CALIB_FILE)", metrics_block)
 
@@ -3160,12 +3164,18 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("score_unscored_touch_events.py", retrain_script)
         self.assertIn("RETRAIN_SCORE_UNSCORED_VERIFY_ON_RETRAIN", retrain_script)
         self.assertIn("RETRAIN_SCORE_UNSCORED_MAX_REMAINING", retrain_script)
+        self.assertIn("RETRAIN_SCORE_UNSCORED_BACKLOG_SWEEP_ON_RETRAIN", retrain_script)
+        self.assertIn("RETRAIN_SCORE_UNSCORED_BACKLOG_SWEEP_LIMIT", retrain_script)
+        self.assertIn("RETRAIN_SCORE_UNSCORED_BACKLOG_SWEEP_MIN_BACKLOG", retrain_script)
         self.assertIn("RETRAIN_SCORE_UNSCORED_TIMEOUT_SEC", retrain_script)
         self.assertIn("RETRAIN_SCORE_UNSCORED_MAX_ATTEMPTS", retrain_script)
         self.assertIn("RETRAIN_SCORE_UNSCORED_FAIL_ON_PARTIAL", retrain_script)
         self.assertIn("--timeout-sec", retrain_script)
         self.assertIn("--max-attempts", retrain_script)
         self.assertIn("--fail-on-partial", retrain_script)
+        self.assertIn("count_unscored_non_preview()", retrain_script)
+        self.assertIn("mark_soft_failure", retrain_script)
+        self.assertIn("--set \"retrain_last_status=${RETRAIN_LAST_STATUS}\"", retrain_script)
         self.assertIn("capture_ops_smoke_failure_details", retrain_script)
         self.assertIn("build_ops_smoke_alert_body", retrain_script)
         self.assertIn("summary=", retrain_script)
@@ -3199,6 +3209,18 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertNotIn("${host_value,,}", stack_script)
 
         proc = run_cmd(["bash", "-n", "server/run_persistent_stack.sh"], cwd=REPO_ROOT)
+        self.assertEqual(proc.returncode, 0, msg=f"{proc.stdout}\n{proc.stderr}")
+
+    def test_run_gamma_bridge_sources_dotenv_safely(self) -> None:
+        gamma_script = (REPO_ROOT / "server" / "run_gamma_bridge.sh").read_text(encoding="utf-8")
+        self.assertIn('ENV_FILE="${ROOT_DIR}/.env"', gamma_script)
+        self.assertIn("load_env_file()", gamma_script)
+        self.assertIn('load_env_file "${ENV_FILE}"', gamma_script)
+        self.assertNotIn('source "${ROOT_DIR}/.env"', gamma_script)
+        self.assertIn('if [[ "${#value}" -ge 2 ]]; then', gamma_script)
+        self.assertIn('value="${value:1:${#value}-2}"', gamma_script)
+
+        proc = run_cmd(["bash", "-n", "server/run_gamma_bridge.sh"], cwd=REPO_ROOT)
         self.assertEqual(proc.returncode, 0, msg=f"{proc.stdout}\n{proc.stderr}")
 
     def test_train_rf_threshold_tuning_uses_calibration_fold(self) -> None:
@@ -3534,6 +3556,7 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(result.get("failed"), 1)
         self.assertEqual(result.get("remaining_unscored"), 1)
         self.assertEqual(result.get("max_remaining"), 0)
+        self.assertIn("remaining_unscored 1 exceeds max_remaining 0", str(result.get("last_error")))
 
     def test_score_unscored_touch_events_transport_circuit_breaker(self) -> None:
         scorer = load_module(
