@@ -318,8 +318,18 @@ def _is_transport_outage_error(error_text: str | None) -> bool:
         "remote end closed connection",
         "temporarily unavailable",
         "broken pipe",
+        "http error 429",
+        "too many requests",
+        "status 429",
     )
     return any(marker in lowered for marker in markers)
+
+
+def _is_rate_limited_error(error_text: str | None) -> bool:
+    if not error_text:
+        return False
+    lowered = str(error_text).lower()
+    return "429" in lowered or "too many requests" in lowered
 
 
 def _emit_progress(
@@ -459,6 +469,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
         if saw_transport_outage:
             consecutive_transport_failures += 1
+            if _is_rate_limited_error(error):
+                # Prevent retry storms when the ML server is actively
+                # rate-limiting this worker.
+                cooldown = min(
+                    max(0.25, float(args.retry_max_sec)),
+                    max(0.25, float(args.retry_base_sec)) * 4.0,
+                )
+                time.sleep(cooldown)
             if max_consecutive_transport_failures > 0 and (
                 consecutive_transport_failures >= max_consecutive_transport_failures
             ):

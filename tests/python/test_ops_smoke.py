@@ -3102,7 +3102,10 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("fetchYahooWithBackoff(symbol, range, interval, 4, requestOptions)", dashboard_source)
         self.assertIn("fetchPersistedDailyCandles(symbol, requestOptions)", dashboard_source)
         self.assertIn("fetchVixLevel(interval, range, requestOptions)", dashboard_source)
-        self.assertIn("fetchGammaData(symbol, requestOptions)", dashboard_source)
+        self.assertRegex(
+            dashboard_source,
+            r"fetchGammaData\(symbol,\s*(?:state\.gammaExpiry,\s*)?requestOptions\)",
+        )
         self.assertIn("if (isStaleRequest() || isAbortError(error))", dashboard_source)
 
     def test_session_routine_contract_present(self) -> None:
