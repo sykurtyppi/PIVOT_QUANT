@@ -2757,6 +2757,14 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("cacheStaleReason: data.cacheStaleReason ? String(data.cacheStaleReason) : null", dashboard)
         self.assertIn("Stale (cached)", dashboard)
 
+    def test_dashboard_gamma_intraday_fallback_indicator_contract_present(self) -> None:
+        dashboard = (REPO_ROOT / "production_pivot_dashboard.html").read_text(encoding="utf-8")
+        self.assertIn("dteFallback: !!data.dteFallback", dashboard)
+        self.assertIn("dteFallbackReason: data.dteFallbackReason ? String(data.dteFallbackReason) : null", dashboard)
+        self.assertIn("const dteFallbackIntraday = !!state.gammaDataIntraday?.dteFallback;", dashboard)
+        self.assertIn("wallSuffixIntradayParts.push('0DTE fallback');", dashboard)
+        self.assertIn("Call Wall (Intraday)", dashboard)
+
     def test_dashboard_proxy_ops_status_uses_async_file_reads(self) -> None:
         proxy_source = (REPO_ROOT / "server" / "yahoo_proxy.js").read_text(encoding="utf-8")
         self.assertIn("const fsp = fs.promises;", proxy_source)

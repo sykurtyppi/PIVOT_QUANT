@@ -4486,7 +4486,17 @@
             );
             const wallsIntraday = state.lastWallsIntraday;
             const gammaOnlyIntraday = !!state.gammaDataIntraday?.gammaOnlyMode;
-            const wallSuffixIntraday = gammaOnlyIntraday ? ' (γ only)' : '';
+            const dteFallbackIntraday = !!state.gammaDataIntraday?.dteFallback;
+            const wallSuffixIntradayParts = [];
+            if (gammaOnlyIntraday) {
+                wallSuffixIntradayParts.push('γ only');
+            }
+            if (dteFallbackIntraday) {
+                wallSuffixIntradayParts.push('0DTE fallback');
+            }
+            const wallSuffixIntraday = wallSuffixIntradayParts.length
+                ? ` (${wallSuffixIntradayParts.join(' · ')})`
+                : '';
             setLabeledText(
                 'wall-call-intraday',
                 'Call Wall (Intraday)',
@@ -5316,6 +5326,8 @@
                         },
                         usedOpenInterest: data.usedOpenInterest,
                         gammaOnlyMode: !!data.gammaOnlyMode,
+                        dteFallback: !!data.dteFallback,
+                        dteFallbackReason: data.dteFallbackReason ? String(data.dteFallbackReason) : null,
                         stats: data.stats || null,
                         expiryMode: data.expiryMode || expiryMode,
                         cacheStale: !!data.cacheStale,
