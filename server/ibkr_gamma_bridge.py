@@ -631,6 +631,10 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None, expiry_m
     deltas = data.get("delta", [])
     expiries = data.get("expiration", [])
     underlyings = data.get("underlyingPrice", [])
+    dte_fallback = bool(data.get("dteFallback"))
+    dte_fallback_reason = data.get("dteFallbackReason")
+    if dte_fallback_reason is not None:
+        dte_fallback_reason = str(dte_fallback_reason)
 
     if not strikes or not gammas:
         raise ValueError("marketdata.app returned options chain with no strike/gamma data")
@@ -788,6 +792,8 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None, expiry_m
         "symbol": symbol.upper(),
         "spot": spot,
         "expiryMode": mode or "front",
+        "dteFallback": dte_fallback,
+        "dteFallbackReason": dte_fallback_reason,
         "generatedAt": _utc_iso_z(),
         "gammaFlip": flip,
         "callWall": wall_payload(call_wall),

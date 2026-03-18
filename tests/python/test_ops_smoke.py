@@ -3040,6 +3040,14 @@ class OpsSmokeTests(unittest.TestCase):
             block,
         )
 
+    def test_ibkr_bridge_marketdata_surfaces_dte_fallback_metadata(self) -> None:
+        source = (REPO_ROOT / "server" / "ibkr_gamma_bridge.py").read_text(encoding="utf-8")
+        block = source.split("def fetch_gamma_marketdata(", 1)[1].split("class GammaHandler", 1)[0]
+        self.assertIn("dte_fallback = bool(data.get(\"dteFallback\"))", block)
+        self.assertIn("dte_fallback_reason = data.get(\"dteFallbackReason\")", block)
+        self.assertIn("\"dteFallback\": dte_fallback", block)
+        self.assertIn("\"dteFallbackReason\": dte_fallback_reason", block)
+
     def test_ibkr_bridge_marketdata_cache_key_is_expiry_mode_scoped(self) -> None:
         source = (REPO_ROOT / "server" / "ibkr_gamma_bridge.py").read_text(encoding="utf-8")
         self.assertIn("_EXPIRY_MODE_DTE = {", source)
