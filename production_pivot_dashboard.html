@@ -1617,11 +1617,22 @@
                         </select>
                     </div>
                     <div class="control">
-                        <label for="gamma-expiry-select">Gamma Expiry</label>
+                        <label for="gamma-expiry-select">Gamma Expiry (Structural)</label>
                         <select id="gamma-expiry-select">
-                            <option value="front" selected>Front-Week</option>
+                            <option value="front">Front-Week</option>
                             <option value="0dte">0DTE</option>
                             <option value="monthly">Monthly</option>
+                            <option value="quarterly" selected>Quarterly (90DTE)</option>
+                            <option value="all">All (Weighted)</option>
+                        </select>
+                    </div>
+                    <div class="control">
+                        <label for="gamma-expiry-intraday-select">Gamma Expiry (Intraday)</label>
+                        <select id="gamma-expiry-intraday-select">
+                            <option value="front">Front-Week</option>
+                            <option value="0dte" selected>0DTE</option>
+                            <option value="monthly">Monthly</option>
+                            <option value="quarterly">Quarterly (90DTE)</option>
                             <option value="all">All (Weighted)</option>
                         </select>
                     </div>
@@ -1792,6 +1803,7 @@
                         <div class="chart-toolbar" role="group" aria-label="Chart layers">
                             <button class="chip-toggle is-on" id="toggle-pivots" type="button">Pivots</button>
                             <button class="chip-toggle is-on" id="toggle-gamma-walls" type="button">Gamma</button>
+                            <button class="chip-toggle is-on" id="toggle-gamma-walls-intraday" type="button">Gamma I</button>
                             <button class="chip-toggle is-on" id="toggle-ema9" type="button">EMA 9</button>
                             <button class="chip-toggle is-on" id="toggle-ema21" type="button">EMA 21</button>
                             <button class="chip-toggle is-on" id="toggle-ema50" type="button">EMA 50</button>
@@ -2006,6 +2018,9 @@
                         <div class="signal-item" id="wall-call" title="Strike with highest call open interest — acts as resistance via dealer hedging"><strong>Call Wall</strong>--</div>
                         <div class="signal-item" id="wall-put" title="Strike with highest put open interest — acts as support via dealer hedging"><strong>Put Wall</strong>--</div>
                         <div class="signal-item" id="wall-pin" title="Strike where price may gravitate toward due to balanced OI — max pain effect"><strong>Pin Candidate</strong>--</div>
+                        <div class="signal-item" id="wall-call-intraday" title="Intraday call wall (0DTE/front-week) — short-term dealer pinning"><strong>Call Wall (Intraday)</strong>--</div>
+                        <div class="signal-item" id="wall-put-intraday" title="Intraday put wall (0DTE/front-week) — short-term dealer pinning"><strong>Put Wall (Intraday)</strong>--</div>
+                        <div class="signal-item" id="wall-pin-intraday" title="Intraday pin candidate (0DTE/front-week)"><strong>Pin (Intraday)</strong>--</div>
                         <div class="signal-item" id="playbook" title="Suggested trading approach based on gamma environment and vol regime"><strong>Playbook</strong>--</div>
                         <div class="signal-item" id="gamma-confidence" title="Reliability score for gamma data based on freshness and coverage"><strong>Gamma Confidence</strong>--</div>
                     </div>
@@ -2056,7 +2071,8 @@
         const UI_DEFAULTS = Object.freeze({
             range: '3mo',
             pivotType: 'standard',
-            gammaExpiry: 'front',
+            gammaExpiry: 'quarterly',
+            gammaExpiryIntraday: '0dte',
             lookbackSessions: 20,
             autoRefreshSec: 60,
             exportConvertTo: 'native',
@@ -2079,6 +2095,7 @@
             ema200Series: null,
             vwapSeries: null,
             gammaLines: [],
+            gammaLinesIntraday: [],
             candles: [],
             intradayInterval: '1m',
             intradayRange: '5d',
@@ -2103,8 +2120,10 @@
             lastAtr: null,
             lastGamma: null,
             lastWalls: null,
+            lastWallsIntraday: null,
             vixLevel: null,
             gammaData: null,
+            gammaDataIntraday: null,
             gammaFetchError: null,
             lastEma9: null,
             lastEma21: null,
@@ -2118,6 +2137,7 @@
             exportConvertTo: UI_DEFAULTS.exportConvertTo,
             exportZoneBps: UI_DEFAULTS.exportZoneBps,
             gammaExpiry: UI_DEFAULTS.gammaExpiry,
+            gammaExpiryIntraday: UI_DEFAULTS.gammaExpiryIntraday,
             advancedControlsOpen: UI_DEFAULTS.advancedControlsOpen,
             autoRefreshTimer: null,
             autoRefreshCountdownTimer: null,
@@ -2170,6 +2190,7 @@
             uiVisibility: {
                 pivots: true,
                 gammaWalls: true,
+                gammaWallsIntraday: true,
                 ema9: true,
                 ema21: true,
                 ema50: true,
@@ -2493,6 +2514,7 @@
                     interval: state.interval,
                     pivotType: state.pivotType,
                     gammaExpiry: state.gammaExpiry,
+                    gammaExpiryIntraday: state.gammaExpiryIntraday,
                     lookback: String(state.lookbackSessions),
                     autoRefreshSec: String(state.autoRefreshSec),
                     exportConvertTo: state.exportConvertTo,
@@ -2519,6 +2541,7 @@
                     if (prefs.interval) state.interval = prefs.interval;
                     if (prefs.pivotType) state.pivotType = prefs.pivotType;
                     if (prefs.gammaExpiry) state.gammaExpiry = prefs.gammaExpiry;
+                    if (prefs.gammaExpiryIntraday) state.gammaExpiryIntraday = prefs.gammaExpiryIntraday;
                     if (prefs.lookback && Number.isFinite(Number(prefs.lookback))) state.lookbackSessions = Number(prefs.lookback);
                     if (prefs.autoRefreshSec !== undefined && Number.isFinite(Number(prefs.autoRefreshSec))) {
                         state.autoRefreshSec = Math.max(0, Number(prefs.autoRefreshSec));
@@ -2672,12 +2695,14 @@
 
             state.pivotLines.forEach((line) => setSeriesVisible(line, state.uiVisibility.pivots));
             state.gammaLines.forEach((line) => setSeriesVisible(line, state.uiVisibility.gammaWalls));
+            state.gammaLinesIntraday.forEach((line) => setSeriesVisible(line, state.uiVisibility.gammaWallsIntraday));
         }
 
         function initializeChartToolbar() {
             const mappings = [
                 { id: 'toggle-pivots', key: 'pivots' },
                 { id: 'toggle-gamma-walls', key: 'gammaWalls' },
+                { id: 'toggle-gamma-walls-intraday', key: 'gammaWallsIntraday' },
                 { id: 'toggle-ema9', key: 'ema9' },
                 { id: 'toggle-ema21', key: 'ema21' },
                 { id: 'toggle-ema50', key: 'ema50' },
@@ -2693,7 +2718,28 @@
                 button.addEventListener('click', () => {
                     state.uiVisibility[key] = !state.uiVisibility[key];
                     syncToggleButton(id, state.uiVisibility[key]);
-                    applyChartVisibility();
+                    if (key === 'gammaWallsIntraday') {
+                        if (state.uiVisibility.gammaWallsIntraday && !state.gammaDataIntraday) {
+                            fetchGammaData(state.symbol, state.gammaExpiryIntraday)
+                                .then((data) => {
+                                    state.gammaDataIntraday = data;
+                                    if (state.latestData && state.selectedSessionIndex) {
+                                        renderForSession(state.latestData, state.selectedSessionIndex);
+                                    } else {
+                                        applyChartVisibility();
+                                    }
+                                })
+                                .catch((error) => {
+                                    console.warn('Intraday gamma fetch failed', error);
+                                    state.gammaDataIntraday = null;
+                                    applyChartVisibility();
+                                });
+                        } else {
+                            applyChartVisibility();
+                        }
+                    } else {
+                        applyChartVisibility();
+                    }
                     saveUiPrefs();
                 });
             });
@@ -2944,6 +2990,7 @@
             if (state.range !== UI_DEFAULTS.range) count += 1;
             if (state.pivotType !== UI_DEFAULTS.pivotType) count += 1;
             if (state.gammaExpiry !== UI_DEFAULTS.gammaExpiry) count += 1;
+            if (state.gammaExpiryIntraday !== UI_DEFAULTS.gammaExpiryIntraday) count += 1;
             if (Number(state.lookbackSessions) !== UI_DEFAULTS.lookbackSessions) count += 1;
             if (Number(state.autoRefreshSec) !== UI_DEFAULTS.autoRefreshSec) count += 1;
             if (normalizeExportInstrument(state.exportConvertTo) !== UI_DEFAULTS.exportConvertTo) count += 1;
@@ -2972,6 +3019,7 @@
             state.range = UI_DEFAULTS.range;
             state.pivotType = UI_DEFAULTS.pivotType;
             state.gammaExpiry = UI_DEFAULTS.gammaExpiry;
+            state.gammaExpiryIntraday = UI_DEFAULTS.gammaExpiryIntraday;
             state.lookbackSessions = UI_DEFAULTS.lookbackSessions;
             state.autoRefreshSec = UI_DEFAULTS.autoRefreshSec;
             state.exportConvertTo = UI_DEFAULTS.exportConvertTo;
@@ -2983,6 +3031,8 @@
             if (pivotSelect) pivotSelect.value = UI_DEFAULTS.pivotType;
             const gammaSelect = document.getElementById('gamma-expiry-select');
             if (gammaSelect) gammaSelect.value = UI_DEFAULTS.gammaExpiry;
+            const gammaIntradaySelect = document.getElementById('gamma-expiry-intraday-select');
+            if (gammaIntradaySelect) gammaIntradaySelect.value = UI_DEFAULTS.gammaExpiryIntraday;
             const lookbackSelect = document.getElementById('lookback-select');
             if (lookbackSelect) lookbackSelect.value = String(UI_DEFAULTS.lookbackSessions);
             const autoRefreshSelect = document.getElementById('auto-refresh-select');
@@ -3385,6 +3435,17 @@
             state.gammaLines = [];
         }
 
+        function clearGammaLinesIntraday() {
+            state.gammaLinesIntraday.forEach((line) => {
+                try {
+                    state.chart.removeSeries(line);
+                } catch (error) {
+                    console.warn('Failed to remove intraday gamma series', error);
+                }
+            });
+            state.gammaLinesIntraday = [];
+        }
+
         function getLevelLabelSet(levels, referencePrice) {
             const labelSet = new Set(['PP', 'PIVOT', 'GAMMA', 'R1', 'S1']);
             if (!Array.isArray(levels) || !Number.isFinite(referencePrice)) {
@@ -3434,6 +3495,9 @@
             const map = {
                 'CALL WALL': 'CALL WALL',
                 'PUT WALL': 'PUT WALL',
+                'I CALL WALL': 'I CALL WALL',
+                'I PUT WALL': 'I PUT WALL',
+                'I PIN': 'I PIN',
                 'GAMMA': 'GAMMA',
                 'PIVOT': 'PIVOT',
                 'PP': 'PIVOT POINT',
@@ -3484,14 +3548,21 @@
             });
         }
 
-        function renderGammaWalls(walls) {
+        function renderGammaWalls(walls, opts = {}) {
             if (!state.chart || !walls) return;
-            clearGammaLines();
+            const mode = opts.mode === 'intraday' ? 'intraday' : 'structural';
+            const lineBucket = mode === 'intraday' ? 'gammaLinesIntraday' : 'gammaLines';
+            const visibilityKey = mode === 'intraday' ? 'gammaWallsIntraday' : 'gammaWalls';
+            const shortPrefix = mode === 'intraday' ? 'I ' : '';
+            const useDashed = mode === 'intraday';
+
+            if (mode === 'intraday') clearGammaLinesIntraday();
+            else clearGammaLines();
 
             const entries = [
-                walls.callWall ? { label: 'CALL WALL', shortLabel: 'CALL WALL', data: walls.callWall } : null,
-                walls.putWall ? { label: 'PUT WALL', shortLabel: 'PUT WALL', data: walls.putWall } : null,
-                walls.pin ? { label: 'PIN', shortLabel: 'PIN', data: walls.pin } : null,
+                walls.callWall ? { label: `${shortPrefix}CALL WALL`, shortLabel: `${shortPrefix}CALL WALL`, data: walls.callWall } : null,
+                walls.putWall ? { label: `${shortPrefix}PUT WALL`, shortLabel: `${shortPrefix}PUT WALL`, data: walls.putWall } : null,
+                walls.pin ? { label: `${shortPrefix}PIN`, shortLabel: `${shortPrefix}PIN`, data: walls.pin } : null,
             ].filter(Boolean);
 
             if (!entries.length) return;
@@ -3506,17 +3577,18 @@
 
             entries.forEach((entry) => {
                 const isNearest = entry.label === nearestLabel;
-                const color = entry.label === 'CALL WALL'
+                const baseLabel = entry.label.replace(/^I\s+/i, '').toUpperCase();
+                const color = baseLabel === 'CALL WALL'
                     ? `rgba(249, 115, 22, ${isNearest ? 0.92 : 0.62})`
-                    : entry.label === 'PUT WALL'
+                    : baseLabel === 'PUT WALL'
                         ? `rgba(16, 185, 129, ${isNearest ? 0.92 : 0.62})`
                         : `rgba(168, 85, 247, ${isNearest ? 0.9 : 0.54})`;
                 const line = (state._addLine || ((chart, options) => chart.addLineSeries(options)))(state.chart, {
                     color,
-                    lineWidth: isNearest ? 2 : 1,
-                    lineStyle: entry.label === 'PIN' ? 2 : 0,
-                    priceLineVisible: isNearest,
-                    lastValueVisible: isNearest,
+                    lineWidth: isNearest ? (useDashed ? 1 : 2) : 1,
+                    lineStyle: useDashed || baseLabel === 'PIN' ? 2 : 0,
+                    priceLineVisible: isNearest && mode === 'structural',
+                    lastValueVisible: isNearest && mode === 'structural',
                     title: entry.shortLabel,
                 });
 
@@ -3525,8 +3597,8 @@
                     { time: endTime, value: entry.data.price },
                 ]);
 
-                setSeriesVisible(line, state.uiVisibility.gammaWalls);
-                state.gammaLines.push(line);
+                setSeriesVisible(line, state.uiVisibility[visibilityKey]);
+                state[lineBucket].push(line);
             });
         }
 
@@ -4219,6 +4291,7 @@
             }
             const walls = gammaData?.walls || computeWallsProxy(windowCandles, state.referencePrice, 24);
             state.lastWalls = walls;
+            state.lastWallsIntraday = state.gammaDataIntraday?.walls || null;
             const strength = analyzeStrength(rawLevels, windowCandles, state.referencePrice, atr);
             const levels = buildLevelsArray(rawLevels, state.referencePrice, strength);
             state.lastLevels = levels;
@@ -4251,7 +4324,12 @@
             setLabeledText('gamma-level', 'Gamma flip:', gammaLabel);
 
             updateGammaPanel(windowCandles, gammaLevel, state.referencePrice, gammaSource);
-            renderGammaWalls(state.lastWalls);
+            renderGammaWalls(state.lastWalls, { mode: 'structural' });
+            if (state.lastWallsIntraday) {
+                renderGammaWalls(state.lastWallsIntraday, { mode: 'intraday' });
+            } else {
+                clearGammaLinesIntraday();
+            }
             applyChartVisibility();
             if (typeof state.resizeChartToContainer === 'function') {
                 state.resizeChartToContainer();
@@ -4405,6 +4483,24 @@
                 'wall-pin',
                 'Pin Candidate',
                 walls?.pin ? `${formatNumber(walls.pin.price)} (${walls.pin.strength})${wallSuffix}` : '--'
+            );
+            const wallsIntraday = state.lastWallsIntraday;
+            const gammaOnlyIntraday = !!state.gammaDataIntraday?.gammaOnlyMode;
+            const wallSuffixIntraday = gammaOnlyIntraday ? ' (γ only)' : '';
+            setLabeledText(
+                'wall-call-intraday',
+                'Call Wall (Intraday)',
+                wallsIntraday?.callWall ? `${formatNumber(wallsIntraday.callWall.price)} (${wallsIntraday.callWall.strength})${wallSuffixIntraday}` : '--'
+            );
+            setLabeledText(
+                'wall-put-intraday',
+                'Put Wall (Intraday)',
+                wallsIntraday?.putWall ? `${formatNumber(wallsIntraday.putWall.price)} (${wallsIntraday.putWall.strength})${wallSuffixIntraday}` : '--'
+            );
+            setLabeledText(
+                'wall-pin-intraday',
+                'Pin (Intraday)',
+                wallsIntraday?.pin ? `${formatNumber(wallsIntraday.pin.price)} (${wallsIntraday.pin.strength})${wallSuffixIntraday}` : '--'
             );
             setLabeledText('playbook', 'Playbook', playbook);
 
@@ -5197,9 +5293,13 @@
             return null;
         }
 
-        async function fetchGammaData(symbol, options = {}) {
+        async function fetchGammaData(symbol, expiryOverride, options = {}) {
             try {
-                const expiryMode = document.getElementById('gamma-expiry-select')?.value || 'front';
+                const expiryMode = String(
+                    expiryOverride
+                    || document.getElementById('gamma-expiry-select')?.value
+                    || UI_DEFAULTS.gammaExpiry
+                );
                 const apiUrl = `${getApiOrigin()}/api/gamma?symbol=${encodeURIComponent(symbol)}&expiry=${encodeURIComponent(expiryMode)}&limit=60`;
                 const data = await fetchJson(apiUrl, 6000, options);
                 const hasGammaFlip = Number.isFinite(data?.gammaFlip);
@@ -6585,8 +6685,14 @@
 
                 state.vixLevel = await fetchVixLevel(interval, range, requestOptions);
                 if (isStaleRequest()) return;
-                state.gammaData = await fetchGammaData(symbol, requestOptions);
+                state.gammaData = await fetchGammaData(symbol, state.gammaExpiry, requestOptions);
                 if (isStaleRequest()) return;
+                if (state.uiVisibility.gammaWallsIntraday) {
+                    state.gammaDataIntraday = await fetchGammaData(symbol, state.gammaExpiryIntraday, requestOptions);
+                    if (isStaleRequest()) return;
+                } else {
+                    state.gammaDataIntraday = null;
+                }
 
                 if (state.candleSeries) {
                     state.candleSeries.setData(state.candles);
@@ -6813,11 +6919,27 @@
                 state.gammaExpiry = String(event.target.value || UI_DEFAULTS.gammaExpiry);
                 saveUiPrefs();
                 updateAdvancedControlsSummary();
-                state.gammaData = await fetchGammaData(state.symbol);
+                state.gammaData = await fetchGammaData(state.symbol, state.gammaExpiry);
                 if (state.latestData && state.selectedSessionIndex) {
                     renderForSession(state.latestData, state.selectedSessionIndex);
                 }
             });
+            const gammaIntradaySelect = document.getElementById('gamma-expiry-intraday-select');
+            if (gammaIntradaySelect) {
+                gammaIntradaySelect.addEventListener('change', async (event) => {
+                    state.gammaExpiryIntraday = String(event.target.value || UI_DEFAULTS.gammaExpiryIntraday);
+                    saveUiPrefs();
+                    updateAdvancedControlsSummary();
+                    if (state.uiVisibility.gammaWallsIntraday) {
+                        state.gammaDataIntraday = await fetchGammaData(state.symbol, state.gammaExpiryIntraday);
+                    } else {
+                        state.gammaDataIntraday = null;
+                    }
+                    if (state.latestData && state.selectedSessionIndex) {
+                        renderForSession(state.latestData, state.selectedSessionIndex);
+                    }
+                });
+            }
             document.getElementById('session-select').addEventListener('change', (event) => {
                 if (state.latestData) {
                     renderForSession(state.latestData, Number(event.target.value));
@@ -6967,6 +7089,7 @@
                 'interval-select': state.interval,
                 'pivot-select': state.pivotType,
                 'gamma-expiry-select': state.gammaExpiry,
+                'gamma-expiry-intraday-select': state.gammaExpiryIntraday,
                 'lookback-select': String(state.lookbackSessions),
                 'auto-refresh-select': String(state.autoRefreshSec),
                 'export-convert-to': normalizeExportInstrument(state.exportConvertTo),

@@ -517,6 +517,7 @@ def compute_gamma_walls(symbol, expiry_mode, limit):
 
 
 _EXPIRY_MODE_DTE = {
+    "0dte":      0,   # today only
     "front":     7,   # current week (Mon/Wed/Fri SPY weeklies)
     "weekly":    7,
     "monthly":  30,   # nearest monthly expiry
