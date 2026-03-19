@@ -2931,6 +2931,15 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("wallSuffixIntradayParts.push('0DTE fallback');", dashboard)
         self.assertIn("Call Wall (Intraday)", dashboard)
 
+    def test_dashboard_ml_metrics_staleness_indicator_contract_present(self) -> None:
+        dashboard = (REPO_ROOT / "production_pivot_dashboard.html").read_text(encoding="utf-8")
+        self.assertIn("const metricsStaleSeconds = Number(state.mlMetrics?.stale_seconds);", dashboard)
+        self.assertIn("ML: ${mlLabel}${healthSuffix}${metricsSuffix}", dashboard)
+        self.assertIn("const staleSeconds = Number(metrics?.stale_seconds);", dashboard)
+        self.assertIn("Updated ${metrics.updated_at || '--'} · Age ${staleAgeLabel}${staleTag}", dashboard)
+        self.assertIn("note.style.color = 'var(--warning)';", dashboard)
+        self.assertIn("note.style.color = 'var(--danger)';", dashboard)
+
     def test_dashboard_proxy_ops_status_uses_async_file_reads(self) -> None:
         proxy_source = (REPO_ROOT / "server" / "yahoo_proxy.js").read_text(encoding="utf-8")
         self.assertIn("const fsp = fs.promises;", proxy_source)

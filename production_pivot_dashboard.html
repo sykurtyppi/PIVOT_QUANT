@@ -2920,6 +2920,17 @@
             return `${(deltaHour / 24).toFixed(1)}d`;
         }
 
+        function formatAgeFromSeconds(totalSeconds) {
+            if (!Number.isFinite(totalSeconds) || totalSeconds < 0) return '--';
+            const seconds = Math.floor(totalSeconds);
+            if (seconds < 60) return `${seconds}s`;
+            const minutes = Math.floor(seconds / 60);
+            if (minutes < 60) return `${minutes}m`;
+            const hours = minutes / 60;
+            if (hours < 48) return `${hours.toFixed(1)}h`;
+            return `${(hours / 24).toFixed(1)}d`;
+        }
+
         function setSystemPill(id, text, tone = '', title = '') {
             const pill = document.getElementById(id);
             if (!pill) return;
@@ -3094,21 +3105,42 @@
                     : state.mlServiceStatus === 'degraded'
                         ? 'degraded'
                         : 'checking';
-            const mlTone = state.mlServiceStatus === 'online'
+            const metricsStaleSeconds = Number(state.mlMetrics?.stale_seconds);
+            const metricsWarn = Number.isFinite(metricsStaleSeconds) && metricsStaleSeconds >= 24 * 3600;
+            const metricsRisk = Number.isFinite(metricsStaleSeconds) && metricsStaleSeconds >= 7 * 24 * 3600;
+            let mlTone = state.mlServiceStatus === 'online'
                 ? 'ok'
                 : state.mlServiceStatus === 'offline'
                     ? 'risk'
                     : 'warn';
+            if (state.mlServiceStatus === 'online' && metricsWarn) {
+                mlTone = metricsRisk ? 'risk' : 'warn';
+            }
             const healthSuffix = state.mlHealthState === 'kill-switch'
                 ? ' · kill-switch'
                 : state.mlHealthState === 'degrading'
                     ? ' · degrading'
                     : '';
+            const metricsSuffix = metricsRisk
+                ? ' · metrics stale'
+                : metricsWarn
+                    ? ' · metrics aging'
+                    : '';
+            const mlTitleParts = [];
+            if (state.mlServiceMessage) {
+                mlTitleParts.push(state.mlServiceMessage);
+            }
+            if (Number.isFinite(metricsStaleSeconds)) {
+                mlTitleParts.push(`Metrics age ${formatAgeFromSeconds(metricsStaleSeconds)}`);
+            }
+            if (metricsWarn) {
+                mlTitleParts.push('Dashboard metrics exports are stale.');
+            }
             setSystemPill(
                 'sys-ml',
-                `ML: ${mlLabel}${healthSuffix}`,
+                `ML: ${mlLabel}${healthSuffix}${metricsSuffix}`,
                 mlTone,
-                state.mlServiceMessage || ''
+                mlTitleParts.join(' · ')
             );
 
             const collectorLabel = state.collectorServiceStatus === 'online'
@@ -6474,15 +6506,36 @@
             if (!note) return;
             if (!metrics || metrics.status !== 'ok') {
                 note.textContent = 'Metrics: --';
+                note.style.color = '';
+                updateSystemStrip();
                 return;
             }
             const latest = metrics.latest;
             const latestLabel = latest
                 ? `Latest fold ${latest.fold} (${latest.test_start} -> ${latest.test_end})`
                 : 'Latest fold --';
-            note.textContent = `${latestLabel} · Updated ${metrics.updated_at}`;
+            const staleSeconds = Number(metrics?.stale_seconds);
+            const staleAgeLabel = Number.isFinite(staleSeconds)
+                ? formatAgeFromSeconds(staleSeconds)
+                : '--';
+            const metricsWarn = Number.isFinite(staleSeconds) && staleSeconds >= 24 * 3600;
+            const metricsRisk = Number.isFinite(staleSeconds) && staleSeconds >= 7 * 24 * 3600;
+            const staleTag = metricsRisk
+                ? ' · STALE'
+                : metricsWarn
+                    ? ' · Aging'
+                    : '';
+            note.textContent = `${latestLabel} · Updated ${metrics.updated_at || '--'} · Age ${staleAgeLabel}${staleTag}`;
+            if (metricsRisk) {
+                note.style.color = 'var(--danger)';
+            } else if (metricsWarn) {
+                note.style.color = 'var(--warning)';
+            } else {
+                note.style.color = '';
+            }
 
             updateMlSparklines(metrics.series || {});
+            updateSystemStrip();
         }
 
         function updateMlSparklines(series) {
