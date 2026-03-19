@@ -1299,6 +1299,137 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertAlmostEqual(float(error.retry_after_sec or 0.0), 7.0, places=3)
         self.assertTrue(collector._is_rate_limited_exception(error))
 
+    def test_live_collector_main_applies_rate_limit_cooldown_skip_path(self) -> None:
+        collector = load_module(
+            "pq_live_collector_score_cooldown_loop_test",
+            REPO_ROOT / "server" / "live_event_collector.py",
+        )
+
+        class _FakeHealthServer:
+            def shutdown(self) -> None:
+                return
+
+            def server_close(self) -> None:
+                return
+
+        class _FakeConn:
+            def commit(self) -> None:
+                return
+
+            def rollback(self) -> None:
+                return
+
+            def close(self) -> None:
+                return
+
+        class _FakeStopEvent:
+            def __init__(self, max_cycles: int = 2) -> None:
+                self.wait_calls = 0
+                self.max_cycles = max_cycles
+
+            def is_set(self) -> bool:
+                return self.wait_calls >= self.max_cycles
+
+            def wait(self, _timeout: float) -> bool:
+                self.wait_calls += 1
+                return self.is_set()
+
+            def set(self) -> None:
+                self.wait_calls = self.max_cycles
+
+        original_run_health_server = collector._run_health_server
+        original_connect_db = collector._connect_db
+        original_collect_symbol = collector._collect_symbol
+        original_score_events = collector._score_events
+        original_stop_event = collector._stop_event
+        original_signal = collector.signal.signal
+        original_symbols = list(collector.SYMBOLS)
+        original_poll = collector.POLL_SEC
+        original_score_enabled = collector.SCORE_ENABLED
+        original_backlog = collector.SCORE_UNSCORED_MAX_PER_CYCLE
+        original_cooldown = collector.SCORE_RATE_LIMIT_COOLDOWN_SEC
+        try:
+            collector._run_health_server = lambda: _FakeHealthServer()
+            collector._connect_db = lambda: _FakeConn()
+            collector.signal.signal = lambda *_args, **_kwargs: None
+            collector._stop_event = _FakeStopEvent(max_cycles=2)
+            collector.SYMBOLS = ["SPY"]
+            collector.POLL_SEC = 0
+            collector.SCORE_ENABLED = True
+            collector.SCORE_UNSCORED_MAX_PER_CYCLE = 0
+            collector.SCORE_RATE_LIMIT_COOLDOWN_SEC = 60.0
+
+            collector._set_state(
+                {
+                    "status": "starting",
+                    "last_cycle_start_ms": None,
+                    "last_cycle_end_ms": None,
+                    "last_success_ms": None,
+                    "last_error": None,
+                    "cycles": 0,
+                    "symbols": {},
+                    "score_status": "idle",
+                    "score_backoff_until_ms": 0,
+                    "score_backoff_reason": None,
+                    "score_backoff_skip_cycles": 0,
+                    "score_backoff_skipped_events": 0,
+                    "score_rate_limit_count": 0,
+                    "score_last_rate_limit_ms": None,
+                }
+            )
+
+            def _fake_collect_symbol(_conn, symbol):  # noqa: ANN001
+                return (
+                    {
+                        "symbol": symbol,
+                        "source": "Yahoo",
+                        "bars_inserted": 0,
+                        "events_built": 1,
+                        "events_inserted": 1,
+                        "events_scored": 0,
+                        "candles": 10,
+                        "session_count": 2,
+                    },
+                    [{"event_id": f"evt_{symbol}_1"}],
+                )
+
+            score_calls = {"n": 0}
+
+            def _fake_score_events(events):  # noqa: ANN001
+                score_calls["n"] += 1
+                raise collector.ScoreRequestError(
+                    f"ML score request failed: HTTP 429 for {len(events)} events",
+                    status_code=429,
+                    retry_after_sec=5.0,
+                )
+
+            collector._collect_symbol = _fake_collect_symbol
+            collector._score_events = _fake_score_events
+
+            collector.main()
+        finally:
+            collector._run_health_server = original_run_health_server
+            collector._connect_db = original_connect_db
+            collector._collect_symbol = original_collect_symbol
+            collector._score_events = original_score_events
+            collector._stop_event = original_stop_event
+            collector.signal.signal = original_signal
+            collector.SYMBOLS = original_symbols
+            collector.POLL_SEC = original_poll
+            collector.SCORE_ENABLED = original_score_enabled
+            collector.SCORE_UNSCORED_MAX_PER_CYCLE = original_backlog
+            collector.SCORE_RATE_LIMIT_COOLDOWN_SEC = original_cooldown
+
+        snap = collector._get_state_snapshot()
+        self.assertEqual(score_calls["n"], 1, "Cooldown path should suppress second-cycle score call")
+        self.assertEqual(int(snap.get("score_rate_limit_count") or 0), 1)
+        self.assertEqual(int(snap.get("score_backoff_skip_cycles") or 0), 2)
+        self.assertEqual(int(snap.get("score_backoff_skipped_events") or 0), 2)
+        self.assertEqual(snap.get("status"), "ok")
+        self.assertEqual(snap.get("score_status"), "cooldown")
+        symbol_state = (snap.get("symbols") or {}).get("SPY") or {}
+        self.assertEqual(int(symbol_state.get("events_score_skipped") or 0), 1)
+
     def test_event_writer_registers_atexit_connection_cleanup(self) -> None:
         source = (REPO_ROOT / "server" / "event_writer.py").read_text(encoding="utf-8")
         self.assertIn("atexit.register(_close_thread_local_connection)", source)
