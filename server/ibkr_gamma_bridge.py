@@ -146,6 +146,12 @@ def _request_market_data_type(data_type):
 
 
 def _fetch_ticker_price(contract):
+    def _first_ticker_or_raise():
+        tickers = ib.reqTickers(contract)
+        if not tickers or tickers[0] is None:
+            raise ValueError(f"No market data ticker returned for {contract}")
+        return tickers[0]
+
     # Prefer explicit data type if provided.
     if IB_DATA_TYPE:
         try:
@@ -155,14 +161,14 @@ def _fetch_ticker_price(contract):
     else:
         _request_market_data_type(1)
 
-    ticker = ib.reqTickers(contract)[0]
+    ticker = _first_ticker_or_raise()
     price = _safe_price(ticker.marketPrice(), ticker.last, ticker.close)
     if _is_finite(price):
         return price
 
     # Fallback to delayed if realtime unavailable.
     _request_market_data_type(3)
-    ticker = ib.reqTickers(contract)[0]
+    ticker = _first_ticker_or_raise()
     price = _safe_price(ticker.marketPrice(), ticker.last, ticker.close)
     return price
 

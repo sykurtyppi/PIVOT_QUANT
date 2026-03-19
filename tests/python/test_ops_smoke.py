@@ -2273,6 +2273,22 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("if bridge_marketdata_cooldown:", block)
         self.assertIn("_merge_context_with_carry(snapshot_context, carry_context, today_et)", block)
 
+    def test_backfill_ensure_new_columns_uses_transaction_contract_present(self) -> None:
+        source = (REPO_ROOT / "scripts" / "backfill_events.py").read_text(encoding="utf-8")
+        block = source.split("def ensure_new_columns(", 1)[1].split("def ensure_schema(", 1)[0]
+        self.assertIn('conn.execute("BEGIN")', block)
+        self.assertIn("conn.rollback()", block)
+        self.assertIn("except Exception:", block)
+
+    def test_build_duckdb_view_prefers_fresher_source_contract_present(self) -> None:
+        source = (REPO_ROOT / "scripts" / "build_duckdb_view.py").read_text(encoding="utf-8")
+        self.assertIn("def _is_parquet_fresh(", source)
+        self.assertIn("touch_parquet.stat().st_mtime_ns < touch_csv.stat().st_mtime_ns", source)
+        self.assertIn("labels_parquet.stat().st_mtime_ns < labels_csv.stat().st_mtime_ns", source)
+        self.assertIn("Parquet exports are stale versus CSV; using CSV exports for freshness.", source)
+        proc = run_cmd([PYTHON, "-m", "py_compile", "scripts/build_duckdb_view.py"], cwd=REPO_ROOT)
+        self.assertEqual(proc.returncode, 0, msg=f"{proc.stdout}\n{proc.stderr}")
+
     def test_enrich_touch_events_uses_carry_and_does_not_null_overwrite(self) -> None:
         db = self.tmp / "enrich_gamma.sqlite"
         conn = sqlite3.connect(str(db))
@@ -3225,6 +3241,14 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("if ib.isConnected()", ensure_block)
         self.assertIn("timeout=IB_CONNECT_TIMEOUT_SEC", ensure_block)
         self.assertIn("IBKR reconnect cooldown active", ensure_block)
+
+    def test_ibkr_bridge_fetch_ticker_price_empty_ticker_guard_contract_present(self) -> None:
+        source = (REPO_ROOT / "server" / "ibkr_gamma_bridge.py").read_text(encoding="utf-8")
+        block = source.split("def _fetch_ticker_price(", 1)[1].split("def ensure_connected(", 1)[0]
+        self.assertIn("tickers = ib.reqTickers(contract)", block)
+        self.assertIn("if not tickers or tickers[0] is None:", block)
+        self.assertIn("raise ValueError(", block)
+        self.assertIn("No market data ticker returned", block)
 
     def test_ibkr_bridge_marketdata_cache_returns_copy(self) -> None:
         source = (REPO_ROOT / "server" / "ibkr_gamma_bridge.py").read_text(encoding="utf-8")

@@ -8,6 +8,24 @@ DB_PATH = Path(os.getenv("DUCKDB_PATH", "data/pivot_training.duckdb"))
 PIP_INSTALL = f"{sys.executable} -m pip install"
 
 
+def _is_parquet_fresh(
+    touch_parquet: Path,
+    labels_parquet: Path,
+    touch_csv: Path,
+    labels_csv: Path,
+) -> bool:
+    if not touch_parquet.exists() or not labels_parquet.exists():
+        return False
+
+    # If corresponding CSV exists and is newer, prefer CSV to avoid silently
+    # training on stale parquet snapshots.
+    if touch_csv.exists() and touch_parquet.stat().st_mtime_ns < touch_csv.stat().st_mtime_ns:
+        return False
+    if labels_csv.exists() and labels_parquet.stat().st_mtime_ns < labels_csv.stat().st_mtime_ns:
+        return False
+    return True
+
+
 def main() -> None:
     try:
         import duckdb  # type: ignore
@@ -20,7 +38,13 @@ def main() -> None:
     touch_parquet = EXPORT_DIR / "touch_events.parquet"
     labels_parquet = EXPORT_DIR / "event_labels.parquet"
 
-    use_parquet = touch_parquet.exists() and labels_parquet.exists()
+    parquet_available = touch_parquet.exists() and labels_parquet.exists()
+    use_parquet = _is_parquet_fresh(
+        touch_parquet=touch_parquet,
+        labels_parquet=labels_parquet,
+        touch_csv=touch_csv,
+        labels_csv=labels_csv,
+    )
     if not use_parquet and (not touch_csv.exists() or not labels_csv.exists()):
         print(
             "Exports missing. Run: python3 scripts/export_parquet.py "
@@ -32,6 +56,8 @@ def main() -> None:
     if use_parquet:
         print("Using parquet exports for training view.")
     else:
+        if parquet_available:
+            print("Parquet exports are stale versus CSV; using CSV exports for freshness.", file=sys.stderr)
         print("Using CSV exports for training view.")
 
     con = duckdb.connect(str(DB_PATH))
