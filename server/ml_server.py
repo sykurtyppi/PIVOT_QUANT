@@ -101,6 +101,25 @@ if not ML_SHADOW_HORIZONS:
 ML_REGIME_POLICY_MODE = (os.getenv("ML_REGIME_POLICY_MODE", "shadow") or "shadow").strip().lower()
 if ML_REGIME_POLICY_MODE not in {"off", "shadow", "active"}:
     ML_REGIME_POLICY_MODE = "shadow"
+ML_REJECT_OR_BREAKOUT_FILTER_MODE = (
+    os.getenv("ML_REJECT_OR_BREAKOUT_FILTER_MODE", "off") or "off"
+).strip().lower()
+if ML_REJECT_OR_BREAKOUT_FILTER_MODE not in {"off", "shadow", "active"}:
+    ML_REJECT_OR_BREAKOUT_FILTER_MODE = "off"
+ML_REJECT_OR_BREAKOUT_FILTER_HORIZONS = {
+    int(h.strip())
+    for h in os.getenv("ML_REJECT_OR_BREAKOUT_FILTER_HORIZONS", "15").split(",")
+    if h.strip().isdigit() and int(h.strip()) in {5, 15, 30, 60}
+}
+if not ML_REJECT_OR_BREAKOUT_FILTER_HORIZONS:
+    ML_REJECT_OR_BREAKOUT_FILTER_HORIZONS = {15}
+ML_REJECT_OR_BREAKOUT_FILTER_BLOCK_VALUES = {
+    int(v.strip())
+    for v in os.getenv("ML_REJECT_OR_BREAKOUT_FILTER_BLOCK_VALUES", "-1").split(",")
+    if v.strip().lstrip("-").isdigit() and int(v.strip()) in {-1, 0, 1}
+}
+if not ML_REJECT_OR_BREAKOUT_FILTER_BLOCK_VALUES:
+    ML_REJECT_OR_BREAKOUT_FILTER_BLOCK_VALUES = {-1}
 ML_REGIME_THRESHOLD_MAX_DELTA = max(
     0.0,
     min(0.20, float(os.getenv("ML_REGIME_THRESHOLD_MAX_DELTA", "0.05"))),
@@ -1812,6 +1831,11 @@ async def health():
                 "strategy": ML_REGIME_GUARD_EXPANSION_NEAR_STRATEGY,
                 "reject_delta": ML_REGIME_GUARD_EXPANSION_NEAR_REJECT_DELTA,
                 "break_delta": ML_REGIME_GUARD_EXPANSION_NEAR_BREAK_DELTA,
+            },
+            "reject_or_breakout": {
+                "mode": ML_REJECT_OR_BREAKOUT_FILTER_MODE,
+                "horizons": sorted(ML_REJECT_OR_BREAKOUT_FILTER_HORIZONS),
+                "block_values": sorted(ML_REJECT_OR_BREAKOUT_FILTER_BLOCK_VALUES),
             }
         },
         "analogs": {
@@ -2878,6 +2902,55 @@ def _score_event(event: dict):
                 quality_flags.append("ANALOG_DISAGREEMENT_GUARD_ACTIVE")
                 selected_policy = f"{selected_policy}_analog_disagreement_guard"
 
+    event_or_breakout = _to_int(event.get("or_breakout"))
+    if event_or_breakout is None:
+        event_or_breakout = _to_int(features.get("or_breakout"))
+    or_breakout_filter_info = {
+        "mode": ML_REJECT_OR_BREAKOUT_FILTER_MODE,
+        "event_or_breakout": event_or_breakout,
+        "horizons": sorted(ML_REJECT_OR_BREAKOUT_FILTER_HORIZONS),
+        "block_values": sorted(ML_REJECT_OR_BREAKOUT_FILTER_BLOCK_VALUES),
+        "candidate_count": 0,
+        "applied_count": 0,
+        "signal_diffs": {},
+    }
+    if (
+        ML_REJECT_OR_BREAKOUT_FILTER_MODE in {"shadow", "active"}
+        and event_or_breakout in ML_REJECT_OR_BREAKOUT_FILTER_BLOCK_VALUES
+    ):
+        available_horizons = set(all_horizons)
+        configured_horizons = {
+            horizon
+            for horizon in ML_REJECT_OR_BREAKOUT_FILTER_HORIZONS
+            if horizon in available_horizons
+        }
+        for horizon in sorted(configured_horizons):
+            key = f"signal_{horizon}m"
+            before = selected_signals.get(key)
+            if before != "reject":
+                continue
+            after = before
+            applied = False
+            or_breakout_filter_info["candidate_count"] += 1
+            if ML_REJECT_OR_BREAKOUT_FILTER_MODE == "active":
+                selected_signals[key] = "no_edge"
+                after = "no_edge"
+                applied = True
+                or_breakout_filter_info["applied_count"] += 1
+            or_breakout_filter_info["signal_diffs"][key] = {
+                "before": before,
+                "after": after,
+                "applied": applied,
+                "or_breakout": event_or_breakout,
+            }
+        candidate_count = int(or_breakout_filter_info.get("candidate_count", 0) or 0)
+        if candidate_count > 0:
+            if ML_REJECT_OR_BREAKOUT_FILTER_MODE == "shadow":
+                quality_flags.append("OR_BREAKOUT_REJECT_FILTER_DIVERGENCE")
+            elif ML_REJECT_OR_BREAKOUT_FILTER_MODE == "active":
+                quality_flags.append("OR_BREAKOUT_REJECT_FILTER_ACTIVE")
+                selected_policy = f"{selected_policy}_or_breakout_filter"
+
     signal_diffs = {
         f"signal_{h}m": {
             "baseline": baseline_signals.get(f"signal_{h}m"),
@@ -3047,6 +3120,7 @@ def _score_event(event: dict):
                 "abstain": guardrail_abstain,
                 **guardrail_meta,
             },
+            "or_breakout_reject_filter": or_breakout_filter_info,
             "signal_diffs": signal_diffs,
         },
     }

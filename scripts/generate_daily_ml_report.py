@@ -666,6 +666,12 @@ def compute_regime_policy_summary(predictions: list[dict[str, Any]]) -> dict[str
         "divergence_count": 0,
         "divergence_by_horizon": {5: 0, 15: 0, 30: 0, 60: 0},
         "divergence_by_atr_zone": {"ultra": 0, "near": 0, "mid": 0, "far": 0, "unknown": 0},
+        "or_breakout_reject_filter": {
+            "mode_counts": {"off": 0, "shadow": 0, "active": 0, "unknown": 0},
+            "events_with_candidates": 0,
+            "candidate_signals": 0,
+            "applied_signals": 0,
+        },
     }
     seen_divergence_events: set[str] = set()
     allowed_modes = {"off", "shadow", "active"}
@@ -725,6 +731,29 @@ def compute_regime_policy_summary(predictions: list[dict[str, Any]]) -> dict[str
                     seen_divergence_events.add(event_id)
                     summary["divergence_count"] += 1
                     summary["divergence_by_atr_zone"][atr_zone] += 1
+
+            filter_summary = summary["or_breakout_reject_filter"]
+            filter_mode = "unknown"
+            filter_payload = policy_payload.get("or_breakout_reject_filter")
+            if isinstance(filter_payload, dict):
+                filter_mode_raw = str(filter_payload.get("mode") or "unknown").strip().lower()
+                if filter_mode_raw in {"off", "shadow", "active"}:
+                    filter_mode = filter_mode_raw
+                candidate_count_raw = filter_payload.get("candidate_count", 0)
+                applied_count_raw = filter_payload.get("applied_count", 0)
+                try:
+                    candidate_count = max(0, int(candidate_count_raw))
+                except Exception:
+                    candidate_count = 0
+                try:
+                    applied_count = max(0, int(applied_count_raw))
+                except Exception:
+                    applied_count = 0
+                if candidate_count > 0:
+                    filter_summary["events_with_candidates"] += 1
+                filter_summary["candidate_signals"] += candidate_count
+                filter_summary["applied_signals"] += applied_count
+            filter_summary["mode_counts"][filter_mode] += 1
 
         summary["atr_zone_counts"][atr_zone] += 1
 
@@ -1703,6 +1732,21 @@ def render_report(
         f"ultra={div_zone.get('ultra', 0)}, near={div_zone.get('near', 0)}, "
         f"mid={div_zone.get('mid', 0)}, far={div_zone.get('far', 0)}, "
         f"unknown={div_zone.get('unknown', 0)}"
+    )
+    or_breakout_filter_summary = regime_policy_summary.get("or_breakout_reject_filter", {})
+    or_breakout_filter_modes = or_breakout_filter_summary.get("mode_counts", {})
+    lines.append(
+        f"- OR breakout reject filter modes: "
+        f"off={or_breakout_filter_modes.get('off', 0)}, "
+        f"shadow={or_breakout_filter_modes.get('shadow', 0)}, "
+        f"active={or_breakout_filter_modes.get('active', 0)}, "
+        f"unknown={or_breakout_filter_modes.get('unknown', 0)}"
+    )
+    lines.append(
+        f"- OR breakout reject filter impact: "
+        f"events_with_candidates={or_breakout_filter_summary.get('events_with_candidates', 0)}, "
+        f"candidate_signals={or_breakout_filter_summary.get('candidate_signals', 0)}, "
+        f"applied_signals={or_breakout_filter_summary.get('applied_signals', 0)}"
     )
     lines.append("")
 

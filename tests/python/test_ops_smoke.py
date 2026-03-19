@@ -3391,6 +3391,9 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("MODEL_GOV_ENFORCE_THRESHOLD_UTILITY_GUARD=", env_example)
         self.assertIn("MODEL_GOV_THRESHOLD_UTILITY_TARGETS=", env_example)
         self.assertIn("MODEL_GOV_THRESHOLD_UTILITY_MIN_SCORE=", env_example)
+        self.assertIn("ML_REJECT_OR_BREAKOUT_FILTER_MODE=off", env_example)
+        self.assertIn("ML_REJECT_OR_BREAKOUT_FILTER_HORIZONS=", env_example)
+        self.assertIn("ML_REJECT_OR_BREAKOUT_FILTER_BLOCK_VALUES=", env_example)
 
     def test_runtime_requirements_contract_present(self) -> None:
         runtime_reqs = (REPO_ROOT / "requirements-runtime.txt").read_text(encoding="utf-8")
@@ -3850,6 +3853,9 @@ class OpsSmokeTests(unittest.TestCase):
         ml_server = (REPO_ROOT / "server" / "ml_server.py").read_text(encoding="utf-8")
         self.assertIn("ML_SHADOW_HORIZONS", ml_server)
         self.assertIn("ML_REGIME_POLICY_MODE", ml_server)
+        self.assertIn("ML_REJECT_OR_BREAKOUT_FILTER_MODE", ml_server)
+        self.assertIn("OR_BREAKOUT_REJECT_FILTER_DIVERGENCE", ml_server)
+        self.assertIn("or_breakout_reject_filter", ml_server)
         self.assertIn("regime_policy", ml_server)
         self.assertIn("_compute_trade_regime", ml_server)
         self.assertIn("signal_30m", ml_server)
@@ -4223,6 +4229,73 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(guardrail_extreme["signals"].get("signal_5m"), "no_edge")
         self.assertEqual(guardrail_extreme["regime_policy"]["selected_policy"], "guardrail_no_trade")
         self.assertTrue(bool(guardrail_extreme["regime_policy"]["guardrail"]["applied"]))
+
+    def test_reject_or_breakout_filter_shadow_and_active_modes(self) -> None:
+        ml_server = load_module("ml_server_or_breakout_filter_runtime", REPO_ROOT / "server" / "ml_server.py")
+
+        class DummyModel:
+            classes_ = np.array([0, 1])
+
+            def __init__(self, prob: float) -> None:
+                self.prob = prob
+
+            def predict_proba(self, _df):
+                return np.array([[1.0 - self.prob, self.prob]], dtype=float)
+
+        ml_server.build_feature_row = lambda event: {"x": 1.0, "or_breakout": event.get("or_breakout")}
+        ml_server.collect_missing = lambda _features: []
+        ml_server.ML_SHADOW_HORIZONS = set()
+        ml_server.ML_REGIME_POLICY_MODE = "off"
+        ml_server.ML_REGIME_GUARD_EXPANSION_NEAR_MODE = "off"
+        ml_server.ML_ANALOG_DISAGREEMENT_GUARD_MODE = "off"
+        ml_server.ML_REJECT_OR_BREAKOUT_FILTER_HORIZONS = {15}
+        ml_server.ML_REJECT_OR_BREAKOUT_FILTER_BLOCK_VALUES = {-1}
+
+        ml_server.registry.models = {
+            "reject": {
+                15: {
+                    "feature_columns": ["x"],
+                    "pipeline": DummyModel(0.82),
+                    "calibration": "sigmoid",
+                }
+            },
+            "break": {
+                15: {
+                    "feature_columns": ["x"],
+                    "pipeline": DummyModel(0.18),
+                    "calibration": "sigmoid",
+                }
+            },
+        }
+        ml_server.registry.thresholds = {"reject": {15: 0.5}, "break": {15: 0.5}}
+        ml_server.registry.manifest = {"version": "vtest", "trained_end_ts": int(time.time() * 1000)}
+
+        blocked_event = {"event_id": "or_breakout_blocked_shadow", "or_breakout": -1}
+
+        ml_server.ML_REJECT_OR_BREAKOUT_FILTER_MODE = "shadow"
+        shadow_result = ml_server._score_event(blocked_event)
+        self.assertEqual(shadow_result["signals"].get("signal_15m"), "reject")
+        shadow_filter = shadow_result["regime_policy"]["or_breakout_reject_filter"]
+        self.assertEqual(int(shadow_filter.get("candidate_count")), 1)
+        self.assertEqual(int(shadow_filter.get("applied_count")), 0)
+        self.assertIn("OR_BREAKOUT_REJECT_FILTER_DIVERGENCE", shadow_result["quality_flags"])
+        self.assertEqual(shadow_result["regime_policy"]["selected_policy"], "baseline")
+
+        ml_server.ML_REJECT_OR_BREAKOUT_FILTER_MODE = "active"
+        active_result = ml_server._score_event({**blocked_event, "event_id": "or_breakout_blocked_active"})
+        self.assertEqual(active_result["signals"].get("signal_15m"), "no_edge")
+        active_filter = active_result["regime_policy"]["or_breakout_reject_filter"]
+        self.assertEqual(int(active_filter.get("candidate_count")), 1)
+        self.assertEqual(int(active_filter.get("applied_count")), 1)
+        self.assertIn("OR_BREAKOUT_REJECT_FILTER_ACTIVE", active_result["quality_flags"])
+        self.assertIn("or_breakout_filter", active_result["regime_policy"]["selected_policy"])
+
+        pass_event = {"event_id": "or_breakout_pass_active", "or_breakout": 1}
+        pass_result = ml_server._score_event(pass_event)
+        self.assertEqual(pass_result["signals"].get("signal_15m"), "reject")
+        pass_filter = pass_result["regime_policy"]["or_breakout_reject_filter"]
+        self.assertEqual(int(pass_filter.get("candidate_count")), 0)
+        self.assertEqual(int(pass_filter.get("applied_count")), 0)
 
     def test_feature_drift_respects_min_count_and_ignore_columns(self) -> None:
         ml_server = load_module("ml_server_feature_drift_runtime", REPO_ROOT / "server" / "ml_server.py")
@@ -5349,6 +5422,11 @@ class OpsSmokeTests(unittest.TestCase):
                     {
                         "atr_zone": "ultra",
                         "atr_overlay": {"applied": True},
+                        "or_breakout_reject_filter": {
+                            "mode": "shadow",
+                            "candidate_count": 2,
+                            "applied_count": 0,
+                        },
                         "signal_diffs": {
                             "signal_5m": {"baseline": "no_edge", "regime": "reject"},
                             "signal_15m": {"baseline": "reject", "regime": "reject"},
@@ -5366,6 +5444,11 @@ class OpsSmokeTests(unittest.TestCase):
                     {
                         "atr_zone": "far",
                         "atr_overlay": {"applied": False},
+                        "or_breakout_reject_filter": {
+                            "mode": "off",
+                            "candidate_count": 0,
+                            "applied_count": 0,
+                        },
                         "signal_diffs": {"signal_60m": {"baseline": "break", "regime": "break"}},
                     }
                 ),
@@ -5380,6 +5463,11 @@ class OpsSmokeTests(unittest.TestCase):
                     {
                         "atr_zone": "near",
                         "atr_overlay": {"applied": True},
+                        "or_breakout_reject_filter": {
+                            "mode": "active",
+                            "candidate_count": 1,
+                            "applied_count": 1,
+                        },
                         "signal_diffs": {"signal_15m": {"baseline": "reject", "regime": "break"}},
                     }
                 ),
@@ -5405,6 +5493,13 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(int(summary["divergence_by_horizon"][15]), 1)
         self.assertEqual(int(summary["divergence_by_atr_zone"]["ultra"]), 1)
         self.assertEqual(int(summary["divergence_by_atr_zone"]["near"]), 1)
+        filter_summary = summary["or_breakout_reject_filter"]
+        self.assertEqual(int(filter_summary["mode_counts"]["shadow"]), 1)
+        self.assertEqual(int(filter_summary["mode_counts"]["active"]), 1)
+        self.assertEqual(int(filter_summary["mode_counts"]["off"]), 1)
+        self.assertEqual(int(filter_summary["events_with_candidates"]), 2)
+        self.assertEqual(int(filter_summary["candidate_signals"]), 3)
+        self.assertEqual(int(filter_summary["applied_signals"]), 1)
 
     def test_report_analog_shadow_summary_and_deltas(self) -> None:
         report = load_module(
