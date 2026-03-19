@@ -875,7 +875,10 @@ def build_impact_lines(impact: dict[str, Any]) -> list[str]:
     ]
 
     if impact.get("avg_gross") is None:
-        lines.append("No matured tradeable returns yet for impact calculation.")
+        lines.append(
+            "No matured tradeable returns yet for impact calculation "
+            "(no reject/break signals emitted on matured rows)."
+        )
         return lines
 
     lines.append(f"Avg gross return: {impact['avg_gross']:.2f} bps")

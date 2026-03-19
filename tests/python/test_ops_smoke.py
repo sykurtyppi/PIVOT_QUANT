@@ -539,6 +539,25 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertAlmostEqual(float(impact["win_rate_net"]), 1.0, places=6)
         self.assertEqual(int(impact["by_horizon"][5]["n"]), 2)
 
+    def test_daily_report_impact_lines_explain_zero_tradeable_rows(self) -> None:
+        send_daily_report = load_module(
+            "pq_send_daily_report_impact_lines_zero_rows_test",
+            REPO_ROOT / "scripts" / "send_daily_report.py",
+        )
+        lines = send_daily_report.build_impact_lines(
+            {
+                "cost_model": {"spread": 0.8, "slippage": 0.4, "commission": 0.1, "total": 1.3},
+                "signals": 0,
+                "avg_gross": None,
+                "avg_net": None,
+                "win_rate_net": None,
+                "by_horizon": {},
+            }
+        )
+        joined = "\n".join(lines)
+        self.assertIn("Tradeable matured signals: 0", joined)
+        self.assertIn("no reject/break signals emitted on matured rows", joined)
+
     def test_daily_report_unscored_uses_distinct_event_ids(self) -> None:
         db = self.tmp / "daily_report_counts.sqlite"
         conn = sqlite3.connect(str(db))
@@ -6243,6 +6262,8 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("- No prediction: 0", text)
         self.assertIn("| 2026-03-06 | 1 | 1 | 0 | 0 | 0 | 0 |", text)
         self.assertIn("## What-if Policy Comparison (Baseline vs Guardrail vs No-5m)", text)
+        self.assertIn("- What-if guardrail candidate trades (baseline in expansion+near): 1", text)
+        self.assertIn("- What-if no-5m candidate trades (baseline best_horizon=5): 1", text)
         self.assertIn("## Runtime Applied Policy Summary", text)
         self.assertIn("## Cost Sweep", text)
         self.assertIn("## Stratified PnL (Regime x ATR Zone x Horizon)", text)
@@ -6388,6 +6409,11 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("- >6h: 1", text)
         self.assertIn("- No prediction: 0", text)
         self.assertIn("| 2026-03-06 | 1 | 0 | 0 | 0 | 1 | 0 |", text)
+
+    def test_generate_daily_report_tradeability_note_contract_present(self) -> None:
+        source = (REPO_ROOT / "scripts" / "generate_daily_ml_report.py").read_text(encoding="utf-8")
+        self.assertIn("Tradeable matured signals (reject+break)", source)
+        self.assertIn("Performance note: no matured reject/break signals in this window", source)
 
     def test_train_artifacts_horizon_stats_use_target_specific_other_bucket(self) -> None:
         module = load_module("train_rf_artifacts_stats", REPO_ROOT / "scripts" / "train_rf_artifacts.py")

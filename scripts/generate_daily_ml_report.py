@@ -1607,6 +1607,46 @@ def format_metric(v: float | None, digits: int = 3) -> str:
     return f"{v:.{digits}f}"
 
 
+def summarize_tradeability_blockers(manifest: dict[str, Any]) -> str | None:
+    thresholds_meta = manifest.get("thresholds_meta")
+    if not isinstance(thresholds_meta, dict):
+        return None
+    reject_meta = thresholds_meta.get("reject")
+    break_meta = thresholds_meta.get("break")
+    reject_guarded: list[int] = []
+    break_fallback: list[int] = []
+
+    if isinstance(reject_meta, dict):
+        for horizon_raw, payload in reject_meta.items():
+            if not isinstance(payload, dict):
+                continue
+            if bool(payload.get("guard_applied")):
+                try:
+                    reject_guarded.append(int(horizon_raw))
+                except Exception:
+                    continue
+    if isinstance(break_meta, dict):
+        for horizon_raw, payload in break_meta.items():
+            if not isinstance(payload, dict):
+                continue
+            if bool(payload.get("fallback")):
+                try:
+                    break_fallback.append(int(horizon_raw))
+                except Exception:
+                    continue
+
+    notes: list[str] = []
+    if reject_guarded:
+        ordered = ", ".join(f"{h}m" for h in sorted(set(reject_guarded)))
+        notes.append(f"reject utility guard active ({ordered})")
+    if break_fallback:
+        ordered = ", ".join(f"{h}m" for h in sorted(set(break_fallback)))
+        notes.append(f"break thresholds on fallback ({ordered})")
+    if not notes:
+        return None
+    return "; ".join(notes)
+
+
 def render_report(
     report_day: date,
     start_ms: int,
@@ -1674,6 +1714,23 @@ def render_report(
     lines.append(f"- Scored predictions (latest per event): {total_preds}")
     lines.append(f"- Unique events scored: {total_events}")
     lines.append(f"- Labeled prediction rows (matured horizons): {total_labeled}")
+    tradeable_matured_signals = sum(
+        int(b.signal_reject_count or 0) + int(b.signal_break_count or 0)
+        for b in bundles
+    )
+    lines.append(f"- Tradeable matured signals (reject+break): {tradeable_matured_signals}")
+    if total_labeled > 0 and tradeable_matured_signals == 0:
+        blocker_summary = summarize_tradeability_blockers(manifest)
+        if blocker_summary:
+            lines.append(
+                "- Performance note: no matured reject/break signals in this window, "
+                f"so impact bps are unavailable ({blocker_summary})."
+            )
+        else:
+            lines.append(
+                "- Performance note: no matured reject/break signals in this window, "
+                "so impact bps are unavailable."
+            )
     lines.append("")
     lines.append("## Regime Summary")
     lines.append("")

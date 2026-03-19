@@ -579,6 +579,10 @@ def policy_net(event: ScoredEvent, policy: str, cost_bps: float) -> float:
 
 def summarize_policy(events: list[ScoredEvent], cost_bps: float) -> dict[str, dict[str, float | int | None]]:
     out: dict[str, dict[str, float | int | None]] = {}
+    guardrail_candidates = sum(
+        1 for e in events if e.baseline_trade and e.trade_regime == "expansion" and e.atr_zone == "near"
+    )
+    no5m_candidates = sum(1 for e in events if e.baseline_trade and int(e.best_horizon) == 5)
     for policy in POLICIES:
         nets = [policy_net(e, policy, cost_bps) for e in events]
         traded_nets = [n for e, n in zip(events, nets) if policy_trade(e, policy)]
@@ -592,6 +596,8 @@ def summarize_policy(events: list[ScoredEvent], cost_bps: float) -> dict[str, di
         }
     out["meta"] = {
         "events": len(events),
+        "guardrail_candidates": guardrail_candidates,
+        "no5m_candidates": no5m_candidates,
         "filtered_by_guardrail": sum(1 for e in events if e.baseline_trade and not e.guardrail_trade),
         "filtered_by_no5m": sum(1 for e in events if e.baseline_trade and not e.no5m_trade),
     }
@@ -733,6 +739,14 @@ def build_report(
     lines.append("")
     lines.append(f"- What-if delta Guardrail vs Baseline (total bps): {guardrail_total - baseline_total:.3f}")
     lines.append(f"- What-if delta No-5m vs Baseline (total bps): {no5m_total - baseline_total:.3f}")
+    lines.append(
+        f"- What-if guardrail candidate trades (baseline in expansion+near): "
+        f"{int(summary['meta']['guardrail_candidates'] or 0)}"
+    )
+    lines.append(
+        f"- What-if no-5m candidate trades (baseline best_horizon=5): "
+        f"{int(summary['meta']['no5m_candidates'] or 0)}"
+    )
     lines.append(f"- What-if filtered trades by guardrail: {int(summary['meta']['filtered_by_guardrail'] or 0)}")
     lines.append(f"- What-if filtered trades by no-5m filter: {int(summary['meta']['filtered_by_no5m'] or 0)}")
     lines.append("")
