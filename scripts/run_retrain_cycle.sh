@@ -297,6 +297,78 @@ print(int(path.stat().st_mtime_ns // 1_000_000))
 PY
 }
 
+log_threshold_guard_summary() {
+  local manifest_path="${MODEL_DIR%/}/manifest_runtime_latest.json"
+  if [[ "${manifest_path}" != /* ]]; then
+    manifest_path="${ROOT_DIR}/${manifest_path}"
+  fi
+  if [[ -z "${PYTHON}" || ! -f "${manifest_path}" ]]; then
+    return 0
+  fi
+  "${PYTHON}" - "${manifest_path}" <<'PY' || true
+import json
+import pathlib
+import sys
+
+if len(sys.argv) < 2:
+    raise SystemExit(0)
+
+path = pathlib.Path(sys.argv[1])
+if not path.exists():
+    raise SystemExit(0)
+
+try:
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+except Exception:
+    raise SystemExit(0)
+
+thresholds = manifest.get("thresholds") or {}
+thresholds_meta = manifest.get("thresholds_meta") or {}
+targets = sorted(set(list(thresholds.keys()) + list(thresholds_meta.keys())))
+
+def _to_sorted_horizons(values):
+    def _key(v):
+        try:
+            return int(str(v))
+        except Exception:
+            return 10**9
+    return sorted(values, key=_key)
+
+def _fmt(value):
+    if value is None:
+        return "na"
+    try:
+        return f"{float(value):.6f}"
+    except Exception:
+        return str(value)
+
+for target in targets:
+    target_thresholds = thresholds.get(target) or {}
+    target_meta = thresholds_meta.get(target) or {}
+    horizons = _to_sorted_horizons(set(list(target_thresholds.keys()) + list(target_meta.keys())))
+    for horizon in horizons:
+        meta = target_meta.get(str(horizon)) or {}
+        threshold = target_thresholds.get(str(horizon))
+        guard_reason = str(meta.get("guard_reason") or "none").strip()
+        if not guard_reason:
+            guard_reason = "none"
+        guard_reason = guard_reason.replace("\n", " ")
+        print(
+            "target={target} horizon={horizon} threshold={threshold} "
+            "fallback={fallback} guard={guard} reason={reason} score={score} signals={signals}".format(
+                target=target,
+                horizon=horizon,
+                threshold=_fmt(threshold),
+                fallback=str(bool(meta.get("fallback"))).lower(),
+                guard=str(bool(meta.get("guard_applied"))).lower(),
+                reason=guard_reason,
+                score=_fmt(meta.get("score")),
+                signals=str(meta.get("signals") if meta.get("signals") is not None else "na"),
+            )
+        )
+PY
+}
+
 mark_failure() {
   local exit_code="$?"
   local failed_cmd="${BASH_COMMAND:-unknown}"
@@ -375,6 +447,13 @@ run_step "build_labels"    "${PYTHON}" scripts/build_labels.py --horizons 5 15 3
 run_step "export_parquet"  "${PYTHON}" scripts/export_parquet.py
 run_step "duckdb_view"     "${PYTHON}" scripts/build_duckdb_view.py
 run_step "train_artifacts" "${PYTHON}" scripts/train_rf_artifacts.py
+threshold_summary_output="$(log_threshold_guard_summary)"
+if [[ -n "${threshold_summary_output}" ]]; then
+  while IFS= read -r summary_line; do
+    [[ -n "${summary_line}" ]] || continue
+    echo "[$(timestamp)] INFO threshold_summary ${summary_line}" | tee -a "${LOG_DIR}/retrain.log"
+  done <<< "${threshold_summary_output}"
+fi
 if is_truthy "${REFRESH_ML_METRICS_ON_RETRAIN}"; then
   local_metrics_started_ms="$(now_ms)"
   ops_set \

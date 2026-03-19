@@ -3348,6 +3348,8 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("RETRAIN_REFRESH_ML_METRICS_ON_RETRAIN", retrain_script)
         self.assertIn("RETRAIN_METRICS_TARGET", retrain_script)
         self.assertIn("RETRAIN_METRICS_HORIZON_MIN", retrain_script)
+        self.assertIn("log_threshold_guard_summary()", retrain_script)
+        self.assertIn("INFO threshold_summary", retrain_script)
         self.assertIn("START refresh_ml_metrics", retrain_script)
         self.assertIn("scripts/train_rf.py", retrain_script)
         self.assertIn("metrics_refresh_last_status=running", retrain_script)
@@ -3365,6 +3367,10 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("build_ops_smoke_alert_body", retrain_script)
         self.assertIn("summary=", retrain_script)
         self.assertIn("hint=", retrain_script)
+
+        env_example = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+        self.assertIn("RF_THRESHOLD_MIN_SIGNALS_OVERRIDES=", env_example)
+        self.assertIn("RF_THRESHOLD_PRECISION_FLOOR_OVERRIDES=", env_example)
 
     def test_runtime_requirements_contract_present(self) -> None:
         runtime_reqs = (REPO_ROOT / "requirements-runtime.txt").read_text(encoding="utf-8")
@@ -6380,6 +6386,75 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertTrue(bool(meta.get("guard_applied")))
         self.assertIn("non_positive_utility", str(meta.get("guard_reason")))
         self.assertTrue(bool(meta.get("fallback")))
+
+    def test_train_artifacts_threshold_override_parser_and_resolver(self) -> None:
+        module = load_module(
+            "train_rf_artifacts_threshold_overrides",
+            REPO_ROOT / "scripts" / "train_rf_artifacts.py",
+        )
+
+        min_signals = module._parse_threshold_overrides(
+            "break:15=8,break:30=8,break:60=6,reject:*=10",
+            value_cast=module._coerce_min_signals,
+            option_name="--threshold-min-signals-overrides",
+        )
+        precision_floor = module._parse_threshold_overrides(
+            "break:15=0.35,break:60=0.30,reject:*=0.40",
+            value_cast=module._coerce_precision_floor,
+            option_name="--threshold-precision-floor-overrides",
+        )
+
+        self.assertEqual(int(min_signals[("break", 15)]), 8)
+        self.assertEqual(int(min_signals[("break", 60)]), 6)
+        self.assertEqual(int(min_signals[("reject", None)]), 10)
+        self.assertAlmostEqual(float(precision_floor[("break", 60)]), 0.30, places=9)
+        self.assertAlmostEqual(float(precision_floor[("reject", None)]), 0.40, places=9)
+
+        self.assertEqual(
+            int(
+                module._resolve_threshold_override(
+                    target="break",
+                    horizon=15,
+                    base_value=10,
+                    overrides=min_signals,
+                )
+            ),
+            8,
+        )
+        self.assertEqual(
+            int(
+                module._resolve_threshold_override(
+                    target="reject",
+                    horizon=5,
+                    base_value=12,
+                    overrides=min_signals,
+                )
+            ),
+            10,
+        )
+        self.assertEqual(
+            int(
+                module._resolve_threshold_override(
+                    target="break",
+                    horizon=5,
+                    base_value=10,
+                    overrides=min_signals,
+                )
+            ),
+            10,
+        )
+
+    def test_train_artifacts_threshold_override_parser_rejects_invalid_entry(self) -> None:
+        module = load_module(
+            "train_rf_artifacts_threshold_overrides_invalid",
+            REPO_ROOT / "scripts" / "train_rf_artifacts.py",
+        )
+        with self.assertRaises(ValueError):
+            module._parse_threshold_overrides(
+                "break15=8",
+                value_cast=module._coerce_min_signals,
+                option_name="--threshold-min-signals-overrides",
+            )
 
     def test_threshold_selector_prefers_utility_above_floor_before_stability(self) -> None:
         module = load_module(

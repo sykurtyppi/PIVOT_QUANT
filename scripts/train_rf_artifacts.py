@@ -2,6 +2,7 @@
 import argparse
 import json
 import os
+import re
 import shutil
 import sys
 import time
@@ -40,6 +41,89 @@ def _env_bool(name: str, default: bool) -> bool:
     if raw is None or raw == "":
         return bool(default)
     return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _coerce_precision_floor(raw_value: str) -> float:
+    value = float(raw_value)
+    if value < 0.0 or value > 1.0:
+        raise ValueError(f"precision floor must be within [0,1], got {raw_value!r}")
+    return float(value)
+
+
+def _coerce_min_signals(raw_value: str) -> int:
+    value = int(raw_value)
+    if value < 1:
+        raise ValueError(f"min_signals must be >= 1, got {raw_value!r}")
+    return int(value)
+
+
+def _parse_threshold_overrides(
+    raw_value: str,
+    *,
+    value_cast,
+    option_name: str,
+) -> dict[tuple[str, int | None], float | int]:
+    """Parse target/horizon override map.
+
+    Format: "break:15=8,break:30=8,break:60=6,reject:*=10"
+    Keys accept ":" "/" "_" "-" separators and optional "m" suffix.
+    """
+    parsed: dict[tuple[str, int | None], float | int] = {}
+    if raw_value is None:
+        return parsed
+
+    for token in str(raw_value).split(","):
+        item = token.strip()
+        if not item:
+            continue
+        if "=" not in item:
+            raise ValueError(
+                f"{option_name}: invalid entry {item!r}; expected '<target>:<horizon>=<value>'"
+            )
+        key_raw, value_raw = item.split("=", 1)
+        key = key_raw.strip().lower()
+        value_text = value_raw.strip()
+        if not value_text:
+            raise ValueError(f"{option_name}: missing value in entry {item!r}")
+
+        match = re.match(r"^(reject|break)\s*[:/_-]\s*([0-9]+m?|all|\*)$", key)
+        if not match:
+            raise ValueError(
+                f"{option_name}: invalid key {key_raw!r}; expected reject|break + horizon (e.g. break:15)"
+            )
+
+        target = str(match.group(1)).lower()
+        horizon_token = str(match.group(2)).lower()
+        horizon: int | None
+        if horizon_token in {"all", "*"}:
+            horizon = None
+        else:
+            horizon = int(horizon_token.rstrip("m"))
+
+        try:
+            value = value_cast(value_text)
+        except Exception as exc:
+            raise ValueError(f"{option_name}: invalid value {value_text!r} in entry {item!r}: {exc}") from exc
+
+        parsed[(target, horizon)] = value
+    return parsed
+
+
+def _resolve_threshold_override(
+    *,
+    target: str,
+    horizon: int,
+    base_value: float | int,
+    overrides: dict[tuple[str, int | None], float | int],
+) -> float | int:
+    target_key = str(target).strip().lower()
+    direct_key = (target_key, int(horizon))
+    if direct_key in overrides:
+        return overrides[direct_key]
+    wildcard_key = (target_key, None)
+    if wildcard_key in overrides:
+        return overrides[wildcard_key]
+    return base_value
 
 
 def require(module_name: str, hint: str):
@@ -370,6 +454,22 @@ def main() -> None:
         help="Minimum predicted positives required for threshold candidates.",
     )
     parser.add_argument(
+        "--threshold-precision-floor-overrides",
+        default=os.getenv("RF_THRESHOLD_PRECISION_FLOOR_OVERRIDES", ""),
+        help=(
+            "Optional per target/horizon precision floors. "
+            "Format: 'break:15=0.35,break:60=0.30,reject:*=0.40'"
+        ),
+    )
+    parser.add_argument(
+        "--threshold-min-signals-overrides",
+        default=os.getenv("RF_THRESHOLD_MIN_SIGNALS_OVERRIDES", "break:15=8,break:30=8,break:60=6"),
+        help=(
+            "Optional per target/horizon minimum signal counts. "
+            "Format: 'break:15=8,break:30=8,break:60=6,reject:*=10'"
+        ),
+    )
+    parser.add_argument(
         "--threshold-trade-cost-bps",
         type=float,
         default=default_trade_cost_bps,
@@ -454,6 +554,21 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    try:
+        threshold_precision_floor_overrides = _parse_threshold_overrides(
+            args.threshold_precision_floor_overrides,
+            value_cast=_coerce_precision_floor,
+            option_name="--threshold-precision-floor-overrides",
+        )
+        threshold_min_signals_overrides = _parse_threshold_overrides(
+            args.threshold_min_signals_overrides,
+            value_cast=_coerce_min_signals,
+            option_name="--threshold-min-signals-overrides",
+        )
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(2) from exc
+
     pd = require("pandas", "python3 -m pip install pandas")
     joblib = require("joblib", "python3 -m pip install joblib")
 
@@ -526,6 +641,23 @@ def main() -> None:
             if sub.empty:
                 continue
 
+            threshold_precision_floor = float(
+                _resolve_threshold_override(
+                    target=target,
+                    horizon=horizon,
+                    base_value=float(args.threshold_precision_floor),
+                    overrides=threshold_precision_floor_overrides,
+                )
+            )
+            threshold_min_signals = int(
+                _resolve_threshold_override(
+                    target=target,
+                    horizon=horizon,
+                    base_value=int(args.threshold_min_signals),
+                    overrides=threshold_min_signals_overrides,
+                )
+            )
+
             y = sub[target].astype(int)
             X = feature_df.loc[sub.index]
             calib_mask_sub = sub["event_date_et"].isin(calib_dates)
@@ -579,7 +711,7 @@ def main() -> None:
                     y_calib,
                     fit_fraction=float(args.calib_fit_fraction),
                     min_fit_events=int(args.calib_min_fit_events),
-                    min_tune_events=int(args.threshold_min_signals),
+                    min_tune_events=int(threshold_min_signals),
                 )
                 calibration_shared_slice = not split_used
                 if len(X_calib_fit) >= 20 and len(set(y_calib_fit)) == 2:
@@ -600,8 +732,16 @@ def main() -> None:
                 "signals": 0,
                 "evaluated_candidates": 0,
                 "fallback": True,
-                "precision_floor": float(args.threshold_precision_floor),
-                "min_signals": int(args.threshold_min_signals),
+                "precision_floor": float(threshold_precision_floor),
+                "min_signals": int(threshold_min_signals),
+                "precision_floor_base": float(args.threshold_precision_floor),
+                "min_signals_base": int(args.threshold_min_signals),
+                "precision_floor_override_applied": bool(
+                    abs(float(threshold_precision_floor) - float(args.threshold_precision_floor)) > 1e-12
+                ),
+                "min_signals_override_applied": bool(
+                    int(threshold_min_signals) != int(args.threshold_min_signals)
+                ),
                 "trade_cost_bps": float(args.threshold_trade_cost_bps),
                 "stability_band": float(threshold_stability_band),
                 "top_candidates": [],
@@ -644,8 +784,8 @@ def main() -> None:
                             y_calib_for_thresh.to_numpy(),
                             y_prob_calib,
                             objective=args.threshold_objective,
-                            precision_floor=float(args.threshold_precision_floor),
-                            min_signals=int(args.threshold_min_signals),
+                            precision_floor=float(threshold_precision_floor),
+                            min_signals=int(threshold_min_signals),
                             default_threshold=0.5,
                             utility_per_signal=utility_values,
                             stability_band=float(threshold_stability_band),
