@@ -355,7 +355,8 @@ for target in targets:
         guard_reason = guard_reason.replace("\n", " ")
         print(
             "target={target} horizon={horizon} threshold={threshold} "
-            "fallback={fallback} guard={guard} reason={reason} score={score} signals={signals}".format(
+            "fallback={fallback} guard={guard} reason={reason} score={score} signals={signals} "
+            "tp_util={tp_util} fp_util={fp_util} corr_pos={corr_pos}".format(
                 target=target,
                 horizon=horizon,
                 threshold=_fmt(threshold),
@@ -364,6 +365,9 @@ for target in targets:
                 reason=guard_reason,
                 score=_fmt(meta.get("score")),
                 signals=str(meta.get("signals") if meta.get("signals") is not None else "na"),
+                tp_util=_fmt(meta.get("selected_tp_utility_sum")),
+                fp_util=_fmt(meta.get("selected_fp_utility_sum")),
+                corr_pos=_fmt(meta.get("tune_prob_utility_corr_pos")),
             )
         )
 PY

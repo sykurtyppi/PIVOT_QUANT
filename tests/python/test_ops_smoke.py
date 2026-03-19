@@ -3350,6 +3350,7 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("RETRAIN_METRICS_HORIZON_MIN", retrain_script)
         self.assertIn("log_threshold_guard_summary()", retrain_script)
         self.assertIn("INFO threshold_summary", retrain_script)
+        self.assertIn("tp_util=", retrain_script)
         self.assertIn("START refresh_ml_metrics", retrain_script)
         self.assertIn("scripts/train_rf.py", retrain_script)
         self.assertIn("metrics_refresh_last_status=running", retrain_script)
@@ -3371,6 +3372,9 @@ class OpsSmokeTests(unittest.TestCase):
         env_example = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
         self.assertIn("RF_THRESHOLD_MIN_SIGNALS_OVERRIDES=", env_example)
         self.assertIn("RF_THRESHOLD_PRECISION_FLOOR_OVERRIDES=", env_example)
+        self.assertIn("MODEL_GOV_ENFORCE_THRESHOLD_UTILITY_GUARD=", env_example)
+        self.assertIn("MODEL_GOV_THRESHOLD_UTILITY_TARGETS=", env_example)
+        self.assertIn("MODEL_GOV_THRESHOLD_UTILITY_MIN_SCORE=", env_example)
 
     def test_runtime_requirements_contract_present(self) -> None:
         runtime_reqs = (REPO_ROOT / "requirements-runtime.txt").read_text(encoding="utf-8")
@@ -6540,6 +6544,23 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertTrue(bool(meta.get("guard_applied")))
         self.assertIn("fallback_threshold", str(meta.get("guard_reason")))
 
+    def test_train_artifacts_threshold_diagnostics_expose_tp_fp_utility(self) -> None:
+        module = load_module(
+            "train_rf_artifacts_threshold_diagnostics",
+            REPO_ROOT / "scripts" / "train_rf_artifacts.py",
+        )
+        diagnostics = module.compute_threshold_diagnostics(
+            y_true=np.asarray([1, 1, 0, 0, 1], dtype=int),
+            y_prob=np.asarray([0.9, 0.7, 0.8, 0.2, 0.4], dtype=float),
+            utility_per_signal=np.asarray([5.0, -3.0, -8.0, 1.0, 2.0], dtype=float),
+            threshold=0.7,
+        )
+        self.assertEqual(int(diagnostics.get("selected_tp_count") or 0), 2)
+        self.assertEqual(int(diagnostics.get("selected_fp_count") or 0), 1)
+        self.assertAlmostEqual(float(diagnostics.get("selected_tp_utility_sum") or 0.0), 2.0, places=9)
+        self.assertAlmostEqual(float(diagnostics.get("selected_fp_utility_sum") or 0.0), -8.0, places=9)
+        self.assertAlmostEqual(float(diagnostics.get("selected_utility_sum") or 0.0), -6.0, places=9)
+
     def test_model_governance_skips_regression_gates_when_support_is_low(self) -> None:
         module = load_module("model_governance", REPO_ROOT / "scripts" / "model_governance.py")
         gates = module.GateConfig(
@@ -6584,6 +6605,91 @@ class OpsSmokeTests(unittest.TestCase):
         failures, skips = module.evaluate_gates(active, candidate, gates)
         self.assertEqual(failures, [])
         self.assertTrue(any("break:5m skipped regression gates" in item for item in skips))
+
+    def test_model_governance_threshold_utility_guard_blocks_promotion(self) -> None:
+        module = load_module(
+            "model_governance_threshold_utility_guard",
+            REPO_ROOT / "scripts" / "model_governance.py",
+        )
+        gates = module.GateConfig(
+            required_targets=["reject"],
+            required_horizons=[5],
+            min_trained_end_delta_ms=0,
+            max_mfe_regression_bps=1.5,
+            max_mae_worsening_bps=2.0,
+            min_total_samples=0,
+            min_positive_samples_reject=0,
+            min_positive_samples_break=0,
+            allow_feature_version_change=False,
+            enforce_threshold_utility_guard=True,
+            threshold_utility_targets=["reject"],
+            threshold_utility_min_score=0.0,
+        )
+        active = {
+            "feature_version": "v3",
+            "trained_end_ts": 1000,
+            "stats": {"5": {"reject": {"sample_size": 200, "reject_count": 80, "mfe_bps_reject": 8.0, "mae_bps_reject": -12.0}}},
+            "thresholds": {"reject": {"5": 0.5}},
+            "thresholds_meta": {"reject": {"5": {"objective": "utility_bps", "score": 10.0, "guard_applied": False}}},
+        }
+        candidate = {
+            "feature_version": "v3",
+            "trained_end_ts": 2000,
+            "stats": {"5": {"reject": {"sample_size": 200, "reject_count": 80, "mfe_bps_reject": 8.5, "mae_bps_reject": -11.5}}},
+            "thresholds": {"reject": {"5": 1.0}},
+            "thresholds_meta": {
+                "reject": {
+                    "5": {
+                        "objective": "utility_bps",
+                        "score": -45.0,
+                        "guard_applied": True,
+                        "guard_reason": "non_positive_utility(-45<=0)",
+                    }
+                }
+            },
+        }
+        failures, _ = module.evaluate_gates(active, candidate, gates)
+        self.assertTrue(
+            any("reject:5m threshold utility guard applied" in item for item in failures)
+        )
+
+    def test_model_governance_threshold_utility_min_score_blocks_nonpositive(self) -> None:
+        module = load_module(
+            "model_governance_threshold_utility_min_score",
+            REPO_ROOT / "scripts" / "model_governance.py",
+        )
+        gates = module.GateConfig(
+            required_targets=["reject"],
+            required_horizons=[5],
+            min_trained_end_delta_ms=0,
+            max_mfe_regression_bps=1.5,
+            max_mae_worsening_bps=2.0,
+            min_total_samples=0,
+            min_positive_samples_reject=0,
+            min_positive_samples_break=0,
+            allow_feature_version_change=False,
+            enforce_threshold_utility_guard=True,
+            threshold_utility_targets=["reject"],
+            threshold_utility_min_score=0.0,
+        )
+        active = {
+            "feature_version": "v3",
+            "trained_end_ts": 1000,
+            "stats": {"5": {"reject": {"sample_size": 200, "reject_count": 80, "mfe_bps_reject": 8.0, "mae_bps_reject": -12.0}}},
+            "thresholds": {"reject": {"5": 0.5}},
+            "thresholds_meta": {"reject": {"5": {"objective": "utility_bps", "score": 10.0, "guard_applied": False}}},
+        }
+        candidate = {
+            "feature_version": "v3",
+            "trained_end_ts": 2000,
+            "stats": {"5": {"reject": {"sample_size": 200, "reject_count": 80, "mfe_bps_reject": 8.5, "mae_bps_reject": -11.5}}},
+            "thresholds": {"reject": {"5": 0.62}},
+            "thresholds_meta": {"reject": {"5": {"objective": "utility_bps", "score": -0.01, "guard_applied": False}}},
+        }
+        failures, _ = module.evaluate_gates(active, candidate, gates)
+        self.assertTrue(
+            any("reject:5m threshold utility score" in item for item in failures)
+        )
 
     def test_model_governance_regime_aware_waives_aggregate_mfe_regression(self) -> None:
         module = load_module("model_governance_regime_waive", REPO_ROOT / "scripts" / "model_governance.py")

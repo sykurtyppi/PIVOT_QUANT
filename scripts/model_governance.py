@@ -77,6 +77,15 @@ DEFAULT_REGIME_MIN_POSITIVE_SAMPLES_BREAK = int(
 DEFAULT_REGIME_MIN_COMPARED_BUCKETS = int(
     os.getenv("MODEL_GOV_REGIME_MIN_COMPARED_BUCKETS", "1")
 )
+DEFAULT_ENFORCE_THRESHOLD_UTILITY_GUARD = os.getenv(
+    "MODEL_GOV_ENFORCE_THRESHOLD_UTILITY_GUARD", "true"
+).strip().lower() in {"1", "true", "yes", "y", "on"}
+DEFAULT_THRESHOLD_UTILITY_TARGETS = os.getenv(
+    "MODEL_GOV_THRESHOLD_UTILITY_TARGETS", "reject"
+)
+DEFAULT_THRESHOLD_UTILITY_MIN_SCORE = float(
+    os.getenv("MODEL_GOV_THRESHOLD_UTILITY_MIN_SCORE", "0.0")
+)
 DEFAULT_DB = os.getenv("PIVOT_DB", str(ROOT / "data" / "pivot_events.sqlite"))
 STATE_SCHEMA_VERSION = 1
 MAX_HISTORY = 200
@@ -102,6 +111,9 @@ class GateConfig:
     regime_min_positive_samples_reject: int = 0
     regime_min_positive_samples_break: int = 0
     regime_min_compared_buckets: int = 1
+    enforce_threshold_utility_guard: bool = False
+    threshold_utility_targets: list[str] = field(default_factory=lambda: ["reject"])
+    threshold_utility_min_score: float = 0.0
 
 
 def now_ms() -> int:
@@ -478,6 +490,63 @@ def evaluate_gates(
                 f"candidate trained_end_ts not newer enough ({int(candidate_end)} < {int(required)})"
             )
 
+    if gates.enforce_threshold_utility_guard:
+        candidate_thresholds = candidate.get("thresholds", {})
+        candidate_thresholds_meta = candidate.get("thresholds_meta", {})
+        if not isinstance(candidate_thresholds, dict):
+            candidate_thresholds = {}
+        if not isinstance(candidate_thresholds_meta, dict):
+            candidate_thresholds_meta = {}
+
+        for horizon in gates.required_horizons:
+            horizon_key = str(horizon)
+            for target in gates.threshold_utility_targets:
+                target_thresholds = candidate_thresholds.get(target, {})
+                target_meta_map = candidate_thresholds_meta.get(target, {})
+                if not isinstance(target_thresholds, dict):
+                    target_thresholds = {}
+                if not isinstance(target_meta_map, dict):
+                    target_meta_map = {}
+
+                threshold = to_float(target_thresholds.get(horizon_key))
+                target_meta = target_meta_map.get(horizon_key, {})
+                if not isinstance(target_meta, dict):
+                    target_meta = {}
+
+                if threshold is None:
+                    failures.append(
+                        f"{target}:{horizon}m threshold utility guard check failed (missing threshold)"
+                    )
+                    continue
+
+                objective = str(target_meta.get("objective") or "")
+                if objective != "utility_bps":
+                    failures.append(
+                        f"{target}:{horizon}m threshold utility guard check failed (objective={objective or 'missing'})"
+                    )
+                    continue
+
+                guard_applied = bool(target_meta.get("guard_applied"))
+                guard_reason = str(target_meta.get("guard_reason") or "").strip()
+                if guard_applied:
+                    failures.append(
+                        f"{target}:{horizon}m threshold utility guard applied ({guard_reason or 'unspecified'})"
+                    )
+                    continue
+
+                score = to_float(target_meta.get("score"))
+                if score is None:
+                    failures.append(
+                        f"{target}:{horizon}m threshold utility guard check failed (missing threshold score)"
+                    )
+                    continue
+
+                if score <= float(gates.threshold_utility_min_score):
+                    failures.append(
+                        f"{target}:{horizon}m threshold utility score {score:.3f} <= "
+                        f"min_score {float(gates.threshold_utility_min_score):.3f}"
+                    )
+
     active_stats = active.get("stats", {})
     candidate_stats = candidate.get("stats", {})
     for horizon in gates.required_horizons:
@@ -726,6 +795,9 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
             int(args.regime_min_positive_samples_break),
         ),
         regime_min_compared_buckets=max(1, int(args.regime_min_compared_buckets)),
+        enforce_threshold_utility_guard=bool(args.enforce_threshold_utility_guard),
+        threshold_utility_targets=parse_csv_list(args.threshold_utility_targets) or ["reject"],
+        threshold_utility_min_score=float(args.threshold_utility_min_score),
     )
     state = load_state(state_path)
 
@@ -1107,6 +1179,32 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_REGIME_MIN_COMPARED_BUCKETS,
         help="Minimum number of supported buckets required to waive aggregate regressions.",
+    )
+    eval_cmd.add_argument(
+        "--enforce-threshold-utility-guard",
+        action="store_true",
+        default=DEFAULT_ENFORCE_THRESHOLD_UTILITY_GUARD,
+        help=(
+            "Reject candidate promotion when threshold utility guard is applied or "
+            "utility score is below --threshold-utility-min-score for configured targets/horizons."
+        ),
+    )
+    eval_cmd.add_argument(
+        "--no-enforce-threshold-utility-guard",
+        dest="enforce_threshold_utility_guard",
+        action="store_false",
+        help="Disable threshold utility guard checks in governance promotion evaluation.",
+    )
+    eval_cmd.add_argument(
+        "--threshold-utility-targets",
+        default=DEFAULT_THRESHOLD_UTILITY_TARGETS,
+        help="Comma-separated targets for threshold utility guard checks (default: reject).",
+    )
+    eval_cmd.add_argument(
+        "--threshold-utility-min-score",
+        type=float,
+        default=DEFAULT_THRESHOLD_UTILITY_MIN_SCORE,
+        help="Minimum acceptable threshold utility score for configured targets/horizons.",
     )
     eval_cmd.add_argument("--force-promote", action="store_true", default=False)
     eval_cmd.set_defaults(func=cmd_evaluate)

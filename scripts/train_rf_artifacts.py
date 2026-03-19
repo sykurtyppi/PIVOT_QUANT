@@ -415,6 +415,74 @@ def apply_threshold_risk_guards(
     return float(threshold), threshold_meta
 
 
+def compute_threshold_diagnostics(
+    *,
+    y_true,
+    y_prob,
+    utility_per_signal,
+    threshold: float,
+) -> dict:
+    """Compute utility diagnostics for the chosen threshold on the tune slice."""
+    np = require("numpy", "python3 -m pip install numpy")
+
+    y_true_arr = np.asarray(y_true, dtype=int)
+    y_prob_arr = np.asarray(y_prob, dtype=float)
+    utility_arr = np.asarray(utility_per_signal, dtype=float)
+
+    if y_true_arr.size == 0 or y_prob_arr.size == 0 or utility_arr.size == 0:
+        return {}
+    if y_true_arr.size != y_prob_arr.size or y_true_arr.size != utility_arr.size:
+        return {}
+
+    pred_mask = y_prob_arr >= float(threshold)
+    tp_mask = pred_mask & (y_true_arr == 1)
+    fp_mask = pred_mask & (y_true_arr == 0)
+    pos_mask = y_true_arr == 1
+    neg_mask = y_true_arr == 0
+
+    def _mean_or_none(mask) -> float | None:
+        count = int(np.sum(mask))
+        if count <= 0:
+            return None
+        return float(np.mean(utility_arr[mask]))
+
+    def _sum(mask) -> float:
+        if int(np.sum(mask)) <= 0:
+            return 0.0
+        return float(np.sum(utility_arr[mask]))
+
+    def _corr_or_none(x_arr, y_arr) -> float | None:
+        if x_arr is None or y_arr is None:
+            return None
+        if len(x_arr) < 4 or len(y_arr) < 4:
+            return None
+        try:
+            corr = float(np.corrcoef(x_arr, y_arr)[0, 1])
+        except Exception:
+            return None
+        if not np.isfinite(corr):
+            return None
+        return corr
+
+    diagnostics = {
+        "selected_threshold_for_utility_diagnostics": float(threshold),
+        "selected_tp_count": int(np.sum(tp_mask)),
+        "selected_fp_count": int(np.sum(fp_mask)),
+        "selected_utility_sum": _sum(pred_mask),
+        "selected_utility_avg": _mean_or_none(pred_mask),
+        "selected_tp_utility_sum": _sum(tp_mask),
+        "selected_tp_utility_avg": _mean_or_none(tp_mask),
+        "selected_fp_utility_sum": _sum(fp_mask),
+        "selected_fp_utility_avg": _mean_or_none(fp_mask),
+        "tune_utility_all_mean": _mean_or_none(np.ones_like(y_true_arr, dtype=bool)),
+        "tune_utility_pos_mean": _mean_or_none(pos_mask),
+        "tune_utility_neg_mean": _mean_or_none(neg_mask),
+        "tune_prob_utility_corr_pos": _corr_or_none(y_prob_arr[pos_mask], utility_arr[pos_mask]),
+        "tune_prob_utility_corr_all": _corr_or_none(y_prob_arr, utility_arr),
+    }
+    return diagnostics
+
+
 def main() -> None:
     default_trade_cost_bps = _env_float(
         "RF_THRESHOLD_TRADE_COST_BPS",
@@ -757,6 +825,8 @@ def main() -> None:
             model_obj = calibrator if calibrator is not None else pipeline
             X_calib_set = X_calib_tune if X_calib_tune is not None else X.loc[calib_mask_sub]
             y_calib_for_thresh = y_calib_tune if y_calib_tune is not None else y.loc[X_calib_set.index]
+            y_prob_calib = None
+            utility_values_for_diag = None
             if calibrator is not None and calibration_shared_slice:
                 threshold_meta["search_enabled"] = False
                 threshold_meta["search_skip_reason"] = "shared_calibration_slice"
@@ -780,6 +850,7 @@ def main() -> None:
                                 target,
                                 trade_cost_bps=float(args.threshold_trade_cost_bps),
                             )
+                            utility_values_for_diag = utility_values
                         selection = select_threshold(
                             y_calib_for_thresh.to_numpy(),
                             y_prob_calib,
@@ -819,6 +890,20 @@ def main() -> None:
                     optimal_threshold = 0.5
                     threshold_meta["search_enabled"] = False
                     threshold_meta["search_skip_reason"] = "threshold_selection_exception"
+
+            if (
+                args.threshold_objective == "utility_bps"
+                and y_prob_calib is not None
+                and utility_values_for_diag is not None
+            ):
+                threshold_meta.update(
+                    compute_threshold_diagnostics(
+                        y_true=y_calib_for_thresh.to_numpy(),
+                        y_prob=y_prob_calib,
+                        utility_per_signal=utility_values_for_diag,
+                        threshold=float(optimal_threshold),
+                    )
+                )
 
             optimal_threshold, threshold_meta = apply_threshold_risk_guards(
                 objective=args.threshold_objective,
