@@ -190,6 +190,22 @@ SCORE_UNSCORED_FAIL_ON_PARTIAL="${RETRAIN_SCORE_UNSCORED_FAIL_ON_PARTIAL:-false}
 SCORE_UNSCORED_BACKLOG_SWEEP_ON_RETRAIN="${RETRAIN_SCORE_UNSCORED_BACKLOG_SWEEP_ON_RETRAIN:-true}"
 SCORE_UNSCORED_BACKLOG_SWEEP_LIMIT="${RETRAIN_SCORE_UNSCORED_BACKLOG_SWEEP_LIMIT:-10000}"
 SCORE_UNSCORED_BACKLOG_SWEEP_MIN_BACKLOG="${RETRAIN_SCORE_UNSCORED_BACKLOG_SWEEP_MIN_BACKLOG:-1}"
+REFRESH_ML_METRICS_ON_RETRAIN="${RETRAIN_REFRESH_ML_METRICS_ON_RETRAIN:-true}"
+RETRAIN_METRICS_DUCKDB_PATH="${RETRAIN_METRICS_DUCKDB_PATH:-${DUCKDB_PATH:-data/pivot_training.duckdb}}"
+RETRAIN_METRICS_DUCKDB_VIEW="${RETRAIN_METRICS_DUCKDB_VIEW:-${DUCKDB_VIEW:-training_events_v1}}"
+RETRAIN_METRICS_TARGET="${RETRAIN_METRICS_TARGET:-reject}"
+RETRAIN_METRICS_HORIZON_MIN="${RETRAIN_METRICS_HORIZON_MIN:-15}"
+RETRAIN_METRICS_TRAIN_DAYS="${RETRAIN_METRICS_TRAIN_DAYS:-30}"
+RETRAIN_METRICS_CALIB_DAYS="${RETRAIN_METRICS_CALIB_DAYS:-5}"
+RETRAIN_METRICS_TEST_DAYS="${RETRAIN_METRICS_TEST_DAYS:-5}"
+RETRAIN_METRICS_MAX_FOLDS="${RETRAIN_METRICS_MAX_FOLDS:-12}"
+RETRAIN_METRICS_MIN_EVENTS="${RETRAIN_METRICS_MIN_EVENTS:-200}"
+RETRAIN_METRICS_SPLIT_MODE="${RETRAIN_METRICS_SPLIT_MODE:-rolling}"
+RETRAIN_METRICS_OUT="${RETRAIN_METRICS_OUT:-data/exports/rf_walkforward_metrics.json}"
+RETRAIN_METRICS_FEATURE_OUT="${RETRAIN_METRICS_FEATURE_OUT:-data/exports/rf_feature_report.json}"
+RETRAIN_METRICS_FEATURE_CSV="${RETRAIN_METRICS_FEATURE_CSV:-data/exports/rf_feature_report.csv}"
+RETRAIN_METRICS_CALIB_OUT="${RETRAIN_METRICS_CALIB_OUT:-data/exports/rf_calibration_curve.json}"
+RETRAIN_METRICS_CALIB_CSV="${RETRAIN_METRICS_CALIB_CSV:-data/exports/rf_calibration_curve.csv}"
 OPS_SMOKE_FAILURE_SUMMARY=""
 OPS_SMOKE_FAILURE_HINT=""
 RELOAD_STATUS="not_attempted"
@@ -255,6 +271,29 @@ try:
     print(int(cur.fetchone()[0] or 0))
 except Exception:
     print(0)
+PY
+}
+
+file_mtime_ms() {
+  local file_path="${1:-}"
+  if [[ -z "${PYTHON}" || -z "${file_path}" ]]; then
+    echo 0
+    return 0
+  fi
+  "${PYTHON}" - "${file_path}" <<'PY'
+import pathlib
+import sys
+
+if len(sys.argv) < 2:
+    print(0)
+    raise SystemExit(0)
+
+path = pathlib.Path(sys.argv[1])
+if not path.exists():
+    print(0)
+    raise SystemExit(0)
+
+print(int(path.stat().st_mtime_ns // 1_000_000))
 PY
 }
 
@@ -336,6 +375,63 @@ run_step "build_labels"    "${PYTHON}" scripts/build_labels.py --horizons 5 15 3
 run_step "export_parquet"  "${PYTHON}" scripts/export_parquet.py
 run_step "duckdb_view"     "${PYTHON}" scripts/build_duckdb_view.py
 run_step "train_artifacts" "${PYTHON}" scripts/train_rf_artifacts.py
+if is_truthy "${REFRESH_ML_METRICS_ON_RETRAIN}"; then
+  local_metrics_started_ms="$(now_ms)"
+  ops_set \
+    --set "metrics_refresh_last_status=running" \
+    --set "metrics_refresh_last_at_ms=${local_metrics_started_ms}" \
+    --set "metrics_refresh_last_error="
+  echo "[$(timestamp)] START refresh_ml_metrics" | tee -a "${LOG_DIR}/retrain.log"
+  echo "[$(timestamp)] INFO refresh_ml_metrics config target=${RETRAIN_METRICS_TARGET} horizon=${RETRAIN_METRICS_HORIZON_MIN} split=${RETRAIN_METRICS_SPLIT_MODE} folds=${RETRAIN_METRICS_MAX_FOLDS}" | tee -a "${LOG_DIR}/retrain.log"
+  if "${PYTHON}" scripts/train_rf.py \
+      --db "${RETRAIN_METRICS_DUCKDB_PATH}" \
+      --view "${RETRAIN_METRICS_DUCKDB_VIEW}" \
+      --target "${RETRAIN_METRICS_TARGET}" \
+      --horizon-min "${RETRAIN_METRICS_HORIZON_MIN}" \
+      --train-days "${RETRAIN_METRICS_TRAIN_DAYS}" \
+      --calib-days "${RETRAIN_METRICS_CALIB_DAYS}" \
+      --test-days "${RETRAIN_METRICS_TEST_DAYS}" \
+      --max-folds "${RETRAIN_METRICS_MAX_FOLDS}" \
+      --min-events "${RETRAIN_METRICS_MIN_EVENTS}" \
+      --split-mode "${RETRAIN_METRICS_SPLIT_MODE}" \
+      --out "${RETRAIN_METRICS_OUT}" \
+      --feature-out "${RETRAIN_METRICS_FEATURE_OUT}" \
+      --feature-csv "${RETRAIN_METRICS_FEATURE_CSV}" \
+      --calib-out "${RETRAIN_METRICS_CALIB_OUT}" \
+      --calib-csv "${RETRAIN_METRICS_CALIB_CSV}" \
+      >> "${LOG_DIR}/retrain.log" 2>&1; then
+    metrics_mtime_ms="$(file_mtime_ms "${RETRAIN_METRICS_OUT}")"
+    calib_mtime_ms="$(file_mtime_ms "${RETRAIN_METRICS_CALIB_OUT}")"
+    if [[ "${metrics_mtime_ms}" =~ ^[0-9]+$ && "${calib_mtime_ms}" =~ ^[0-9]+$ ]] \
+      && (( metrics_mtime_ms >= local_metrics_started_ms )) \
+      && (( calib_mtime_ms >= local_metrics_started_ms )); then
+      echo "[$(timestamp)] DONE  refresh_ml_metrics" | tee -a "${LOG_DIR}/retrain.log"
+      ops_set \
+        --set "metrics_refresh_last_status=ok" \
+        --set "metrics_refresh_last_at_ms=$(now_ms)" \
+        --set "metrics_refresh_last_error="
+    else
+      echo "[$(timestamp)] WARN: refresh_ml_metrics did not produce fresh artifact timestamps (metrics=${metrics_mtime_ms} calib=${calib_mtime_ms})" | tee -a "${LOG_DIR}/retrain.log"
+      mark_soft_failure "ml_metrics_refresh_stale"
+      ops_set \
+        --set "metrics_refresh_last_status=failed" \
+        --set "metrics_refresh_last_at_ms=$(now_ms)" \
+        --set "metrics_refresh_last_error=artifacts_not_refreshed"
+    fi
+  else
+    echo "[$(timestamp)] WARN: refresh_ml_metrics failed (continuing retrain)" | tee -a "${LOG_DIR}/retrain.log"
+    mark_soft_failure "ml_metrics_refresh_failed"
+    ops_set \
+      --set "metrics_refresh_last_status=failed" \
+      --set "metrics_refresh_last_at_ms=$(now_ms)" \
+      --set "metrics_refresh_last_error=train_rf_failed"
+  fi
+else
+  echo "[$(timestamp)] INFO refresh_ml_metrics skipped (RETRAIN_REFRESH_ML_METRICS_ON_RETRAIN=false)" | tee -a "${LOG_DIR}/retrain.log"
+  ops_set \
+    --set "metrics_refresh_last_status=skipped" \
+    --set "metrics_refresh_last_at_ms=$(now_ms)"
+fi
 if is_truthy "${MODEL_GOV_FORCE_PROMOTE:-false}"; then
   run_step "governance_evaluate" \
     "${PYTHON}" scripts/model_governance.py \
