@@ -83,6 +83,9 @@ SCORE_TIMEOUT_SEC = max(1.0, float(os.getenv("LIVE_COLLECTOR_SCORE_TIMEOUT_SEC",
 SCORE_MAX_ATTEMPTS = max(1, int(os.getenv("LIVE_COLLECTOR_SCORE_MAX_ATTEMPTS", "2")))
 SCORE_RETRY_BASE_SEC = max(0.0, float(os.getenv("LIVE_COLLECTOR_SCORE_RETRY_BASE_SEC", "0.5")))
 SCORE_RETRY_MAX_SEC = max(SCORE_RETRY_BASE_SEC, float(os.getenv("LIVE_COLLECTOR_SCORE_RETRY_MAX_SEC", "4.0")))
+SCORE_RATE_LIMIT_COOLDOWN_SEC = max(
+    5.0, float(os.getenv("LIVE_COLLECTOR_SCORE_RATE_LIMIT_COOLDOWN_SEC", "180"))
+)
 SCORE_UNSCORED_LOOKBACK_DAYS = max(0, int(os.getenv("LIVE_COLLECTOR_SCORE_UNSCORED_LOOKBACK_DAYS", "3")))
 SCORE_UNSCORED_MAX_PER_CYCLE = max(0, int(os.getenv("LIVE_COLLECTOR_SCORE_UNSCORED_MAX_PER_CYCLE", "12")))
 GAMMA_REFRESH_SEC = max(30, int(os.getenv("LIVE_COLLECTOR_GAMMA_REFRESH_SEC", "300")))
@@ -113,6 +116,13 @@ _state: Dict[str, Any] = {
     "last_error": None,
     "cycles": 0,
     "symbols": {},
+    "score_status": "idle",
+    "score_backoff_until_ms": 0,
+    "score_backoff_reason": None,
+    "score_backoff_skip_cycles": 0,
+    "score_backoff_skipped_events": 0,
+    "score_rate_limit_count": 0,
+    "score_last_rate_limit_ms": None,
 }
 
 
@@ -168,11 +178,86 @@ def _score_retry_delay_sec(attempt: int) -> float:
     return min(SCORE_RETRY_MAX_SEC, SCORE_RETRY_BASE_SEC * (2 ** (attempt - 1)))
 
 
+class ScoreRequestError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        retry_after_sec: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.retry_after_sec = retry_after_sec
+
+
+def _parse_retry_after_sec(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        parsed = float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    if parsed <= 0:
+        return None
+    return parsed
+
+
+def _is_rate_limited_exception(error: Exception) -> bool:
+    if isinstance(error, ScoreRequestError):
+        return int(error.status_code or 0) == 429
+    lowered = str(error).lower()
+    return "429" in lowered or "too many requests" in lowered
+
+
+def _score_backoff_snapshot() -> tuple[int, str | None]:
+    with _state_lock:
+        backoff_until_ms = int(_state.get("score_backoff_until_ms") or 0)
+        reason_raw = _state.get("score_backoff_reason")
+    reason = str(reason_raw) if reason_raw else None
+    return backoff_until_ms, reason
+
+
+def _score_backoff_remaining_ms(now_ms: int | None = None) -> tuple[int, str | None]:
+    current_ms = int(time.time() * 1000) if now_ms is None else int(now_ms)
+    until_ms, reason = _score_backoff_snapshot()
+    if until_ms > current_ms:
+        return until_ms - current_ms, reason
+    return 0, None
+
+
+def _clear_score_backoff_if_expired(now_ms: int) -> bool:
+    with _state_lock:
+        until_ms = int(_state.get("score_backoff_until_ms") or 0)
+        if until_ms <= 0 or now_ms < until_ms:
+            return False
+        _state["score_backoff_until_ms"] = 0
+        _state["score_backoff_reason"] = None
+    return True
+
+
+def _activate_score_backoff(reason: str, retry_after_sec: float | None = None) -> int:
+    now_ms = int(time.time() * 1000)
+    cooldown_sec = max(float(SCORE_RATE_LIMIT_COOLDOWN_SEC), float(retry_after_sec or 0.0))
+    target_until_ms = now_ms + int(cooldown_sec * 1000)
+    with _state_lock:
+        prev_until = int(_state.get("score_backoff_until_ms") or 0)
+        if target_until_ms < prev_until:
+            target_until_ms = prev_until
+        _state["score_backoff_until_ms"] = target_until_ms
+        _state["score_backoff_reason"] = reason
+        _state["score_last_rate_limit_ms"] = now_ms
+        _state["score_rate_limit_count"] = int(_state.get("score_rate_limit_count") or 0) + 1
+    return target_until_ms
+
+
 def _score_chunk(chunk: List[Dict[str, Any]], headers: Dict[str, str]) -> None:
     payload = json.dumps({"events": chunk}).encode("utf-8")
     req = Request(SCORE_API_URL, data=payload, headers=headers, method="POST")
     retryable_http = {408, 409, 425, 429, 500, 502, 503, 504}
     last_exc: Exception | None = None
+    last_status_code: int | None = None
+    last_retry_after_sec: float | None = None
 
     for attempt in range(1, SCORE_MAX_ATTEMPTS + 1):
         try:
@@ -186,7 +271,11 @@ def _score_chunk(chunk: List[Dict[str, Any]], headers: Dict[str, str]) -> None:
             return
         except HTTPError as exc:
             last_exc = exc
-            retryable = int(getattr(exc, "code", 0) or 0) in retryable_http
+            last_status_code = int(getattr(exc, "code", 0) or 0)
+            headers_obj = getattr(exc, "headers", None)
+            retry_after_raw = headers_obj.get("Retry-After") if headers_obj is not None else None
+            last_retry_after_sec = _parse_retry_after_sec(retry_after_raw)
+            retryable = last_status_code in retryable_http
         except (URLError, TimeoutError, json.JSONDecodeError) as exc:
             last_exc = exc
             retryable = True
@@ -205,7 +294,11 @@ def _score_chunk(chunk: List[Dict[str, Any]], headers: Dict[str, str]) -> None:
         if delay_sec > 0:
             time.sleep(delay_sec)
 
-    raise RuntimeError(f"ML score request failed: {last_exc}")
+    raise ScoreRequestError(
+        f"ML score request failed: {last_exc}",
+        status_code=last_status_code,
+        retry_after_sec=last_retry_after_sec,
+    )
 
 
 def _get_gamma_context(symbol: str) -> Dict[str, Any] | None:
@@ -526,6 +619,9 @@ def main() -> None:
     try:
         while not _stop_event.is_set():
             cycle_started = int(time.time() * 1000)
+            score_backoff_recovered = _clear_score_backoff_if_expired(cycle_started)
+            if score_backoff_recovered:
+                log.info("ML score cooldown expired; resuming live scoring.")
             with _state_lock:
                 _state["last_cycle_start_ms"] = cycle_started
                 _state["cycles"] = int(_state.get("cycles", 0)) + 1
@@ -535,46 +631,117 @@ def main() -> None:
             total_bars = 0
             total_events = 0
             total_scored = 0
+            total_score_skipped = 0
 
             for symbol in SYMBOLS:
                 try:
                     result, new_events = _collect_symbol(conn, symbol)
                     conn.commit()
+                    result.setdefault("events_score_skipped", 0)
 
                     if SCORE_ENABLED and new_events:
-                        try:
-                            scored_now = _score_events(new_events)
-                            result["events_scored"] = scored_now
-                            total_scored += scored_now
-                        except Exception as score_exc:
-                            cycle_errors.append(f"{symbol}:score:{score_exc}")
-                            log.warning("Collector scoring failed for %s: %s", symbol, score_exc)
+                        remaining_ms, backoff_reason = _score_backoff_remaining_ms()
+                        if remaining_ms > 0:
+                            skipped_now = len(new_events)
+                            result["events_score_skipped"] += skipped_now
+                            total_score_skipped += skipped_now
+                            log.info(
+                                "Skipping live scoring for %s (%d events) due to active cooldown %.1fs (%s)",
+                                symbol,
+                                skipped_now,
+                                remaining_ms / 1000.0,
+                                backoff_reason or "rate_limited",
+                            )
+                        else:
+                            try:
+                                scored_now = _score_events(new_events)
+                                result["events_scored"] = scored_now
+                                total_scored += scored_now
+                            except Exception as score_exc:
+                                if _is_rate_limited_exception(score_exc):
+                                    retry_after_sec = (
+                                        score_exc.retry_after_sec
+                                        if isinstance(score_exc, ScoreRequestError)
+                                        else None
+                                    )
+                                    until_ms = _activate_score_backoff(
+                                        "ML score endpoint returned HTTP 429",
+                                        retry_after_sec=retry_after_sec,
+                                    )
+                                    cooldown_sec = max(
+                                        0.0, (until_ms - int(time.time() * 1000)) / 1000.0
+                                    )
+                                    skipped_now = len(new_events)
+                                    result["events_score_skipped"] += skipped_now
+                                    total_score_skipped += skipped_now
+                                    log.warning(
+                                        "Collector scoring rate-limited for %s; entering cooldown %.1fs (%s)",
+                                        symbol,
+                                        cooldown_sec,
+                                        score_exc,
+                                    )
+                                else:
+                                    cycle_errors.append(f"{symbol}:score:{score_exc}")
+                                    log.warning("Collector scoring failed for %s: %s", symbol, score_exc)
 
                     # Also score a small backlog slice so retrain/backfill-created
                     # events do not stay permanently unscored in prediction_log.
                     if SCORE_ENABLED and SCORE_UNSCORED_MAX_PER_CYCLE > 0:
-                        lookback_ms = SCORE_UNSCORED_LOOKBACK_DAYS * 86_400_000
-                        min_ts_ms = max(0, int(time.time() * 1000) - lookback_ms)
-                        exclude_ids = {ev.get("event_id") for ev in new_events if ev.get("event_id")}
-                        backlog_events = _fetch_unscored_events(
-                            conn,
-                            symbol=symbol,
-                            min_ts_ms=min_ts_ms,
-                            limit=SCORE_UNSCORED_MAX_PER_CYCLE,
-                            exclude_event_ids=exclude_ids,
-                        )
-                        if backlog_events:
-                            try:
-                                scored_backlog = _score_events(backlog_events)
-                                result["events_scored"] += scored_backlog
-                                total_scored += scored_backlog
-                            except Exception as score_gap_exc:
-                                cycle_errors.append(f"{symbol}:score_gap:{score_gap_exc}")
-                                log.warning(
-                                    "Collector backlog scoring failed for %s: %s",
-                                    symbol,
-                                    score_gap_exc,
-                                )
+                        remaining_ms, backoff_reason = _score_backoff_remaining_ms()
+                        if remaining_ms > 0:
+                            # Do not hit score endpoint while cooling down.
+                            log.info(
+                                "Skipping backlog scoring for %s due to active cooldown %.1fs (%s)",
+                                symbol,
+                                remaining_ms / 1000.0,
+                                backoff_reason or "rate_limited",
+                            )
+                        else:
+                            lookback_ms = SCORE_UNSCORED_LOOKBACK_DAYS * 86_400_000
+                            min_ts_ms = max(0, int(time.time() * 1000) - lookback_ms)
+                            exclude_ids = {ev.get("event_id") for ev in new_events if ev.get("event_id")}
+                            backlog_events = _fetch_unscored_events(
+                                conn,
+                                symbol=symbol,
+                                min_ts_ms=min_ts_ms,
+                                limit=SCORE_UNSCORED_MAX_PER_CYCLE,
+                                exclude_event_ids=exclude_ids,
+                            )
+                            if backlog_events:
+                                try:
+                                    scored_backlog = _score_events(backlog_events)
+                                    result["events_scored"] += scored_backlog
+                                    total_scored += scored_backlog
+                                except Exception as score_gap_exc:
+                                    if _is_rate_limited_exception(score_gap_exc):
+                                        retry_after_sec = (
+                                            score_gap_exc.retry_after_sec
+                                            if isinstance(score_gap_exc, ScoreRequestError)
+                                            else None
+                                        )
+                                        until_ms = _activate_score_backoff(
+                                            "ML score endpoint returned HTTP 429",
+                                            retry_after_sec=retry_after_sec,
+                                        )
+                                        cooldown_sec = max(
+                                            0.0, (until_ms - int(time.time() * 1000)) / 1000.0
+                                        )
+                                        skipped_now = len(backlog_events)
+                                        result["events_score_skipped"] += skipped_now
+                                        total_score_skipped += skipped_now
+                                        log.warning(
+                                            "Collector backlog scoring rate-limited for %s; entering cooldown %.1fs (%s)",
+                                            symbol,
+                                            cooldown_sec,
+                                            score_gap_exc,
+                                        )
+                                    else:
+                                        cycle_errors.append(f"{symbol}:score_gap:{score_gap_exc}")
+                                        log.warning(
+                                            "Collector backlog scoring failed for %s: %s",
+                                            symbol,
+                                            score_gap_exc,
+                                        )
 
                     symbol_results.append(result)
                     total_bars += result["bars_inserted"]
@@ -586,11 +753,29 @@ def main() -> None:
 
             now = int(time.time() * 1000)
             status = "ok" if not cycle_errors else "degraded"
+            remaining_backoff_ms, _ = _score_backoff_remaining_ms(now)
+            state_before = _get_state_snapshot()
+            score_status = "disabled"
+            if SCORE_ENABLED:
+                if remaining_backoff_ms > 0:
+                    score_status = "cooldown"
+                elif total_scored > 0:
+                    score_status = "ok"
+                else:
+                    score_status = "idle"
             updates: Dict[str, Any] = {
                 "status": status,
                 "last_cycle_end_ms": now,
                 "symbols": {entry["symbol"]: entry for entry in symbol_results},
+                "score_status": score_status,
             }
+            if total_score_skipped > 0:
+                updates["score_backoff_skip_cycles"] = int(
+                    state_before.get("score_backoff_skip_cycles") or 0
+                ) + 1
+                updates["score_backoff_skipped_events"] = int(
+                    state_before.get("score_backoff_skipped_events") or 0
+                ) + int(total_score_skipped)
             if not cycle_errors:
                 updates["last_success_ms"] = now
                 updates["last_error"] = None
@@ -600,18 +785,20 @@ def main() -> None:
 
             if cycle_errors:
                 log.warning(
-                    "Collector cycle complete with errors (bars=%d events=%d scored=%d): %s",
+                    "Collector cycle complete with errors (bars=%d events=%d scored=%d skipped=%d): %s",
                     total_bars,
                     total_events,
                     total_scored,
+                    total_score_skipped,
                     "; ".join(cycle_errors),
                 )
-            elif total_bars > 0 or total_events > 0 or total_scored > 0:
+            elif total_bars > 0 or total_events > 0 or total_scored > 0 or total_score_skipped > 0:
                 log.info(
-                    "Collector cycle complete (bars_inserted=%d events_inserted=%d events_scored=%d)",
+                    "Collector cycle complete (bars_inserted=%d events_inserted=%d events_scored=%d events_score_skipped=%d)",
                     total_bars,
                     total_events,
                     total_scored,
+                    total_score_skipped,
                 )
             else:
                 log.info("Collector cycle complete (no new bars/events)")

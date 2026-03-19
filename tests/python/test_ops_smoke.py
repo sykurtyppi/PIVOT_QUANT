@@ -1264,6 +1264,41 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn(2, posted_sizes)
         self.assertGreaterEqual(posted_sizes.count(1), 2)
 
+    def test_live_collector_score_chunk_surfaces_rate_limit_metadata(self) -> None:
+        collector = load_module(
+            "pq_live_collector_score_rate_limit_test",
+            REPO_ROOT / "server" / "live_event_collector.py",
+        )
+
+        original_urlopen = collector.urlopen
+        original_attempts = collector.SCORE_MAX_ATTEMPTS
+        try:
+            collector.SCORE_MAX_ATTEMPTS = 1
+
+            def _always_429(_req, timeout=0):  # noqa: ANN001
+                raise collector.HTTPError(
+                    url=collector.SCORE_API_URL,
+                    code=429,
+                    msg="Too Many Requests",
+                    hdrs={"Retry-After": "7"},
+                    fp=None,
+                )
+
+            collector.urlopen = _always_429
+            with self.assertRaises(collector.ScoreRequestError) as ctx:
+                collector._score_chunk(
+                    [{"event_id": "evt_429"}],
+                    {"Content-Type": "application/json"},
+                )
+        finally:
+            collector.urlopen = original_urlopen
+            collector.SCORE_MAX_ATTEMPTS = original_attempts
+
+        error = ctx.exception
+        self.assertEqual(int(error.status_code or 0), 429)
+        self.assertAlmostEqual(float(error.retry_after_sec or 0.0), 7.0, places=3)
+        self.assertTrue(collector._is_rate_limited_exception(error))
+
     def test_event_writer_registers_atexit_connection_cleanup(self) -> None:
         source = (REPO_ROOT / "server" / "event_writer.py").read_text(encoding="utf-8")
         self.assertIn("atexit.register(_close_thread_local_connection)", source)
