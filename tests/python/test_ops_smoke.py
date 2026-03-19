@@ -1093,6 +1093,15 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIsNone(second)
         self.assertIsNotNone(third)
 
+    def test_audit_resolution_utility_contract_present(self) -> None:
+        source = (REPO_ROOT / "scripts" / "audit_resolution_utility.py").read_text(encoding="utf-8")
+        self.assertIn("Target Utility Audit", source)
+        self.assertIn("Resolution Coverage", source)
+        self.assertIn("selection_bias_gap(has-no)", source)
+        self.assertIn("timing_delta(res-horizon_same_subset)", source)
+        proc = run_cmd([PYTHON, "-m", "py_compile", "scripts/audit_resolution_utility.py"], cwd=REPO_ROOT)
+        self.assertEqual(proc.returncode, 0, msg=f"{proc.stdout}\n{proc.stderr}")
+
     def test_local_services_use_allowlist_cors(self) -> None:
         for rel in (
             "server/event_writer.py",
@@ -3348,9 +3357,14 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("RETRAIN_REFRESH_ML_METRICS_ON_RETRAIN", retrain_script)
         self.assertIn("RETRAIN_METRICS_TARGET", retrain_script)
         self.assertIn("RETRAIN_METRICS_HORIZON_MIN", retrain_script)
+        self.assertIn("RETRAIN_RF_CALIB_DAYS", retrain_script)
+        self.assertIn("INFO train_artifacts config calib_days=", retrain_script)
+        self.assertIn("--calib-days \"${RETRAIN_RF_CALIB_DAYS}\"", retrain_script)
         self.assertIn("log_threshold_guard_summary()", retrain_script)
         self.assertIn("INFO threshold_summary", retrain_script)
         self.assertIn("tp_util=", retrain_script)
+        self.assertIn("tune_rows=", retrain_script)
+        self.assertIn("fit_rows=", retrain_script)
         self.assertIn("START refresh_ml_metrics", retrain_script)
         self.assertIn("scripts/train_rf.py", retrain_script)
         self.assertIn("metrics_refresh_last_status=running", retrain_script)
@@ -3372,6 +3386,8 @@ class OpsSmokeTests(unittest.TestCase):
         env_example = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
         self.assertIn("RF_THRESHOLD_MIN_SIGNALS_OVERRIDES=", env_example)
         self.assertIn("RF_THRESHOLD_PRECISION_FLOOR_OVERRIDES=", env_example)
+        self.assertIn("RF_CALIB_DAYS=", env_example)
+        self.assertIn("MODEL_GOV_MIN_TRAINED_END_DELTA_MS=21600000", env_example)
         self.assertIn("MODEL_GOV_ENFORCE_THRESHOLD_UTILITY_GUARD=", env_example)
         self.assertIn("MODEL_GOV_THRESHOLD_UTILITY_TARGETS=", env_example)
         self.assertIn("MODEL_GOV_THRESHOLD_UTILITY_MIN_SCORE=", env_example)

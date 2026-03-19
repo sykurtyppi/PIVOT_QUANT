@@ -36,6 +36,16 @@ def _env_float(name: str, default: float) -> float:
         return float(default)
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return int(default)
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        return int(default)
+
+
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.getenv(name)
     if raw is None or raw == "":
@@ -497,7 +507,7 @@ def main() -> None:
     parser.add_argument("--horizons", default="5,15,30,60")
     parser.add_argument("--targets", default="reject,break")
     parser.add_argument("--calibration", choices=["auto", "isotonic", "sigmoid", "none"], default="auto")
-    parser.add_argument("--calib-days", type=int, default=3)
+    parser.add_argument("--calib-days", type=int, default=_env_int("RF_CALIB_DAYS", 10))
     parser.add_argument("--min-events", type=int, default=200)
     parser.add_argument("--n-estimators", type=int, default=300)
     parser.add_argument("--max-depth", type=int, default=12)

@@ -204,6 +204,7 @@ RETRAIN_METRICS_SPLIT_MODE="${RETRAIN_METRICS_SPLIT_MODE:-rolling}"
 RETRAIN_METRICS_OUT="${RETRAIN_METRICS_OUT:-data/exports/rf_walkforward_metrics.json}"
 RETRAIN_METRICS_FEATURE_OUT="${RETRAIN_METRICS_FEATURE_OUT:-data/exports/rf_feature_report.json}"
 RETRAIN_METRICS_FEATURE_CSV="${RETRAIN_METRICS_FEATURE_CSV:-data/exports/rf_feature_report.csv}"
+RETRAIN_RF_CALIB_DAYS="${RETRAIN_RF_CALIB_DAYS:-${RF_CALIB_DAYS:-10}}"
 RETRAIN_METRICS_CALIB_OUT="${RETRAIN_METRICS_CALIB_OUT:-data/exports/rf_calibration_curve.json}"
 RETRAIN_METRICS_CALIB_CSV="${RETRAIN_METRICS_CALIB_CSV:-data/exports/rf_calibration_curve.csv}"
 OPS_SMOKE_FAILURE_SUMMARY=""
@@ -356,7 +357,7 @@ for target in targets:
         print(
             "target={target} horizon={horizon} threshold={threshold} "
             "fallback={fallback} guard={guard} reason={reason} score={score} signals={signals} "
-            "tp_util={tp_util} fp_util={fp_util} corr_pos={corr_pos}".format(
+            "tp_util={tp_util} fp_util={fp_util} corr_pos={corr_pos} tune_rows={tune_rows} fit_rows={fit_rows}".format(
                 target=target,
                 horizon=horizon,
                 threshold=_fmt(threshold),
@@ -368,6 +369,8 @@ for target in targets:
                 tp_util=_fmt(meta.get("selected_tp_utility_sum")),
                 fp_util=_fmt(meta.get("selected_fp_utility_sum")),
                 corr_pos=_fmt(meta.get("tune_prob_utility_corr_pos")),
+                tune_rows=str(meta.get("threshold_tune_size") if meta.get("threshold_tune_size") is not None else "na"),
+                fit_rows=str(meta.get("calibration_fit_size") if meta.get("calibration_fit_size") is not None else "na"),
             )
         )
 PY
@@ -450,7 +453,8 @@ run_step "backfill" "${PYTHON}" scripts/backfill_events.py --symbols "${RETRAIN_
 run_step "build_labels"    "${PYTHON}" scripts/build_labels.py --horizons 5 15 30 60 --incremental
 run_step "export_parquet"  "${PYTHON}" scripts/export_parquet.py
 run_step "duckdb_view"     "${PYTHON}" scripts/build_duckdb_view.py
-run_step "train_artifacts" "${PYTHON}" scripts/train_rf_artifacts.py
+echo "[$(timestamp)] INFO train_artifacts config calib_days=${RETRAIN_RF_CALIB_DAYS}" | tee -a "${LOG_DIR}/retrain.log"
+run_step "train_artifacts" "${PYTHON}" scripts/train_rf_artifacts.py --calib-days "${RETRAIN_RF_CALIB_DAYS}"
 threshold_summary_output="$(log_threshold_guard_summary)"
 if [[ -n "${threshold_summary_output}" ]]; then
   while IFS= read -r summary_line; do
