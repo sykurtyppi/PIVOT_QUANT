@@ -1138,6 +1138,13 @@ class OpsSmokeTests(unittest.TestCase):
         proc = run_cmd([PYTHON, "-m", "py_compile", "scripts/audit_resolution_utility.py"], cwd=REPO_ROOT)
         self.assertEqual(proc.returncode, 0, msg=f"{proc.stdout}\n{proc.stderr}")
 
+    def test_run_replay_backfill_contract_present(self) -> None:
+        source = (REPO_ROOT / "scripts" / "run_replay_backfill.sh").read_text(encoding="utf-8")
+        self.assertIn("Replay target looks like production DB. Aborting.", source)
+        self.assertIn("prediction_log_pre_replay", source)
+        self.assertIn("--preview", source)
+        self.assertIn("--max-remaining 0", source)
+
     def test_local_services_use_allowlist_cors(self) -> None:
         for rel in (
             "server/event_writer.py",
@@ -3659,6 +3666,106 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(result.get("failed"), 0)
         self.assertEqual(set(posted_event_ids), {"evt_missing_1", "evt_missing_2"})
         self.assertNotIn("evt_scored", posted_event_ids)
+
+    def test_score_unscored_touch_events_preview_mode_tracks_preview_rows(self) -> None:
+        scorer = load_module(
+            "pq_score_unscored_touch_events_preview_mode_test",
+            REPO_ROOT / "scripts" / "score_unscored_touch_events.py",
+        )
+
+        db = self.tmp / "score_unscored_preview.sqlite"
+        conn = sqlite3.connect(str(db))
+        try:
+            conn.execute(
+                """
+                CREATE TABLE touch_events(
+                    event_id TEXT PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    ts_event INTEGER NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE prediction_log(
+                    event_id TEXT NOT NULL,
+                    ts_prediction INTEGER NOT NULL,
+                    is_preview INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+            now_ms = int(time.time() * 1000)
+            rows = [
+                ("evt_live_scored", "SPY", now_ms - 60_000),
+                ("evt_preview_scored", "SPY", now_ms - 120_000),
+                ("evt_missing", "SPY", now_ms - 180_000),
+            ]
+            conn.executemany(
+                "INSERT INTO touch_events(event_id, symbol, ts_event) VALUES (?, ?, ?)",
+                rows,
+            )
+            conn.execute(
+                "INSERT INTO prediction_log(event_id, ts_prediction, is_preview) VALUES (?, ?, ?)",
+                ("evt_live_scored", now_ms, 0),
+            )
+            conn.execute(
+                "INSERT INTO prediction_log(event_id, ts_prediction, is_preview) VALUES (?, ?, ?)",
+                ("evt_preview_scored", now_ms, 1),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        class _FakeResp:
+            def __init__(self, payload: dict) -> None:
+                self._raw = json.dumps(payload).encode("utf-8")
+
+            def read(self) -> bytes:
+                return self._raw
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> bool:
+                return False
+
+        posted_events: list[dict[str, Any]] = []
+        original_urlopen = scorer.urlopen
+        try:
+
+            def _fake_urlopen(req, timeout=0):  # noqa: ANN001
+                payload = json.loads(req.data.decode("utf-8"))
+                events = payload.get("events", [])
+                posted_events.extend(events)
+                return _FakeResp({"results": [{"status": "ok"} for _ in events]})
+
+            scorer.urlopen = _fake_urlopen
+            args = scorer.parse_args(
+                [
+                    "--db",
+                    str(db),
+                    "--symbols",
+                    "SPY",
+                    "--lookback-days",
+                    "30",
+                    "--limit",
+                    "10",
+                    "--batch-size",
+                    "5",
+                    "--preview",
+                ]
+            )
+            result = scorer.run(args)
+        finally:
+            scorer.urlopen = original_urlopen
+
+        self.assertEqual(result.get("status"), "ok")
+        self.assertTrue(bool(result.get("preview")))
+        self.assertEqual(result.get("attempted"), 2)
+        self.assertEqual(result.get("scored_ok"), 2)
+        posted_ids = {str(event.get("event_id")) for event in posted_events}
+        self.assertEqual(posted_ids, {"evt_live_scored", "evt_missing"})
+        self.assertTrue(all(bool(event.get("preview")) for event in posted_events))
 
     def test_score_unscored_touch_events_single_fallback_and_verify(self) -> None:
         scorer = load_module(
@@ -6298,6 +6405,7 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("## Prediction Coverage SLA", text)
         self.assertIn("- Timely prediction lag filter: <= 6.00 hours", text)
         self.assertIn("- Overall coverage: 100.00% (2/2)", text)
+        self.assertIn("- Scored-event rows dropped (missing matching horizon label): 0", text)
         self.assertIn("- Coverage status: PASS", text)
         self.assertIn("## Prediction Lag Profile (First Live Prediction)", text)
         self.assertIn("- <=1h: 2", text)
@@ -6951,6 +7059,33 @@ class OpsSmokeTests(unittest.TestCase):
         failures, skips = module.evaluate_gates(active, candidate, gates)
         self.assertEqual(failures, [])
         self.assertTrue(any("break:5m skipped regression gates" in item for item in skips))
+
+    def test_model_governance_reports_missing_metric_skip(self) -> None:
+        module = load_module("model_governance_missing_metric_skip", REPO_ROOT / "scripts" / "model_governance.py")
+        gates = module.GateConfig(
+            required_targets=["break"],
+            required_horizons=[5],
+            min_trained_end_delta_ms=0,
+            max_mfe_regression_bps=1.5,
+            max_mae_worsening_bps=2.0,
+            min_total_samples=0,
+            min_positive_samples_reject=0,
+            min_positive_samples_break=0,
+            allow_feature_version_change=False,
+        )
+        active = {
+            "feature_version": "v3",
+            "trained_end_ts": 1000,
+            "stats": {"5": {"break": {"sample_size": 200, "break_count": 60, "mae_bps_break": -10.0}}},
+        }
+        candidate = {
+            "feature_version": "v3",
+            "trained_end_ts": 2000,
+            "stats": {"5": {"break": {"sample_size": 220, "break_count": 62, "mfe_bps_break": 7.0, "mae_bps_break": -9.0}}},
+        }
+        failures, skips = module.evaluate_gates(active, candidate, gates)
+        self.assertEqual(failures, [])
+        self.assertTrue(any("skipped mfe_bps_break regression gate" in item for item in skips))
 
     def test_model_governance_threshold_utility_guard_blocks_promotion(self) -> None:
         module = load_module(

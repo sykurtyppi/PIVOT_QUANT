@@ -258,7 +258,19 @@ def _evaluate_regime_metric(
     active_metric = to_float(active_block.get(metric_key))
     candidate_metric = to_float(candidate_block.get(metric_key))
     if active_metric is None or candidate_metric is None:
-        return False, None, []
+        missing: list[str] = []
+        if active_metric is None:
+            missing.append("active")
+        if candidate_metric is None:
+            missing.append("candidate")
+        return (
+            False,
+            None,
+            [
+                f"{target}:{horizon}m skipped {metric_key} regression gate "
+                f"(missing {'/'.join(missing)} metric)"
+            ],
+        )
 
     aggregate_failed = _is_metric_regression(
         active_value=active_metric,

@@ -1558,6 +1558,11 @@ def _write_prediction_record(event: dict, result: dict) -> tuple[str, str | None
                 analog_best_ci_width = reject_w if reject_w is not None else break_w
         is_preview = 1 if event.get("preview") else 0
 
+        # Preserve original signal/probability/threshold payload for each
+        # (event_id, model_version) row and only refresh runtime metadata on
+        # conflict. This keeps first-prediction signal history stable while
+        # allowing later rescoring metadata (policy/analogs/quality flags) to
+        # be updated.
         conn.execute(
             """INSERT INTO prediction_log (
                 event_id, ts_prediction, model_version, feature_version,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Score touch events that do not yet have a live prediction row."""
+"""Score touch events that do not yet have a prediction row for the selected source."""
 
 from __future__ import annotations
 
@@ -21,13 +21,23 @@ DEFAULT_SCORE_URL = os.getenv("LIVE_COLLECTOR_SCORE_URL", "http://127.0.0.1:5003
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Score unscored touch_events into prediction_log.")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Score unscored touch_events into prediction_log. "
+            "Date filters use UTC calendar dates (YYYY-MM-DD)."
+        )
+    )
     parser.add_argument("--db", default=DEFAULT_DB, help="SQLite path (default: PIVOT_DB or data/pivot_events.sqlite)")
     parser.add_argument("--score-url", default=DEFAULT_SCORE_URL, help="ML /score endpoint")
     parser.add_argument("--symbols", default="", help="Optional comma-separated symbols")
     parser.add_argument("--lookback-days", type=int, default=7, help="Lookback window when start/end not provided")
     parser.add_argument("--start-date", default="", help="Inclusive UTC date YYYY-MM-DD")
     parser.add_argument("--end-date", default="", help="Inclusive UTC date YYYY-MM-DD")
+    parser.add_argument(
+        "--preview",
+        action="store_true",
+        help="Write preview predictions (is_preview=1) instead of live predictions (default: live).",
+    )
     parser.add_argument("--limit", type=int, default=600, help="Max events to process")
     parser.add_argument("--batch-size", type=int, default=64, help="Events per /score batch")
     parser.add_argument("--timeout-sec", type=float, default=12.0, help="HTTP timeout per call")
@@ -76,7 +86,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help=(
             "Ignore existing prediction_log rows and rescore all matching touch_events "
-            "(INSERT OR IGNORE in ml_server prevents duplicate rows for the same event_id+model_version)."
+            "(ml_server UPSERT keeps one row per event_id+model_version)."
         ),
     )
     parser.add_argument("--dry-run", action="store_true", help="Only list how many events are eligible")
@@ -122,21 +132,22 @@ def fetch_unscored_events(
     lookback_days: int,
     limit: int,
     rescore_existing: bool,
+    preview_mode: bool,
 ) -> list[dict[str, Any]]:
     if not _has_table(conn, "touch_events"):
         return []
 
+    params: list[Any] = []
     if _has_table(conn, "prediction_log") and not rescore_existing:
         join_clause = (
             "LEFT JOIN prediction_log pl "
-            "ON pl.event_id = te.event_id AND COALESCE(pl.is_preview, 0) = 0"
+            "ON pl.event_id = te.event_id AND COALESCE(pl.is_preview, 0) = ?"
         )
         where = ["pl.event_id IS NULL"]
+        params.append(1 if preview_mode else 0)
     else:
         join_clause = ""
         where = []
-
-    params: list[Any] = []
     if symbols:
         placeholders = ",".join("?" for _ in symbols)
         where.append(f"te.symbol IN ({placeholders})")
@@ -175,21 +186,22 @@ def count_unscored_events(
     end_date: str,
     lookback_days: int,
     rescore_existing: bool,
+    preview_mode: bool,
 ) -> int:
     if not _has_table(conn, "touch_events"):
         return 0
 
+    params: list[Any] = []
     if _has_table(conn, "prediction_log") and not rescore_existing:
         join_clause = (
             "LEFT JOIN prediction_log pl "
-            "ON pl.event_id = te.event_id AND COALESCE(pl.is_preview, 0) = 0"
+            "ON pl.event_id = te.event_id AND COALESCE(pl.is_preview, 0) = ?"
         )
         where = ["pl.event_id IS NULL"]
+        params.append(1 if preview_mode else 0)
     else:
         join_clause = ""
         where = []
-
-    params: list[Any] = []
     if symbols:
         placeholders = ",".join("?" for _ in symbols)
         where.append(f"te.symbol IN ({placeholders})")
@@ -225,12 +237,13 @@ def count_recently_scored_events(
     end_date: str,
     lookback_days: int,
     since_ts_ms: int,
+    preview_mode: bool,
 ) -> int:
     if not _has_table(conn, "touch_events") or not _has_table(conn, "prediction_log"):
         return 0
 
     where: list[str] = []
-    params: list[Any] = [int(since_ts_ms)]
+    params: list[Any] = [1 if preview_mode else 0, int(since_ts_ms)]
 
     if symbols:
         placeholders = ",".join("?" for _ in symbols)
@@ -254,7 +267,7 @@ def count_recently_scored_events(
         FROM touch_events te
         JOIN prediction_log pl
           ON pl.event_id = te.event_id
-         AND COALESCE(pl.is_preview, 0) = 0
+         AND COALESCE(pl.is_preview, 0) = ?
          AND pl.ts_prediction >= ?
         WHERE {where_sql}
     """
@@ -353,6 +366,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     symbols = _parse_symbols(args.symbols)
     start_date = _validate_date(args.start_date)
     end_date = _validate_date(args.end_date)
+    preview_mode = bool(args.preview)
     if start_date and end_date and end_date < start_date:
         raise ValueError("end-date must be >= start-date")
 
@@ -365,6 +379,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             end_date=end_date,
             lookback_days=max(0, int(args.lookback_days)),
             rescore_existing=bool(args.rescore_existing),
+            preview_mode=preview_mode,
         )
         events = fetch_unscored_events(
             conn,
@@ -374,9 +389,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             lookback_days=max(0, int(args.lookback_days)),
             limit=max(0, int(args.limit)),
             rescore_existing=bool(args.rescore_existing),
+            preview_mode=preview_mode,
         )
     finally:
         conn.close()
+
+    if preview_mode:
+        events = [{**event, "preview": True} for event in events]
 
     attempted = len(events)
     if args.dry_run:
@@ -391,6 +410,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "symbols": symbols,
             "start_date": start_date or None,
             "end_date": end_date or None,
+            "preview": preview_mode,
         }
 
     scored_ok = 0
@@ -515,6 +535,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     end_date=end_date,
                     lookback_days=max(0, int(args.lookback_days)),
                     since_ts_ms=run_started_ms,
+                    preview_mode=preview_mode,
                 )
                 remaining_unscored = max(0, eligible_total - int(refreshed_count))
             else:
@@ -525,6 +546,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     end_date=end_date,
                     lookback_days=max(0, int(args.lookback_days)),
                     rescore_existing=False,
+                    preview_mode=preview_mode,
                 )
         finally:
             conn_verify.close()
@@ -576,6 +598,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "symbols": symbols,
         "start_date": start_date or None,
         "end_date": end_date or None,
+        "preview": preview_mode,
         "last_error": last_error,
     }
 

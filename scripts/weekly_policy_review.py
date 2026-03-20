@@ -363,6 +363,79 @@ def load_scored_events(
     return out
 
 
+def load_scored_event_selection_summary(
+    conn: sqlite3.Connection,
+    *,
+    symbol: str,
+    start_ms: int,
+    end_ms: int,
+    source: str,
+    max_pred_lag_hours: float,
+    scored_event_basis: str,
+) -> dict[str, int]:
+    if scored_event_basis not in {"first", "latest"}:
+        raise ValueError(f"Unsupported scored_event_basis={scored_event_basis!r}")
+    src_filter = source_filter_sql(conn, source)
+    max_pred_lag_ms = int(float(max_pred_lag_hours) * 3600 * 1000)
+    pred_order = "ASC" if scored_event_basis == "first" else "DESC"
+    row = conn.execute(
+        f"""
+        WITH scoped_touch AS (
+            SELECT te.event_id, te.ts_event
+            FROM touch_events te
+            WHERE te.symbol = ?
+              AND te.ts_event >= ?
+              AND te.ts_event < ?
+        ),
+        selected_pred AS (
+            SELECT *
+            FROM (
+                SELECT
+                    pl.event_id,
+                    pl.best_horizon,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY pl.event_id
+                        ORDER BY pl.ts_prediction {pred_order}
+                    ) AS rn
+                FROM scoped_touch st
+                JOIN prediction_log pl ON pl.event_id = st.event_id
+                WHERE 1 = 1
+                  {src_filter}
+                  AND (pl.ts_prediction - st.ts_event) >= 0
+                  AND (pl.ts_prediction - st.ts_event) <= ?
+            )
+            WHERE rn = 1
+        )
+        SELECT
+            COUNT(*) AS selected_rows,
+            SUM(CASE WHEN sp.best_horizon IS NOT NULL THEN 1 ELSE 0 END) AS with_horizon_rows,
+            SUM(
+                CASE
+                    WHEN sp.best_horizon IS NOT NULL
+                     AND EXISTS (
+                         SELECT 1
+                         FROM event_labels el
+                         WHERE el.event_id = sp.event_id
+                           AND el.horizon_min = sp.best_horizon
+                     )
+                    THEN 1 ELSE 0
+                END
+            ) AS labeled_rows
+        FROM selected_pred sp
+        """,
+        (symbol.upper(), start_ms, end_ms, max_pred_lag_ms),
+    ).fetchone()
+    selected_rows = int((row["selected_rows"] if row else 0) or 0)
+    with_horizon_rows = int((row["with_horizon_rows"] if row else 0) or 0)
+    labeled_rows = int((row["labeled_rows"] if row else 0) or 0)
+    return {
+        "selected_rows": selected_rows,
+        "with_horizon_rows": with_horizon_rows,
+        "labeled_rows": labeled_rows,
+        "dropped_missing_label_rows": max(0, with_horizon_rows - labeled_rows),
+    }
+
+
 def load_prediction_coverage(
     conn: sqlite3.Connection,
     *,
@@ -379,8 +452,7 @@ def load_prediction_coverage(
         WITH te AS (
             SELECT
                 te.event_id AS event_id,
-                te.ts_event AS ts_event_ms,
-                date(te.ts_event/1000, 'unixepoch') AS day
+                te.ts_event AS ts_event_ms
             FROM touch_events te
             WHERE te.symbol = ?
               AND te.ts_event >= ?
@@ -396,23 +468,35 @@ def load_prediction_coverage(
               AND (pl.ts_prediction - te.ts_event_ms) <= ?
         )
         SELECT
-            te.day AS day,
-            COUNT(*) AS touch_n,
-            SUM(CASE WHEN te.event_id IN (SELECT event_id FROM pred_ids) THEN 1 ELSE 0 END) AS pred_n
+            te.ts_event_ms AS ts_event_ms,
+            CASE WHEN te.event_id IN (SELECT event_id FROM pred_ids) THEN 1 ELSE 0 END AS has_prediction
         FROM te
-        GROUP BY te.day
-        ORDER BY te.day ASC
+        ORDER BY te.ts_event_ms ASC
         """,
         (symbol.upper(), start_ms, end_ms, max_pred_lag_ms),
     ).fetchall()
+
+    day_counts: dict[str, dict[str, int]] = {}
+    for row in rows:
+        ts_event_ms = int(row["ts_event_ms"])
+        day = (
+            datetime.fromtimestamp(ts_event_ms / 1000, tz=timezone.utc)
+            .astimezone(ET_TZ)
+            .date()
+            .isoformat()
+        )
+        bucket = day_counts.setdefault(day, {"touch_n": 0, "pred_n": 0})
+        bucket["touch_n"] += 1
+        bucket["pred_n"] += int(row["has_prediction"] or 0)
 
     day_rows: list[dict[str, Any]] = []
     touch_total = 0
     pred_total = 0
     zero_pred_days = 0
-    for row in rows:
-        touch_n = int(row["touch_n"] or 0)
-        pred_n = int(row["pred_n"] or 0)
+    for day in sorted(day_counts.keys()):
+        counts = day_counts[day]
+        touch_n = int(counts["touch_n"])
+        pred_n = int(counts["pred_n"])
         coverage_pct = (100.0 * pred_n / touch_n) if touch_n > 0 else None
         if pred_n == 0:
             zero_pred_days += 1
@@ -420,7 +504,7 @@ def load_prediction_coverage(
         pred_total += pred_n
         day_rows.append(
             {
-                "day": str(row["day"]),
+                "day": day,
                 "touch_n": touch_n,
                 "pred_n": pred_n,
                 "gap_n": max(0, touch_n - pred_n),
@@ -644,6 +728,7 @@ def build_report(
     calibration_rows: list[dict[str, Any]],
     has_daily_ml_metrics: bool,
     coverage_summary: dict[str, Any],
+    scored_event_selection: dict[str, Any],
     lag_profile: dict[str, Any],
     coverage_sla_pct: float,
     max_pred_lag_hours: float,
@@ -662,6 +747,10 @@ def build_report(
     cov_pred_total = int(coverage_summary.get("pred_total") or 0)
     cov_pct = coverage_summary.get("coverage_pct")
     cov_zero_days = int(coverage_summary.get("zero_pred_days") or 0)
+    selection_rows = int(scored_event_selection.get("selected_rows") or 0)
+    with_horizon_rows = int(scored_event_selection.get("with_horizon_rows") or 0)
+    labeled_rows = int(scored_event_selection.get("labeled_rows") or 0)
+    dropped_missing_label_rows = int(scored_event_selection.get("dropped_missing_label_rows") or 0)
     cov_below = 0
     for row in cov_days:
         pct = row.get("coverage_pct")
@@ -710,6 +799,14 @@ def build_report(
         )
         lines.append(f"- Days below SLA: {cov_below}/{len(cov_days)}")
         lines.append(f"- Zero-prediction days: {cov_zero_days}")
+        lines.append(
+            f"- Scored-event basis rows selected: {selection_rows} "
+            f"(with best_horizon={with_horizon_rows}, labeled={labeled_rows})"
+        )
+        lines.append(
+            f"- Scored-event rows dropped (missing matching horizon label): "
+            f"{dropped_missing_label_rows}"
+        )
         lines.append(f"- Coverage status: {coverage_status}")
         lines.append("")
         lines.append("| Day (ET) | Touch Events | Predicted Events | Gap | Coverage % |")
@@ -987,6 +1084,15 @@ def main() -> None:
             source=args.source,
             max_pred_lag_hours=float(args.max_pred_lag_hours),
         )
+        scored_event_selection = load_scored_event_selection_summary(
+            conn,
+            symbol=args.symbol,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            source=args.source,
+            max_pred_lag_hours=float(args.max_pred_lag_hours),
+            scored_event_basis=str(args.scored_event_basis).strip().lower(),
+        )
         lag_profile = load_prediction_lag_profile(
             conn,
             symbol=args.symbol,
@@ -1007,6 +1113,7 @@ def main() -> None:
         calibration_rows=calibration_rows,
         has_daily_ml_metrics=has_daily_ml_metrics,
         coverage_summary=coverage_summary,
+        scored_event_selection=scored_event_selection,
         lag_profile=lag_profile,
         coverage_sla_pct=float(args.coverage_sla_pct),
         max_pred_lag_hours=float(args.max_pred_lag_hours),
