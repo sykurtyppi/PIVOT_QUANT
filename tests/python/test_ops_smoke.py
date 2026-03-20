@@ -558,6 +558,23 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("Tradeable matured signals: 0", joined)
         self.assertIn("no reject/break signals emitted on matured rows", joined)
 
+    def test_daily_report_context_parses_prediction_basis_and_scored_line(self) -> None:
+        send_daily_report = load_module(
+            "pq_send_daily_report_basis_parse_test",
+            REPO_ROOT / "scripts" / "send_daily_report.py",
+        )
+        report_path = self.tmp / "ml_daily_2026-03-19.md"
+        report_text = "\n".join(
+            [
+                "# Daily ML Report - 2026-03-19",
+                "- Prediction basis for scored rows: first prediction per event",
+                "- Scored predictions (first prediction per event): 42",
+            ]
+        )
+        ctx = send_daily_report.parse_report_context(report_text, report_path)
+        self.assertEqual(ctx.get("prediction_basis"), "first")
+        self.assertEqual(ctx.get("scored"), "42")
+
     def test_daily_report_unscored_uses_distinct_event_ids(self) -> None:
         db = self.tmp / "daily_report_counts.sqlite"
         conn = sqlite3.connect(str(db))
@@ -6103,6 +6120,7 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("## Regime Policy Attribution", text)
         self.assertIn("## Calibration Stability (daily_ml_metrics)", text)
         self.assertIn("Horizon 5m divergences: 1", text)
+        self.assertIn("- Prediction basis: first prediction per event", text)
 
     def test_weekly_policy_review_generates_markdown_with_core_sections(self) -> None:
         db = self.tmp / "weekly_policy_review.sqlite"
@@ -6603,6 +6621,8 @@ class OpsSmokeTests(unittest.TestCase):
         source = (REPO_ROOT / "scripts" / "generate_daily_ml_report.py").read_text(encoding="utf-8")
         self.assertIn("Tradeable matured signals (reject+break)", source)
         self.assertIn("Performance note: no matured reject/break signals in this window", source)
+        self.assertIn("Prediction basis for scored rows", source)
+        self.assertIn("--prediction-basis", source)
 
     def test_train_artifacts_horizon_stats_use_target_specific_other_bucket(self) -> None:
         module = load_module("train_rf_artifacts_stats", REPO_ROOT / "scripts" / "train_rf_artifacts.py")

@@ -21,6 +21,11 @@ except ImportError:  # pragma: no cover
 ET_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone.utc
 DEFAULT_DB = os.getenv("PIVOT_DB", "data/pivot_events.sqlite")
 DEFAULT_OUTPUT = "logs/reports/weekend_deep_audit_latest.md"
+DEFAULT_PREDICTION_BASIS = (
+    os.getenv("ML_WEEKEND_AUDIT_PREDICTION_BASIS", "first") or "first"
+).strip().lower()
+if DEFAULT_PREDICTION_BASIS not in {"first", "latest"}:
+    DEFAULT_PREDICTION_BASIS = "first"
 DEFAULT_COST_BPS = float(os.getenv("ML_COST_SPREAD_BPS", "0.8")) + float(
     os.getenv("ML_COST_SLIPPAGE_BPS", "0.4")
 ) + float(os.getenv("ML_COST_COMMISSION_BPS", "0.1"))
@@ -48,6 +53,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--start-date", required=True, help="ET start date (YYYY-MM-DD)")
     parser.add_argument("--end-date", required=True, help="ET end date inclusive (YYYY-MM-DD)")
     parser.add_argument("--symbol", default="SPY", help="Symbol filter (default: SPY)")
+    parser.add_argument(
+        "--prediction-basis",
+        choices=("first", "latest"),
+        default=DEFAULT_PREDICTION_BASIS,
+        help=(
+            "Prediction row basis for attribution rows "
+            "(first=execution fidelity, latest=replay view)."
+        ),
+    )
     parser.add_argument("--cost-bps", type=float, default=DEFAULT_COST_BPS, help="Roundtrip cost model in bps")
     parser.add_argument(
         "--calibration-lookback-days",
@@ -102,6 +116,22 @@ def parse_json(value: Any) -> dict[str, Any]:
         except Exception:
             return {}
     return {}
+
+
+def prediction_order_sql(prediction_basis: str) -> str:
+    basis = str(prediction_basis or "first").strip().lower()
+    if basis == "first":
+        return "ASC"
+    if basis == "latest":
+        return "DESC"
+    raise ValueError(f"Unsupported prediction_basis={prediction_basis!r}")
+
+
+def prediction_basis_label(prediction_basis: str) -> str:
+    basis = str(prediction_basis or "first").strip().lower()
+    if basis == "latest":
+        return "latest prediction per event"
+    return "first prediction per event"
 
 
 def load_snapshots(conn: sqlite3.Connection, symbol: str, end_day: date) -> dict[date, SnapshotInfo]:
@@ -255,25 +285,27 @@ def load_labels_by_event(
     return [dict(r) for r in rows]
 
 
-def load_latest_predictions(
+def load_selected_predictions(
     conn: sqlite3.Connection,
     symbol: str,
     start_ms: int,
     end_ms: int,
+    prediction_basis: str,
 ) -> list[dict[str, Any]]:
+    pred_order = prediction_order_sql(prediction_basis)
     pred_cols = {r["name"] for r in conn.execute("PRAGMA table_info(prediction_log)").fetchall()}
     has_preview = "is_preview" in pred_cols
     preview_filter = "AND COALESCE(lp.is_preview, 0) = 0" if has_preview else ""
     rows = conn.execute(
         f"""
-        WITH latest_pred AS (
+        WITH selected_pred AS (
             SELECT *
             FROM (
                 SELECT
                     pl.*,
                     ROW_NUMBER() OVER (
                         PARTITION BY pl.event_id
-                        ORDER BY pl.ts_prediction DESC
+                        ORDER BY pl.ts_prediction {pred_order}
                     ) AS rn
                 FROM prediction_log pl
             )
@@ -290,7 +322,7 @@ def load_latest_predictions(
             lp.signal_15m,
             lp.signal_30m,
             lp.signal_60m
-        FROM latest_pred lp
+        FROM selected_pred lp
         JOIN touch_events te ON te.event_id = lp.event_id
         WHERE te.symbol = ?
           AND te.ts_event >= ?
@@ -333,6 +365,7 @@ def build_markdown(
     event_rows: list[dict[str, Any]],
     label_rows: list[dict[str, Any]],
     pred_rows: list[dict[str, Any]],
+    prediction_basis: str,
     snapshots: dict[date, SnapshotInfo],
     calibration_rows: list[dict[str, Any]],
 ) -> str:
@@ -468,7 +501,8 @@ def build_markdown(
     lines.append(f"- Cost model: {cost_bps:.2f} bps")
     lines.append(f"- Events audited: {len(event_rows)}")
     lines.append(f"- Labeled rows audited: {len(label_rows)}")
-    lines.append(f"- Latest predictions audited: {len(pred_rows)}")
+    lines.append(f"- Prediction basis: {prediction_basis_label(prediction_basis)}")
+    lines.append(f"- Predictions audited: {len(pred_rows)}")
     lines.append("")
 
     lines.append("## Gamma Freshness & Carry")
@@ -612,7 +646,13 @@ def main() -> None:
         snapshots = load_snapshots(conn, args.symbol, end_day=end_day)
         events = load_event_rows(conn, args.symbol, start_ms, end_ms)
         labels = load_labels_by_event(conn, args.symbol, start_ms, end_ms)
-        preds = load_latest_predictions(conn, args.symbol, start_ms, end_ms)
+        preds = load_selected_predictions(
+            conn,
+            args.symbol,
+            start_ms,
+            end_ms,
+            args.prediction_basis,
+        )
         cal = load_daily_calibration(conn, args.calibration_lookback_days)
     finally:
         conn.close()
@@ -625,6 +665,7 @@ def main() -> None:
         event_rows=events,
         label_rows=labels,
         pred_rows=preds,
+        prediction_basis=args.prediction_basis,
         snapshots=snapshots,
         calibration_rows=cal,
     )

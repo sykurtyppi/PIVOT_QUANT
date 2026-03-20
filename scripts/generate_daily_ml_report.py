@@ -24,6 +24,11 @@ from typing import Any
 
 DEFAULT_DB = os.getenv("PIVOT_DB", "data/pivot_events.sqlite")
 DEFAULT_REPORT_DIR = os.getenv("ML_REPORT_DIR", "logs/reports")
+DEFAULT_PREDICTION_BASIS = (
+    os.getenv("ML_DAILY_REPORT_PREDICTION_BASIS", "first") or "first"
+).strip().lower()
+if DEFAULT_PREDICTION_BASIS not in {"first", "latest"}:
+    DEFAULT_PREDICTION_BASIS = "first"
 ROOT = Path(__file__).resolve().parents[1]
 MODEL_DIR = Path(os.getenv("RF_MODEL_DIR", str(ROOT / "data" / "models")))
 DEFAULT_GAMMA_LOG = ROOT / "logs" / "gamma_bridge.log"
@@ -422,12 +427,30 @@ def _prediction_log_expr(pred_cols: set[str], col_name: str) -> str:
     return f"NULL AS {col_name}"
 
 
+def _prediction_order_sql(prediction_basis: str) -> str:
+    basis = str(prediction_basis or "first").strip().lower()
+    if basis == "first":
+        return "ASC"
+    if basis == "latest":
+        return "DESC"
+    raise ValueError(f"Unsupported prediction_basis={prediction_basis!r}")
+
+
+def _prediction_basis_label(prediction_basis: str) -> str:
+    basis = str(prediction_basis or "first").strip().lower()
+    if basis == "latest":
+        return "latest prediction per event"
+    return "first prediction per event"
+
+
 def fetch_labeled_records(
     conn: sqlite3.Connection,
     start_ms: int,
     end_ms: int,
     include_preview: bool,
+    prediction_basis: str,
 ) -> list[dict[str, Any]]:
+    pred_order = _prediction_order_sql(prediction_basis)
     pred_cols = {r[1] for r in conn.execute("PRAGMA table_info(prediction_log)").fetchall()}
     has_preview = "is_preview" in pred_cols
     quality_flags_expr = _prediction_log_expr(pred_cols, "quality_flags")
@@ -446,14 +469,14 @@ def fetch_labeled_records(
         preview_filter = "AND COALESCE(lp.is_preview, 0) = 0"
 
     sql = f"""
-        WITH latest_pred AS (
+        WITH selected_pred AS (
             SELECT *
             FROM (
                 SELECT
                     pl.*,
                     ROW_NUMBER() OVER (
                         PARTITION BY pl.event_id
-                        ORDER BY pl.ts_prediction DESC
+                        ORDER BY pl.ts_prediction {pred_order}
                     ) AS rn
                 FROM prediction_log pl
             )
@@ -500,7 +523,7 @@ def fetch_labeled_records(
             el.return_bps,
             el.mfe_bps,
             el.mae_bps
-        FROM latest_pred lp
+        FROM selected_pred lp
         JOIN touch_events te ON te.event_id = lp.event_id
         JOIN event_labels el ON el.event_id = lp.event_id
         WHERE te.ts_event >= ? AND te.ts_event < ?
@@ -516,7 +539,9 @@ def fetch_latest_predictions(
     start_ms: int,
     end_ms: int,
     include_preview: bool,
+    prediction_basis: str,
 ) -> list[dict[str, Any]]:
+    pred_order = _prediction_order_sql(prediction_basis)
     pred_cols = {r[1] for r in conn.execute("PRAGMA table_info(prediction_log)").fetchall()}
     has_preview = "is_preview" in pred_cols
     quality_flags_expr = _prediction_log_expr(pred_cols, "quality_flags")
@@ -535,14 +560,14 @@ def fetch_latest_predictions(
         preview_filter = "AND COALESCE(lp.is_preview, 0) = 0"
 
     sql = f"""
-        WITH latest_pred AS (
+        WITH selected_pred AS (
             SELECT *
             FROM (
                 SELECT
                     pl.*,
                     ROW_NUMBER() OVER (
                         PARTITION BY pl.event_id
-                        ORDER BY pl.ts_prediction DESC
+                        ORDER BY pl.ts_prediction {pred_order}
                     ) AS rn
                 FROM prediction_log pl
             )
@@ -583,7 +608,7 @@ def fetch_latest_predictions(
             te.touch_side,
             te.regime_type,
             te.rv_regime
-        FROM latest_pred lp
+        FROM selected_pred lp
         JOIN touch_events te ON te.event_id = lp.event_id
         WHERE te.ts_event >= ? AND te.ts_event < ?
         {preview_filter}
@@ -1652,6 +1677,7 @@ def render_report(
     start_ms: int,
     end_ms: int,
     predictions: list[dict[str, Any]],
+    prediction_basis: str,
     labeled_records: list[dict[str, Any]],
     bundles: list[MetricBundle],
     analog_summaries: list[AnalogHorizonSummary],
@@ -1684,6 +1710,7 @@ def render_report(
         session_stale_hours=stale_hours_session,
     )
     report_date_str = report_day.strftime("%Y-%m-%d")
+    prediction_basis_label = _prediction_basis_label(prediction_basis)
 
     total_preds = len(predictions)
     total_labeled = len(labeled_records)
@@ -1696,6 +1723,7 @@ def render_report(
     lines.append(f"- Window (ET): {ts_to_et(start_ms)} -> {ts_to_et(end_ms)}")
     lines.append(f"- Model: `{model_version}` (feature `{feature_version}`)")
     lines.append(f"- Trained End: {trained_end}")
+    lines.append(f"- Prediction basis for scored rows: {prediction_basis_label}")
     lines.append(
         f"- Model Staleness: "
         f"{f'{stale_hours_session:.1f}h' if stale_hours_session is not None else '--'} "
@@ -1711,7 +1739,7 @@ def render_report(
     lines.append("")
     lines.append("## Headline Counts")
     lines.append("")
-    lines.append(f"- Scored predictions (latest per event): {total_preds}")
+    lines.append(f"- Scored predictions ({prediction_basis_label}): {total_preds}")
     lines.append(f"- Unique events scored: {total_events}")
     lines.append(f"- Labeled prediction rows (matured horizons): {total_labeled}")
     tradeable_matured_signals = sum(
@@ -2072,6 +2100,15 @@ def main() -> None:
             "(default: ML_ANALOG_PROMOTION_EVAL_MODE or blend)"
         ),
     )
+    parser.add_argument(
+        "--prediction-basis",
+        choices=("first", "latest"),
+        default=DEFAULT_PREDICTION_BASIS,
+        help=(
+            "Prediction row basis for scored rows "
+            "(first=execution fidelity, latest=replay view)."
+        ),
+    )
     parser.add_argument("--print-path", action="store_true", default=True, help="Print output report path")
     args = parser.parse_args()
 
@@ -2099,9 +2136,27 @@ def main() -> None:
         gate_eval_mode = str(args.analog_gate_eval_mode or ANALOG_PROMOTION_EVAL_MODE).strip().lower()
         if gate_eval_mode not in {"analog", "blend"}:
             gate_eval_mode = ANALOG_PROMOTION_EVAL_MODE
-        predictions = fetch_latest_predictions(conn, start_ms, end_ms, args.include_preview)
-        labeled_records = fetch_labeled_records(conn, start_ms, end_ms, args.include_preview)
-        labeled_records_gate = fetch_labeled_records(conn, gate_start_ms, end_ms, args.include_preview)
+        predictions = fetch_latest_predictions(
+            conn,
+            start_ms,
+            end_ms,
+            args.include_preview,
+            args.prediction_basis,
+        )
+        labeled_records = fetch_labeled_records(
+            conn,
+            start_ms,
+            end_ms,
+            args.include_preview,
+            args.prediction_basis,
+        )
+        labeled_records_gate = fetch_labeled_records(
+            conn,
+            gate_start_ms,
+            end_ms,
+            args.include_preview,
+            args.prediction_basis,
+        )
 
         horizons = REPORT_HORIZONS or [5, 15, 30, 60]
         bundles = [build_horizon_metrics(labeled_records, h) for h in horizons]
@@ -2126,6 +2181,7 @@ def main() -> None:
             start_ms=start_ms,
             end_ms=end_ms,
             predictions=predictions,
+            prediction_basis=args.prediction_basis,
             labeled_records=labeled_records,
             bundles=bundles,
             analog_summaries=analog_summaries,

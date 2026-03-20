@@ -32,6 +32,11 @@ if str(ROOT) not in sys.path:
 from ml.thresholds import directional_return_bps
 
 DEFAULT_DB = os.getenv("PIVOT_DB", str(ROOT / "data" / "pivot_events.sqlite"))
+DEFAULT_PREDICTION_BASIS = (
+    os.getenv("ML_DAILY_REPORT_PREDICTION_BASIS", "first") or "first"
+).strip().lower()
+if DEFAULT_PREDICTION_BASIS not in {"first", "latest"}:
+    DEFAULT_PREDICTION_BASIS = "first"
 DEFAULT_LOG_FILES = [
     ROOT / "logs" / "retrain.log",
     ROOT / "logs" / "ml_server.log",
@@ -93,6 +98,15 @@ def env_bool(name: str, default: bool = False) -> bool:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Send ML daily report notifications.")
     parser.add_argument("--report", required=True, help="Path to markdown report file.")
+    parser.add_argument(
+        "--prediction-basis",
+        choices=("first", "latest"),
+        default=DEFAULT_PREDICTION_BASIS,
+        help=(
+            "Prediction row basis for impact/trade metrics "
+            "(first=execution fidelity, latest=replay view)."
+        ),
+    )
     parser.add_argument(
         "--db",
         default=os.getenv("PIVOT_DB", DEFAULT_DB),
@@ -701,11 +715,20 @@ def count_score_timeouts_in_tail(log_tails: dict[str, str]) -> int:
     return total
 
 
-def compute_impact_stats(db_path: str, report_day: date, include_preview: bool = False) -> dict[str, Any]:
+def compute_impact_stats(
+    db_path: str,
+    report_day: date,
+    include_preview: bool = False,
+    prediction_basis: str | None = None,
+) -> dict[str, Any]:
     spread = float(os.getenv("ML_COST_SPREAD_BPS", "0.8"))
     slippage = float(os.getenv("ML_COST_SLIPPAGE_BPS", "0.4"))
     commission = float(os.getenv("ML_COST_COMMISSION_BPS", "0.1"))
     total_cost = spread + slippage + commission
+
+    prediction_basis = normalize_prediction_basis(
+        prediction_basis or os.getenv("ML_DAILY_REPORT_PREDICTION_BASIS", "first")
+    )
 
     result: dict[str, Any] = {
         "cost_model": {"spread": spread, "slippage": slippage, "commission": commission, "total": total_cost},
@@ -714,6 +737,7 @@ def compute_impact_stats(db_path: str, report_day: date, include_preview: bool =
         "avg_net": None,
         "win_rate_net": None,
         "by_horizon": {},
+        "prediction_basis": prediction_basis,
     }
 
     conn = connect_db_if_exists(db_path)
@@ -749,15 +773,16 @@ def compute_impact_stats(db_path: str, report_day: date, include_preview: bool =
         )
 
         start_ms, end_ms = et_day_bounds_ms(report_day)
+        prediction_order = "ASC" if prediction_basis == "first" else "DESC"
         rows = conn.execute(
             f"""
-            WITH latest_pred AS (
+            WITH selected_pred AS (
                 SELECT *
                 FROM (
                     SELECT pl.*,
                            ROW_NUMBER() OVER (
                              PARTITION BY pl.event_id
-                             ORDER BY pl.ts_prediction DESC
+                             ORDER BY pl.ts_prediction {prediction_order}
                            ) AS rn
                     FROM prediction_log pl
                 )
@@ -771,7 +796,7 @@ def compute_impact_stats(db_path: str, report_day: date, include_preview: bool =
                 {signal_select}
             FROM event_labels el
             JOIN touch_events te ON te.event_id = el.event_id
-            JOIN latest_pred lp ON lp.event_id = el.event_id
+            JOIN selected_pred lp ON lp.event_id = el.event_id
             WHERE te.ts_event >= ? AND te.ts_event < ?
               {preview_filter}
             """,
@@ -939,12 +964,33 @@ def extract_line_value(markdown: str, label: str) -> str | None:
     return clean_inline_markdown(match.group(1))
 
 
+def normalize_prediction_basis(raw: str | None) -> str:
+    basis = (raw or "").strip().lower()
+    return basis if basis in {"first", "latest"} else "first"
+
+
 def parse_report_context(markdown: str, report_path: Path) -> dict[str, str]:
     report_date = "unknown"
     header = markdown.splitlines()[0].strip() if markdown else ""
     date_match = re.search(r"(\d{4}-\d{2}-\d{2})", header)
     if date_match:
         report_date = date_match.group(1)
+
+    basis_line = extract_line_value(markdown, "Prediction basis for scored rows")
+    parsed_basis = "first"
+    if basis_line:
+        lowered = basis_line.lower()
+        if "latest prediction per event" in lowered:
+            parsed_basis = "latest"
+        elif "first prediction per event" in lowered:
+            parsed_basis = "first"
+    basis_label = "latest prediction per event" if parsed_basis == "latest" else "first prediction per event"
+    scored_value = (
+        extract_line_value(markdown, f"Scored predictions ({basis_label})")
+        or extract_line_value(markdown, "Scored predictions (latest per event)")
+        or extract_line_value(markdown, "Scored predictions")
+        or "0"
+    )
 
     return {
         "report_date": report_date,
@@ -953,7 +999,8 @@ def parse_report_context(markdown: str, report_path: Path) -> dict[str, str]:
         "health": extract_line_value(markdown, "Health State") or "unknown",
         "model": extract_line_value(markdown, "Model") or "unknown",
         "staleness": extract_line_value(markdown, "Model Staleness") or "unknown",
-        "scored": extract_line_value(markdown, "Scored predictions (latest per event)") or "0",
+        "prediction_basis": parsed_basis,
+        "scored": scored_value,
         "unique_events": extract_line_value(markdown, "Unique events scored") or "0",
         "labeled_rows": extract_line_value(markdown, "Labeled prediction rows (matured horizons)") or "0",
         "report_path": str(report_path),
@@ -961,12 +1008,13 @@ def parse_report_context(markdown: str, report_path: Path) -> dict[str, str]:
 
 
 def build_short_summary(context: dict[str, str]) -> str:
+    basis_label = "latest prediction per event" if context.get("prediction_basis") == "latest" else "first prediction per event"
     lines = [
         f"PivotQuant Daily ML Report: {context['report_date']}",
         f"Health: {context['health']}",
         f"Model: {context['model']}",
         f"Model staleness: {context['staleness']}",
-        f"Scored predictions: {context['scored']}",
+        f"Scored predictions ({basis_label}): {context['scored']}",
         f"Report file: {context['report_path']}",
     ]
     return "\n".join(lines)
@@ -1173,13 +1221,14 @@ def build_compact_email_body(
     include_log_tails: bool,
 ) -> str:
     lines: list[str] = []
+    basis_label = "latest prediction per event" if context.get("prediction_basis") == "latest" else "first prediction per event"
     lines.append(f"PivotQuant Daily ML Report ({context['report_date']})")
     lines.append("")
     lines.append("Executive Summary")
     lines.append(f"- Health: {context['health']}")
     lines.append(f"- Model: {context['model']}")
     lines.append(f"- Staleness: {context['staleness']}")
-    lines.append(f"- Scored Predictions: {context['scored']}")
+    lines.append(f"- Scored Predictions ({basis_label}): {context['scored']}")
     lines.append(f"- Unique Events Scored: {context['unique_events']}")
     lines.append(f"- Labeled Rows (matured): {context['labeled_rows']}")
     lines.append(f"- Window (ET): {context['window']}")
@@ -1459,6 +1508,10 @@ def main() -> int:
 
     report_text = read_report(report_path)
     context = parse_report_context(report_text, report_path)
+    cli_basis = normalize_prediction_basis(args.prediction_basis)
+    report_basis = normalize_prediction_basis(context.get("prediction_basis"))
+    prediction_basis = report_basis if report_basis in {"first", "latest"} else cli_basis
+    context["prediction_basis"] = prediction_basis
     summary = build_short_summary(context)
     report_day = parse_report_day(context["report_date"])
     db_progress = fetch_db_progress(args.db, report_day)
@@ -1501,7 +1554,7 @@ def main() -> int:
     if previous_report_path and previous_report_path.exists():
         previous_context = parse_report_context(read_report(previous_report_path), previous_report_path)
     trend_lines = build_trend_summary(context, previous_context, db_progress, db_prev, failures_today, failures_prev)
-    impact_stats = compute_impact_stats(args.db, report_day)
+    impact_stats = compute_impact_stats(args.db, report_day, prediction_basis=prediction_basis)
     impact_lines = build_impact_lines(impact_stats)
     action_flags = build_action_flags(context, db_progress, retrain_status, failures_today, impact_stats)
     compact_body = build_compact_email_body(
