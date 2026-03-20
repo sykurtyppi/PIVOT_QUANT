@@ -3014,6 +3014,15 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("note.style.color = 'var(--warning)';", dashboard)
         self.assertIn("note.style.color = 'var(--danger)';", dashboard)
 
+    def test_dashboard_ema_warmup_and_tradingview_seed_contract_present(self) -> None:
+        dashboard = (REPO_ROOT / "production_pivot_dashboard.html").read_text(encoding="utf-8")
+        self.assertIn("const EMA_WARMUP_RANGE = '5y';", dashboard)
+        self.assertIn("const EMA_WARMUP_MIN_BARS = EMA_MAX_PERIOD * 3;", dashboard)
+        self.assertIn("function fetchEmaWarmupCandles(symbol, interval, options = {}, isStaleRequest = null)", dashboard)
+        self.assertIn("function clipSeriesToCandles(series, candles)", dashboard)
+        self.assertIn("ema = close;", dashboard)
+        self.assertIn("if (isDailyInterval(interval) && state.candles.length < EMA_WARMUP_MIN_BARS)", dashboard)
+
     def test_dashboard_proxy_ops_status_uses_async_file_reads(self) -> None:
         proxy_source = (REPO_ROOT / "server" / "yahoo_proxy.js").read_text(encoding="utf-8")
         self.assertIn("const fsp = fs.promises;", proxy_source)

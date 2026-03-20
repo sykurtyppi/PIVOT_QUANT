@@ -2209,6 +2209,9 @@
             lastDataQualityLabel: '--',
             lastDataCoverage: null,
             lastBarTs: null,
+            emaWarmupKey: null,
+            emaWarmupCandles: [],
+            emaWarmupFetchedAtMs: 0,
         };
 
         // ── Toast Notification System ──
@@ -2346,6 +2349,10 @@
         const RANGE_ORDER = ['1mo', '3mo', '6mo', '1y'];
         const INTRADAY_INTERVALS = new Set(['1m', '5m', '15m', '30m', '60m', '90m']);
         const ML_SUPPORTED_SYMBOLS = new Set(['SPY']);
+        const EMA_WARMUP_RANGE = '5y';
+        const EMA_MAX_PERIOD = 200;
+        const EMA_WARMUP_MIN_BARS = EMA_MAX_PERIOD * 3;
+        const EMA_WARMUP_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
         const INTRADAY_RANGE_CAP = {
             '5m': '1mo',
             '15m': '3mo',
@@ -3677,7 +3684,7 @@
 
         function calculateEMA(candles, period = 9) {
             if (!candles.length) return [];
-            const k = 2 / (period + 1);
+            const alpha = 2 / (period + 1);
             const emaSeries = [];
             let ema = null;
 
@@ -3686,18 +3693,28 @@
                 if (!Number.isFinite(close)) continue;
 
                 if (ema === null) {
-                    if (i < period - 1) continue;
-                    const slice = candles.slice(i - period + 1, i + 1).map((c) => c.close);
-                    const sma = slice.reduce((sum, v) => sum + v, 0) / slice.length;
-                    ema = sma;
+                    // Match TradingView-style EMA seeding from first valid close.
+                    ema = close;
                 } else {
-                    ema = close * k + ema * (1 - k);
+                    ema = close * alpha + ema * (1 - alpha);
                 }
 
                 emaSeries.push({ time: candles[i].time, value: ema });
             }
 
             return emaSeries;
+        }
+
+        function isDailyInterval(interval) {
+            return interval === '1d' || interval === 'daily';
+        }
+
+        function clipSeriesToCandles(series, candles) {
+            if (!Array.isArray(series) || !series.length || !Array.isArray(candles) || !candles.length) {
+                return [];
+            }
+            const visibleTimes = new Set(candles.map((candle) => candle.time));
+            return series.filter((point) => visibleTimes.has(point.time));
         }
 
         function calculateVWAP(candles, timeZone) {
@@ -5472,6 +5489,50 @@
             return normalizeDailyCandles(merged, timeZone);
         }
 
+        async function fetchEmaWarmupCandles(symbol, interval, options = {}, isStaleRequest = null) {
+            if (!isDailyInterval(interval)) return [];
+            const cacheKey = `${String(symbol || '').toUpperCase()}|${interval}|${EMA_WARMUP_RANGE}`;
+            const cacheAgeMs = Date.now() - Number(state.emaWarmupFetchedAtMs || 0);
+            if (
+                state.emaWarmupKey === cacheKey
+                && Array.isArray(state.emaWarmupCandles)
+                && state.emaWarmupCandles.length > 0
+                && cacheAgeMs >= 0
+                && cacheAgeMs <= EMA_WARMUP_CACHE_TTL_MS
+            ) {
+                return state.emaWarmupCandles;
+            }
+
+            let data = null;
+            try {
+                data = await fetchIbkrMarket(symbol, interval, EMA_WARMUP_RANGE, options);
+                if (typeof isStaleRequest === 'function' && isStaleRequest()) return [];
+                if (!data?.candles?.length) {
+                    throw new Error('IBKR warmup data unavailable');
+                }
+            } catch (error) {
+                console.warn('IBKR EMA warmup fetch failed, falling back to dashboard market API', error);
+                data = await fetchDashboardMarket(symbol, interval, EMA_WARMUP_RANGE, options);
+                if (typeof isStaleRequest === 'function' && isStaleRequest()) return [];
+                if (!data?.candles?.length) {
+                    data = await fetchYahooWithBackoff(symbol, EMA_WARMUP_RANGE, interval, 4, options);
+                    if (typeof isStaleRequest === 'function' && isStaleRequest()) return [];
+                }
+            }
+
+            const warmupCandles = Array.isArray(data?.candles) ? data.candles : [];
+            if (!warmupCandles.length) return [];
+
+            const timeZone = data?.session?.timeZone || state.timeZone || 'America/New_York';
+            const normalized = normalizeDailyCandles(warmupCandles, timeZone);
+            if (!normalized.length) return [];
+
+            state.emaWarmupKey = cacheKey;
+            state.emaWarmupCandles = normalized;
+            state.emaWarmupFetchedAtMs = Date.now();
+            return normalized;
+        }
+
         async function postBars(bars, symbol, intervalSec) {
             if (!bars?.length) return;
             const barInterval = Number.isFinite(intervalSec) ? intervalSec : intervalToSeconds(state.intradayInterval);
@@ -6764,11 +6825,21 @@
                     state.chart.timeScale().fitContent();
                 }
 
-                const ema9Series = calculateEMA(state.candles, 9);
-                const ema21Series = calculateEMA(state.candles, 21);
-                const ema50Series = calculateEMA(state.candles, 50);
-                const ema100Series = calculateEMA(state.candles, 100);
-                const ema200Series = calculateEMA(state.candles, 200);
+                let emaSourceCandles = state.candles;
+                if (isDailyInterval(interval) && state.candles.length < EMA_WARMUP_MIN_BARS) {
+                    const warmupCandles = await fetchEmaWarmupCandles(symbol, interval, requestOptions, isStaleRequest);
+                    if (isStaleRequest()) return;
+                    if (warmupCandles.length) {
+                        emaSourceCandles = mergeDailyCandles(state.candles, warmupCandles, state.timeZone);
+                        setDebug(`EMA warmup loaded (${emaSourceCandles.length} bars source, ${state.candles.length} visible).`);
+                    }
+                }
+
+                const ema9Series = clipSeriesToCandles(calculateEMA(emaSourceCandles, 9), state.candles);
+                const ema21Series = clipSeriesToCandles(calculateEMA(emaSourceCandles, 21), state.candles);
+                const ema50Series = clipSeriesToCandles(calculateEMA(emaSourceCandles, 50), state.candles);
+                const ema100Series = clipSeriesToCandles(calculateEMA(emaSourceCandles, 100), state.candles);
+                const ema200Series = clipSeriesToCandles(calculateEMA(emaSourceCandles, 200), state.candles);
                 if (state.ema9Series) {
                     state.ema9Series.setData(ema9Series);
                 }
