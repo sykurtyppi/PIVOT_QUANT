@@ -20,6 +20,9 @@ ET_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone.utc
 DEFAULT_DB = os.getenv("PIVOT_DB", "data/pivot_events.sqlite")
 DEFAULT_OUTPUT = "logs/reports/weekly_policy_review_latest.md"
 DEFAULT_MAX_PRED_LAG_HOURS = float(os.getenv("ML_WEEKLY_REVIEW_MAX_PRED_LAG_HOURS", "6"))
+DEFAULT_SCORED_EVENT_BASIS = os.getenv("ML_WEEKLY_REVIEW_SCORED_EVENT_BASIS", "first").strip().lower()
+if DEFAULT_SCORED_EVENT_BASIS not in {"first", "latest"}:
+    DEFAULT_SCORED_EVENT_BASIS = "first"
 DEFAULT_COST_BPS = float(os.getenv("ML_COST_SPREAD_BPS", "0.8")) + float(
     os.getenv("ML_COST_SLIPPAGE_BPS", "0.4")
 ) + float(os.getenv("ML_COST_COMMISSION_BPS", "0.1"))
@@ -90,6 +93,15 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=DEFAULT_MAX_PRED_LAG_HOURS,
         help="Max prediction lag from event time in hours for weekly metrics (default: 6)",
+    )
+    parser.add_argument(
+        "--scored-event-basis",
+        choices=("first", "latest"),
+        default=DEFAULT_SCORED_EVENT_BASIS,
+        help=(
+            "Prediction row basis for scored-event policy metrics "
+            "(first=execution fidelity, latest=replay view)."
+        ),
     )
     parser.add_argument("--output", default=DEFAULT_OUTPUT, help="Markdown output path")
     return parser.parse_args()
@@ -231,9 +243,13 @@ def load_scored_events(
     end_ms: int,
     source: str,
     max_pred_lag_hours: float,
+    scored_event_basis: str,
 ) -> list[ScoredEvent]:
+    if scored_event_basis not in {"first", "latest"}:
+        raise ValueError(f"Unsupported scored_event_basis={scored_event_basis!r}")
     src_filter = source_filter_sql(conn, source)
     max_pred_lag_ms = int(float(max_pred_lag_hours) * 3600 * 1000)
+    pred_order = "ASC" if scored_event_basis == "first" else "DESC"
     pred_cols = table_columns(conn, "prediction_log")
     trade_regime_expr = "lp.trade_regime AS trade_regime" if "trade_regime" in pred_cols else "NULL AS trade_regime"
     regime_policy_expr = "lp.regime_policy_json AS regime_policy_json" if "regime_policy_json" in pred_cols else "NULL AS regime_policy_json"
@@ -249,7 +265,7 @@ def load_scored_events(
               AND te.ts_event >= ?
               AND te.ts_event < ?
         ),
-        latest_pred AS (
+        selected_pred AS (
             SELECT *
             FROM (
                 SELECT
@@ -257,7 +273,7 @@ def load_scored_events(
                     st.ts_event AS ts_event_ms,
                     ROW_NUMBER() OVER (
                         PARTITION BY pl.event_id
-                        ORDER BY pl.ts_prediction DESC
+                        ORDER BY pl.ts_prediction {pred_order}
                     ) AS rn
                 FROM scoped_touch st
                 JOIN prediction_log pl ON pl.event_id = st.event_id
@@ -281,7 +297,7 @@ def load_scored_events(
             lp.signal_30m,
             lp.signal_60m,
             el.return_bps
-        FROM latest_pred lp
+        FROM selected_pred lp
         JOIN scoped_touch st ON st.event_id = lp.event_id
         JOIN event_labels el ON el.event_id = lp.event_id AND el.horizon_min = lp.best_horizon
         WHERE 1 = 1
@@ -621,6 +637,7 @@ def build_report(
     *,
     symbol: str,
     source: str,
+    scored_event_basis: str,
     start_day: date,
     end_day: date,
     events: list[ScoredEvent],
@@ -664,13 +681,15 @@ def build_report(
         if coverage_status == "FAIL"
         else "- Policy Change Gate: ALLOW POLICY CHANGES (coverage SLA PASS)"
     )
+    basis_label = "first prediction per event" if scored_event_basis == "first" else "latest prediction per event"
 
     lines: list[str] = []
     lines.append(f"# Weekly Policy Review ({symbol.upper()})")
     lines.append("")
     lines.append(f"- Window (ET): {start_day.isoformat()} -> {end_day.isoformat()}")
     lines.append(f"- Source: {source}")
-    lines.append(f"- Events (latest prediction per event): {len(events)}")
+    lines.append(f"- Scored-event basis: {basis_label}")
+    lines.append(f"- Events ({basis_label}): {len(events)}")
     lines.append(f"- Primary cost model: {base_cost_bps:.2f} bps")
     lines.append(policy_gate_line)
     lines.append("")
@@ -953,6 +972,7 @@ def main() -> None:
             end_ms=end_ms,
             source=args.source,
             max_pred_lag_hours=float(args.max_pred_lag_hours),
+            scored_event_basis=str(args.scored_event_basis).strip().lower(),
         )
         calibration_rows, has_daily_ml_metrics = load_calibration_rows(
             conn,
@@ -980,6 +1000,7 @@ def main() -> None:
     report = build_report(
         symbol=args.symbol,
         source=args.source,
+        scored_event_basis=str(args.scored_event_basis).strip().lower(),
         start_day=start_day,
         end_day=end_day,
         events=events,

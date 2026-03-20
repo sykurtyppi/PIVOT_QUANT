@@ -6276,6 +6276,7 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, msg=f"{proc.stdout}\n{proc.stderr}")
         text = out_md.read_text(encoding="utf-8")
         self.assertIn("- Policy Change Gate: ALLOW POLICY CHANGES (coverage SLA PASS)", text)
+        self.assertIn("- Scored-event basis: first prediction per event", text)
         self.assertIn("## Prediction Coverage SLA", text)
         self.assertIn("- Timely prediction lag filter: <= 6.00 hours", text)
         self.assertIn("- Overall coverage: 100.00% (2/2)", text)
@@ -6428,11 +6429,175 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("- Overall coverage: 0.00% (0/1)", text)
         self.assertIn("- Coverage status: FAIL", text)
         self.assertIn("- Policy Change Gate: BLOCK POLICY CHANGES (coverage SLA FAIL)", text)
-        self.assertIn("- Events (latest prediction per event): 0", text)
+        self.assertIn("- Scored-event basis: first prediction per event", text)
+        self.assertIn("- Events (first prediction per event): 0", text)
         self.assertIn("## Prediction Lag Profile (First Live Prediction)", text)
         self.assertIn("- >6h: 1", text)
         self.assertIn("- No prediction: 0", text)
         self.assertIn("| 2026-03-06 | 1 | 0 | 0 | 0 | 1 | 0 |", text)
+
+    def test_weekly_policy_review_supports_first_vs_latest_scored_event_basis(self) -> None:
+        db = self.tmp / "weekly_policy_review_basis.sqlite"
+        conn = sqlite3.connect(str(db))
+        try:
+            conn.execute(
+                """
+                CREATE TABLE touch_events(
+                    event_id TEXT PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    ts_event INTEGER NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE event_labels(
+                    event_id TEXT NOT NULL,
+                    horizon_min INTEGER NOT NULL,
+                    return_bps REAL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE prediction_log(
+                    event_id TEXT NOT NULL,
+                    ts_prediction INTEGER NOT NULL,
+                    is_preview INTEGER NOT NULL DEFAULT 0,
+                    best_horizon INTEGER,
+                    abstain INTEGER NOT NULL DEFAULT 0,
+                    trade_regime TEXT,
+                    regime_policy_json TEXT,
+                    selected_policy TEXT,
+                    signal_5m TEXT,
+                    signal_15m TEXT,
+                    signal_30m TEXT,
+                    signal_60m TEXT
+                )
+                """
+            )
+
+            ts_event = int(datetime(2026, 3, 6, 15, 0, tzinfo=timezone.utc).timestamp() * 1000)
+            ts_pred_first = ts_event + (30 * 60 * 1000)  # timely first prediction
+            ts_pred_latest = ts_event + (20 * 3600 * 1000)  # replay-style later prediction
+
+            conn.execute(
+                "INSERT INTO touch_events(event_id, symbol, ts_event) VALUES (?, ?, ?)",
+                ("evt_weekly_basis_1", "SPY", ts_event),
+            )
+            conn.execute(
+                "INSERT INTO event_labels(event_id, horizon_min, return_bps) VALUES (?, ?, ?)",
+                ("evt_weekly_basis_1", 60, -5.0),
+            )
+            conn.execute(
+                """
+                INSERT INTO prediction_log(
+                    event_id, ts_prediction, is_preview, best_horizon, abstain,
+                    trade_regime, regime_policy_json, selected_policy,
+                    signal_5m, signal_15m, signal_30m, signal_60m
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "evt_weekly_basis_1",
+                    ts_pred_first,
+                    0,
+                    60,
+                    0,
+                    "compression",
+                    json.dumps({"atr_zone": "ultra"}),
+                    "baseline",
+                    "no_edge",
+                    "no_edge",
+                    "no_edge",
+                    "break",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO prediction_log(
+                    event_id, ts_prediction, is_preview, best_horizon, abstain,
+                    trade_regime, regime_policy_json, selected_policy,
+                    signal_5m, signal_15m, signal_30m, signal_60m
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "evt_weekly_basis_1",
+                    ts_pred_latest,
+                    0,
+                    60,
+                    0,
+                    "compression",
+                    json.dumps({"atr_zone": "ultra"}),
+                    "baseline",
+                    "no_edge",
+                    "no_edge",
+                    "no_edge",
+                    "no_edge",
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        out_first = self.tmp / "weekly_policy_review_basis_first.md"
+        proc_first = run_cmd(
+            [
+                PYTHON,
+                "scripts/weekly_policy_review.py",
+                "--db",
+                str(db),
+                "--symbol",
+                "SPY",
+                "--source",
+                "live",
+                "--start-date",
+                "2026-03-06",
+                "--end-date",
+                "2026-03-06",
+                "--max-pred-lag-hours",
+                "72",
+                "--scored-event-basis",
+                "first",
+                "--output",
+                str(out_first),
+            ],
+            cwd=REPO_ROOT,
+        )
+        self.assertEqual(proc_first.returncode, 0, msg=f"{proc_first.stdout}\n{proc_first.stderr}")
+        text_first = out_first.read_text(encoding="utf-8")
+        self.assertIn("- Scored-event basis: first prediction per event", text_first)
+        self.assertIn("- Events (first prediction per event): 1", text_first)
+        self.assertIn("| Baseline | 1 |", text_first)
+
+        out_latest = self.tmp / "weekly_policy_review_basis_latest.md"
+        proc_latest = run_cmd(
+            [
+                PYTHON,
+                "scripts/weekly_policy_review.py",
+                "--db",
+                str(db),
+                "--symbol",
+                "SPY",
+                "--source",
+                "live",
+                "--start-date",
+                "2026-03-06",
+                "--end-date",
+                "2026-03-06",
+                "--max-pred-lag-hours",
+                "72",
+                "--scored-event-basis",
+                "latest",
+                "--output",
+                str(out_latest),
+            ],
+            cwd=REPO_ROOT,
+        )
+        self.assertEqual(proc_latest.returncode, 0, msg=f"{proc_latest.stdout}\n{proc_latest.stderr}")
+        text_latest = out_latest.read_text(encoding="utf-8")
+        self.assertIn("- Scored-event basis: latest prediction per event", text_latest)
+        self.assertIn("- Events (latest prediction per event): 1", text_latest)
+        self.assertIn("| Baseline | 0 |", text_latest)
 
     def test_generate_daily_report_tradeability_note_contract_present(self) -> None:
         source = (REPO_ROOT / "scripts" / "generate_daily_ml_report.py").read_text(encoding="utf-8")
