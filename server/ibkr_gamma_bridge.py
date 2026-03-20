@@ -217,6 +217,19 @@ def pick_expiries(expirations, mode):
         return []
 
     today = _utc_today_yyyymmdd()
+
+    def _parse_expiry(exp):
+        try:
+            return datetime.strptime(exp, "%Y%m%d")
+        except ValueError:
+            return None
+
+    def _is_monthly(dt):
+        return 15 <= dt.day <= 21 and dt.weekday() == 4
+
+    def _is_quarterly(dt):
+        return _is_monthly(dt) and dt.month in (3, 6, 9, 12)
+
     if mode == "0dte":
         if today in exp_list:
             return [today]
@@ -230,13 +243,35 @@ def pick_expiries(expirations, mode):
 
     if mode == "monthly":
         for exp in exp_list:
-            try:
-                dt = datetime.strptime(exp, "%Y%m%d")
-                if 15 <= dt.day <= 21 and dt.weekday() == 4:
-                    return [exp]
-            except ValueError:
+            dt = _parse_expiry(exp)
+            if dt is None:
                 continue
+            if exp >= today and _is_monthly(dt):
+                return [exp]
+        for exp in exp_list:
+            dt = _parse_expiry(exp)
+            if dt is None:
+                continue
+            if _is_monthly(dt):
+                return [exp]
         return [exp_list[0]]
+
+    if mode == "quarterly":
+        for exp in exp_list:
+            dt = _parse_expiry(exp)
+            if dt is None:
+                continue
+            if exp >= today and _is_quarterly(dt):
+                return [exp]
+        for exp in exp_list:
+            dt = _parse_expiry(exp)
+            if dt is None:
+                continue
+            if _is_quarterly(dt):
+                return [exp]
+        # Fallback to monthly/front behavior if no quarterly expiry is present.
+        monthly = pick_expiries(exp_list, "monthly")
+        return monthly if monthly else pick_expiries(exp_list, "front")
 
     if mode == "all":
         return exp_list[: max(1, IB_MAX_EXPIRIES)]

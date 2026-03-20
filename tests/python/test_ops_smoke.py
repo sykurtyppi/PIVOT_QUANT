@@ -2926,6 +2926,12 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("x-forwarded-for", proxy_source)
         self.assertIn("url.pathname === '/health'", proxy_source)
 
+    def test_dashboard_proxy_yahoo_gamma_quarterly_expiry_contract_present(self) -> None:
+        proxy_source = (REPO_ROOT / "server" / "yahoo_proxy.js").read_text(encoding="utf-8")
+        self.assertIn("function isQuarterlyExpiry(expiryYmd)", proxy_source)
+        self.assertIn("if (safeMode === 'quarterly')", proxy_source)
+        self.assertIn("isQuarterlyExpiry(exp)", proxy_source)
+
     def test_dashboard_proxy_runtime_architecture_live_endpoint(self) -> None:
         if shutil.which("node") is None:
             self.skipTest("node is not available in PATH")
@@ -3321,6 +3327,19 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("dte_days = _EXPIRY_MODE_DTE.get(mode, MDA_GAMMA_DTE_DAYS)", source)
         self.assertIn('cache_key = f"{symbol.upper()}:{mode or \'default\'}"', source)
         self.assertIn("payload = fetch_gamma_marketdata(symbol, expiry_mode=expiry)", source)
+
+    def test_ibkr_bridge_pick_expiries_supports_quarterly_mode(self) -> None:
+        bridge = load_module(
+            "pq_ibkr_pick_expiries_quarterly_test",
+            REPO_ROOT / "server" / "ibkr_gamma_bridge.py",
+        )
+        original_today = bridge._utc_today_yyyymmdd
+        try:
+            bridge._utc_today_yyyymmdd = lambda: "20260319"
+            expiries = ["20260320", "20260327", "20260417", "20260619", "20260918"]
+            self.assertEqual(bridge.pick_expiries(expiries, "quarterly"), ["20260320"])
+        finally:
+            bridge._utc_today_yyyymmdd = original_today
 
     def test_ibkr_bridge_market_close_uses_new_york_timezone(self) -> None:
         bridge = load_module(

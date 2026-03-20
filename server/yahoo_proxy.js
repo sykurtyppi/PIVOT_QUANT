@@ -1314,6 +1314,13 @@ function isMonthlyExpiry(expiryYmd) {
   return weekday === 5 && day >= 15 && day <= 21;
 }
 
+function isQuarterlyExpiry(expiryYmd) {
+  const value = String(expiryYmd || '');
+  if (!isMonthlyExpiry(value)) return false;
+  const month = Number(value.slice(4, 6));
+  return month === 3 || month === 6 || month === 9 || month === 12;
+}
+
 function pickOptionsExpiry(expirations, mode) {
   const normalized = Array.from(
     new Set(
@@ -1332,6 +1339,13 @@ function pickOptionsExpiry(expirations, mode) {
   }
 
   if (safeMode === 'monthly') {
+    const monthly = normalized.filter((exp) => isMonthlyExpiry(exp) && exp >= today);
+    if (monthly.length) return monthly[0];
+  }
+
+  if (safeMode === 'quarterly') {
+    const quarterly = normalized.filter((exp) => isQuarterlyExpiry(exp) && exp >= today);
+    if (quarterly.length) return quarterly[0];
     const monthly = normalized.filter((exp) => isMonthlyExpiry(exp) && exp >= today);
     if (monthly.length) return monthly[0];
   }
