@@ -64,6 +64,34 @@ def _env_n_jobs(name: str, default: int) -> int:
     return value
 
 
+def _parse_reject_or_breakout_filter_rules(raw: str) -> dict[int, set[int]]:
+    rules: dict[int, set[int]] = {}
+    if not raw:
+        return rules
+    for token in raw.replace(";", ",").split(","):
+        token = token.strip()
+        if not token or ":" not in token:
+            continue
+        horizon_raw, values_raw = token.split(":", 1)
+        horizon_norm = horizon_raw.strip().lower().rstrip("m")
+        if not horizon_norm.isdigit():
+            continue
+        horizon = int(horizon_norm)
+        if horizon not in {5, 15, 30, 60}:
+            continue
+        values: set[int] = set()
+        for value_token in values_raw.replace("/", "|").split("|"):
+            value_token = value_token.strip()
+            if not value_token or not value_token.lstrip("-").isdigit():
+                continue
+            value = int(value_token)
+            if value in {-1, 0, 1}:
+                values.add(value)
+        if values:
+            rules[horizon] = values
+    return rules
+
+
 ROOT = Path(__file__).resolve().parents[1]
 ANALOG_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone.utc
 if str(ROOT) not in sys.path:
@@ -120,6 +148,9 @@ ML_REJECT_OR_BREAKOUT_FILTER_BLOCK_VALUES = {
 }
 if not ML_REJECT_OR_BREAKOUT_FILTER_BLOCK_VALUES:
     ML_REJECT_OR_BREAKOUT_FILTER_BLOCK_VALUES = {-1}
+ML_REJECT_OR_BREAKOUT_FILTER_RULES = _parse_reject_or_breakout_filter_rules(
+    os.getenv("ML_REJECT_OR_BREAKOUT_FILTER_RULES", "")
+)
 ML_REGIME_THRESHOLD_MAX_DELTA = max(
     0.0,
     min(0.20, float(os.getenv("ML_REGIME_THRESHOLD_MAX_DELTA", "0.05"))),
@@ -1807,6 +1838,8 @@ async def health():
             "write_fail_total_exceeded",
         )
     )
+    or_breakout_rules = _effective_reject_or_breakout_filter_rules()
+    or_breakout_block_values = sorted({v for values in or_breakout_rules.values() for v in values})
 
     result = {
         "status": status,
@@ -1839,8 +1872,9 @@ async def health():
             },
             "reject_or_breakout": {
                 "mode": ML_REJECT_OR_BREAKOUT_FILTER_MODE,
-                "horizons": sorted(ML_REJECT_OR_BREAKOUT_FILTER_HORIZONS),
-                "block_values": sorted(ML_REJECT_OR_BREAKOUT_FILTER_BLOCK_VALUES),
+                "horizons": sorted(or_breakout_rules),
+                "block_values": or_breakout_block_values,
+                "rules": _serialize_reject_or_breakout_filter_rules(or_breakout_rules),
             }
         },
         "analogs": {
@@ -2046,6 +2080,60 @@ def _to_bool(value) -> bool | None:
         if norm in {"0", "false", "no", "off"}:
             return False
     return None
+
+
+def _effective_reject_or_breakout_filter_rules() -> dict[int, set[int]]:
+    rules: dict[int, set[int]] = {}
+    if isinstance(ML_REJECT_OR_BREAKOUT_FILTER_RULES, dict) and ML_REJECT_OR_BREAKOUT_FILTER_RULES:
+        for horizon_raw, values_raw in ML_REJECT_OR_BREAKOUT_FILTER_RULES.items():
+            try:
+                horizon = int(horizon_raw)
+            except Exception:
+                continue
+            if horizon not in {5, 15, 30, 60}:
+                continue
+            values: set[int] = set()
+            if isinstance(values_raw, (set, list, tuple)):
+                iterable = values_raw
+            else:
+                iterable = [values_raw]
+            for value_raw in iterable:
+                try:
+                    value = int(value_raw)
+                except Exception:
+                    continue
+                if value in {-1, 0, 1}:
+                    values.add(value)
+            if values:
+                rules[horizon] = values
+        if rules:
+            return rules
+    fallback_values = {
+        int(value)
+        for value in ML_REJECT_OR_BREAKOUT_FILTER_BLOCK_VALUES
+        if int(value) in {-1, 0, 1}
+    }
+    if not fallback_values:
+        fallback_values = {-1}
+    fallback_horizons = {
+        int(horizon)
+        for horizon in ML_REJECT_OR_BREAKOUT_FILTER_HORIZONS
+        if int(horizon) in {5, 15, 30, 60}
+    }
+    if not fallback_horizons:
+        fallback_horizons = {15}
+    for horizon in sorted(fallback_horizons):
+        rules[horizon] = set(fallback_values)
+    return rules
+
+
+def _serialize_reject_or_breakout_filter_rules(rules: dict[int, set[int]]) -> dict[str, list[int]]:
+    out: dict[str, list[int]] = {}
+    for horizon in sorted(rules):
+        values = sorted(int(v) for v in rules[horizon] if int(v) in {-1, 0, 1})
+        if values:
+            out[str(horizon)] = values
+    return out
 
 
 def _clamp_threshold(value: float) -> float:
@@ -2910,26 +2998,33 @@ def _score_event(event: dict):
     event_or_breakout = _to_int(event.get("or_breakout"))
     if event_or_breakout is None:
         event_or_breakout = _to_int(features.get("or_breakout"))
+    or_breakout_rules = _effective_reject_or_breakout_filter_rules()
+    blocked_values = sorted({v for values in or_breakout_rules.values() for v in values})
     or_breakout_filter_info = {
         "mode": ML_REJECT_OR_BREAKOUT_FILTER_MODE,
         "event_or_breakout": event_or_breakout,
-        "horizons": sorted(ML_REJECT_OR_BREAKOUT_FILTER_HORIZONS),
-        "block_values": sorted(ML_REJECT_OR_BREAKOUT_FILTER_BLOCK_VALUES),
+        "horizons": sorted(or_breakout_rules),
+        "block_values": blocked_values,
+        "rules": _serialize_reject_or_breakout_filter_rules(or_breakout_rules),
         "candidate_count": 0,
         "applied_count": 0,
         "signal_diffs": {},
     }
     if (
         ML_REJECT_OR_BREAKOUT_FILTER_MODE in {"shadow", "active"}
-        and event_or_breakout in ML_REJECT_OR_BREAKOUT_FILTER_BLOCK_VALUES
+        and event_or_breakout is not None
+        and bool(or_breakout_rules)
     ):
         available_horizons = set(all_horizons)
         configured_horizons = {
             horizon
-            for horizon in ML_REJECT_OR_BREAKOUT_FILTER_HORIZONS
+            for horizon in or_breakout_rules
             if horizon in available_horizons
         }
         for horizon in sorted(configured_horizons):
+            horizon_block_values = or_breakout_rules.get(horizon, set())
+            if event_or_breakout not in horizon_block_values:
+                continue
             key = f"signal_{horizon}m"
             before = selected_signals.get(key)
             if before != "reject":
@@ -2947,6 +3042,7 @@ def _score_event(event: dict):
                 "after": after,
                 "applied": applied,
                 "or_breakout": event_or_breakout,
+                "blocked_values": sorted(horizon_block_values),
             }
         candidate_count = int(or_breakout_filter_info.get("candidate_count", 0) or 0)
         if candidate_count > 0:

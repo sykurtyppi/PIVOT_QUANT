@@ -3489,6 +3489,7 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("ML_REJECT_OR_BREAKOUT_FILTER_MODE=off", env_example)
         self.assertIn("ML_REJECT_OR_BREAKOUT_FILTER_HORIZONS=", env_example)
         self.assertIn("ML_REJECT_OR_BREAKOUT_FILTER_BLOCK_VALUES=", env_example)
+        self.assertIn("ML_REJECT_OR_BREAKOUT_FILTER_RULES=", env_example)
 
     def test_runtime_requirements_contract_present(self) -> None:
         runtime_reqs = (REPO_ROOT / "requirements-runtime.txt").read_text(encoding="utf-8")
@@ -4049,6 +4050,7 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("ML_SHADOW_HORIZONS", ml_server)
         self.assertIn("ML_REGIME_POLICY_MODE", ml_server)
         self.assertIn("ML_REJECT_OR_BREAKOUT_FILTER_MODE", ml_server)
+        self.assertIn("ML_REJECT_OR_BREAKOUT_FILTER_RULES", ml_server)
         self.assertIn("OR_BREAKOUT_REJECT_FILTER_DIVERGENCE", ml_server)
         self.assertIn("or_breakout_reject_filter", ml_server)
         self.assertIn("regime_policy", ml_server)
@@ -4445,6 +4447,7 @@ class OpsSmokeTests(unittest.TestCase):
         ml_server.ML_ANALOG_DISAGREEMENT_GUARD_MODE = "off"
         ml_server.ML_REJECT_OR_BREAKOUT_FILTER_HORIZONS = {15}
         ml_server.ML_REJECT_OR_BREAKOUT_FILTER_BLOCK_VALUES = {-1}
+        ml_server.ML_REJECT_OR_BREAKOUT_FILTER_RULES = {}
 
         ml_server.registry.models = {
             "reject": {
@@ -4473,6 +4476,7 @@ class OpsSmokeTests(unittest.TestCase):
         shadow_filter = shadow_result["regime_policy"]["or_breakout_reject_filter"]
         self.assertEqual(int(shadow_filter.get("candidate_count")), 1)
         self.assertEqual(int(shadow_filter.get("applied_count")), 0)
+        self.assertEqual(shadow_filter.get("rules"), {"15": [-1]})
         self.assertIn("OR_BREAKOUT_REJECT_FILTER_DIVERGENCE", shadow_result["quality_flags"])
         self.assertEqual(shadow_result["regime_policy"]["selected_policy"], "baseline")
 
@@ -4491,6 +4495,75 @@ class OpsSmokeTests(unittest.TestCase):
         pass_filter = pass_result["regime_policy"]["or_breakout_reject_filter"]
         self.assertEqual(int(pass_filter.get("candidate_count")), 0)
         self.assertEqual(int(pass_filter.get("applied_count")), 0)
+
+    def test_reject_or_breakout_filter_per_horizon_rules(self) -> None:
+        ml_server = load_module("ml_server_or_breakout_filter_rules_runtime", REPO_ROOT / "server" / "ml_server.py")
+
+        class DummyModel:
+            classes_ = np.array([0, 1])
+
+            def __init__(self, prob: float) -> None:
+                self.prob = prob
+
+            def predict_proba(self, _df):
+                return np.array([[1.0 - self.prob, self.prob]], dtype=float)
+
+        ml_server.build_feature_row = lambda event: {"x": 1.0, "or_breakout": event.get("or_breakout")}
+        ml_server.collect_missing = lambda _features: []
+        ml_server.ML_SHADOW_HORIZONS = set()
+        ml_server.ML_REGIME_POLICY_MODE = "off"
+        ml_server.ML_REGIME_GUARD_EXPANSION_NEAR_MODE = "off"
+        ml_server.ML_ANALOG_DISAGREEMENT_GUARD_MODE = "off"
+        ml_server.ML_REJECT_OR_BREAKOUT_FILTER_MODE = "active"
+        ml_server.ML_REJECT_OR_BREAKOUT_FILTER_HORIZONS = {15, 60}
+        ml_server.ML_REJECT_OR_BREAKOUT_FILTER_BLOCK_VALUES = {-1}
+        ml_server.ML_REJECT_OR_BREAKOUT_FILTER_RULES = {15: {-1}, 60: {0}}
+
+        ml_server.registry.models = {
+            "reject": {
+                15: {
+                    "feature_columns": ["x"],
+                    "pipeline": DummyModel(0.85),
+                    "calibration": "sigmoid",
+                },
+                60: {
+                    "feature_columns": ["x"],
+                    "pipeline": DummyModel(0.83),
+                    "calibration": "sigmoid",
+                },
+            },
+            "break": {
+                15: {
+                    "feature_columns": ["x"],
+                    "pipeline": DummyModel(0.10),
+                    "calibration": "sigmoid",
+                },
+                60: {
+                    "feature_columns": ["x"],
+                    "pipeline": DummyModel(0.12),
+                    "calibration": "sigmoid",
+                },
+            },
+        }
+        ml_server.registry.thresholds = {"reject": {15: 0.5, 60: 0.5}, "break": {15: 0.5, 60: 0.5}}
+        ml_server.registry.manifest = {"version": "vtest", "trained_end_ts": int(time.time() * 1000)}
+
+        orb_neg1 = ml_server._score_event({"event_id": "or_breakout_rule_neg1", "or_breakout": -1})
+        self.assertEqual(orb_neg1["signals"].get("signal_15m"), "no_edge")
+        self.assertEqual(orb_neg1["signals"].get("signal_60m"), "reject")
+        self.assertEqual(
+            orb_neg1["regime_policy"]["or_breakout_reject_filter"].get("rules"),
+            {"15": [-1], "60": [0]},
+        )
+
+        orb_zero = ml_server._score_event({"event_id": "or_breakout_rule_zero", "or_breakout": 0})
+        self.assertEqual(orb_zero["signals"].get("signal_15m"), "reject")
+        self.assertEqual(orb_zero["signals"].get("signal_60m"), "no_edge")
+
+        orb_one = ml_server._score_event({"event_id": "or_breakout_rule_one", "or_breakout": 1})
+        self.assertEqual(orb_one["signals"].get("signal_15m"), "reject")
+        self.assertEqual(orb_one["signals"].get("signal_60m"), "reject")
+        self.assertEqual(int(orb_one["regime_policy"]["or_breakout_reject_filter"].get("candidate_count")), 0)
 
     def test_feature_drift_respects_min_count_and_ignore_columns(self) -> None:
         ml_server = load_module("ml_server_feature_drift_runtime", REPO_ROOT / "server" / "ml_server.py")
