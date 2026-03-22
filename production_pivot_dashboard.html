@@ -1707,9 +1707,9 @@
                         <label for="gamma-expiry-intraday-select">Gamma Expiry (Intraday)</label>
                         <select id="gamma-expiry-intraday-select">
                             <option value="front">Front-Week</option>
-                            <option value="0dte" selected>0DTE</option>
+                            <option value="0dte">0DTE</option>
                             <option value="monthly">Monthly</option>
-                            <option value="quarterly">Quarterly (90DTE)</option>
+                            <option value="quarterly" selected>Quarterly (90DTE)</option>
                             <option value="all">All (Weighted)</option>
                         </select>
                     </div>
@@ -2187,7 +2187,7 @@
             range: '3mo',
             pivotType: 'standard',
             gammaExpiry: 'quarterly',
-            gammaExpiryIntraday: '0dte',
+            gammaExpiryIntraday: 'quarterly',
             lookbackSessions: 20,
             autoRefreshSec: 60,
             exportConvertTo: 'native',
@@ -2468,6 +2468,7 @@
         const RANGE_ORDER = ['1mo', '3mo', '6mo', '1y'];
         const INTRADAY_INTERVALS = new Set(['1m', '5m', '15m', '30m', '60m', '90m']);
         const ML_SUPPORTED_SYMBOLS = new Set(['SPY']);
+        const GAMMA_EXPIRY_MODES = new Set(['front', '0dte', 'monthly', 'quarterly', 'all']);
         const EMA_WARMUP_RANGE = '5y';
         const EMA_MAX_PERIOD = 200;
         const EMA_WARMUP_MIN_BARS = EMA_MAX_PERIOD * 3;
@@ -2485,6 +2486,12 @@
 
         const isMlSupportedSymbol = (symbol) =>
             typeof symbol === 'string' && ML_SUPPORTED_SYMBOLS.has(symbol.toUpperCase());
+
+        function normalizeGammaExpiryMode(rawValue, fallback) {
+            const value = String(rawValue || '').trim().toLowerCase();
+            if (GAMMA_EXPIRY_MODES.has(value)) return value;
+            return String(fallback || UI_DEFAULTS.gammaExpiry).toLowerCase();
+        }
 
         function clampRangeByCap(range, maxRange) {
             const rangeIdx = RANGE_ORDER.indexOf(range);
@@ -2666,8 +2673,11 @@
                     if (prefs.range) state.range = prefs.range;
                     if (prefs.interval) state.interval = prefs.interval;
                     if (prefs.pivotType) state.pivotType = prefs.pivotType;
-                    if (prefs.gammaExpiry) state.gammaExpiry = prefs.gammaExpiry;
-                    if (prefs.gammaExpiryIntraday) state.gammaExpiryIntraday = prefs.gammaExpiryIntraday;
+                    state.gammaExpiry = normalizeGammaExpiryMode(prefs.gammaExpiry, UI_DEFAULTS.gammaExpiry);
+                    state.gammaExpiryIntraday = normalizeGammaExpiryMode(
+                        prefs.gammaExpiryIntraday,
+                        UI_DEFAULTS.gammaExpiryIntraday
+                    );
                     if (prefs.lookback && Number.isFinite(Number(prefs.lookback))) state.lookbackSessions = Number(prefs.lookback);
                     if (prefs.autoRefreshSec !== undefined && Number.isFinite(Number(prefs.autoRefreshSec))) {
                         state.autoRefreshSec = Math.max(0, Number(prefs.autoRefreshSec));
@@ -2683,6 +2693,17 @@
                     }
                     if (prefs.visibility && typeof prefs.visibility === 'object') {
                         Object.assign(state.uiVisibility, prefs.visibility);
+                    }
+
+                    const migratedIntradayKey = 'pq_gamma_intraday_migrated_v2';
+                    const migratedIntraday = localStorage.getItem(migratedIntradayKey) === '1';
+                    if (!migratedIntraday && state.gammaExpiryIntraday === '0dte') {
+                        state.gammaExpiryIntraday = UI_DEFAULTS.gammaExpiryIntraday;
+                        const nextPrefs = { ...prefs, gammaExpiryIntraday: state.gammaExpiryIntraday };
+                        localStorage.setItem('pq_ui_prefs', JSON.stringify(nextPrefs));
+                    }
+                    if (!migratedIntraday) {
+                        localStorage.setItem(migratedIntradayKey, '1');
                     }
                 } else {
                     // Fallback to legacy key
@@ -3070,6 +3091,15 @@
             } else {
                 pill.removeAttribute('title');
             }
+        }
+
+        function formatGammaSourceLabel(rawSource) {
+            const value = String(rawSource || '').trim();
+            const lower = value.toLowerCase();
+            if (lower === 'ibkr') return 'IBKR';
+            if (lower === 'yahoo') return 'Yahoo';
+            if (lower === 'marketdata.app') return 'marketdata.app';
+            return value || 'Proxy';
         }
 
         function clipText(value, maxLen = 160) {
@@ -4842,7 +4872,7 @@
                 ? `${ivRv} (${ivSource} ${formatNumber(iv, 2)}%)`
                 : ivRv;
 
-            const sourceLabel = gammaSource === 'IBKR' ? 'IBKR' : gammaSource === 'Yahoo' ? 'Yahoo' : 'Proxy';
+            const sourceLabel = formatGammaSourceLabel(gammaSource);
             state.lastGammaMode = `${gammaMode} (${sourceLabel})`;
             state.lastPlaybook = playbook;
             state.lastVolRegime = rvLabel;
