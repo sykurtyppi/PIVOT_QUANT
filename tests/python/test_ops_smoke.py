@@ -5632,6 +5632,72 @@ class OpsSmokeTests(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_ml_prediction_log_preserves_original_ts_prediction_on_conflict(self) -> None:
+        db = self.tmp / "predlog_ts_preserve.sqlite"
+        prev_db = os.environ.get("PREDICTION_LOG_DB")
+        os.environ["PREDICTION_LOG_DB"] = str(db)
+        try:
+            ml_server = load_module("ml_server_predlog_ts_preserve_runtime", REPO_ROOT / "server" / "ml_server.py")
+        finally:
+            if prev_db is None:
+                os.environ.pop("PREDICTION_LOG_DB", None)
+            else:
+                os.environ["PREDICTION_LOG_DB"] = prev_db
+
+        original_time = ml_server.time.time
+        try:
+            ml_server.time.time = lambda: 1.0
+            event = {"event_id": "evt_ts_preserve"}
+            first_result = {
+                "model_version": "vkeep",
+                "feature_version": "v3",
+                "best_horizon": 15,
+                "abstain": False,
+                "scores": {"prob_reject_15m": 0.66},
+                "signals": {"signal_15m": "reject"},
+                "thresholds": {"threshold_reject_15m": 0.5},
+                "quality_flags": ["FIRST_WRITE"],
+                "regime_policy": {
+                    "mode": "shadow",
+                    "trade_regime": "compression",
+                    "selected_policy": "baseline",
+                },
+                "analogs": {},
+            }
+            ml_server._log_prediction(event, first_result)
+
+            ml_server.time.time = lambda: 2.0
+            second_result = {
+                **first_result,
+                "quality_flags": ["SECOND_WRITE"],
+                "regime_policy": {
+                    "mode": "active",
+                    "trade_regime": "expansion",
+                    "selected_policy": "regime_active",
+                },
+            }
+            ml_server._log_prediction(event, second_result)
+        finally:
+            ml_server.time.time = original_time
+
+        conn = sqlite3.connect(str(db))
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute(
+                """
+                SELECT ts_prediction, selected_policy, regime_policy_mode
+                FROM prediction_log
+                WHERE event_id = ? AND model_version = ?
+                """,
+                ("evt_ts_preserve", "vkeep"),
+            ).fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(int(row["ts_prediction"]), 1000)
+            self.assertEqual(str(row["selected_policy"]), "regime_active")
+            self.assertEqual(str(row["regime_policy_mode"]), "active")
+        finally:
+            conn.close()
+
     def test_ml_prediction_log_reuses_thread_local_connection(self) -> None:
         db = self.tmp / "predlog_conn_reuse.sqlite"
         prev_db = os.environ.get("PREDICTION_LOG_DB")
@@ -6662,6 +6728,62 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("- >6h: 1", text)
         self.assertIn("- No prediction: 0", text)
         self.assertIn("| 2026-03-06 | 1 | 0 | 0 | 0 | 1 | 0 |", text)
+
+    def test_weekly_policy_review_lag_profile_buckets_day_in_et(self) -> None:
+        db = self.tmp / "weekly_policy_review_lag_day_et.sqlite"
+        conn = sqlite3.connect(str(db))
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.execute(
+                """
+                CREATE TABLE touch_events(
+                    event_id TEXT PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    ts_event INTEGER NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE prediction_log(
+                    event_id TEXT NOT NULL,
+                    ts_prediction INTEGER NOT NULL,
+                    is_preview INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+
+            # 2026-03-07 00:30 UTC is still 2026-03-06 in New York (ET).
+            ts_event = int(datetime(2026, 3, 7, 0, 30, tzinfo=timezone.utc).timestamp() * 1000)
+            ts_pred = ts_event + (30 * 60 * 1000)
+
+            conn.execute(
+                "INSERT INTO touch_events(event_id, symbol, ts_event) VALUES (?, ?, ?)",
+                ("evt_weekly_lag_day_et", "SPY", ts_event),
+            )
+            conn.execute(
+                "INSERT INTO prediction_log(event_id, ts_prediction, is_preview) VALUES (?, ?, ?)",
+                ("evt_weekly_lag_day_et", ts_pred, 0),
+            )
+            conn.commit()
+
+            weekly = load_module(
+                "weekly_policy_review_lag_day_et_runtime",
+                REPO_ROOT / "scripts" / "weekly_policy_review.py",
+            )
+            lag_profile = weekly.load_prediction_lag_profile(
+                conn,
+                symbol="SPY",
+                start_ms=ts_event - 1000,
+                end_ms=ts_event + 1000,
+                source="live",
+            )
+            self.assertEqual(len(lag_profile["days"]), 1)
+            day_row = lag_profile["days"][0]
+            self.assertEqual(day_row["day"], "2026-03-06")
+            self.assertEqual(int(day_row["lag_le_1h_n"]), 1)
+        finally:
+            conn.close()
 
     def test_weekly_policy_review_supports_first_vs_latest_scored_event_basis(self) -> None:
         db = self.tmp / "weekly_policy_review_basis.sqlite"

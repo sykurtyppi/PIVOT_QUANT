@@ -1609,7 +1609,6 @@ def _write_prediction_record(event: dict, result: dict) -> tuple[str, str | None
                 quality_flags, is_preview
             ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(event_id, model_version) DO UPDATE SET
-                ts_prediction = excluded.ts_prediction,
                 regime_policy_mode = excluded.regime_policy_mode,
                 trade_regime = excluded.trade_regime,
                 selected_policy = excluded.selected_policy,

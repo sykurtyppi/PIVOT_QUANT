@@ -539,8 +539,7 @@ def load_prediction_lag_profile(
         WITH te AS (
             SELECT
                 te.event_id AS event_id,
-                te.ts_event AS ts_event_ms,
-                date(te.ts_event/1000, 'unixepoch') AS day
+                te.ts_event AS ts_event_ms
             FROM touch_events te
             WHERE te.symbol = ?
               AND te.ts_event >= ?
@@ -549,73 +548,67 @@ def load_prediction_lag_profile(
         first_pred AS (
             SELECT
                 te.event_id AS event_id,
-                te.day AS day,
                 te.ts_event_ms AS ts_event_ms,
                 MIN(pl.ts_prediction) AS first_pred_ms
             FROM te
             LEFT JOIN prediction_log pl
                 ON pl.event_id = te.event_id
                 {src_filter}
-            GROUP BY te.event_id, te.day, te.ts_event_ms
+            GROUP BY te.event_id, te.ts_event_ms
         )
         SELECT
-            fp.day AS day,
-            COUNT(*) AS touch_n,
-            SUM(CASE WHEN fp.first_pred_ms IS NULL THEN 1 ELSE 0 END) AS no_pred_n,
-            SUM(
-                CASE
-                    WHEN fp.first_pred_ms IS NOT NULL
-                     AND (fp.first_pred_ms - fp.ts_event_ms) >= 0
-                     AND (fp.first_pred_ms - fp.ts_event_ms) <= ?
-                    THEN 1 ELSE 0
-                END
-            ) AS lag_le_1h_n,
-            SUM(
-                CASE
-                    WHEN fp.first_pred_ms IS NOT NULL
-                     AND (fp.first_pred_ms - fp.ts_event_ms) > ?
-                     AND (fp.first_pred_ms - fp.ts_event_ms) <= ?
-                    THEN 1 ELSE 0
-                END
-            ) AS lag_1_to_3h_n,
-            SUM(
-                CASE
-                    WHEN fp.first_pred_ms IS NOT NULL
-                     AND (fp.first_pred_ms - fp.ts_event_ms) > ?
-                     AND (fp.first_pred_ms - fp.ts_event_ms) <= ?
-                    THEN 1 ELSE 0
-                END
-            ) AS lag_3_to_6h_n,
-            SUM(
-                CASE
-                    WHEN fp.first_pred_ms IS NOT NULL
-                     AND (fp.first_pred_ms - fp.ts_event_ms) > ?
-                    THEN 1 ELSE 0
-                END
-            ) AS lag_gt_6h_n,
-            SUM(
-                CASE
-                    WHEN fp.first_pred_ms IS NOT NULL
-                     AND (fp.first_pred_ms - fp.ts_event_ms) < 0
-                    THEN 1 ELSE 0
-                END
-            ) AS lag_negative_n
+            fp.event_id AS event_id,
+            fp.ts_event_ms AS ts_event_ms,
+            fp.first_pred_ms AS first_pred_ms
         FROM first_pred fp
-        GROUP BY fp.day
-        ORDER BY fp.day ASC
+        ORDER BY fp.ts_event_ms ASC
         """,
         (
             symbol.upper(),
             start_ms,
             end_ms,
-            one_hour_ms,
-            one_hour_ms,
-            three_hour_ms,
-            three_hour_ms,
-            six_hour_ms,
-            six_hour_ms,
         ),
     ).fetchall()
+
+    day_buckets: dict[str, dict[str, int]] = {}
+    for row in rows:
+        ts_event_ms = int(row["ts_event_ms"] or 0)
+        if ts_event_ms <= 0:
+            continue
+        event_day_et = (
+            datetime.fromtimestamp(ts_event_ms / 1000, tz=timezone.utc)
+            .astimezone(ET_TZ)
+            .date()
+            .isoformat()
+        )
+        bucket = day_buckets.setdefault(
+            event_day_et,
+            {
+                "touch_n": 0,
+                "no_pred_n": 0,
+                "lag_le_1h_n": 0,
+                "lag_1_to_3h_n": 0,
+                "lag_3_to_6h_n": 0,
+                "lag_gt_6h_n": 0,
+                "lag_negative_n": 0,
+            },
+        )
+        bucket["touch_n"] += 1
+        first_pred_ms = row["first_pred_ms"]
+        if first_pred_ms is None:
+            bucket["no_pred_n"] += 1
+            continue
+        lag_ms = int(first_pred_ms) - ts_event_ms
+        if lag_ms < 0:
+            bucket["lag_negative_n"] += 1
+        elif lag_ms <= one_hour_ms:
+            bucket["lag_le_1h_n"] += 1
+        elif lag_ms <= three_hour_ms:
+            bucket["lag_1_to_3h_n"] += 1
+        elif lag_ms <= six_hour_ms:
+            bucket["lag_3_to_6h_n"] += 1
+        else:
+            bucket["lag_gt_6h_n"] += 1
 
     day_rows: list[dict[str, Any]] = []
     totals = {
@@ -627,17 +620,18 @@ def load_prediction_lag_profile(
         "lag_gt_6h_total": 0,
         "lag_negative_total": 0,
     }
-    for row in rows:
-        touch_n = int(row["touch_n"] or 0)
-        no_pred_n = int(row["no_pred_n"] or 0)
-        lag_le_1h_n = int(row["lag_le_1h_n"] or 0)
-        lag_1_to_3h_n = int(row["lag_1_to_3h_n"] or 0)
-        lag_3_to_6h_n = int(row["lag_3_to_6h_n"] or 0)
-        lag_gt_6h_n = int(row["lag_gt_6h_n"] or 0)
-        lag_negative_n = int(row["lag_negative_n"] or 0)
+    for day in sorted(day_buckets):
+        day_counts = day_buckets[day]
+        touch_n = int(day_counts["touch_n"])
+        no_pred_n = int(day_counts["no_pred_n"])
+        lag_le_1h_n = int(day_counts["lag_le_1h_n"])
+        lag_1_to_3h_n = int(day_counts["lag_1_to_3h_n"])
+        lag_3_to_6h_n = int(day_counts["lag_3_to_6h_n"])
+        lag_gt_6h_n = int(day_counts["lag_gt_6h_n"])
+        lag_negative_n = int(day_counts["lag_negative_n"])
         day_rows.append(
             {
-                "day": str(row["day"]),
+                "day": str(day),
                 "touch_n": touch_n,
                 "no_pred_n": no_pred_n,
                 "lag_le_1h_n": lag_le_1h_n,
