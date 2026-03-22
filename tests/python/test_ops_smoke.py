@@ -901,11 +901,53 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(int(invalid_row["has_monthly_confluence"]), 0)
         self.assertEqual(invalid_row["level_family"], "pivot")
 
+        non_list_row = features.build_feature_row(
+            {
+                "symbol": "SPY",
+                "ts_event": ts_event,
+                "level_type": "P",
+                "level_price": 100.0,
+                "touch_price": 100.0,
+                "distance_bps": 0.0,
+                "mtf_confluence_types": '{"weekly":"yes"}',
+            }
+        )
+        self.assertEqual(int(non_list_row["has_weekly_confluence"]), 0)
+        self.assertEqual(int(non_list_row["has_monthly_confluence"]), 0)
+
         missing = features.collect_missing({"symbol": "SPY"})
         self.assertEqual(
             missing,
             ["ts_event", "level_type", "level_price", "touch_price", "distance_bps"],
         )
+
+    def test_build_feature_row_sanitizes_nonfinite_values(self) -> None:
+        features = load_module(
+            "pq_features_nonfinite_test",
+            REPO_ROOT / "ml" / "features.py",
+        )
+        ts_event = int(datetime(2026, 3, 10, 15, 0, tzinfo=timezone.utc).timestamp() * 1000)
+        row = features.build_feature_row(
+            {
+                "symbol": "SPY",
+                "ts_event": ts_event,
+                "level_type": "R2",
+                "level_price": 100.0,
+                "touch_price": 1e308,
+                "distance_bps": 1.0,
+                "ema9": 1e308,
+                "ema21": 1e-308,
+                "vwap": 1e-308,
+                "session_std": 1e-308,
+                "atr": float("inf"),
+                "custom_inf": float("inf"),
+            }
+        )
+        self.assertIsNone(row.get("ema_spread_bps"))
+        self.assertIsNone(row.get("vwap_dist_bps_calc"))
+        self.assertIsNone(row.get("vwap_zscore"))
+        self.assertIsNone(row.get("atr_bps"))
+        self.assertIsNone(row.get("custom_inf"))
 
     def test_drop_features_returns_copy(self) -> None:
         features = load_module(

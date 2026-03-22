@@ -179,8 +179,9 @@ def build_feature_row(event: dict[str, Any]) -> dict[str, Any]:
         try:
             import json
             types_list = json.loads(mtf_types) if isinstance(mtf_types, str) else mtf_types
-            row["has_weekly_confluence"] = 1 if any("weekly" in t for t in types_list) else 0
-            row["has_monthly_confluence"] = 1 if any("monthly" in t for t in types_list) else 0
+            if isinstance(types_list, list):
+                row["has_weekly_confluence"] = 1 if any("weekly" in str(t) for t in types_list) else 0
+                row["has_monthly_confluence"] = 1 if any("monthly" in str(t) for t in types_list) else 0
         except (json.JSONDecodeError, TypeError):
             pass
 
@@ -231,6 +232,10 @@ def build_feature_row(event: dict[str, Any]) -> dict[str, Any]:
     else:
         row["atr_bps"] = None
         row["distance_atr_ratio"] = None
+
+    for key, value in row.items():
+        if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+            row[key] = None
 
     return row
 
