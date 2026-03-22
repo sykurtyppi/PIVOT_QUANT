@@ -40,6 +40,7 @@ const EXPORT_DIR = path.join(ROOT_DIR, 'data', 'exports');
 const METRICS_FILE = path.join(EXPORT_DIR, 'rf_walkforward_metrics.json');
 const CALIB_FILE = path.join(EXPORT_DIR, 'rf_calibration_curve.json');
 const ACTIVE_MANIFEST_FILE = path.join(ROOT_DIR, 'data', 'models', 'manifest_active.json');
+const MODEL_REGISTRY_FILE = path.join(ROOT_DIR, 'data', 'models', 'model_registry.json');
 const SQLITE_DB = path.join(ROOT_DIR, 'data', 'pivot_events.sqlite');
 const ENV_FILE = path.join(ROOT_DIR, '.env');
 const BACKUP_STATE_FILE = path.join(ROOT_DIR, 'logs', 'backup_state.json');
@@ -2404,6 +2405,7 @@ async function queryOpsStatus() {
     alertLogLines,
     drillLogLines,
     mlHealth,
+    modelRegistry,
   ] = await Promise.all([
     loadEnvMapAsync(ENV_FILE),
     readOpsStatusRows(),
@@ -2421,6 +2423,7 @@ async function queryOpsStatus() {
         return null;
       }
     })(),
+    readJsonFileSafeAsync(MODEL_REGISTRY_FILE, {}),
   ]);
   const reportLog = summarizeReportDelivery(reportLogLines);
   const alertLog = summarizeHealthAlert(alertLogLines);
@@ -2429,6 +2432,12 @@ async function queryOpsStatus() {
   const backupLastRunMs = toNumber(ops.backup_last_run_ms, toNumber(backupState.last_run_ms, null));
   const restoreLastRunMs = toNumber(ops.backup_restore_last_run_ms, null);
   const hostLastRunMs = toNumber(ops.host_health_last_run_ms, toNumber(hostState.checked_at_ms, null));
+  const retrainLastStartedMs = toNumber(ops.retrain_last_started_ms, null);
+  const retrainLastCompletedMs = toNumber(ops.retrain_last_completed_ms, null);
+  const reloadLastCompletedMs = toNumber(
+    ops.reload_last_completed_ms,
+    toNumber(mlHealth?.reload?.last_completed_at_ms, null)
+  );
 
   const reportChannels = parseCsv(
     env.ML_REPORT_NOTIFY_CHANNELS || process.env.ML_REPORT_NOTIFY_CHANNELS || ''
@@ -2485,6 +2494,25 @@ async function queryOpsStatus() {
         last_line: alertLog.line,
         services: alertState?.services || {},
       },
+    },
+    retrain: {
+      last_status: ops.retrain_last_status || 'unknown',
+      last_started_ms: retrainLastStartedMs,
+      last_completed_ms: retrainLastCompletedMs,
+      age_min: ageMinutes(retrainLastCompletedMs),
+      last_error: ops.retrain_last_error || '',
+      reload_last_status: ops.reload_last_status || mlHealth?.reload?.last_status || 'unknown',
+      reload_last_completed_ms: reloadLastCompletedMs,
+      reload_age_min: ageMinutes(reloadLastCompletedMs),
+      reload_last_error: ops.reload_last_error || mlHealth?.reload?.last_error || '',
+    },
+    governance: {
+      last_action: modelRegistry?.last_action || 'unknown',
+      last_reason: modelRegistry?.last_reason || '',
+      active_version: modelRegistry?.active_version || mlHealth?.manifest?.version || '',
+      candidate_version: modelRegistry?.candidate_version || '',
+      last_checked_at_ms: toNumber(modelRegistry?.last_checked_at_ms, null),
+      last_promoted_at_ms: toNumber(modelRegistry?.last_promoted_at_ms, null),
     },
     prediction_log: {
       queue_depth: toNumber(mlHealth?.prediction_log?.queue_depth, null),

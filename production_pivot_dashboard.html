@@ -525,6 +525,74 @@
             border-color: rgba(239, 68, 68, 0.4);
         }
 
+        .transparency-strip {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+            gap: 8px;
+            padding: 10px 28px;
+            border-bottom: 1px solid var(--border);
+            background: rgba(6, 10, 24, 0.36);
+        }
+
+        .transparency-item {
+            background: rgba(15, 23, 42, 0.72);
+            border: 1px solid rgba(148, 163, 184, 0.14);
+            border-radius: 10px;
+            padding: 8px 10px;
+            font-size: 11px;
+            color: var(--muted);
+            min-height: 52px;
+        }
+
+        .transparency-item strong {
+            display: block;
+            color: var(--text);
+            margin-bottom: 4px;
+            letter-spacing: 0.3px;
+            text-transform: uppercase;
+            font-size: 10px;
+        }
+
+        .transparency-value {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text);
+            line-height: 1.3;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .transparency-item small {
+            display: block;
+            margin-top: 4px;
+            color: var(--muted);
+            opacity: 0.92;
+            line-height: 1.2;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .transparency-item.ok {
+            border-color: rgba(34, 197, 94, 0.4);
+            color: #86efac;
+        }
+
+        .transparency-item.warn {
+            border-color: rgba(245, 158, 11, 0.42);
+            color: #fde68a;
+        }
+
+        .transparency-item.risk {
+            border-color: rgba(239, 68, 68, 0.45);
+            color: #fca5a5;
+        }
+
+        .transparency-item-wide {
+            grid-column: span 2;
+        }
+
         .panel {
             background: linear-gradient(180deg, rgba(15, 23, 42, 0.92), rgba(10, 16, 30, 0.92));
             border: 1px solid var(--border);
@@ -1357,6 +1425,15 @@
                 padding: 10px 16px;
             }
 
+            .transparency-strip {
+                padding: 10px 16px;
+                grid-template-columns: 1fr 1fr;
+            }
+
+            .transparency-item-wide {
+                grid-column: span 2;
+            }
+
             .grid {
                 padding: 14px 16px 20px;
             }
@@ -1692,6 +1769,44 @@
             <div class="system-pill" id="sys-collector">Collector: --</div>
             <div class="system-pill" id="sys-last-bar">Last bar: --</div>
             <div class="system-pill" id="sys-refresh">Refresh: --</div>
+        </section>
+
+        <section class="transparency-strip" aria-label="Model transparency">
+            <div class="transparency-item" id="trans-model">
+                <strong>Model State</strong>
+                <div class="transparency-value" data-role="value">--</div>
+                <small data-role="note">--</small>
+            </div>
+            <div class="transparency-item" id="trans-retrain">
+                <strong>Retrain / Reload</strong>
+                <div class="transparency-value" data-role="value">--</div>
+                <small data-role="note">--</small>
+            </div>
+            <div class="transparency-item" id="trans-governance">
+                <strong>Governance</strong>
+                <div class="transparency-value" data-role="value">--</div>
+                <small data-role="note">--</small>
+            </div>
+            <div class="transparency-item" id="trans-gamma">
+                <strong>Gamma Source</strong>
+                <div class="transparency-value" data-role="value">--</div>
+                <small data-role="note">--</small>
+            </div>
+            <div class="transparency-item" id="trans-ema">
+                <strong>EMA Method</strong>
+                <div class="transparency-value" data-role="value">--</div>
+                <small data-role="note">--</small>
+            </div>
+            <div class="transparency-item" id="trans-thresholds">
+                <strong>Threshold Guard</strong>
+                <div class="transparency-value" data-role="value">--</div>
+                <small data-role="note">--</small>
+            </div>
+            <div class="transparency-item transparency-item-wide" id="trans-governance-reason">
+                <strong>Last Governance Reason</strong>
+                <div class="transparency-value" data-role="value">--</div>
+                <small data-role="note">--</small>
+            </div>
         </section>
 
         <section class="decision-strip" aria-label="Decision summary">
@@ -2162,6 +2277,7 @@
             mlPreviewBps: 30,
             mlMetrics: null,
             mlMeta: null,
+            mlHealthRaw: null,
             mlMetricsTimer: null,
             mlServiceStatus: 'checking',
             mlServiceMessage: 'Checking ML service health.',
@@ -2212,6 +2328,9 @@
             emaWarmupKey: null,
             emaWarmupCandles: [],
             emaWarmupFetchedAtMs: 0,
+            lastEmaMethod: '--',
+            lastEmaWarmupBars: 0,
+            lastEmaVisibleBars: 0,
         };
 
         // ── Toast Notification System ──
@@ -2953,6 +3072,225 @@
             }
         }
 
+        function clipText(value, maxLen = 160) {
+            const text = String(value ?? '').trim();
+            if (!text) return '--';
+            return text.length <= maxLen ? text : `${text.slice(0, Math.max(0, maxLen - 1)).trimEnd()}…`;
+        }
+
+        function setTransparencyItem(id, value, note = '', tone = '', title = '') {
+            const item = document.getElementById(id);
+            if (!item) return;
+            const valueEl = item.querySelector('[data-role="value"]');
+            const noteEl = item.querySelector('[data-role="note"]');
+            if (valueEl) valueEl.textContent = value == null || value === '' ? '--' : String(value);
+            if (noteEl) noteEl.textContent = note == null || note === '' ? '--' : String(note);
+            item.classList.remove('ok', 'warn', 'risk');
+            if (tone) item.classList.add(tone);
+            if (title) {
+                item.title = title;
+            } else {
+                item.removeAttribute('title');
+            }
+        }
+
+        function summarizeThresholdTarget(metaByHorizon) {
+            const entries = Object.values(metaByHorizon || {});
+            let total = 0;
+            let fallback = 0;
+            let guard = 0;
+            entries.forEach((entry) => {
+                if (!entry || typeof entry !== 'object') return;
+                total += 1;
+                if (entry.fallback === true) fallback += 1;
+                const reason = String(entry.reason || '');
+                if (
+                    entry.guard === true
+                    || reason.includes('non_positive_utility')
+                    || reason.includes('guard')
+                ) {
+                    guard += 1;
+                }
+            });
+            return { total, fallback, guard };
+        }
+
+        function summarizeThresholdMeta(thresholdsMeta) {
+            const reject = summarizeThresholdTarget(thresholdsMeta?.reject);
+            const brk = summarizeThresholdTarget(thresholdsMeta?.break);
+            if (!reject.total && !brk.total) {
+                return {
+                    value: '--',
+                    note: 'Threshold metadata unavailable',
+                    tone: '',
+                };
+            }
+            const value = `reject g${reject.guard}/${reject.total || 0} · f${reject.fallback}/${reject.total || 0}`;
+            const note = `break g${brk.guard}/${brk.total || 0} · f${brk.fallback}/${brk.total || 0}`;
+            let tone = 'ok';
+            if (reject.guard > 0 || brk.guard > 0) {
+                tone = 'risk';
+            } else if (reject.fallback > 0 || brk.fallback > 0) {
+                tone = 'warn';
+            }
+            return { value, note, tone };
+        }
+
+        function updateTransparencyStrip() {
+            const rawMlStatus = String(state.mlHealthRaw?.status || state.mlServiceStatus || 'unknown').toLowerCase();
+            const modelVersion = String(state.mlMeta?.version || '--');
+            const trainedEndTs = Number(state.mlMeta?.trained_end_ts);
+            const staleHours = Number(state.mlHealthRaw?.stale_hours);
+            let modelTone = rawMlStatus === 'ok' || rawMlStatus === 'online'
+                ? 'ok'
+                : rawMlStatus === 'stale'
+                    || rawMlStatus === 'degraded'
+                    || rawMlStatus === 'starting'
+                    || rawMlStatus === 'checking'
+                    || rawMlStatus === 'unknown'
+                    ? 'warn'
+                    : 'risk';
+            if (Number.isFinite(staleHours) && staleHours >= 96) {
+                modelTone = 'risk';
+            }
+            const modelNoteParts = [];
+            if (Number.isFinite(trainedEndTs) && trainedEndTs > 0) {
+                modelNoteParts.push(`trained ${formatDateTime(trainedEndTs)}`);
+            }
+            if (Number.isFinite(staleHours)) {
+                modelNoteParts.push(`stale ${staleHours.toFixed(1)}h`);
+            }
+            setTransparencyItem(
+                'trans-model',
+                `${modelVersion} · ${rawMlStatus.toUpperCase()}`,
+                modelNoteParts.join(' · '),
+                modelTone
+            );
+
+            const retrainStatus = String(
+                state.opsStatus?.retrain?.last_status || state.opsStatus?.retrain?.status || 'unknown'
+            ).toLowerCase();
+            const reloadStatus = String(
+                state.opsStatus?.retrain?.reload_last_status || state.mlHealthRaw?.reload?.last_status || 'unknown'
+            ).toLowerCase();
+            const retrainDoneMs = Number(state.opsStatus?.retrain?.last_completed_ms);
+            const reloadDoneMs = Number(
+                state.opsStatus?.retrain?.reload_last_completed_ms || state.mlHealthRaw?.reload?.last_completed_at_ms
+            );
+            const retrainNoteParts = [];
+            if (Number.isFinite(retrainDoneMs) && retrainDoneMs > 0) {
+                retrainNoteParts.push(`retrain ${formatAgeShort(retrainDoneMs)} ago`);
+            }
+            if (Number.isFinite(reloadDoneMs) && reloadDoneMs > 0) {
+                retrainNoteParts.push(`reload ${formatAgeShort(reloadDoneMs)} ago`);
+            }
+            let retrainTone = 'ok';
+            if (
+                retrainStatus.includes('error')
+                || retrainStatus.includes('fail')
+                || reloadStatus.includes('error')
+                || reloadStatus.includes('fail')
+            ) {
+                retrainTone = 'risk';
+            } else if (
+                retrainStatus === 'unknown'
+                || reloadStatus === 'unknown'
+                || retrainStatus.includes('running')
+                || retrainStatus.includes('start')
+            ) {
+                retrainTone = 'warn';
+            }
+            setTransparencyItem(
+                'trans-retrain',
+                `retrain ${retrainStatus.toUpperCase()} · reload ${reloadStatus.toUpperCase()}`,
+                retrainNoteParts.join(' · '),
+                retrainTone
+            );
+
+            const governance = state.opsStatus?.governance || {};
+            const govAction = String(governance.last_action || 'unknown').toLowerCase();
+            const govActive = governance.active_version || modelVersion;
+            const govCandidate = governance.candidate_version || '--';
+            const govCheckedMs = Number(governance.last_checked_at_ms);
+            let govTone = 'warn';
+            if (govAction === 'promoted') govTone = 'ok';
+            if (govAction === 'rejected') govTone = 'warn';
+            if (govAction.includes('error') || govAction.includes('fail')) govTone = 'risk';
+            setTransparencyItem(
+                'trans-governance',
+                `${govAction.toUpperCase()} · active ${govActive}`,
+                `candidate ${govCandidate}${Number.isFinite(govCheckedMs) && govCheckedMs > 0 ? ` · checked ${formatAgeShort(govCheckedMs)} ago` : ''}`,
+                govTone
+            );
+
+            const gammaMainSource = String(state.gammaData?.source || '--');
+            const gammaMainExpiry = String(state.gammaData?.expiryMode || state.gammaExpiry || '--').toUpperCase();
+            const gammaIntradayExpiry = String(
+                state.gammaDataIntraday?.expiryMode || state.gammaExpiryIntraday || '--'
+            ).toUpperCase();
+            const gammaDteFallback = Boolean(state.gammaDataIntraday?.dteFallback);
+            const gammaOnlyMode = Boolean(state.gammaData?.gammaOnlyMode || state.gammaDataIntraday?.gammaOnlyMode);
+            let gammaTone = state.gammaData ? 'ok' : '';
+            if (state.gammaFetchError) {
+                gammaTone = 'risk';
+            } else if (gammaDteFallback || gammaOnlyMode) {
+                gammaTone = 'warn';
+            }
+            const gammaNoteParts = [`intraday ${gammaIntradayExpiry}`];
+            if (gammaDteFallback) {
+                gammaNoteParts.push('0DTE fallback');
+            }
+            if (gammaOnlyMode) {
+                gammaNoteParts.push('gamma-only walls');
+            }
+            setTransparencyItem(
+                'trans-gamma',
+                `${gammaMainSource} · ${gammaMainExpiry}`,
+                gammaNoteParts.join(' · '),
+                gammaTone,
+                state.gammaDataIntraday?.dteFallbackReason || state.gammaFetchError || ''
+            );
+
+            const emaMethod = String(state.lastEmaMethod || '--');
+            const emaMethodLabel = emaMethod === 'daily_warmup_merged'
+                ? 'TV seed + 5Y warmup'
+                : emaMethod === 'daily_visible_seed'
+                    ? 'TV seed (daily visible)'
+                    : emaMethod === 'intraday_visible_seed'
+                        ? 'TV seed (intraday)'
+                        : '--';
+            const emaVisibleBars = Number(state.lastEmaVisibleBars);
+            const emaWarmupBars = Number(state.lastEmaWarmupBars);
+            const emaNeedsWarmup = isDailyInterval(state.interval) && emaVisibleBars > 0 && emaVisibleBars < EMA_WARMUP_MIN_BARS;
+            let emaTone = 'ok';
+            if (emaNeedsWarmup && emaMethod !== 'daily_warmup_merged') {
+                emaTone = 'warn';
+            }
+            setTransparencyItem(
+                'trans-ema',
+                emaMethodLabel,
+                `visible ${Number.isFinite(emaVisibleBars) ? emaVisibleBars : '--'} · warmup ${Number.isFinite(emaWarmupBars) ? emaWarmupBars : '--'}`,
+                emaTone
+            );
+
+            const thresholdSummary = summarizeThresholdMeta(state.mlMeta?.thresholds_meta);
+            setTransparencyItem(
+                'trans-thresholds',
+                thresholdSummary.value,
+                thresholdSummary.note,
+                thresholdSummary.tone
+            );
+
+            const governanceReason = clipText(governance.last_reason || '', 180);
+            setTransparencyItem(
+                'trans-governance-reason',
+                governanceReason,
+                `action ${govAction.toUpperCase()}${Number.isFinite(govCheckedMs) && govCheckedMs > 0 ? ` · ${formatDateTime(govCheckedMs)}` : ''}`,
+                govTone,
+                governance.last_reason || ''
+            );
+        }
+
         function normalizeExportInstrument(raw) {
             const value = String(raw || 'native').trim().toUpperCase();
             if (!value || value === 'NATIVE' || value === 'NONE') return 'native';
@@ -3191,6 +3529,7 @@
                 ? `Refresh: ${autoSec}s auto · last ${formatRefreshClock(state.lastRefreshAt)}`
                 : `Refresh: manual · last ${formatRefreshClock(state.lastRefreshAt)}`;
             setSystemPill('sys-refresh', refreshLabel, autoSec > 0 ? 'ok' : '');
+            updateTransparencyStrip();
         }
 
         function updateRefreshMeta() {
@@ -6054,6 +6393,7 @@
                 if (drillNote) drillNote.textContent = 'Drill note: --';
                 const alertNote = document.getElementById('ops-alert-note');
                 if (alertNote) alertNote.textContent = 'Alert note: --';
+                updateSystemStrip();
                 return;
             }
 
@@ -6132,6 +6472,7 @@
                 }
                 alertNote.textContent = `Alert note: report@${reportTs} | immediate@${immediateTs} | slo=${sloText} | release=${releaseText} | audit=${auditText} | prediction_log=${queueText}`;
             }
+            updateSystemStrip();
         }
 
         async function loadOpsStatus() {
@@ -6666,6 +7007,7 @@
             const apiUrl = `${getApiOrigin()}/api/ml/health`;
             try {
                 const payload = await fetchJson(apiUrl, 5000);
+                state.mlHealthRaw = payload || null;
                 state.mlMeta = payload?.manifest || null;
                 const dashboardHealth = payload?.dashboard_health;
                 if (dashboardHealth && typeof dashboardHealth === 'object') {
@@ -6703,6 +7045,7 @@
                 updateHealthWidget();
             } catch (error) {
                 console.warn('ML health fetch failed', error);
+                state.mlHealthRaw = null;
                 setMlServiceState('offline', error?.message || 'Health endpoint unreachable');
                 updateMlPanel(null);
                 updateHealthWidget();
@@ -6826,11 +7169,16 @@
                 }
 
                 let emaSourceCandles = state.candles;
+                state.lastEmaVisibleBars = state.candles.length;
+                state.lastEmaWarmupBars = 0;
+                state.lastEmaMethod = isDailyInterval(interval) ? 'daily_visible_seed' : 'intraday_visible_seed';
                 if (isDailyInterval(interval) && state.candles.length < EMA_WARMUP_MIN_BARS) {
                     const warmupCandles = await fetchEmaWarmupCandles(symbol, interval, requestOptions, isStaleRequest);
                     if (isStaleRequest()) return;
                     if (warmupCandles.length) {
                         emaSourceCandles = mergeDailyCandles(state.candles, warmupCandles, state.timeZone);
+                        state.lastEmaWarmupBars = warmupCandles.length;
+                        state.lastEmaMethod = 'daily_warmup_merged';
                         setDebug(`EMA warmup loaded (${emaSourceCandles.length} bars source, ${state.candles.length} visible).`);
                     }
                 }

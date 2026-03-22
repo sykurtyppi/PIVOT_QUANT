@@ -3056,6 +3056,16 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("note.style.color = 'var(--warning)';", dashboard)
         self.assertIn("note.style.color = 'var(--danger)';", dashboard)
 
+    def test_dashboard_transparency_strip_contract_present(self) -> None:
+        dashboard = (REPO_ROOT / "production_pivot_dashboard.html").read_text(encoding="utf-8")
+        self.assertIn('<section class="transparency-strip" aria-label="Model transparency">', dashboard)
+        self.assertIn('id="trans-model"', dashboard)
+        self.assertIn('id="trans-governance-reason"', dashboard)
+        self.assertIn("function setTransparencyItem(id, value, note = '', tone = '', title = '')", dashboard)
+        self.assertIn("function updateTransparencyStrip()", dashboard)
+        self.assertIn("state.mlHealthRaw = payload || null;", dashboard)
+        self.assertIn("state.lastEmaMethod = 'daily_warmup_merged';", dashboard)
+
     def test_dashboard_ema_warmup_and_tradingview_seed_contract_present(self) -> None:
         dashboard = (REPO_ROOT / "production_pivot_dashboard.html").read_text(encoding="utf-8")
         self.assertIn("const EMA_WARMUP_RANGE = '5y';", dashboard)
@@ -3078,7 +3088,10 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("await Promise.all([", query_block)
         self.assertIn("loadEnvMapAsync(ENV_FILE)", query_block)
         self.assertIn("readJsonFileSafeAsync(BACKUP_STATE_FILE, {})", query_block)
+        self.assertIn("readJsonFileSafeAsync(MODEL_REGISTRY_FILE, {})", query_block)
         self.assertIn("readTailLinesAsync(REPORT_DELIVERY_LOG_FILE, 200)", query_block)
+        self.assertIn("governance:", proxy_source)
+        self.assertIn("retrain:", proxy_source)
         self.assertNotIn("readFileSync(", query_block)
 
     def test_dashboard_proxy_ml_metrics_uses_async_file_reads(self) -> None:
