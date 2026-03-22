@@ -3214,6 +3214,8 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("PREDICTION_LOG_ALERT_DROPPED_TOTAL", source)
         self.assertIn("PREDICTION_LOG_CONNECT_TIMEOUT_SEC", source)
         self.assertIn("PREDICTION_LOG_BUSY_TIMEOUT_MS", source)
+        self.assertIn("PREDICTION_LOG_LOCK_WARN_INTERVAL_SEC", source)
+        self.assertIn("def _warn_prediction_log_contention(exc: Exception) -> None:", source)
         self.assertIn("PRAGMA busy_timeout", source)
         self.assertIn("_PREDICTION_LOG_QUEUE: queue.Queue", source)
         self.assertIn("def _enqueue_prediction(event: dict, result: dict) -> None:", source)

@@ -238,10 +238,13 @@ ML_SCORE_ANALOG_DISABLE_IN_FLIGHT = max(
 )
 ML_INFERENCE_N_JOBS = _env_n_jobs("ML_INFERENCE_N_JOBS", 1)
 PREDICTION_LOG_CONNECT_TIMEOUT_SEC = max(
-    0.01, float(os.getenv("PREDICTION_LOG_CONNECT_TIMEOUT_SEC", "0.05"))
+    0.01, float(os.getenv("PREDICTION_LOG_CONNECT_TIMEOUT_SEC", "0.5"))
 )
 PREDICTION_LOG_BUSY_TIMEOUT_MS = max(
-    0, int(os.getenv("PREDICTION_LOG_BUSY_TIMEOUT_MS", "50"))
+    0, int(os.getenv("PREDICTION_LOG_BUSY_TIMEOUT_MS", "500"))
+)
+PREDICTION_LOG_LOCK_WARN_INTERVAL_SEC = max(
+    1.0, float(os.getenv("PREDICTION_LOG_LOCK_WARN_INTERVAL_SEC", "60"))
 )
 PREDICTION_LOG_SQLITE_SYNC = (os.getenv("PREDICTION_LOG_SQLITE_SYNC", "FULL") or "FULL").strip().upper()
 if PREDICTION_LOG_SQLITE_SYNC not in {"OFF", "NORMAL", "FULL", "EXTRA"}:
@@ -1234,6 +1237,9 @@ _PREDICTION_LOG_QUEUE: queue.Queue[tuple[dict, dict]] = queue.Queue(
 _PREDICTION_LOG_WRITER_STOP = threading.Event()
 _PREDICTION_LOG_WRITER_THREAD: threading.Thread | None = None
 _PREDICTION_LOG_STATE_LOCK = threading.Lock()
+_PREDICTION_LOG_CONTENTION_WARN_LOCK = threading.Lock()
+_PREDICTION_LOG_CONTENTION_WARN_LAST_AT = 0.0
+_PREDICTION_LOG_CONTENTION_WARN_SUPPRESSED = 0
 _prediction_log_state: dict[str, object] = {
     "queue_max_size": PREDICTION_LOG_QUEUE_MAX_SIZE,
     "queue_high_watermark": 0,
@@ -1282,6 +1288,31 @@ def _prediction_log_state_snapshot() -> dict[str, object]:
     writer = _PREDICTION_LOG_WRITER_THREAD
     snapshot["writer_alive"] = bool(writer and writer.is_alive())
     return snapshot
+
+
+def _warn_prediction_log_contention(exc: Exception) -> None:
+    """Emit throttled warning logs for SQLite lock contention."""
+    global _PREDICTION_LOG_CONTENTION_WARN_LAST_AT
+    global _PREDICTION_LOG_CONTENTION_WARN_SUPPRESSED
+
+    now = time.time()
+    with _PREDICTION_LOG_CONTENTION_WARN_LOCK:
+        elapsed = now - _PREDICTION_LOG_CONTENTION_WARN_LAST_AT
+        if elapsed < PREDICTION_LOG_LOCK_WARN_INTERVAL_SEC:
+            _PREDICTION_LOG_CONTENTION_WARN_SUPPRESSED += 1
+            return
+        suppressed = _PREDICTION_LOG_CONTENTION_WARN_SUPPRESSED
+        _PREDICTION_LOG_CONTENTION_WARN_SUPPRESSED = 0
+        _PREDICTION_LOG_CONTENTION_WARN_LAST_AT = now
+
+    if suppressed > 0:
+        log.warning(
+            "Prediction log skipped due SQLite contention: %s (suppressed %d similar events)",
+            exc,
+            suppressed,
+        )
+    else:
+        log.warning("Prediction log skipped due SQLite contention: %s", exc)
 
 
 def _try_begin_score_request() -> bool:
@@ -1668,7 +1699,7 @@ def _write_prediction_record(event: dict, result: dict) -> tuple[str, str | None
         if isinstance(exc, sqlite3.OperationalError):
             lowered = str(exc).lower()
             if "database is locked" in lowered or "database is busy" in lowered:
-                log.debug("Prediction log skipped due SQLite contention: %s", exc)
+                _warn_prediction_log_contention(exc)
                 return "skip", str(exc)
         if conn is not None and getattr(_PREDICTION_LOG_LOCAL, "conn", None) is conn:
             try:
