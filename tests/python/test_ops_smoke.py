@@ -567,6 +567,9 @@ class OpsSmokeTests(unittest.TestCase):
         report_text = "\n".join(
             [
                 "# Daily ML Report - 2026-03-19",
+                "- Model Readiness: **STALE**",
+                "- Trading Utility: **STAND ASIDE**",
+                "- Operator Note: No matured tradeable signals in this window.",
                 "- Prediction basis for scored rows: first prediction per event",
                 "- Scored predictions (first prediction per event): 42",
             ]
@@ -574,6 +577,31 @@ class OpsSmokeTests(unittest.TestCase):
         ctx = send_daily_report.parse_report_context(report_text, report_path)
         self.assertEqual(ctx.get("prediction_basis"), "first")
         self.assertEqual(ctx.get("scored"), "42")
+        self.assertEqual(ctx.get("model_readiness"), "STALE")
+        self.assertEqual(ctx.get("trading_utility"), "STAND ASIDE")
+        self.assertEqual(ctx.get("operator_note"), "No matured tradeable signals in this window.")
+
+    def test_daily_report_retrain_status_uses_completed_cycle_over_stale_running_flag(self) -> None:
+        send_daily_report = load_module(
+            "pq_send_daily_report_retrain_state_contract",
+            REPO_ROOT / "scripts" / "send_daily_report.py",
+        )
+        status = send_daily_report.build_retrain_status(
+            {
+                "retrain_last_start_ms": str(1_000),
+                "retrain_last_end_ms": str(2_000),
+                "retrain_state": "running",
+                "retrain_last_status": "ok",
+                "reload_last_status": "ok",
+            },
+            {
+                "last_cycle": "unknown",
+                "reload_status": "unknown",
+                "next_expected": "unknown",
+            },
+        )
+        self.assertNotIn("(running)", status["last_cycle"])
+        self.assertEqual(status["reload_status"], "ok")
 
     def test_daily_report_unscored_uses_distinct_event_ids(self) -> None:
         db = self.tmp / "daily_report_counts.sqlite"
@@ -7509,6 +7537,9 @@ class OpsSmokeTests(unittest.TestCase):
         source = (REPO_ROOT / "scripts" / "generate_daily_ml_report.py").read_text(encoding="utf-8")
         self.assertIn("Tradeable matured signals (reject+break)", source)
         self.assertIn("Performance note: no matured reject/break signals in this window", source)
+        self.assertIn("Model Readiness", source)
+        self.assertIn("Trading Utility", source)
+        self.assertIn("Operator Note", source)
         self.assertIn("Prediction basis for scored rows", source)
         self.assertIn("--prediction-basis", source)
 

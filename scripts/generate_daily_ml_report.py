@@ -1672,6 +1672,72 @@ def summarize_tradeability_blockers(manifest: dict[str, Any]) -> str | None:
     return "; ".join(notes)
 
 
+def classify_model_readiness(
+    health: str,
+    session_stale_hours: float | None,
+    wall_stale_hours: float | None,
+) -> str:
+    health_norm = str(health or "").strip().lower()
+    if health_norm == "kill-switch":
+        return "BLOCKED"
+    if session_stale_hours is not None and session_stale_hours >= SESSION_STALE_WARN_HOURS:
+        return "STALE"
+    if wall_stale_hours is not None and wall_stale_hours >= 72:
+        return "STALE"
+    if health_norm == "degrading":
+        return "DEGRADED"
+    return "READY"
+
+
+def classify_trading_utility(
+    health: str,
+    total_labeled: int,
+    tradeable_matured_signals: int,
+) -> str:
+    health_norm = str(health or "").strip().lower()
+    if health_norm == "kill-switch":
+        return "DO NOT TRADE"
+    if total_labeled > 0 and tradeable_matured_signals == 0:
+        return "STAND ASIDE"
+    if health_norm == "degrading":
+        return "DEFENSIVE"
+    return "ACTIVE"
+
+
+def build_operator_note(
+    health: str,
+    total_labeled: int,
+    tradeable_matured_signals: int,
+    blocker_summary: str | None,
+    bundles: list[MetricBundle],
+    health_notes: list[str],
+) -> str:
+    health_norm = str(health or "").strip().lower()
+    if health_norm == "kill-switch":
+        if health_notes:
+            return health_notes[0]
+        return "Health kill-switch is active; disable live execution until the model state recovers."
+
+    all_no_edge = bool(bundles) and all(
+        int(b.signal_no_edge_count or 0) >= int(b.sample_size or 0) for b in bundles if int(b.sample_size or 0) > 0
+    )
+    if total_labeled > 0 and tradeable_matured_signals == 0:
+        notes = ["No matured tradeable signals in this window"]
+        if all_no_edge:
+            notes.append("model abstained across all matured horizons")
+        if blocker_summary:
+            notes.append(blocker_summary)
+        return "; ".join(notes) + "."
+
+    if blocker_summary:
+        return blocker_summary[0].upper() + blocker_summary[1:] + "."
+
+    if health_notes:
+        return health_notes[0]
+
+    return "Model state and tradeability are within expected ranges."
+
+
 def render_report(
     report_day: date,
     start_ms: int,
@@ -1715,6 +1781,29 @@ def render_report(
     total_preds = len(predictions)
     total_labeled = len(labeled_records)
     total_events = len({p.get("event_id") for p in predictions if p.get("event_id")})
+    tradeable_matured_signals = sum(
+        int(b.signal_reject_count or 0) + int(b.signal_break_count or 0)
+        for b in bundles
+    )
+    blocker_summary = summarize_tradeability_blockers(manifest)
+    model_readiness = classify_model_readiness(
+        health=health,
+        session_stale_hours=stale_hours_session,
+        wall_stale_hours=stale_hours_wall,
+    )
+    trading_utility = classify_trading_utility(
+        health=health,
+        total_labeled=total_labeled,
+        tradeable_matured_signals=tradeable_matured_signals,
+    )
+    operator_note = build_operator_note(
+        health=health,
+        total_labeled=total_labeled,
+        tradeable_matured_signals=tradeable_matured_signals,
+        blocker_summary=blocker_summary,
+        bundles=bundles,
+        health_notes=health_notes,
+    )
 
     lines: list[str] = []
     lines.append(f"# Daily ML Report - {report_date_str}")
@@ -1733,6 +1822,9 @@ def render_report(
         f"- Wall-Clock Staleness: {f'{stale_hours_wall:.1f}h' if stale_hours_wall is not None else '--'}"
     )
     lines.append(f"- Health State: **{health.upper()}**")
+    lines.append(f"- Model Readiness: **{model_readiness}**")
+    lines.append(f"- Trading Utility: **{trading_utility}**")
+    lines.append(f"- Operator Note: {operator_note}")
     if SHADOW_HORIZONS:
         shadow = ", ".join(f"{h}m" for h in sorted(SHADOW_HORIZONS))
         lines.append(f"- Shadow Horizons: {shadow} (scored/reported, excluded from best-horizon selection)")
@@ -1742,13 +1834,8 @@ def render_report(
     lines.append(f"- Scored predictions ({prediction_basis_label}): {total_preds}")
     lines.append(f"- Unique events scored: {total_events}")
     lines.append(f"- Labeled prediction rows (matured horizons): {total_labeled}")
-    tradeable_matured_signals = sum(
-        int(b.signal_reject_count or 0) + int(b.signal_break_count or 0)
-        for b in bundles
-    )
     lines.append(f"- Tradeable matured signals (reject+break): {tradeable_matured_signals}")
     if total_labeled > 0 and tradeable_matured_signals == 0:
-        blocker_summary = summarize_tradeability_blockers(manifest)
         if blocker_summary:
             lines.append(
                 "- Performance note: no matured reject/break signals in this window, "

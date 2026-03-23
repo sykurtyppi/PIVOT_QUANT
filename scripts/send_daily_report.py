@@ -542,6 +542,8 @@ def build_retrain_status(ops_status: dict[str, str], log_status: dict[str, str])
     reload_status = ops_status.get("reload_last_status", "").strip().lower() or "unknown"
     retrain_state = ops_status.get("retrain_state", "").strip().lower()
     retrain_last_status = ops_status.get("retrain_last_status", "").strip().lower()
+    start_ms = parse_ms(ops_status.get("retrain_last_start_ms"))
+    completed_ms = parse_ms(ops_status.get("retrain_last_end_ms"))
 
     next_expected = "unknown"
     try:
@@ -551,7 +553,9 @@ def build_retrain_status(ops_status: dict[str, str], log_status: dict[str, str])
         pass
 
     state_hint = ""
-    if retrain_state == "running":
+    if retrain_state == "running" and (
+        start_ms is not None and (completed_ms is None or start_ms > completed_ms)
+    ):
         state_hint = " (running)"
     elif retrain_last_status == "failed":
         state_hint = " (last cycle failed)"
@@ -581,6 +585,14 @@ def build_action_flags(
         flags.append(
             f"Trigger retrain now (session staleness exceeds {SESSION_STALE_KILL_HOURS:.1f}h)."
         )
+
+    trading_utility = (context.get("trading_utility") or "").strip().upper()
+    operator_note = (context.get("operator_note") or "").strip()
+    if trading_utility == "STAND ASIDE":
+        if operator_note and operator_note.lower() != "unknown":
+            flags.append(f"Stand aside: {operator_note}")
+        else:
+            flags.append("Stand aside: no tradeable edge was emitted in the report window.")
 
     predictions_today = db_progress.get("predictions_today")
     if isinstance(predictions_today, int) and predictions_today == 0:
@@ -997,6 +1009,9 @@ def parse_report_context(markdown: str, report_path: Path) -> dict[str, str]:
         "generated": extract_line_value(markdown, "Generated") or "unknown",
         "window": extract_line_value(markdown, "Window (ET)") or "unknown",
         "health": extract_line_value(markdown, "Health State") or "unknown",
+        "model_readiness": extract_line_value(markdown, "Model Readiness") or "unknown",
+        "trading_utility": extract_line_value(markdown, "Trading Utility") or "unknown",
+        "operator_note": extract_line_value(markdown, "Operator Note") or "unknown",
         "model": extract_line_value(markdown, "Model") or "unknown",
         "staleness": extract_line_value(markdown, "Model Staleness") or "unknown",
         "prediction_basis": parsed_basis,
@@ -1012,6 +1027,8 @@ def build_short_summary(context: dict[str, str]) -> str:
     lines = [
         f"PivotQuant Daily ML Report: {context['report_date']}",
         f"Health: {context['health']}",
+        f"Model readiness: {context.get('model_readiness', 'unknown')}",
+        f"Trading utility: {context.get('trading_utility', 'unknown')}",
         f"Model: {context['model']}",
         f"Model staleness: {context['staleness']}",
         f"Scored predictions ({basis_label}): {context['scored']}",
@@ -1215,6 +1232,7 @@ def build_compact_email_body(
     action_flags: list[str],
     score_failures_tail: int,
     score_timeouts_tail: int,
+    failures_today: dict[str, int] | None,
     trend_lines: list[str],
     impact_lines: list[str],
     report_path: Path,
@@ -1226,6 +1244,11 @@ def build_compact_email_body(
     lines.append("")
     lines.append("Executive Summary")
     lines.append(f"- Health: {context['health']}")
+    lines.append(f"- Model Readiness: {context.get('model_readiness', 'unknown')}")
+    lines.append(f"- Trading Utility: {context.get('trading_utility', 'unknown')}")
+    operator_note = (context.get("operator_note") or "").strip()
+    if operator_note and operator_note.lower() != "unknown":
+        lines.append(f"- Operator Note: {operator_note}")
     lines.append(f"- Model: {context['model']}")
     lines.append(f"- Staleness: {context['staleness']}")
     lines.append(f"- Scored Predictions ({basis_label}): {context['scored']}")
@@ -1290,8 +1313,13 @@ def build_compact_email_body(
     lines.append(f"- Eligible events in report window: {eligible if eligible is not None else '--'}")
     lines.append(f"- Scored live in report window: {scored_live if scored_live is not None else '--'}")
     lines.append(f"- Unscored eligible in report window: {unscored if unscored is not None else '--'}")
-    lines.append(f"- Score failures (log tail): {score_failures_tail}")
-    lines.append(f"- Score timeouts (log tail): {score_timeouts_tail}")
+    if failures_today:
+        lines.append(
+            f"- Score failures today (all logs): {failures_today.get('failures', 0)} "
+            f"({failures_today.get('timeouts', 0)} timeouts)"
+        )
+    lines.append(f"- Score failures since last retrain (log tail): {score_failures_tail}")
+    lines.append(f"- Score timeouts since last retrain (log tail): {score_timeouts_tail}")
     lines.append("")
 
     lines.append("Retrain & Reload")
@@ -1570,6 +1598,7 @@ def main() -> int:
         action_flags=action_flags,
         score_failures_tail=score_failures_tail,
         score_timeouts_tail=score_timeouts_tail,
+        failures_today=failures_today,
         trend_lines=trend_lines,
         impact_lines=impact_lines,
         report_path=report_path,
