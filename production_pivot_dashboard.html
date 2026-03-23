@@ -1696,8 +1696,8 @@
                     <div class="control">
                         <label for="gamma-expiry-select">Gamma Expiry (Structural)</label>
                         <select id="gamma-expiry-select">
-                            <option value="90dte" selected>90DTE Structural</option>
-                            <option value="aggregate_90dte">Aggregate 90DTE (Shadow)</option>
+                            <option value="aggregate_90dte" selected>Aggregate 90DTE</option>
+                            <option value="90dte">90DTE Single-Expiry</option>
                         </select>
                     </div>
                     <div class="control">
@@ -2179,7 +2179,7 @@
         const UI_DEFAULTS = Object.freeze({
             range: '3mo',
             pivotType: 'standard',
-            gammaExpiry: '90dte',
+            gammaExpiry: 'aggregate_90dte',
             gammaExpiryIntraday: '90dte',
             lookbackSessions: 20,
             autoRefreshSec: 60,
