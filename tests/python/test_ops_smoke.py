@@ -3436,6 +3436,14 @@ class OpsSmokeTests(unittest.TestCase):
         finally:
             bridge._utc_today_yyyymmdd = original_today
 
+    def test_ibkr_bridge_normalizes_marketdata_timestamp_expiries(self) -> None:
+        bridge = load_module(
+            "pq_ibkr_expiry_timestamp_test",
+            REPO_ROOT / "server" / "ibkr_gamma_bridge.py",
+        )
+        self.assertEqual(bridge._normalize_expiry_yyyymmdd(1775529600), "20260407")
+        self.assertEqual(bridge._normalize_expiry_yyyymmdd("1775529600"), "20260407")
+
     def test_ibkr_bridge_market_close_uses_new_york_timezone(self) -> None:
         bridge = load_module(
             "pq_ibkr_market_close_timezone_test",

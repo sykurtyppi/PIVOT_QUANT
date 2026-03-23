@@ -221,9 +221,26 @@ def _parse_expiry_yyyymmdd(exp):
 
 
 def _parse_expiry_any(exp):
+    if isinstance(exp, (int, float)):
+        try:
+            ts = float(exp)
+            if ts > 10_000_000_000:
+                ts /= 1000.0
+            return datetime.fromtimestamp(ts, timezone.utc)
+        except (TypeError, ValueError, OSError, OverflowError):
+            return None
+
     text = str(exp or "").strip()
     if not text:
         return None
+    if text.isdigit():
+        try:
+            ts = float(text)
+            if ts > 10_000_000_000:
+                ts /= 1000.0
+            return datetime.fromtimestamp(ts, timezone.utc)
+        except (TypeError, ValueError, OSError, OverflowError):
+            pass
     for fmt in ("%Y%m%d", "%Y-%m-%d"):
         try:
             return datetime.strptime(text[:10], fmt)
