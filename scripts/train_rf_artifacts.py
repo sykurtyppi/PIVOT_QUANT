@@ -56,11 +56,11 @@ def _env_bool(name: str, default: bool) -> bool:
 def _gamma_context_metadata() -> dict[str, object]:
     return {
         "context_expiry_mode": (
-            os.getenv("GAMMA_CONTEXT_EXPIRY_MODE", "quarterly").strip().lower() or "quarterly"
+            os.getenv("GAMMA_CONTEXT_EXPIRY_MODE", "90dte").strip().lower() or "90dte"
         ),
         "context_dte_window_days": _env_int("GAMMA_CONTEXT_DTE_DAYS", 120),
         "history_expiry_mode": (
-            os.getenv("GAMMA_HISTORY_EXPIRY_MODE", "quarterly").strip().lower() or "quarterly"
+            os.getenv("GAMMA_HISTORY_EXPIRY_MODE", "90dte").strip().lower() or "90dte"
         ),
         "history_dte_window_days": _env_int("GAMMA_HISTORY_LIVE_DTE_DAYS", 120),
     }

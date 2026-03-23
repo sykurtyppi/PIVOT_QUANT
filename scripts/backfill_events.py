@@ -59,10 +59,10 @@ YAHOO_PROXY_AUTH_FAILOPEN_SEC = max(
 )
 GAMMA_CONTEXT_MARKETDATA_TIMEOUT_SEC = int(os.getenv("GAMMA_CONTEXT_MARKETDATA_TIMEOUT_SEC", "12"))
 GAMMA_CONTEXT_MAX_SNAPSHOT_AGE_DAYS = int(os.getenv("GAMMA_CONTEXT_MAX_SNAPSHOT_AGE_DAYS", "3"))
-# Structural gamma context should come from the nearest quarterly expiry.
-GAMMA_CONTEXT_EXPIRY_MODE = (os.getenv("GAMMA_CONTEXT_EXPIRY_MODE", "quarterly") or "quarterly").strip().lower()
-# Use a slightly wider fetch window so the nearest quarterly contract is still
-# available when it lands a few days beyond 90DTE.
+# Structural gamma context should come from the expiry nearest 90DTE.
+GAMMA_CONTEXT_EXPIRY_MODE = (os.getenv("GAMMA_CONTEXT_EXPIRY_MODE", "90dte") or "90dte").strip().lower()
+# Use a slightly wider fetch window so the nearest 90DTE contract is still
+# available when it lands a few days around the target tenor.
 GAMMA_CONTEXT_DTE_DAYS = int(os.getenv("GAMMA_CONTEXT_DTE_DAYS", "120"))
 GAMMA_CONTEXT_STRIKE_RANGE_PCT = float(os.getenv("GAMMA_HISTORY_STRIKE_RANGE_PCT", "0.2"))
 GAMMA_CONTEXT_MAX_STRIKES = int(os.getenv("GAMMA_HISTORY_MAX_STRIKES", "120"))

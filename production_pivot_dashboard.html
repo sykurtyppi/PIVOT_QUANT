@@ -1696,17 +1696,13 @@
                     <div class="control">
                         <label for="gamma-expiry-select">Gamma Expiry (Structural)</label>
                         <select id="gamma-expiry-select">
-                            <option value="monthly">Monthly</option>
-                            <option value="quarterly" selected>Quarterly (90DTE)</option>
-                            <option value="all">All (Weighted)</option>
+                            <option value="90dte" selected>90DTE Structural</option>
                         </select>
                     </div>
                     <div class="control">
                         <label for="gamma-expiry-intraday-select">Gamma Expiry (Secondary)</label>
                         <select id="gamma-expiry-intraday-select">
-                            <option value="monthly">Monthly</option>
-                            <option value="quarterly" selected>Quarterly (90DTE)</option>
-                            <option value="all">All (Weighted)</option>
+                            <option value="90dte" selected>90DTE Structural</option>
                         </select>
                     </div>
                     <div class="control">
@@ -2182,8 +2178,8 @@
         const UI_DEFAULTS = Object.freeze({
             range: '3mo',
             pivotType: 'standard',
-            gammaExpiry: 'quarterly',
-            gammaExpiryIntraday: 'quarterly',
+            gammaExpiry: '90dte',
+            gammaExpiryIntraday: '90dte',
             lookbackSessions: 20,
             autoRefreshSec: 60,
             exportConvertTo: 'native',
@@ -2464,7 +2460,7 @@
         const RANGE_ORDER = ['1mo', '3mo', '6mo', '1y'];
         const INTRADAY_INTERVALS = new Set(['1m', '5m', '15m', '30m', '60m', '90m']);
         const ML_SUPPORTED_SYMBOLS = new Set(['SPY']);
-        const GAMMA_EXPIRY_MODES = new Set(['front', '0dte', 'monthly', 'quarterly', 'all']);
+        const GAMMA_EXPIRY_MODES = new Set(['90dte']);
         const EMA_WARMUP_RANGE = '5y';
         const EMA_MAX_PERIOD = 200;
         const EMA_WARMUP_MIN_BARS = EMA_MAX_PERIOD * 3;
@@ -2485,6 +2481,7 @@
 
         function normalizeGammaExpiryMode(rawValue, fallback) {
             const value = String(rawValue || '').trim().toLowerCase();
+            if (value === 'quarterly') return '90dte';
             if (GAMMA_EXPIRY_MODES.has(value)) return value;
             return String(fallback || UI_DEFAULTS.gammaExpiry).toLowerCase();
         }
@@ -2691,17 +2688,17 @@
                         Object.assign(state.uiVisibility, prefs.visibility);
                     }
 
-                    const migratedQuarterlyKey = 'pq_gamma_quarterly_focus_v1';
-                    const migratedQuarterly = localStorage.getItem(migratedQuarterlyKey) === '1';
-                    if (!migratedQuarterly) {
+                    const migrated90dteKey = 'pq_gamma_90dte_focus_v2';
+                    const migrated90dte = localStorage.getItem(migrated90dteKey) === '1';
+                    if (!migrated90dte) {
                         let nextPrefs = prefs;
                         let changed = false;
-                        if (state.gammaExpiry === 'front' || state.gammaExpiry === '0dte') {
+                        if (state.gammaExpiry !== UI_DEFAULTS.gammaExpiry) {
                             state.gammaExpiry = UI_DEFAULTS.gammaExpiry;
                             nextPrefs = { ...nextPrefs, gammaExpiry: state.gammaExpiry };
                             changed = true;
                         }
-                        if (state.gammaExpiryIntraday === 'front' || state.gammaExpiryIntraday === '0dte') {
+                        if (state.gammaExpiryIntraday !== UI_DEFAULTS.gammaExpiryIntraday) {
                             state.gammaExpiryIntraday = UI_DEFAULTS.gammaExpiryIntraday;
                             nextPrefs = { ...nextPrefs, gammaExpiryIntraday: state.gammaExpiryIntraday };
                             changed = true;
@@ -2709,7 +2706,7 @@
                         if (changed) {
                             localStorage.setItem('pq_ui_prefs', JSON.stringify(nextPrefs));
                         }
-                        localStorage.setItem(migratedQuarterlyKey, '1');
+                        localStorage.setItem(migrated90dteKey, '1');
                     }
                 } else {
                     // Fallback to legacy key

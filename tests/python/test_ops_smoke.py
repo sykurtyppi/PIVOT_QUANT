@@ -2348,9 +2348,9 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("if bridge_marketdata_cooldown:", block)
         self.assertIn("_merge_context_with_carry(snapshot_context, carry_context, today_et)", block)
 
-    def test_backfill_gamma_context_defaults_to_quarterly_structural_mode(self) -> None:
+    def test_backfill_gamma_context_defaults_to_90dte_structural_mode(self) -> None:
         source = (REPO_ROOT / "scripts" / "backfill_events.py").read_text(encoding="utf-8")
-        self.assertIn('GAMMA_CONTEXT_EXPIRY_MODE = (os.getenv("GAMMA_CONTEXT_EXPIRY_MODE", "quarterly")', source)
+        self.assertIn('GAMMA_CONTEXT_EXPIRY_MODE = (os.getenv("GAMMA_CONTEXT_EXPIRY_MODE", "90dte")', source)
         self.assertIn('GAMMA_CONTEXT_DTE_DAYS = int(os.getenv("GAMMA_CONTEXT_DTE_DAYS", "120"))', source)
         self.assertIn('expiry_mode=GAMMA_CONTEXT_EXPIRY_MODE', source)
         self.assertIn('&expiry={GAMMA_CONTEXT_EXPIRY_MODE}&limit=60', source)
@@ -2984,13 +2984,12 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("x-forwarded-for", proxy_source)
         self.assertIn("url.pathname === '/health'", proxy_source)
 
-    def test_dashboard_proxy_yahoo_gamma_quarterly_expiry_contract_present(self) -> None:
+    def test_dashboard_proxy_yahoo_gamma_90dte_expiry_contract_present(self) -> None:
         proxy_source = (REPO_ROOT / "server" / "yahoo_proxy.js").read_text(encoding="utf-8")
-        self.assertIn("function isQuarterlyExpiry(expiryYmd)", proxy_source)
-        self.assertIn("if (safeMode === 'quarterly')", proxy_source)
-        self.assertIn("isQuarterlyExpiry(exp)", proxy_source)
-        self.assertIn("const safeMode = String(mode || 'quarterly').toLowerCase();", proxy_source)
-        self.assertIn("const expiry = url.searchParams.get('expiry') || 'quarterly';", proxy_source)
+        self.assertIn("function normalizeOptionsExpiryMode(mode)", proxy_source)
+        self.assertIn("if (safeMode === '90dte')", proxy_source)
+        self.assertIn("Math.abs(a.dteDays - 90)", proxy_source)
+        self.assertIn("const expiry = url.searchParams.get('expiry') || '90dte';", proxy_source)
 
     def test_dashboard_proxy_runtime_architecture_live_endpoint(self) -> None:
         if shutil.which("node") is None:
@@ -3081,8 +3080,8 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn('<section class="transparency-strip" aria-label="Model transparency">', dashboard)
         self.assertIn('id="trans-model"', dashboard)
         self.assertIn('id="trans-governance-reason"', dashboard)
-        self.assertIn("gammaExpiryIntraday: 'quarterly'", dashboard)
-        self.assertIn("const migratedQuarterlyKey = 'pq_gamma_quarterly_focus_v1';", dashboard)
+        self.assertIn("gammaExpiryIntraday: '90dte'", dashboard)
+        self.assertIn("const migrated90dteKey = 'pq_gamma_90dte_focus_v2';", dashboard)
         self.assertIn("function setTransparencyItem(id, value, note = '', tone = '', title = '')", dashboard)
         self.assertIn("function updateTransparencyStrip()", dashboard)
         self.assertIn("state.mlHealthRaw = payload || null;", dashboard)
@@ -3411,7 +3410,7 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn('"front":     7', source)
         self.assertIn('"weekly":    7', source)
         self.assertIn('"monthly":  45', source)
-        self.assertIn('"quarterly": 120', source)
+        self.assertIn('"90dte":    120', source)
         self.assertIn("dte_days = _EXPIRY_MODE_DTE.get(mode, MDA_GAMMA_DTE_DAYS)", source)
         self.assertIn('cache_key = f"{symbol.upper()}:{mode or \'default\'}"', source)
         self.assertIn("payload = fetch_gamma_marketdata(symbol, expiry_mode=expiry)", source)
@@ -3423,16 +3422,17 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("if selected_expiries and expiry_compact not in selected_expiries:", block)
         self.assertIn('"selectedExpiries": sorted(selected_expiries)', block)
 
-    def test_ibkr_bridge_pick_expiries_supports_quarterly_mode(self) -> None:
+    def test_ibkr_bridge_pick_expiries_supports_90dte_mode(self) -> None:
         bridge = load_module(
-            "pq_ibkr_pick_expiries_quarterly_test",
+            "pq_ibkr_pick_expiries_90dte_test",
             REPO_ROOT / "server" / "ibkr_gamma_bridge.py",
         )
         original_today = bridge._utc_today_yyyymmdd
         try:
-            bridge._utc_today_yyyymmdd = lambda: "20260319"
-            expiries = ["20260320", "20260327", "20260417", "20260619", "20260918"]
-            self.assertEqual(bridge.pick_expiries(expiries, "quarterly"), ["20260320"])
+            bridge._utc_today_yyyymmdd = lambda: "20260323"
+            expiries = ["20260417", "20260515", "20260619", "20260717", "20260918"]
+            self.assertEqual(bridge.pick_expiries(expiries, "90dte"), ["20260619"])
+            self.assertEqual(bridge.pick_expiries(expiries, "quarterly"), ["20260619"])
         finally:
             bridge._utc_today_yyyymmdd = original_today
 
@@ -3521,7 +3521,7 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("ML_SESSION_PREOPEN_HOUR", checker)
         self.assertIn("ML_SESSION_POSTOPEN_HOUR", checker)
         self.assertIn("ML_SESSION_OPS_STATUS_URL", checker)
-        self.assertIn("expiry=quarterly", checker)
+        self.assertIn("expiry=90dte", checker)
 
         proc = run_cmd([PYTHON, "-m", "py_compile", "scripts/session_routine_check.py"], cwd=REPO_ROOT)
         self.assertEqual(proc.returncode, 0, msg=f"{proc.stdout}\n{proc.stderr}")

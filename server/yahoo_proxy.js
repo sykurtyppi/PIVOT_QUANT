@@ -1322,6 +1322,23 @@ function isQuarterlyExpiry(expiryYmd) {
   return month === 3 || month === 6 || month === 9 || month === 12;
 }
 
+function normalizeOptionsExpiryMode(mode) {
+  const safeMode = String(mode || '90dte').toLowerCase();
+  return safeMode === 'quarterly' ? '90dte' : safeMode;
+}
+
+function daysUntilExpiry(expiryYmd, todayYmd) {
+  const expYear = Number(expiryYmd.slice(0, 4));
+  const expMonth = Number(expiryYmd.slice(4, 6)) - 1;
+  const expDay = Number(expiryYmd.slice(6, 8));
+  const todayYear = Number(todayYmd.slice(0, 4));
+  const todayMonth = Number(todayYmd.slice(4, 6)) - 1;
+  const todayDay = Number(todayYmd.slice(6, 8));
+  const expUtc = Date.UTC(expYear, expMonth, expDay);
+  const todayUtc = Date.UTC(todayYear, todayMonth, todayDay);
+  return Math.round((expUtc - todayUtc) / 86400000);
+}
+
 function pickOptionsExpiry(expirations, mode) {
   const normalized = Array.from(
     new Set(
@@ -1333,20 +1350,27 @@ function pickOptionsExpiry(expirations, mode) {
   if (!normalized.length) return null;
 
   const today = formatYmd(Math.floor(Date.now() / 1000), 'America/New_York').replace(/-/g, '');
-  const safeMode = String(mode || 'quarterly').toLowerCase();
+  const safeMode = normalizeOptionsExpiryMode(mode);
 
   if (safeMode === '0dte') {
     return normalized.includes(today) ? today : normalized[0];
   }
 
-  if (safeMode === 'monthly') {
-    const monthly = normalized.filter((exp) => isMonthlyExpiry(exp) && exp >= today);
-    if (monthly.length) return monthly[0];
+  if (safeMode === '90dte') {
+    const candidates = normalized
+      .map((exp) => ({ exp, dteDays: daysUntilExpiry(exp, today) }))
+      .filter((item) => Number.isFinite(item.dteDays) && item.dteDays >= 0)
+      .sort((a, b) => {
+        const diff = Math.abs(a.dteDays - 90) - Math.abs(b.dteDays - 90);
+        if (diff !== 0) return diff;
+        if (a.dteDays !== b.dteDays) return a.dteDays - b.dteDays;
+        return a.exp.localeCompare(b.exp);
+      });
+    if (candidates.length) return candidates[0].exp;
+    return normalized[0];
   }
 
-  if (safeMode === 'quarterly') {
-    const quarterly = normalized.filter((exp) => isQuarterlyExpiry(exp) && exp >= today);
-    if (quarterly.length) return quarterly[0];
+  if (safeMode === 'monthly') {
     const monthly = normalized.filter((exp) => isMonthlyExpiry(exp) && exp >= today);
     if (monthly.length) return monthly[0];
   }
@@ -1533,15 +1557,16 @@ function buildWallPayload(strike, oi, maxOi) {
   };
 }
 
-async function fetchYahooGammaFallback({ symbol, expiryMode = 'quarterly', limit = 60 }) {
+async function fetchYahooGammaFallback({ symbol, expiryMode = '90dte', limit = 60 }) {
   const optionSymbol = mapOptionsSymbol(symbol);
+  const safeExpiryMode = normalizeOptionsExpiryMode(expiryMode);
   const firstFetch = await fetchYahooOptionsResult(optionSymbol);
   const first = firstFetch.optionResult;
   const expiries = (Array.isArray(first?.expirationDates) ? first.expirationDates : [])
     .map((value) => String(value))
     .filter((value) => /^\d{8}$/.test(value))
     .sort();
-  const selectedExpiry = pickOptionsExpiry(expiries, expiryMode);
+  const selectedExpiry = pickOptionsExpiry(expiries, safeExpiryMode);
 
   let selectedResult = first;
   let attempts = firstFetch.attempts;
@@ -1582,7 +1607,7 @@ async function fetchYahooGammaFallback({ symbol, expiryMode = 'quarterly', limit
     source: 'Yahoo',
     symbol: (symbol || 'SPY').toUpperCase().trim(),
     spot: summary.spot,
-    expiryMode,
+    expiryMode: safeExpiryMode,
     generatedAt: new Date().toISOString(),
     gammaFlip: null,
     callWall: buildWallPayload(summary.callWall?.strike, summary.callWall?.oi, maxWallOi),
@@ -2932,7 +2957,7 @@ const server = http.createServer(async (req, res) => {
     }
     try {
       const symbol = url.searchParams.get('symbol') || 'SPX';
-      const expiry = url.searchParams.get('expiry') || 'quarterly';
+      const expiry = url.searchParams.get('expiry') || '90dte';
       const limit = url.searchParams.get('limit') || '60';
       const source = (url.searchParams.get('source') || 'auto').toLowerCase();
       const gammaUrl = `http://127.0.0.1:5001/gamma?symbol=${encodeURIComponent(
