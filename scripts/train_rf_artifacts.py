@@ -53,6 +53,19 @@ def _env_bool(name: str, default: bool) -> bool:
     return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _gamma_context_metadata() -> dict[str, object]:
+    return {
+        "context_expiry_mode": (
+            os.getenv("GAMMA_CONTEXT_EXPIRY_MODE", "quarterly").strip().lower() or "quarterly"
+        ),
+        "context_dte_window_days": _env_int("GAMMA_CONTEXT_DTE_DAYS", 120),
+        "history_expiry_mode": (
+            os.getenv("GAMMA_HISTORY_EXPIRY_MODE", "quarterly").strip().lower() or "quarterly"
+        ),
+        "history_dte_window_days": _env_int("GAMMA_HISTORY_LIVE_DTE_DAYS", 120),
+    }
+
+
 def _coerce_precision_floor(raw_value: str) -> float:
     value = float(raw_value)
     if value < 0.0 or value > 1.0:
@@ -666,6 +679,7 @@ def main() -> None:
         "calibration": {},
         "thresholds_meta": {},
         "stats": {},
+        "gamma_context": _gamma_context_metadata(),
         "trained_end_ts": None,
     }
     trained_end_ts_max = None

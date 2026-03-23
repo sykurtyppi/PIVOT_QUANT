@@ -1696,18 +1696,14 @@
                     <div class="control">
                         <label for="gamma-expiry-select">Gamma Expiry (Structural)</label>
                         <select id="gamma-expiry-select">
-                            <option value="front">Front-Week</option>
-                            <option value="0dte">0DTE</option>
                             <option value="monthly">Monthly</option>
                             <option value="quarterly" selected>Quarterly (90DTE)</option>
                             <option value="all">All (Weighted)</option>
                         </select>
                     </div>
                     <div class="control">
-                        <label for="gamma-expiry-intraday-select">Gamma Expiry (Intraday)</label>
+                        <label for="gamma-expiry-intraday-select">Gamma Expiry (Secondary)</label>
                         <select id="gamma-expiry-intraday-select">
-                            <option value="front">Front-Week</option>
-                            <option value="0dte">0DTE</option>
                             <option value="monthly">Monthly</option>
                             <option value="quarterly" selected>Quarterly (90DTE)</option>
                             <option value="all">All (Weighted)</option>
@@ -2133,9 +2129,9 @@
                         <div class="signal-item" id="wall-call" title="Strike with highest call open interest — acts as resistance via dealer hedging"><strong>Call Wall</strong>--</div>
                         <div class="signal-item" id="wall-put" title="Strike with highest put open interest — acts as support via dealer hedging"><strong>Put Wall</strong>--</div>
                         <div class="signal-item" id="wall-pin" title="Strike where price may gravitate toward due to balanced OI — max pain effect"><strong>Pin Candidate</strong>--</div>
-                        <div class="signal-item" id="wall-call-intraday" title="Intraday call wall (0DTE/front-week) — short-term dealer pinning"><strong>Call Wall (Intraday)</strong>--</div>
-                        <div class="signal-item" id="wall-put-intraday" title="Intraday put wall (0DTE/front-week) — short-term dealer pinning"><strong>Put Wall (Intraday)</strong>--</div>
-                        <div class="signal-item" id="wall-pin-intraday" title="Intraday pin candidate (0DTE/front-week)"><strong>Pin (Intraday)</strong>--</div>
+                        <div class="signal-item" id="wall-call-intraday" title="Secondary wall set using the selected gamma expiry mode"><strong>Call Wall (Secondary)</strong>--</div>
+                        <div class="signal-item" id="wall-put-intraday" title="Secondary wall set using the selected gamma expiry mode"><strong>Put Wall (Secondary)</strong>--</div>
+                        <div class="signal-item" id="wall-pin-intraday" title="Secondary pin candidate using the selected gamma expiry mode"><strong>Pin (Secondary)</strong>--</div>
                         <div class="signal-item" id="playbook" title="Suggested trading approach based on gamma environment and vol regime"><strong>Playbook</strong>--</div>
                         <div class="signal-item" id="gamma-confidence" title="Reliability score for gamma data based on freshness and coverage"><strong>Gamma Confidence</strong>--</div>
                     </div>
@@ -2695,15 +2691,25 @@
                         Object.assign(state.uiVisibility, prefs.visibility);
                     }
 
-                    const migratedIntradayKey = 'pq_gamma_intraday_migrated_v2';
-                    const migratedIntraday = localStorage.getItem(migratedIntradayKey) === '1';
-                    if (!migratedIntraday && state.gammaExpiryIntraday === '0dte') {
-                        state.gammaExpiryIntraday = UI_DEFAULTS.gammaExpiryIntraday;
-                        const nextPrefs = { ...prefs, gammaExpiryIntraday: state.gammaExpiryIntraday };
-                        localStorage.setItem('pq_ui_prefs', JSON.stringify(nextPrefs));
-                    }
-                    if (!migratedIntraday) {
-                        localStorage.setItem(migratedIntradayKey, '1');
+                    const migratedQuarterlyKey = 'pq_gamma_quarterly_focus_v1';
+                    const migratedQuarterly = localStorage.getItem(migratedQuarterlyKey) === '1';
+                    if (!migratedQuarterly) {
+                        let nextPrefs = prefs;
+                        let changed = false;
+                        if (state.gammaExpiry === 'front' || state.gammaExpiry === '0dte') {
+                            state.gammaExpiry = UI_DEFAULTS.gammaExpiry;
+                            nextPrefs = { ...nextPrefs, gammaExpiry: state.gammaExpiry };
+                            changed = true;
+                        }
+                        if (state.gammaExpiryIntraday === 'front' || state.gammaExpiryIntraday === '0dte') {
+                            state.gammaExpiryIntraday = UI_DEFAULTS.gammaExpiryIntraday;
+                            nextPrefs = { ...nextPrefs, gammaExpiryIntraday: state.gammaExpiryIntraday };
+                            changed = true;
+                        }
+                        if (changed) {
+                            localStorage.setItem('pq_ui_prefs', JSON.stringify(nextPrefs));
+                        }
+                        localStorage.setItem(migratedQuarterlyKey, '1');
                     }
                 } else {
                     // Fallback to legacy key
@@ -7187,7 +7193,11 @@
                 state.gammaData = await fetchGammaData(symbol, state.gammaExpiry, requestOptions);
                 if (isStaleRequest()) return;
                 if (state.uiVisibility.gammaWallsIntraday) {
-                    state.gammaDataIntraday = await fetchGammaData(symbol, state.gammaExpiryIntraday, requestOptions);
+                    if (state.gammaExpiryIntraday === state.gammaExpiry) {
+                        state.gammaDataIntraday = state.gammaData;
+                    } else {
+                        state.gammaDataIntraday = await fetchGammaData(symbol, state.gammaExpiryIntraday, requestOptions);
+                    }
                     if (isStaleRequest()) return;
                 } else {
                     state.gammaDataIntraday = null;
@@ -7434,6 +7444,9 @@
                 saveUiPrefs();
                 updateAdvancedControlsSummary();
                 state.gammaData = await fetchGammaData(state.symbol, state.gammaExpiry);
+                if (state.uiVisibility.gammaWallsIntraday && state.gammaExpiryIntraday === state.gammaExpiry) {
+                    state.gammaDataIntraday = state.gammaData;
+                }
                 if (state.latestData && state.selectedSessionIndex) {
                     renderForSession(state.latestData, state.selectedSessionIndex);
                 }
@@ -7445,7 +7458,11 @@
                     saveUiPrefs();
                     updateAdvancedControlsSummary();
                     if (state.uiVisibility.gammaWallsIntraday) {
-                        state.gammaDataIntraday = await fetchGammaData(state.symbol, state.gammaExpiryIntraday);
+                        if (state.gammaExpiryIntraday === state.gammaExpiry && state.gammaData) {
+                            state.gammaDataIntraday = state.gammaData;
+                        } else {
+                            state.gammaDataIntraday = await fetchGammaData(state.symbol, state.gammaExpiryIntraday);
+                        }
                     } else {
                         state.gammaDataIntraday = null;
                     }

@@ -2325,10 +2325,19 @@ class OpsSmokeTests(unittest.TestCase):
 
     def test_collect_gamma_history_fallback_uses_dte_filter(self) -> None:
         source = (REPO_ROOT / "scripts" / "collect_gamma_history.py").read_text(encoding="utf-8")
+        self.assertIn("GAMMA_HISTORY_EXPIRY_MODE", source)
         self.assertIn("GAMMA_HISTORY_LIVE_DTE_DAYS", source)
         fetch_block = source.split("def fetch_marketdata_chain(", 1)[1].split("def _to_float", 1)[0]
         self.assertIn("?dte={GAMMA_HISTORY_LIVE_DTE_DAYS}", fetch_block)
         self.assertNotIn("?expiration=all", fetch_block)
+
+    def test_collect_gamma_history_summarize_chain_tracks_selected_expiry_family(self) -> None:
+        source = (REPO_ROOT / "scripts" / "collect_gamma_history.py").read_text(encoding="utf-8")
+        block = source.split("def summarize_chain(", 1)[1].split("def ensure_schema(", 1)[0]
+        self.assertIn("selected_expiries = _pick_chain_expiries(expiries, expiry_mode, snapshot_date)", block)
+        self.assertIn("if selected_expiries and expiry_compact not in selected_expiries:", block)
+        self.assertIn('"selected_expiries": sorted(selected_expiries)', block)
+        self.assertIn('"expiry_mode": str(expiry_mode or GAMMA_HISTORY_EXPIRY_MODE).lower()', block)
 
     def test_backfill_gamma_context_avoids_marketdata_when_bridge_reports_cooldown(self) -> None:
         source = (REPO_ROOT / "scripts" / "backfill_events.py").read_text(encoding="utf-8")
@@ -2338,6 +2347,13 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("daily request limit", block)
         self.assertIn("if bridge_marketdata_cooldown:", block)
         self.assertIn("_merge_context_with_carry(snapshot_context, carry_context, today_et)", block)
+
+    def test_backfill_gamma_context_defaults_to_quarterly_structural_mode(self) -> None:
+        source = (REPO_ROOT / "scripts" / "backfill_events.py").read_text(encoding="utf-8")
+        self.assertIn('GAMMA_CONTEXT_EXPIRY_MODE = (os.getenv("GAMMA_CONTEXT_EXPIRY_MODE", "quarterly")', source)
+        self.assertIn('GAMMA_CONTEXT_DTE_DAYS = int(os.getenv("GAMMA_CONTEXT_DTE_DAYS", "120"))', source)
+        self.assertIn('expiry_mode=GAMMA_CONTEXT_EXPIRY_MODE', source)
+        self.assertIn('&expiry={GAMMA_CONTEXT_EXPIRY_MODE}&limit=60', source)
 
     def test_backfill_ensure_new_columns_uses_transaction_contract_present(self) -> None:
         source = (REPO_ROOT / "scripts" / "backfill_events.py").read_text(encoding="utf-8")
@@ -2973,6 +2989,8 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("function isQuarterlyExpiry(expiryYmd)", proxy_source)
         self.assertIn("if (safeMode === 'quarterly')", proxy_source)
         self.assertIn("isQuarterlyExpiry(exp)", proxy_source)
+        self.assertIn("const safeMode = String(mode || 'quarterly').toLowerCase();", proxy_source)
+        self.assertIn("const expiry = url.searchParams.get('expiry') || 'quarterly';", proxy_source)
 
     def test_dashboard_proxy_runtime_architecture_live_endpoint(self) -> None:
         if shutil.which("node") is None:
@@ -3047,7 +3065,7 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("dteFallbackReason: data.dteFallbackReason ? String(data.dteFallbackReason) : null", dashboard)
         self.assertIn("const dteFallbackIntraday = !!state.gammaDataIntraday?.dteFallback;", dashboard)
         self.assertIn("wallSuffixIntradayParts.push('0DTE fallback');", dashboard)
-        self.assertIn("Call Wall (Intraday)", dashboard)
+        self.assertIn("Call Wall (Secondary)", dashboard)
 
     def test_dashboard_ml_metrics_staleness_indicator_contract_present(self) -> None:
         dashboard = (REPO_ROOT / "production_pivot_dashboard.html").read_text(encoding="utf-8")
@@ -3064,7 +3082,7 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn('id="trans-model"', dashboard)
         self.assertIn('id="trans-governance-reason"', dashboard)
         self.assertIn("gammaExpiryIntraday: 'quarterly'", dashboard)
-        self.assertIn("const migratedIntradayKey = 'pq_gamma_intraday_migrated_v2';", dashboard)
+        self.assertIn("const migratedQuarterlyKey = 'pq_gamma_quarterly_focus_v1';", dashboard)
         self.assertIn("function setTransparencyItem(id, value, note = '', tone = '', title = '')", dashboard)
         self.assertIn("function updateTransparencyStrip()", dashboard)
         self.assertIn("state.mlHealthRaw = payload || null;", dashboard)
@@ -3392,11 +3410,18 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("_EXPIRY_MODE_DTE = {", source)
         self.assertIn('"front":     7', source)
         self.assertIn('"weekly":    7', source)
-        self.assertIn('"monthly":  30', source)
-        self.assertIn('"quarterly": 90', source)
+        self.assertIn('"monthly":  45', source)
+        self.assertIn('"quarterly": 120', source)
         self.assertIn("dte_days = _EXPIRY_MODE_DTE.get(mode, MDA_GAMMA_DTE_DAYS)", source)
         self.assertIn('cache_key = f"{symbol.upper()}:{mode or \'default\'}"', source)
         self.assertIn("payload = fetch_gamma_marketdata(symbol, expiry_mode=expiry)", source)
+
+    def test_ibkr_bridge_marketdata_filters_selected_expiries_for_quarterly_mode(self) -> None:
+        source = (REPO_ROOT / "server" / "ibkr_gamma_bridge.py").read_text(encoding="utf-8")
+        block = source.split("def fetch_gamma_marketdata(", 1)[1].split("class GammaHandler", 1)[0]
+        self.assertIn("selected_expiries = _selected_marketdata_expiries(expiries, mode)", block)
+        self.assertIn("if selected_expiries and expiry_compact not in selected_expiries:", block)
+        self.assertIn('"selectedExpiries": sorted(selected_expiries)', block)
 
     def test_ibkr_bridge_pick_expiries_supports_quarterly_mode(self) -> None:
         bridge = load_module(
@@ -3488,6 +3513,7 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("ML_SESSION_PREOPEN_HOUR", checker)
         self.assertIn("ML_SESSION_POSTOPEN_HOUR", checker)
         self.assertIn("ML_SESSION_OPS_STATUS_URL", checker)
+        self.assertIn("expiry=quarterly", checker)
 
         proc = run_cmd([PYTHON, "-m", "py_compile", "scripts/session_routine_check.py"], cwd=REPO_ROOT)
         self.assertEqual(proc.returncode, 0, msg=f"{proc.stdout}\n{proc.stderr}")

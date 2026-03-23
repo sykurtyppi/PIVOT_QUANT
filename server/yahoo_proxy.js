@@ -1333,7 +1333,7 @@ function pickOptionsExpiry(expirations, mode) {
   if (!normalized.length) return null;
 
   const today = formatYmd(Math.floor(Date.now() / 1000), 'America/New_York').replace(/-/g, '');
-  const safeMode = String(mode || 'front').toLowerCase();
+  const safeMode = String(mode || 'quarterly').toLowerCase();
 
   if (safeMode === '0dte') {
     return normalized.includes(today) ? today : normalized[0];
@@ -1533,7 +1533,7 @@ function buildWallPayload(strike, oi, maxOi) {
   };
 }
 
-async function fetchYahooGammaFallback({ symbol, expiryMode = 'front', limit = 60 }) {
+async function fetchYahooGammaFallback({ symbol, expiryMode = 'quarterly', limit = 60 }) {
   const optionSymbol = mapOptionsSymbol(symbol);
   const firstFetch = await fetchYahooOptionsResult(optionSymbol);
   const first = firstFetch.optionResult;
@@ -2932,7 +2932,7 @@ const server = http.createServer(async (req, res) => {
     }
     try {
       const symbol = url.searchParams.get('symbol') || 'SPX';
-      const expiry = url.searchParams.get('expiry') || 'front';
+      const expiry = url.searchParams.get('expiry') || 'quarterly';
       const limit = url.searchParams.get('limit') || '60';
       const source = (url.searchParams.get('source') || 'auto').toLowerCase();
       const gammaUrl = `http://127.0.0.1:5001/gamma?symbol=${encodeURIComponent(

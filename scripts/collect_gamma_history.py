@@ -23,7 +23,10 @@ DEFAULT_DB = os.getenv("PIVOT_DB", "data/pivot_events.sqlite")
 DEFAULT_SYMBOLS = os.getenv("LIVE_COLLECTOR_SYMBOLS", "SPY")
 DEFAULT_RANGE_PCT = float(os.getenv("GAMMA_HISTORY_STRIKE_RANGE_PCT", "0.2"))
 DEFAULT_MAX_STRIKES = int(os.getenv("GAMMA_HISTORY_MAX_STRIKES", "120"))
-GAMMA_HISTORY_LIVE_DTE_DAYS = max(1, int(os.getenv("GAMMA_HISTORY_LIVE_DTE_DAYS", "30")))
+GAMMA_HISTORY_EXPIRY_MODE = (os.getenv("GAMMA_HISTORY_EXPIRY_MODE", "quarterly") or "quarterly").strip().lower()
+# Use a wider fetch window than the target quarterly tenor so the nearest
+# quarterly expiry is still present when it lands slightly beyond 90DTE.
+GAMMA_HISTORY_LIVE_DTE_DAYS = max(1, int(os.getenv("GAMMA_HISTORY_LIVE_DTE_DAYS", "120")))
 DEFAULT_TIMEOUT = int(os.getenv("GAMMA_HISTORY_HTTP_TIMEOUT_SEC", "60"))
 DEFAULT_HTTP_MAX_ATTEMPTS = max(1, int(os.getenv("GAMMA_HISTORY_HTTP_MAX_ATTEMPTS", "6")))
 DEFAULT_HTTP_RETRY_BASE_SEC = max(0.0, float(os.getenv("GAMMA_HISTORY_HTTP_RETRY_BASE_SEC", "1.0")))
@@ -252,6 +255,77 @@ def _to_date(raw: object) -> date | None:
         return None
 
 
+def _normalize_expiry_yyyymmdd(raw: object) -> str | None:
+    expiry_date = _to_date(raw)
+    return expiry_date.strftime("%Y%m%d") if expiry_date is not None else None
+
+
+def _is_monthly_expiry(expiry_date: date) -> bool:
+    return 15 <= expiry_date.day <= 21 and expiry_date.weekday() == 4
+
+
+def _is_quarterly_expiry(expiry_date: date) -> bool:
+    return _is_monthly_expiry(expiry_date) and expiry_date.month in {3, 6, 9, 12}
+
+
+def _pick_chain_expiries(expiries: list[object], mode: str, today: date) -> set[str]:
+    if str(mode or "").lower() == "all":
+        return set()
+
+    normalized: list[str] = []
+    seen = set()
+    for raw in expiries or []:
+        compact = _normalize_expiry_yyyymmdd(raw)
+        if compact is None or compact in seen:
+            continue
+        seen.add(compact)
+        normalized.append(compact)
+    if not normalized:
+        return set()
+
+    normalized.sort()
+    today_compact = today.strftime("%Y%m%d")
+    safe_mode = str(mode or "quarterly").lower()
+
+    if safe_mode == "0dte":
+        return {today_compact if today_compact in seen else normalized[0]}
+
+    if safe_mode == "front":
+        future = [exp for exp in normalized if exp != today_compact]
+        return {future[0] if future else normalized[0]}
+
+    if safe_mode == "monthly":
+        monthly = [
+            exp for exp in normalized
+            if (exp >= today_compact) and _is_monthly_expiry(parse_yyyy_mm_dd(exp[:4] + "-" + exp[4:6] + "-" + exp[6:8]))
+        ]
+        if monthly:
+            return {monthly[0]}
+        fallback = [
+            exp for exp in normalized
+            if _is_monthly_expiry(parse_yyyy_mm_dd(exp[:4] + "-" + exp[4:6] + "-" + exp[6:8]))
+        ]
+        return {fallback[0] if fallback else normalized[0]}
+
+    if safe_mode == "quarterly":
+        quarterly = [
+            exp for exp in normalized
+            if (exp >= today_compact) and _is_quarterly_expiry(parse_yyyy_mm_dd(exp[:4] + "-" + exp[4:6] + "-" + exp[6:8]))
+        ]
+        if quarterly:
+            return {quarterly[0]}
+        fallback = [
+            exp for exp in normalized
+            if _is_quarterly_expiry(parse_yyyy_mm_dd(exp[:4] + "-" + exp[4:6] + "-" + exp[6:8]))
+        ]
+        if fallback:
+            return {fallback[0]}
+        return _pick_chain_expiries(expiries, "monthly", today)
+
+    future = [exp for exp in normalized if exp >= today_compact]
+    return {future[0] if future else normalized[0]}
+
+
 def _option_mid_price(
     idx: int,
     bids: list,
@@ -358,6 +432,8 @@ def summarize_chain(
     chain: dict,
     strike_range_pct: float,
     max_strikes: int,
+    *,
+    expiry_mode: str = GAMMA_HISTORY_EXPIRY_MODE,
 ) -> dict:
     strikes = chain.get("strike") or []
     sides = chain.get("side") or []
@@ -399,6 +475,7 @@ def summarize_chain(
     zero_dte_oi = 0.0
     total_oi = 0.0
     iv_samples: list[tuple[float, str, float | None, float]] = []
+    selected_expiries = _pick_chain_expiries(expiries, expiry_mode, snapshot_date)
 
     multiplier = 100.0
     target_date = snapshot_date
@@ -416,6 +493,9 @@ def summarize_chain(
         oi = _to_float(ois[i] if i < len(ois) else None)
         delta = _to_float(deltas[i] if i < len(deltas) else None)
         expiry_raw = expiries[i] if i < len(expiries) else None
+        expiry_compact = _normalize_expiry_yyyymmdd(expiry_raw)
+        if selected_expiries and expiry_compact not in selected_expiries:
+            continue
 
         if iv is not None:
             with_iv += 1
@@ -558,6 +638,9 @@ def summarize_chain(
             {
                 "symbol": symbol.upper(),
                 "snapshot_date": snapshot_date.strftime("%Y-%m-%d"),
+                "expiry_mode": str(expiry_mode or GAMMA_HISTORY_EXPIRY_MODE).lower(),
+                "selected_expiries": sorted(selected_expiries),
+                "dte_window_days": GAMMA_HISTORY_LIVE_DTE_DAYS,
                 "spot": spot,
                 "contracts": len(strikes),
                 "filtered_contracts": total_contracts,

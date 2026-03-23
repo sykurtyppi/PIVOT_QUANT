@@ -59,11 +59,11 @@ YAHOO_PROXY_AUTH_FAILOPEN_SEC = max(
 )
 GAMMA_CONTEXT_MARKETDATA_TIMEOUT_SEC = int(os.getenv("GAMMA_CONTEXT_MARKETDATA_TIMEOUT_SEC", "12"))
 GAMMA_CONTEXT_MAX_SNAPSHOT_AGE_DAYS = int(os.getenv("GAMMA_CONTEXT_MAX_SNAPSHOT_AGE_DAYS", "3"))
-# Limit live chain fetches to options expiring within this many days.
-# ?expiration=all was the previous value — it downloads the full SPY chain
-# (~8,000 rows = 8,000 credits). ?dte=30 returns only near-term expiries
-# (~1,500 rows) while retaining all the gamma signal that matters.
-GAMMA_CONTEXT_DTE_DAYS = int(os.getenv("GAMMA_CONTEXT_DTE_DAYS", "30"))
+# Structural gamma context should come from the nearest quarterly expiry.
+GAMMA_CONTEXT_EXPIRY_MODE = (os.getenv("GAMMA_CONTEXT_EXPIRY_MODE", "quarterly") or "quarterly").strip().lower()
+# Use a slightly wider fetch window so the nearest quarterly contract is still
+# available when it lands a few days beyond 90DTE.
+GAMMA_CONTEXT_DTE_DAYS = int(os.getenv("GAMMA_CONTEXT_DTE_DAYS", "120"))
 GAMMA_CONTEXT_STRIKE_RANGE_PCT = float(os.getenv("GAMMA_HISTORY_STRIKE_RANGE_PCT", "0.2"))
 GAMMA_CONTEXT_MAX_STRIKES = int(os.getenv("GAMMA_HISTORY_MAX_STRIKES", "120"))
 GAMMA_CONTEXT_CARRY_MAX_DAYS = int(os.getenv("GAMMA_CONTEXT_CARRY_MAX_DAYS", "1"))
@@ -799,6 +799,7 @@ def _fetch_gamma_context_marketdata_live(
             chain=payload,
             strike_range_pct=GAMMA_CONTEXT_STRIKE_RANGE_PCT,
             max_strikes=GAMMA_CONTEXT_MAX_STRIKES,
+            expiry_mode=GAMMA_CONTEXT_EXPIRY_MODE,
         )
         if (
             conn is not None
@@ -941,7 +942,7 @@ def fetch_gamma_context(
     """
     base_url = (os.getenv("GAMMA_BRIDGE_URL") or GAMMA_BRIDGE_URL).strip()
     sep = "&" if "?" in base_url else "?"
-    url = f"{base_url}{sep}symbol={symbol}&expiry=front&limit=60"
+    url = f"{base_url}{sep}symbol={symbol}&expiry={GAMMA_CONTEXT_EXPIRY_MODE}&limit=60"
     bridge_payload = None
     bridge_error_message = ""
     bridge_marketdata_cooldown = False

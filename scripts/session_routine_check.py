@@ -24,7 +24,7 @@ DEFAULT_STATE_FILE = ROOT / "logs" / "session_routine_state.json"
 DEFAULT_LOG_FILE = ROOT / "logs" / "session_routine.log"
 DEFAULT_DB = ROOT / "data" / "pivot_events.sqlite"
 DEFAULT_OPS_STATUS_URL = "http://127.0.0.1:3000/api/ops/status"
-DEFAULT_GAMMA_URL = "http://127.0.0.1:5001/gamma?symbol=SPY&expiry=front&limit=10"
+DEFAULT_GAMMA_URL = "http://127.0.0.1:5001/gamma?symbol=SPY&expiry=quarterly&limit=10"
 
 
 def parse_args() -> argparse.Namespace:

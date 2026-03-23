@@ -24,7 +24,7 @@ IB_BRIDGE_PORT = int(os.getenv("IB_BRIDGE_PORT", "5001"))
 IB_EXCHANGE = os.getenv("IB_EXCHANGE", "CBOE")
 IB_MAX_STRIKES = int(os.getenv("IB_MAX_STRIKES", "60"))
 IB_STRIKE_RANGE = float(os.getenv("IB_STRIKE_RANGE", "0.05"))  # +/- 5%
-IB_EXPIRY_MODE = os.getenv("IB_EXPIRY_MODE", "front")  # front, 0dte, monthly, all
+IB_EXPIRY_MODE = os.getenv("IB_EXPIRY_MODE", "quarterly")  # quarterly structural default
 IB_MAX_EXPIRIES = int(os.getenv("IB_MAX_EXPIRIES", "1"))
 IB_WEIGHT_0DTE = float(os.getenv("IB_WEIGHT_0DTE", "1.0"))
 IB_WEIGHT_FRONT = float(os.getenv("IB_WEIGHT_FRONT", "0.6"))
@@ -39,7 +39,9 @@ MARKETDATA_APP_BASE = "https://api.marketdata.app/v1"
 # Limit options chain to options expiring within this many days.
 # Keeps ~4-6 near-term weekly expiries instead of the full chain (~20 expiries).
 # Reduces per-call credit cost from ~8,000 → ~1,500 rows.
-MDA_GAMMA_DTE_DAYS = int(os.getenv("MDA_GAMMA_DTE_DAYS", "30"))
+# Keep the fetch window wider than the target expiry family so the nearest
+# quarterly contract is still present when it sits a few days beyond 90DTE.
+MDA_GAMMA_DTE_DAYS = int(os.getenv("MDA_GAMMA_DTE_DAYS", "120"))
 # Cache gamma results for this many seconds to avoid burning credits on every
 # dashboard auto-refresh (default 60s). 1800s = 30 min; tune down to 300 if
 # you want faster reaction to intraday gamma shifts.
@@ -211,24 +213,44 @@ def fetch_spot(symbol):
     return float(spot)
 
 
+def _parse_expiry_yyyymmdd(exp):
+    try:
+        return datetime.strptime(str(exp), "%Y%m%d")
+    except ValueError:
+        return None
+
+
+def _parse_expiry_any(exp):
+    text = str(exp or "").strip()
+    if not text:
+        return None
+    for fmt in ("%Y%m%d", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text[:10], fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _normalize_expiry_yyyymmdd(exp):
+    parsed = _parse_expiry_any(exp)
+    return parsed.strftime("%Y%m%d") if parsed is not None else None
+
+
+def _is_monthly_expiry(dt):
+    return 15 <= dt.day <= 21 and dt.weekday() == 4
+
+
+def _is_quarterly_expiry(dt):
+    return _is_monthly_expiry(dt) and dt.month in (3, 6, 9, 12)
+
+
 def pick_expiries(expirations, mode):
     exp_list = sorted(expirations)
     if not exp_list:
         return []
 
     today = _utc_today_yyyymmdd()
-
-    def _parse_expiry(exp):
-        try:
-            return datetime.strptime(exp, "%Y%m%d")
-        except ValueError:
-            return None
-
-    def _is_monthly(dt):
-        return 15 <= dt.day <= 21 and dt.weekday() == 4
-
-    def _is_quarterly(dt):
-        return _is_monthly(dt) and dt.month in (3, 6, 9, 12)
 
     if mode == "0dte":
         if today in exp_list:
@@ -243,31 +265,31 @@ def pick_expiries(expirations, mode):
 
     if mode == "monthly":
         for exp in exp_list:
-            dt = _parse_expiry(exp)
+            dt = _parse_expiry_yyyymmdd(exp)
             if dt is None:
                 continue
-            if exp >= today and _is_monthly(dt):
+            if exp >= today and _is_monthly_expiry(dt):
                 return [exp]
         for exp in exp_list:
-            dt = _parse_expiry(exp)
+            dt = _parse_expiry_yyyymmdd(exp)
             if dt is None:
                 continue
-            if _is_monthly(dt):
+            if _is_monthly_expiry(dt):
                 return [exp]
         return [exp_list[0]]
 
     if mode == "quarterly":
         for exp in exp_list:
-            dt = _parse_expiry(exp)
+            dt = _parse_expiry_yyyymmdd(exp)
             if dt is None:
                 continue
-            if exp >= today and _is_quarterly(dt):
+            if exp >= today and _is_quarterly_expiry(dt):
                 return [exp]
         for exp in exp_list:
-            dt = _parse_expiry(exp)
+            dt = _parse_expiry_yyyymmdd(exp)
             if dt is None:
                 continue
-            if _is_quarterly(dt):
+            if _is_quarterly_expiry(dt):
                 return [exp]
         # Fallback to monthly/front behavior if no quarterly expiry is present.
         monthly = pick_expiries(exp_list, "monthly")
@@ -561,9 +583,26 @@ _EXPIRY_MODE_DTE = {
     "0dte":      0,   # today only
     "front":     7,   # current week (Mon/Wed/Fri SPY weeklies)
     "weekly":    7,
-    "monthly":  30,   # nearest monthly expiry
-    "quarterly": 90,  # nearest quarterly expiry
+    "monthly":  45,   # nearest monthly expiry can sit >30D out
+    "quarterly": 120, # nearest quarterly expiry can sit a bit beyond 90D
 }
+
+
+def _selected_marketdata_expiries(expiries, mode):
+    if mode == "all":
+        return set()
+
+    normalized = []
+    seen = set()
+    for expiry in expiries or []:
+        compact = _normalize_expiry_yyyymmdd(expiry)
+        if compact is None or compact in seen:
+            continue
+        seen.add(compact)
+        normalized.append(compact)
+
+    selected = pick_expiries(normalized, mode or IB_EXPIRY_MODE)
+    return set(selected)
 
 def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None, expiry_mode=None):
     """Compute gamma walls from marketdata.app options chain — fallback when IBKR
@@ -611,9 +650,10 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None, expiry_m
     sr = strike_range or IB_STRIKE_RANGE
     ms = max_strikes or IB_MAX_STRIKES
 
-    # Limit to near-term expiries via ?dte= to avoid fetching the full chain
-    # (all expiries). For SPY, ?dte=30 returns ~5-6 weekly expirations instead
-    # of ~20+, reducing credit cost from ~8,000 rows to ~1,500 rows per call.
+    # Limit to a bounded DTE window to avoid fetching the full chain
+    # (all expiries). We still apply exact expiry-family filtering below so
+    # quarterly mode resolves to the nearest quarterly contract set rather than
+    # aggregating every expiry inside the DTE window.
     url = f"{MARKETDATA_APP_BASE}/options/chain/{symbol.upper()}/?dte={dte_days}"
     req = urllib.request.Request(url, headers={"Authorization": f"Token {MARKETDATA_APP_TOKEN}"})
     try:
@@ -676,6 +716,7 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None, expiry_m
     dte_fallback_reason = data.get("dteFallbackReason")
     if dte_fallback_reason is not None:
         dte_fallback_reason = str(dte_fallback_reason)
+    selected_expiries = _selected_marketdata_expiries(expiries, mode)
 
     if not strikes or not gammas:
         raise ValueError("marketdata.app returned options chain with no strike/gamma data")
@@ -721,6 +762,9 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None, expiry_m
         oi = ois[i] if i < len(ois) else None
         delta = deltas[i] if i < len(deltas) else None
         expiry_raw = expiries[i] if i < len(expiries) else None
+        expiry_compact = _normalize_expiry_yyyymmdd(expiry_raw)
+        if selected_expiries and expiry_compact not in selected_expiries:
+            continue
 
         if gamma is None:
             continue
@@ -757,12 +801,11 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None, expiry_m
             oi_call += size
         else:
             oi_put += size
-        if expiry_raw:
-            expiry_text = str(expiry_raw)[:10]
-            expiries_seen.add(expiry_text)
+        if expiry_compact:
+            expiries_seen.add(expiry_compact)
             if oi is not None:
                 try:
-                    if datetime.strptime(expiry_text, "%Y-%m-%d").date() == today_utc:
+                    if datetime.strptime(expiry_compact, "%Y%m%d").date() == today_utc:
                         zero_dte_oi += size
                 except Exception:
                     pass
@@ -855,6 +898,7 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None, expiry_m
             "atmIV": atm_iv,
             "skew25d": skew,
             "expiries": sorted(expiries_seen),
+            "selectedExpiries": sorted(selected_expiries),
         },
     }
 
