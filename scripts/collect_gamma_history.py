@@ -538,28 +538,42 @@ def _derive_gamma_levels(
     gex_by_strike: dict[float, float],
     call_gex_by_strike: dict[float, float],
     put_gex_by_strike: dict[float, float],
-) -> tuple[float | None, float | None, float | None, float | None]:
+) -> tuple[float | None, bool, str, float | None, float | None, float | None]:
     ordered = sorted(gex_by_strike.keys())
     if not ordered:
-        return None, None, None, None
+        return None, False, "crossing", None, None, None
 
     gamma_flip = None
     cumulative = 0.0
     last_sign: int | None = None
+    is_true_crossing = False
+    observed_signs: set[int] = set()
     for strike in ordered:
         cumulative += gex_by_strike[strike]
         sign = 1 if cumulative > 0 else -1 if cumulative < 0 else 0
+        if sign != 0:
+            observed_signs.add(sign)
         if last_sign is not None and sign != 0 and sign != last_sign:
             gamma_flip = strike
+            is_true_crossing = True
             break
         last_sign = sign
     if gamma_flip is None:
         gamma_flip = min(ordered, key=lambda s: abs(gex_by_strike[s]))
 
+    if is_true_crossing:
+        gamma_regime = "crossing"
+    elif observed_signs == {-1}:
+        gamma_regime = "net_short"
+    elif observed_signs == {1}:
+        gamma_regime = "net_long"
+    else:
+        gamma_regime = "crossing"
+
     call_wall = max(call_gex_by_strike, key=call_gex_by_strike.get) if call_gex_by_strike else None
     put_wall = min(put_gex_by_strike, key=put_gex_by_strike.get) if put_gex_by_strike else None
     pin = max(ordered, key=lambda s: abs(gex_by_strike[s]))
-    return gamma_flip, call_wall, put_wall, pin
+    return gamma_flip, is_true_crossing, gamma_regime, call_wall, put_wall, pin
 
 
 def summarize_chain(
@@ -709,6 +723,8 @@ def summarize_chain(
             put_gex_by_strike[strike] = put_gex_by_strike.get(strike, 0.0) + gex
 
     gamma_flip = None
+    gamma_flip_is_true_crossing = False
+    gamma_regime = "crossing"
     call_wall = None
     put_wall = None
     pin = None
@@ -725,7 +741,7 @@ def summarize_chain(
             put_gex_by_strike = {k: v for k, v in put_gex_by_strike.items() if k in keep}
             ordered = sorted(gex_by_strike.keys())
 
-        gamma_flip, call_wall, put_wall, pin = _derive_gamma_levels(
+        gamma_flip, gamma_flip_is_true_crossing, gamma_regime, call_wall, put_wall, pin = _derive_gamma_levels(
             gex_by_strike,
             call_gex_by_strike,
             put_gex_by_strike,
@@ -756,6 +772,8 @@ def summarize_chain(
         "ts_collected_ms": int(time.time() * 1000),
         "spot": spot,
         "gamma_flip": gamma_flip,
+        "gamma_flip_is_true_crossing": 1 if gamma_flip_is_true_crossing else 0,
+        "gamma_regime": gamma_regime,
         "call_wall": call_wall,
         "put_wall": put_wall,
         "pin": pin,
@@ -778,6 +796,8 @@ def summarize_chain(
                 "selected_expiries": sorted(selected_expiries),
                 "dte_window_days": GAMMA_HISTORY_LIVE_DTE_DAYS,
                 "spot": spot,
+                "gamma_flip_is_true_crossing": bool(gamma_flip_is_true_crossing),
+                "gamma_regime": gamma_regime,
                 "contracts": len(strikes),
                 "filtered_contracts": total_contracts,
                 "compute_fallback_enabled": bool(GAMMA_COMPUTE_FALLBACK),

@@ -414,10 +414,13 @@ def _summarize_gamma_structure(gex_by_strike, call_gex_by_strike, put_gex_by_str
     flip = None
     is_true_crossing = False
     last_sign = None
+    observed_signs = set()
 
     for strike in sorted_strikes:
         cumulative += gex_by_strike[strike]
         sign = 1 if cumulative > 0 else -1 if cumulative < 0 else 0
+        if sign != 0:
+            observed_signs.add(sign)
         if last_sign is not None and sign != last_sign and sign != 0:
             flip = strike
             is_true_crossing = True
@@ -430,6 +433,17 @@ def _summarize_gamma_structure(gex_by_strike, call_gex_by_strike, put_gex_by_str
         # "softest" or most neutral level), but flag this is not a true
         # zero-crossing so callers can present it correctly.
         flip = min(sorted_strikes, key=lambda s: abs(gex_by_strike[s]))
+
+    if is_true_crossing:
+        gamma_regime = "crossing"
+    elif observed_signs == {-1}:
+        gamma_regime = "net_short"
+    elif observed_signs == {1}:
+        gamma_regime = "net_long"
+    else:
+        # Degenerate all-zero / ambiguous cumulative path: preserve neutral
+        # semantics rather than misclassifying a one-sided regime.
+        gamma_regime = "crossing"
 
     call_wall = max(call_gex_by_strike, key=call_gex_by_strike.get) if call_gex_by_strike else None
     put_wall = min(put_gex_by_strike, key=put_gex_by_strike.get) if put_gex_by_strike else None
@@ -453,6 +467,7 @@ def _summarize_gamma_structure(gex_by_strike, call_gex_by_strike, put_gex_by_str
     return {
         "gammaFlip": flip,
         "gammaFlipIsTrueCrossing": is_true_crossing,
+        "gammaRegime": gamma_regime,
         "callWall": wall_payload(call_wall, call_gex_by_strike),
         "putWall": wall_payload(put_wall, put_gex_by_strike),
         "pin": wall_payload(pin, gex_by_strike),
@@ -653,6 +668,7 @@ def compute_gamma_walls(symbol, expiry_mode, limit):
         "generatedAt": _utc_iso_z(),
         "gammaFlip": levels["gammaFlip"],
         "gammaFlipIsTrueCrossing": levels["gammaFlipIsTrueCrossing"],
+        "gammaRegime": levels["gammaRegime"],
         "callWall": levels["callWall"],
         "putWall": levels["putWall"],
         "pin": levels["pin"],
@@ -869,7 +885,7 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None, expiry_m
                     payloads.append(payload)
                     continue
                 partial_errors.append(f"dte={dte_query}: {exc}")
-                if mode != "90dte":
+                if mode not in {"90dte", "aggregate_90dte"}:
                     raise
         if not payloads:
             raise ValueError("; ".join(partial_errors) or f"marketdata.app options chain fetch failed for {symbol}")
@@ -1054,11 +1070,13 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None, expiry_m
         "generatedAt": _utc_iso_z(),
         "gammaFlip": levels["gammaFlip"],
         "gammaFlipIsTrueCrossing": levels["gammaFlipIsTrueCrossing"],
+        "gammaRegime": levels["gammaRegime"],
         "callWall": levels["callWall"],
         "putWall": levels["putWall"],
         "pin": levels["pin"],
         "usedOpenInterest": nonzero_oi > 0,
         "gammaOnlyMode": nonzero_oi == 0,
+        "partialFetchWarnings": partial_errors,
         "stats": {
             "totalContracts": total_contracts,
             "withGreeks": with_greeks,

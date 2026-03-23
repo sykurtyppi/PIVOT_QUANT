@@ -4739,8 +4739,13 @@
             }
 
             const gammaSource = state.gammaData?.source || 'Proxy';
-            const flipIsTrueCrossing = state.gammaData?.gammaFlipIsTrueCrossing;
-            const flipSuffix = flipIsTrueCrossing === false ? ' · regime floor' : '';
+            const gammaRegime = String(state.gammaData?.gammaRegime || '').toLowerCase();
+            let flipSuffix = '';
+            if (gammaRegime === 'net_short') {
+                flipSuffix = ' · regime floor';
+            } else if (gammaRegime === 'net_long') {
+                flipSuffix = ' · regime ceiling';
+            }
             const gammaLabel = Number.isFinite(gammaLevel)
                 ? `${formatNumber(gammaLevel)} (${gammaSource}${flipSuffix})`
                 : '--';
@@ -4854,18 +4859,19 @@
                 else ivRv = 'Fair';
             }
 
+            const gammaRegime = String(state.gammaData?.gammaRegime || '').toLowerCase();
             let gammaMode = 'Unknown';
             let playbook = '--';
             let flipDistance = '--';
             if (Number.isFinite(gammaLevel)) {
                 const diff = ((referencePrice - gammaLevel) / referencePrice) * 100;
                 flipDistance = `${diff >= 0 ? '+' : ''}${formatNumber(diff, 2)}%`;
-                // When the flip is not a true zero-crossing the entire book is
-                // in one gamma regime — treat as Net Short regardless of spot
-                // position, since the "flip" price is just the softest level.
-                if (flipIsTrueCrossing === false) {
+                if (gammaRegime === 'net_short') {
                     gammaMode = 'Net Short';
                     playbook = 'Trend / Speed';
+                } else if (gammaRegime === 'net_long') {
+                    gammaMode = 'Net Long';
+                    playbook = 'Pin / Fade';
                 } else if (Math.abs(diff) < 0.15) {
                     gammaMode = 'Mixed';
                     playbook = 'Chop / Balanced';
@@ -6134,9 +6140,15 @@
             const gammaFlipDist = state.lastGamma
                 ? ((referencePrice - state.lastGamma) / state.lastGamma) * 1e4
                 : null;
-            const gammaMode = state.gammaData?.gammaFlip
-                ? (referencePrice >= state.gammaData.gammaFlip ? 1 : -1)
-                : 0;
+            const gammaRegime = String(state.gammaData?.gammaRegime || '').toLowerCase();
+            let gammaMode = 0;
+            if (gammaRegime === 'net_short') {
+                gammaMode = -1;
+            } else if (gammaRegime === 'net_long') {
+                gammaMode = 1;
+            } else if (state.gammaData?.gammaFlip) {
+                gammaMode = referencePrice >= state.gammaData.gammaFlip ? 1 : -1;
+            }
 
             // ── v3 per-bar features (depend on referencePrice) ──
             const v3 = state.v3Features;

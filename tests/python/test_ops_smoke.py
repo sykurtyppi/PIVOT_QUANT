@@ -3469,6 +3469,82 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("\"dteFallback\": dte_fallback", block)
         self.assertIn("\"dteFallbackReason\": dte_fallback_reason", block)
 
+    def test_ibkr_bridge_marketdata_aggregate_tolerates_partial_fetch_failures(self) -> None:
+        bridge = load_module(
+            "pq_ibkr_marketdata_aggregate_partial_failure_test",
+            REPO_ROOT / "server" / "ibkr_gamma_bridge.py",
+        )
+
+        class _FakeResponse:
+            def __init__(self, payload: dict) -> None:
+                self._payload = json.dumps(payload).encode("utf-8")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> bool:
+                return False
+
+            def read(self) -> bytes:
+                return self._payload
+
+        def _payload_for(expiry: str) -> dict:
+            return {
+                "s": "ok",
+                "strike": [645.0, 670.0],
+                "side": ["put", "call"],
+                "gamma": [0.03, 0.015],
+                "iv": [0.24, 0.20],
+                "openInterest": [150.0, 100.0],
+                "delta": [-0.25, 0.25],
+                "expiration": [expiry, expiry],
+                "underlyingPrice": [650.0, 650.0],
+            }
+
+        payloads = {
+            7: _payload_for("2026-03-27"),
+            14: _payload_for("2026-04-02"),
+            30: _payload_for("2026-04-17"),
+            60: _payload_for("2026-05-15"),
+            75: _payload_for("2026-05-29"),
+            90: _payload_for("2026-06-18"),
+        }
+
+        original_token = bridge.MARKETDATA_APP_TOKEN
+        original_urlopen = bridge.urllib.request.urlopen
+        original_today = bridge._utc_today_yyyymmdd
+        bridge.MARKETDATA_APP_TOKEN = "test-token"
+        bridge._utc_today_yyyymmdd = lambda: "20260323"
+        bridge._mda_gamma_cache.clear()
+        bridge._mda_gamma_error_backoff_until.clear()
+        try:
+            def _fake_urlopen(req, timeout=0):  # noqa: ANN001
+                url = req.full_url if hasattr(req, "full_url") else req.get_full_url()
+                match = re.search(r"[?&]dte=(\d+)", url)
+                if not match:
+                    raise AssertionError(f"missing dte in url: {url}")
+                dte = int(match.group(1))
+                if dte == 45:
+                    raise URLError("simulated aggregate bucket failure")
+                return _FakeResponse(payloads[dte])
+
+            bridge.urllib.request.urlopen = _fake_urlopen
+            result = bridge.fetch_gamma_marketdata("SPY", expiry_mode="aggregate_90dte")
+        finally:
+            bridge.MARKETDATA_APP_TOKEN = original_token
+            bridge.urllib.request.urlopen = original_urlopen
+            bridge._utc_today_yyyymmdd = original_today
+            bridge._mda_gamma_cache.clear()
+            bridge._mda_gamma_error_backoff_until.clear()
+
+        self.assertEqual(result["expiryMode"], "aggregate_90dte")
+        self.assertEqual(result["gammaRegime"], "net_short")
+        self.assertFalse(result["gammaFlipIsTrueCrossing"])
+        self.assertEqual(result["stats"]["selectedExpiries"][0], "20260327")
+        self.assertIn("20260618", result["stats"]["selectedExpiries"])
+        self.assertEqual(len(result["partialFetchWarnings"]), 1)
+        self.assertIn("dte=45", result["partialFetchWarnings"][0])
+
     def test_ibkr_bridge_marketdata_cache_key_is_expiry_mode_scoped(self) -> None:
         source = (REPO_ROOT / "server" / "ibkr_gamma_bridge.py").read_text(encoding="utf-8")
         self.assertIn("_EXPIRY_MODE_DTE = {", source)
@@ -3563,6 +3639,7 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(levels["gammaFlip"], 675.0)
         # All-negative net regime — no true zero-crossing, fallback to min-abs strike
         self.assertFalse(levels["gammaFlipIsTrueCrossing"])
+        self.assertEqual(levels["gammaRegime"], "net_short")
         self.assertEqual(levels["callWall"]["price"], 650.0)
         self.assertGreater(levels["callWall"]["gex"], 0.0)
         self.assertEqual(levels["putWall"]["price"], 630.0)
@@ -3582,6 +3659,20 @@ class OpsSmokeTests(unittest.TestCase):
         )
         self.assertEqual(levels["gammaFlip"], 650.0)
         self.assertTrue(levels["gammaFlipIsTrueCrossing"])
+        self.assertEqual(levels["gammaRegime"], "crossing")
+
+    def test_ibkr_bridge_gamma_regime_reports_net_long_without_crossing(self) -> None:
+        bridge = load_module(
+            "pq_ibkr_gamma_regime_net_long_test",
+            REPO_ROOT / "server" / "ibkr_gamma_bridge.py",
+        )
+        levels = bridge._summarize_gamma_structure(
+            {630.0: 250.0, 650.0: 500.0, 670.0: 300.0},
+            {630.0: 250.0, 650.0: 500.0, 670.0: 300.0},
+            {},
+        )
+        self.assertFalse(levels["gammaFlipIsTrueCrossing"])
+        self.assertEqual(levels["gammaRegime"], "net_long")
 
     def test_ibkr_bridge_select_strikes_respects_custom_range(self) -> None:
         bridge = load_module(
@@ -3596,6 +3687,23 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertTrue(all(spot * 0.95 <= s <= spot * 1.05 for s in narrow))
         self.assertGreater(len(wide), len(narrow))
         self.assertTrue(all(spot * 0.85 <= s <= spot * 1.15 for s in wide))
+
+    def test_dashboard_gamma_panel_uses_explicit_gamma_regime(self) -> None:
+        dashboard = (REPO_ROOT / "production_pivot_dashboard.html").read_text(encoding="utf-8")
+        self.assertIn("const gammaRegime = String(state.gammaData?.gammaRegime || '').toLowerCase();", dashboard)
+        self.assertIn("flipSuffix = ' · regime floor';", dashboard)
+        self.assertIn("flipSuffix = ' · regime ceiling';", dashboard)
+        self.assertIn("gammaMode = 'Net Short';", dashboard)
+        self.assertIn("gammaMode = 'Net Long';", dashboard)
+
+    def test_dashboard_touch_events_use_gamma_regime_for_gamma_mode(self) -> None:
+        dashboard = (REPO_ROOT / "production_pivot_dashboard.html").read_text(encoding="utf-8")
+        block = dashboard.split("function buildTouchEvent(", 1)[1].split("return {", 1)[0]
+        self.assertIn("const gammaRegime = String(state.gammaData?.gammaRegime || '').toLowerCase();", block)
+        self.assertIn("if (gammaRegime === 'net_short') {", block)
+        self.assertIn("gammaMode = -1;", block)
+        self.assertIn("} else if (gammaRegime === 'net_long') {", block)
+        self.assertIn("gammaMode = 1;", block)
 
     def test_train_artifacts_gamma_context_metadata_rejects_legacy_quarterly_alias(self) -> None:
         original_context = os.environ.get("GAMMA_CONTEXT_EXPIRY_MODE")
