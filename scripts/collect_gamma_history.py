@@ -152,9 +152,15 @@ def _retry_sleep_seconds(
 def _marketdata_live_dte_queries(mode: str, base_dte_days: int) -> list[int]:
     safe_mode = _normalize_expiry_mode(mode)
     safe_base = max(1, int(base_dte_days))
+    if safe_mode == "aggregate_90dte":
+        queries: list[int] = []
+        for candidate in (7, 14, 30, 45, 60, 75, 90):
+            if candidate not in queries:
+                queries.append(candidate)
+        return queries
     if safe_mode != "90dte":
         return [safe_base]
-    queries: list[int] = []
+    queries = []
     for candidate in (90, 75, 105, safe_base):
         safe_candidate = max(1, int(candidate))
         if safe_candidate not in queries:
@@ -350,7 +356,7 @@ def _normalize_expiry_mode(mode: str) -> str:
     safe_mode = str(mode or "90dte").strip().lower()
     if safe_mode == "quarterly":
         raise ValueError("expiry_mode=quarterly is no longer supported; use 90dte")
-    if safe_mode not in {"0dte", "front", "monthly", "all", "90dte"}:
+    if safe_mode not in {"0dte", "front", "monthly", "all", "90dte", "aggregate_90dte"}:
         raise ValueError(f"Unsupported expiry_mode={safe_mode!r}")
     return safe_mode
 
@@ -398,6 +404,18 @@ def _pick_chain_expiries(expiries: list[object], mode: str, today: date) -> set[
     if safe_mode == "90dte":
         target = _pick_target_dte_expiry(normalized, today, 90)
         return {target} if target else set()
+
+    if safe_mode == "aggregate_90dte":
+        # Include every forward expiry within the 90DTE structural window.
+        result: set[str] = set()
+        for exp in normalized:
+            if exp < today_compact:
+                continue
+            exp_date = parse_yyyy_mm_dd(exp[:4] + "-" + exp[4:6] + "-" + exp[6:8])
+            dte = (exp_date - today).days
+            if 0 <= dte <= 90:
+                result.add(exp)
+        return result
 
     if safe_mode == "monthly":
         monthly = [

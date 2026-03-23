@@ -2367,6 +2367,33 @@ class OpsSmokeTests(unittest.TestCase):
         )
         self.assertEqual(collector._marketdata_live_dte_queries("90dte", 120), [90, 75, 105, 120])
 
+    def test_collect_gamma_history_aggregate_90dte_dte_queries(self) -> None:
+        collector = load_module(
+            "pq_collect_gamma_history_aggregate_90dte_dte_queries_test",
+            REPO_ROOT / "scripts" / "collect_gamma_history.py",
+        )
+        result = collector._marketdata_live_dte_queries("aggregate_90dte", 120)
+        self.assertEqual(result, [7, 14, 30, 45, 60, 75, 90])
+
+    def test_collect_gamma_history_aggregate_90dte_picks_all_expiries_within_window(self) -> None:
+        from datetime import date as _date
+        collector = load_module(
+            "pq_collect_gamma_history_aggregate_90dte_pick_expiries_test",
+            REPO_ROOT / "scripts" / "collect_gamma_history.py",
+        )
+        today = _date(2026, 3, 23)
+        # Use ISO format so _to_date / _normalize_expiry_yyyymmdd parses correctly.
+        # All-digit strings are treated as unix timestamps by the normalizer.
+        expiries_raw = ["2026-03-20", "2026-03-28", "2026-04-17", "2026-05-15", "2026-06-19", "2026-07-17"]
+        result = collector._pick_chain_expiries(expiries_raw, "aggregate_90dte", today)
+        # 2026-03-20 expired, 2026-07-17 is 116DTE (beyond 90), rest are in window
+        self.assertIn("20260328", result)   # 5 DTE — in
+        self.assertIn("20260417", result)   # 25 DTE — in
+        self.assertIn("20260515", result)   # 53 DTE — in
+        self.assertIn("20260619", result)   # 88 DTE — in
+        self.assertNotIn("20260320", result)  # expired
+        self.assertNotIn("20260717", result)  # 116 DTE — beyond window
+
     def test_collect_gamma_history_summarize_chain_tracks_selected_expiry_family(self) -> None:
         source = (REPO_ROOT / "scripts" / "collect_gamma_history.py").read_text(encoding="utf-8")
         block = source.split("def summarize_chain(", 1)[1].split("def ensure_schema(", 1)[0]
@@ -3495,6 +3522,33 @@ class OpsSmokeTests(unittest.TestCase):
             REPO_ROOT / "server" / "ibkr_gamma_bridge.py",
         )
         self.assertEqual(bridge._marketdata_dte_queries("90dte", 120), [90, 75, 105, 120])
+
+    def test_ibkr_bridge_aggregate_90dte_dte_queries(self) -> None:
+        bridge = load_module(
+            "pq_ibkr_aggregate_90dte_dte_queries_test",
+            REPO_ROOT / "server" / "ibkr_gamma_bridge.py",
+        )
+        result = bridge._marketdata_dte_queries("aggregate_90dte", 120)
+        self.assertEqual(result, [7, 14, 30, 45, 60, 75, 90])
+
+    def test_ibkr_bridge_aggregate_90dte_selected_expiries_filters_by_window(self) -> None:
+        bridge = load_module(
+            "pq_ibkr_aggregate_90dte_selected_expiries_test",
+            REPO_ROOT / "server" / "ibkr_gamma_bridge.py",
+        )
+        original_today = bridge._utc_today_yyyymmdd
+        try:
+            bridge._utc_today_yyyymmdd = lambda: "20260323"
+            # Use ISO format so _parse_expiry_any parses correctly;
+            # all-digit strings are treated as unix timestamps by the normalizer.
+            raw_expiries = ["2026-03-20", "2026-03-28", "2026-06-19", "2026-07-17"]
+            result = bridge._selected_marketdata_expiries(raw_expiries, "aggregate_90dte")
+            self.assertIn("20260328", result)   # 5 DTE — in
+            self.assertIn("20260619", result)   # 88 DTE — in
+            self.assertNotIn("20260320", result)  # expired
+            self.assertNotIn("20260717", result)  # 116 DTE — beyond window
+        finally:
+            bridge._utc_today_yyyymmdd = original_today
 
     def test_ibkr_bridge_uses_side_specific_walls(self) -> None:
         bridge = load_module(

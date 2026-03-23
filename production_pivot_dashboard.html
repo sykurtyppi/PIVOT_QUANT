@@ -1697,6 +1697,7 @@
                         <label for="gamma-expiry-select">Gamma Expiry (Structural)</label>
                         <select id="gamma-expiry-select">
                             <option value="90dte" selected>90DTE Structural</option>
+                            <option value="aggregate_90dte">Aggregate 90DTE (Shadow)</option>
                         </select>
                     </div>
                     <div class="control">
@@ -2460,7 +2461,7 @@
         const RANGE_ORDER = ['1mo', '3mo', '6mo', '1y'];
         const INTRADAY_INTERVALS = new Set(['1m', '5m', '15m', '30m', '60m', '90m']);
         const ML_SUPPORTED_SYMBOLS = new Set(['SPY']);
-        const GAMMA_EXPIRY_MODES = new Set(['90dte']);
+        const GAMMA_EXPIRY_MODES = new Set(['90dte', 'aggregate_90dte']);
         const EMA_WARMUP_RANGE = '5y';
         const EMA_MAX_PERIOD = 200;
         const EMA_WARMUP_MIN_BARS = EMA_MAX_PERIOD * 3;

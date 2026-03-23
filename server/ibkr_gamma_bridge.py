@@ -24,10 +24,13 @@ IB_BRIDGE_PORT = int(os.getenv("IB_BRIDGE_PORT", "5001"))
 IB_EXCHANGE = os.getenv("IB_EXCHANGE", "CBOE")
 IB_MAX_STRIKES = int(os.getenv("IB_MAX_STRIKES", "60"))
 IB_STRIKE_RANGE = float(os.getenv("IB_STRIKE_RANGE", "0.05"))  # +/- 5%
+# aggregate_90dte uses a wider strike window so near-term expirations at
+# different strikes are not clipped by the single-expiry ±5% band.
+IB_AGGREGATE_STRIKE_RANGE = float(os.getenv("IB_AGGREGATE_STRIKE_RANGE", "0.15"))  # +/- 15%
 IB_EXPIRY_MODE = (os.getenv("IB_EXPIRY_MODE", "90dte") or "90dte").strip().lower()
 if IB_EXPIRY_MODE == "quarterly":
     raise ValueError("IB_EXPIRY_MODE=quarterly is no longer supported; use 90dte")
-if IB_EXPIRY_MODE not in {"0dte", "front", "monthly", "all", "90dte"}:
+if IB_EXPIRY_MODE not in {"0dte", "front", "monthly", "all", "90dte", "aggregate_90dte"}:
     raise ValueError(f"Unsupported IB_EXPIRY_MODE={IB_EXPIRY_MODE!r}")
 IB_MAX_EXPIRIES = int(os.getenv("IB_MAX_EXPIRIES", "1"))
 IB_WEIGHT_0DTE = float(os.getenv("IB_WEIGHT_0DTE", "1.0"))
@@ -266,7 +269,7 @@ def _normalize_expiry_mode(mode):
     value = str(mode or IB_EXPIRY_MODE or "90dte").strip().lower()
     if value == "quarterly":
         raise ValueError("expiry=quarterly is no longer supported; use 90dte")
-    if value not in {"0dte", "front", "monthly", "all", "90dte"}:
+    if value not in {"0dte", "front", "monthly", "all", "90dte", "aggregate_90dte"}:
         raise ValueError(f"Unsupported expiry mode: {value!r}")
     return value
 
@@ -314,6 +317,22 @@ def pick_expiries(expirations, mode):
 
     if safe_mode == "90dte":
         return _pick_target_dte_expiry(exp_list, today, 90)
+
+    if safe_mode == "aggregate_90dte":
+        # Return every forward expiry within the 90DTE structural window so GEX
+        # is computed across the full active options book rather than one contract.
+        today_dt = _parse_expiry_yyyymmdd(today)
+        if today_dt is None:
+            return exp_list[:1]
+        result = []
+        for exp in exp_list:
+            dt = _parse_expiry_yyyymmdd(exp)
+            if dt is None:
+                continue
+            dte = (dt.date() - today_dt.date()).days
+            if 0 <= dte <= 90:
+                result.append(exp)
+        return result if result else exp_list[:1]
 
     if safe_mode == "monthly":
         for exp in exp_list:
@@ -650,6 +669,9 @@ _EXPIRY_MODE_DTE = {
     "weekly":    7,
     "monthly":  45,   # nearest monthly expiry can sit >30D out
     "90dte":    120,  # wide fetch window so the closest 90DTE expiry is present
+    # aggregate_90dte uses a fixed bracket [7,14,30,45,60,75,90] regardless of
+    # base_dte, so this value is only a fallback for the default-mode branch.
+    "aggregate_90dte": 90,
 }
 
 _MARKETDATA_ROW_FIELDS = (
@@ -674,6 +696,15 @@ _MARKETDATA_ROW_FIELDS = (
 def _marketdata_dte_queries(mode, base_dte):
     safe_mode = _normalize_expiry_mode(mode)
     safe_base = max(0, int(base_dte or 0))
+    if safe_mode == "aggregate_90dte":
+        # Sweep the full window in steps so marketdata.app returns one expiry
+        # per DTE target; after merging we keep all that fall within 0-90 DTE.
+        # 7 requests vs 4 for single-90dte — same credit tier with 30-min cache.
+        queries = []
+        for candidate in (7, 14, 30, 45, 60, 75, 90):
+            if candidate not in queries:
+                queries.append(candidate)
+        return queries
     if safe_mode != "90dte":
         return [safe_base]
     queries = []
@@ -727,6 +758,22 @@ def _selected_marketdata_expiries(expiries, mode):
         seen.add(compact)
         normalized.append(compact)
 
+    if mode == "aggregate_90dte":
+        # Keep every forward expiry whose DTE falls within the structural window.
+        today_str = _utc_today_yyyymmdd()
+        today_dt = _parse_expiry_yyyymmdd(today_str)
+        result = set()
+        for compact in normalized:
+            if compact < today_str:
+                continue
+            dt = _parse_expiry_yyyymmdd(compact)
+            if dt is None:
+                continue
+            dte = (dt.date() - today_dt.date()).days
+            if dte <= 90:
+                result.add(compact)
+        return result
+
     selected = pick_expiries(normalized, mode or IB_EXPIRY_MODE)
     return set(selected)
 
@@ -773,7 +820,10 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None, expiry_m
                 "upstream call suppressed after recent error"
             )
 
-    sr = strike_range or IB_STRIKE_RANGE
+    # aggregate_90dte needs a wider strike window: near-term weeklies have
+    # significant call/put OI at strikes further from spot than ±5%.
+    default_sr = IB_AGGREGATE_STRIKE_RANGE if mode == "aggregate_90dte" else IB_STRIKE_RANGE
+    sr = strike_range or default_sr
     ms = max_strikes or IB_MAX_STRIKES
 
     # Query a small bracket around 90DTE so structural mode can choose the
