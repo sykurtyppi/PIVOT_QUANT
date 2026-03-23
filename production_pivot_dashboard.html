@@ -1961,7 +1961,7 @@
                 <div class="decision-value mono" id="decision-nearest">--</div>
             </div>
             <div class="decision-card">
-                <div class="decision-label" title="Positive gamma = mean-reversion; Negative gamma = trend-following">Gamma Mode</div>
+                <div class="decision-label" title="Net short / negative gamma favors trend and speed; net long / positive gamma favors pin and fade; at-flip is balanced and choppy">Gamma Mode</div>
                 <div class="decision-value" id="decision-gamma">--</div>
             </div>
             <div class="decision-card">
@@ -6345,12 +6345,12 @@
                 : null;
             const gammaRegime = String(state.gammaData?.gammaRegime || '').toLowerCase();
             let gammaMode = 0;
-            if (gammaRegime === 'net_short') {
+            if (gammaRegime === 'net_short' || gammaRegime === 'negative') {
                 gammaMode = -1;
-            } else if (gammaRegime === 'net_long') {
+            } else if (gammaRegime === 'net_long' || gammaRegime === 'positive') {
                 gammaMode = 1;
-            } else if (state.gammaData?.gammaFlip) {
-                gammaMode = referencePrice >= state.gammaData.gammaFlip ? 1 : -1;
+            } else if (gammaRegime === 'at_flip' || gammaRegime === 'crossing') {
+                gammaMode = 0;
             }
 
             // ── v3 per-bar features (depend on referencePrice) ──

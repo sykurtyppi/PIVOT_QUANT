@@ -2382,17 +2382,21 @@ class OpsSmokeTests(unittest.TestCase):
             REPO_ROOT / "scripts" / "collect_gamma_history.py",
         )
         today = _date(2026, 3, 23)
-        # Use ISO format so _to_date / _normalize_expiry_yyyymmdd parses correctly.
-        # All-digit strings are treated as unix timestamps by the normalizer.
-        expiries_raw = ["2026-03-20", "2026-03-28", "2026-04-17", "2026-05-15", "2026-06-19", "2026-07-17"]
+        expiries_raw = ["20260323", "20260328", "20260417", "20260515", "20260619", "20260717"]
         result = collector._pick_chain_expiries(expiries_raw, "aggregate_90dte", today)
-        # 2026-03-20 expired, 2026-07-17 is 116DTE (beyond 90), rest are in window
+        self.assertNotIn("20260323", result)  # 0 DTE — excluded from structural aggregate
         self.assertIn("20260328", result)   # 5 DTE — in
         self.assertIn("20260417", result)   # 25 DTE — in
         self.assertIn("20260515", result)   # 53 DTE — in
         self.assertIn("20260619", result)   # 88 DTE — in
-        self.assertNotIn("20260320", result)  # expired
         self.assertNotIn("20260717", result)  # 116 DTE — beyond window
+
+    def test_collect_gamma_history_normalizes_compact_expiry_strings(self) -> None:
+        collector = load_module(
+            "pq_collect_gamma_history_compact_expiry_test",
+            REPO_ROOT / "scripts" / "collect_gamma_history.py",
+        )
+        self.assertEqual(collector._normalize_expiry_yyyymmdd("20260618"), "20260618")
 
     def test_collect_gamma_history_summarize_chain_tracks_selected_expiry_family(self) -> None:
         source = (REPO_ROOT / "scripts" / "collect_gamma_history.py").read_text(encoding="utf-8")
@@ -3301,6 +3305,17 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("snapshot_models = registry_snapshot.get(\"models\")", score_block)
         self.assertIn("snapshot_thresholds = registry_snapshot.get(\"thresholds\")", score_block)
 
+    def test_ml_server_logs_missing_threshold_fallbacks(self) -> None:
+        ml_server = load_module(
+            "pq_ml_server_missing_threshold_warning_test",
+            REPO_ROOT / "server" / "ml_server.py",
+        )
+        ml_server._missing_threshold_warnings.clear()
+        with self.assertLogs("ml_server", level="WARNING") as cm:
+            value = ml_server._threshold_from_map({"reject": {}, "break": {}}, "reject", 5, context="test_case")
+        self.assertEqual(value, 0.5)
+        self.assertIn("Missing reject threshold for 5m horizon in test_case", "\n".join(cm.output))
+
     def test_ml_server_reload_endpoint_has_busy_and_cooldown_backpressure(self) -> None:
         source = (REPO_ROOT / "server" / "ml_server.py").read_text(encoding="utf-8")
         self.assertIn("ML_RELOAD_MIN_INTERVAL_SEC", source)
@@ -3639,13 +3654,11 @@ class OpsSmokeTests(unittest.TestCase):
         original_today = bridge._utc_today_yyyymmdd
         try:
             bridge._utc_today_yyyymmdd = lambda: "20260323"
-            # Use ISO format so _parse_expiry_any parses correctly;
-            # all-digit strings are treated as unix timestamps by the normalizer.
-            raw_expiries = ["2026-03-20", "2026-03-28", "2026-06-19", "2026-07-17"]
+            raw_expiries = ["20260323", "20260328", "20260619", "20260717"]
             result = bridge._selected_marketdata_expiries(raw_expiries, "aggregate_90dte")
+            self.assertNotIn("20260323", result)  # 0 DTE — excluded from structural aggregate
             self.assertIn("20260328", result)   # 5 DTE — in
             self.assertIn("20260619", result)   # 88 DTE — in
-            self.assertNotIn("20260320", result)  # expired
             self.assertNotIn("20260717", result)  # 116 DTE — beyond window
         finally:
             bridge._utc_today_yyyymmdd = original_today
@@ -3780,10 +3793,35 @@ class OpsSmokeTests(unittest.TestCase):
         dashboard = (REPO_ROOT / "production_pivot_dashboard.html").read_text(encoding="utf-8")
         block = dashboard.split("function buildTouchEvent(", 1)[1].split("return {", 1)[0]
         self.assertIn("const gammaRegime = String(state.gammaData?.gammaRegime || '').toLowerCase();", block)
-        self.assertIn("if (gammaRegime === 'net_short') {", block)
+        self.assertIn("if (gammaRegime === 'net_short' || gammaRegime === 'negative') {", block)
         self.assertIn("gammaMode = -1;", block)
-        self.assertIn("} else if (gammaRegime === 'net_long') {", block)
+        self.assertIn("} else if (gammaRegime === 'net_long' || gammaRegime === 'positive') {", block)
         self.assertIn("gammaMode = 1;", block)
+        self.assertIn("} else if (gammaRegime === 'at_flip' || gammaRegime === 'crossing') {", block)
+        self.assertNotIn("referencePrice >= state.gammaData.gammaFlip", block)
+
+    def test_train_artifacts_gamma_context_metadata_accepts_aggregate_mode(self) -> None:
+        original_context = os.environ.get("GAMMA_CONTEXT_EXPIRY_MODE")
+        original_history = os.environ.get("GAMMA_HISTORY_EXPIRY_MODE")
+        os.environ["GAMMA_CONTEXT_EXPIRY_MODE"] = "aggregate_90dte"
+        os.environ["GAMMA_HISTORY_EXPIRY_MODE"] = "aggregate_90dte"
+        try:
+            trainer = load_module(
+                "pq_train_rf_artifacts_gamma_mode_accepts_aggregate_test",
+                REPO_ROOT / "scripts" / "train_rf_artifacts.py",
+            )
+            meta = trainer._gamma_context_metadata()
+            self.assertEqual(meta["context_expiry_mode"], "aggregate_90dte")
+            self.assertEqual(meta["history_expiry_mode"], "aggregate_90dte")
+        finally:
+            if original_context is None:
+                os.environ.pop("GAMMA_CONTEXT_EXPIRY_MODE", None)
+            else:
+                os.environ["GAMMA_CONTEXT_EXPIRY_MODE"] = original_context
+            if original_history is None:
+                os.environ.pop("GAMMA_HISTORY_EXPIRY_MODE", None)
+            else:
+                os.environ["GAMMA_HISTORY_EXPIRY_MODE"] = original_history
 
     def test_train_artifacts_gamma_context_metadata_rejects_legacy_quarterly_alias(self) -> None:
         original_context = os.environ.get("GAMMA_CONTEXT_EXPIRY_MODE")
@@ -3814,6 +3852,53 @@ class OpsSmokeTests(unittest.TestCase):
         )
         self.assertEqual(bridge._normalize_expiry_yyyymmdd(1775529600), "20260407")
         self.assertEqual(bridge._normalize_expiry_yyyymmdd("1775529600"), "20260407")
+
+    def test_ibkr_bridge_normalizes_compact_expiry_strings(self) -> None:
+        bridge = load_module(
+            "pq_ibkr_expiry_compact_string_test",
+            REPO_ROOT / "server" / "ibkr_gamma_bridge.py",
+        )
+        self.assertEqual(bridge._normalize_expiry_yyyymmdd("20260618"), "20260618")
+
+    def test_ibkr_bridge_logs_market_data_type_failures(self) -> None:
+        bridge = load_module(
+            "pq_ibkr_market_data_type_warning_test",
+            REPO_ROOT / "server" / "ibkr_gamma_bridge.py",
+        )
+        original_ib = bridge.ib
+
+        class _DummyIB:
+            def reqMarketDataType(self, _data_type):
+                raise RuntimeError("market data type unavailable")
+
+        bridge.ib = _DummyIB()
+        try:
+            with self.assertLogs("ibkr_gamma_bridge", level="WARNING") as cm:
+                bridge._request_market_data_type(1)
+            self.assertIn("reqMarketDataType(1) failed", "\n".join(cm.output))
+        finally:
+            bridge.ib = original_ib
+
+    def test_ibkr_bridge_mda_cache_is_bounded(self) -> None:
+        original_max = os.environ.get("MDA_GAMMA_CACHE_MAX_SIZE")
+        os.environ["MDA_GAMMA_CACHE_MAX_SIZE"] = "2"
+        try:
+            bridge = load_module(
+                "pq_ibkr_mda_cache_bound_test",
+                REPO_ROOT / "server" / "ibkr_gamma_bridge.py",
+            )
+        finally:
+            if original_max is None:
+                os.environ.pop("MDA_GAMMA_CACHE_MAX_SIZE", None)
+            else:
+                os.environ["MDA_GAMMA_CACHE_MAX_SIZE"] = original_max
+        with bridge._mda_gamma_cache_lock:
+            bridge._mda_gamma_cache.clear()
+            bridge._store_mda_gamma_cache_entry("SPY:90dte", {"symbol": "SPY"})
+            bridge._store_mda_gamma_cache_entry("QQQ:90dte", {"symbol": "QQQ"})
+            bridge._store_mda_gamma_cache_entry("IWM:90dte", {"symbol": "IWM"})
+            self.assertEqual(len(bridge._mda_gamma_cache), 2)
+            self.assertNotIn("SPY:90dte", bridge._mda_gamma_cache)
 
     def test_yahoo_proxy_rejects_legacy_quarterly_alias_in_gamma_fallback(self) -> None:
         source = (REPO_ROOT / "server" / "yahoo_proxy.js").read_text(encoding="utf-8")

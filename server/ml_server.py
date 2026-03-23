@@ -107,6 +107,7 @@ import joblib
 from ml.features import build_feature_row, collect_missing, FEATURE_VERSION
 
 log = logging.getLogger("ml_server")
+_missing_threshold_warnings: set[tuple[str, int, str]] = set()
 
 MODEL_DIR = Path(os.getenv("RF_MODEL_DIR", "data/models"))
 RF_MANIFEST_PATH = os.getenv("RF_MANIFEST_PATH", "").strip()
@@ -387,6 +388,28 @@ if not allowed_origins:
     print("ML server warning: ML_CORS_ORIGINS is empty; no browser origins are allowed.")
 
 
+def _threshold_from_map(
+    threshold_map: dict[str, dict[int, float]],
+    target: str,
+    horizon: int,
+    *,
+    context: str,
+) -> float:
+    target_map = threshold_map.get(target, {})
+    if horizon in target_map:
+        return float(target_map[horizon])
+    key = (target, int(horizon), context)
+    if key not in _missing_threshold_warnings:
+        log.warning(
+            "Missing %s threshold for %sm horizon in %s; using 0.5 fallback",
+            target,
+            horizon,
+            context,
+        )
+        _missing_threshold_warnings.add(key)
+    return 0.5
+
+
 class ModelRegistry:
     def __init__(self):
         self.manifest = None
@@ -533,6 +556,13 @@ class ModelRegistry:
                     pkl_thresh = payload.get("optimal_threshold")
                     if pkl_thresh is not None:
                         thresholds.setdefault(target, {})[h_int] = float(pkl_thresh)
+                if h_int not in thresholds.get(target, {}):
+                    log.warning(
+                        "Missing decision threshold for %s %sm model after manifest and pickle load; "
+                        "runtime will fall back to 0.5 until artifacts are fixed.",
+                        target,
+                        h_int,
+                    )
 
         # Atomically swap in the newly built registry payload so /score never
         # sees a transient empty model map during reload.
@@ -564,7 +594,7 @@ class ModelRegistry:
         """Get optimal decision threshold for a target/horizon pair.
         Falls back to 0.5 if not available."""
         with self._lock:
-            return self.thresholds.get(target, {}).get(horizon, 0.5)
+            return _threshold_from_map(self.thresholds, target, horizon, context="registry")
 
     def available(self):
         snapshot = self.snapshot()
@@ -2298,8 +2328,12 @@ def _build_regime_thresholds(
 ) -> dict[str, dict[int, float]]:
     thresholds = {"reject": {}, "break": {}}
     for horizon in all_horizons:
-        base_reject = _clamp_threshold(baseline_thresholds["reject"].get(horizon, 0.5))
-        base_break = _clamp_threshold(baseline_thresholds["break"].get(horizon, 0.5))
+        base_reject = _clamp_threshold(
+            _threshold_from_map(baseline_thresholds, "reject", horizon, context="baseline_thresholds")
+        )
+        base_break = _clamp_threshold(
+            _threshold_from_map(baseline_thresholds, "break", horizon, context="baseline_thresholds")
+        )
         if trade_regime == "compression":
             thresholds["reject"][horizon] = _adjust_threshold(
                 base_reject, ML_REGIME_COMPRESSION_REJECT_DELTA
@@ -2368,11 +2402,11 @@ def _apply_atr_zone_overlay(
     }
     for horizon in all_horizons:
         overlaid["reject"][horizon] = _adjust_threshold(
-            threshold_map["reject"].get(horizon, 0.5),
+            _threshold_from_map(threshold_map, "reject", horizon, context="atr_zone_overlay"),
             reject_delta,
         )
         overlaid["break"][horizon] = _adjust_threshold(
-            threshold_map["break"].get(horizon, 0.5),
+            _threshold_from_map(threshold_map, "break", horizon, context="atr_zone_overlay"),
             break_delta,
         )
     return overlaid, {
@@ -2423,11 +2457,11 @@ def _apply_expansion_near_guardrail(
     meta["break_delta"] = float(break_delta)
     for horizon in all_horizons:
         guarded["reject"][horizon] = _adjust_threshold(
-            threshold_map["reject"].get(horizon, 0.5),
+            _threshold_from_map(threshold_map, "reject", horizon, context="expansion_near_guardrail"),
             reject_delta,
         )
         guarded["break"][horizon] = _adjust_threshold(
-            threshold_map["break"].get(horizon, 0.5),
+            _threshold_from_map(threshold_map, "break", horizon, context="expansion_near_guardrail"),
             break_delta,
         )
     return guarded, meta
@@ -2445,8 +2479,8 @@ def _classify_signals(
         if pr is None and pb is None:
             continue
 
-        reject_thresh = threshold_map["reject"].get(horizon, 0.5)
-        break_thresh = threshold_map["break"].get(horizon, 0.5)
+        reject_thresh = _threshold_from_map(threshold_map, "reject", horizon, context="signal_classification")
+        break_thresh = _threshold_from_map(threshold_map, "break", horizon, context="signal_classification")
         pr = pr if pr is not None else 0.0
         pb = pb if pb is not None else 0.0
 
@@ -2478,8 +2512,12 @@ def _pick_best_horizon(
         pb = pb if pb is not None else 0.0
 
         signal = signals.get(f"signal_{horizon}m")
-        reject_thresh = threshold_map["reject"].get(horizon, 0.5)
-        break_thresh = threshold_map["break"].get(horizon, 0.5)
+        reject_thresh = _threshold_from_map(
+            threshold_map, "reject", horizon, context="shadow_signal_classification"
+        )
+        break_thresh = _threshold_from_map(
+            threshold_map, "break", horizon, context="shadow_signal_classification"
+        )
 
         if signal == "reject":
             signal_edge = pr - reject_thresh
@@ -2565,7 +2603,7 @@ def _score_event(event: dict):
     threshold_map_live = {"reject": thresholds_reject, "break": thresholds_break}
 
     def _snapshot_threshold(target: str, horizon: int) -> float:
-        return float(threshold_map_live.get(target, {}).get(horizon, 0.5))
+        return float(_threshold_from_map(threshold_map_live, target, horizon, context="snapshot"))
 
     for target in ("reject", "break"):
         for horizon, payload in model_map.get(target, {}).items():
@@ -3205,8 +3243,12 @@ def _score_event(event: dict):
         quality_flags.append("ANALOG_LOAD_SHED")
 
     for horizon in all_horizons:
-        thresholds_used[f"threshold_reject_{horizon}m"] = selected_threshold_map["reject"].get(horizon, 0.5)
-        thresholds_used[f"threshold_break_{horizon}m"] = selected_threshold_map["break"].get(horizon, 0.5)
+        thresholds_used[f"threshold_reject_{horizon}m"] = _threshold_from_map(
+            selected_threshold_map, "reject", horizon, context="response_payload"
+        )
+        thresholds_used[f"threshold_break_{horizon}m"] = _threshold_from_map(
+            selected_threshold_map, "break", horizon, context="response_payload"
+        )
 
     return {
         "status": "degraded" if missing else "ok",

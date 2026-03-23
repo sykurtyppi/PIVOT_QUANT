@@ -57,7 +57,7 @@ def _gamma_mode(name: str, default: str = "90dte") -> str:
     value = (os.getenv(name, default) or default).strip().lower()
     if value == "quarterly":
         raise ValueError(f"{name}=quarterly is no longer supported; use 90dte")
-    if value not in {"0dte", "front", "monthly", "all", "90dte"}:
+    if value not in {"0dte", "front", "monthly", "all", "90dte", "aggregate_90dte"}:
         raise ValueError(f"Unsupported {name}={value!r}")
     return value
 

@@ -316,6 +316,13 @@ def _to_date(raw: object) -> date | None:
 
     # Handle unix timestamps (seconds/ms) from some option-chain payloads.
     if isinstance(raw, (int, float)):
+        if float(raw).is_integer():
+            compact = str(int(raw))
+            if len(compact) == 8 and compact.isdigit():
+                try:
+                    return parse_yyyy_mm_dd(compact[:4] + "-" + compact[4:6] + "-" + compact[6:8])
+                except Exception:
+                    pass
         try:
             ts = float(raw)
             if ts > 10_000_000_000:
@@ -327,6 +334,12 @@ def _to_date(raw: object) -> date | None:
     text = str(raw).strip()
     if not text:
         return None
+
+    if len(text) == 8 and text.isdigit():
+        try:
+            return parse_yyyy_mm_dd(text[:4] + "-" + text[4:6] + "-" + text[6:8])
+        except Exception:
+            pass
 
     if text.isdigit():
         try:
@@ -413,7 +426,7 @@ def _pick_chain_expiries(expiries: list[object], mode: str, today: date) -> set[
                 continue
             exp_date = parse_yyyy_mm_dd(exp[:4] + "-" + exp[4:6] + "-" + exp[6:8])
             dte = (exp_date - today).days
-            if 0 <= dte <= 90:
+            if 0 < dte <= 90:
                 result.add(exp)
         return result
 
@@ -538,6 +551,8 @@ def _derive_gamma_levels(
     gex_by_strike: dict[float, float],
     call_gex_by_strike: dict[float, float],
     put_gex_by_strike: dict[float, float],
+    *,
+    spot: float | None = None,
 ) -> tuple[float | None, bool, str, float | None, float | None, float | None]:
     ordered = sorted(gex_by_strike.keys())
     if not ordered:
@@ -562,13 +577,22 @@ def _derive_gamma_levels(
         gamma_flip = min(ordered, key=lambda s: abs(gex_by_strike[s]))
 
     if is_true_crossing:
-        gamma_regime = "crossing"
+        if spot is not None and spot > 0:
+            pct_from_flip = abs(spot - gamma_flip) / spot * 100
+            if pct_from_flip < 0.15:
+                gamma_regime = "at_flip"
+            elif spot > gamma_flip:
+                gamma_regime = "positive"
+            else:
+                gamma_regime = "negative"
+        else:
+            gamma_regime = "crossing"
     elif observed_signs == {-1}:
         gamma_regime = "net_short"
     elif observed_signs == {1}:
         gamma_regime = "net_long"
     else:
-        gamma_regime = "crossing"
+        gamma_regime = "at_flip"
 
     call_wall = max(call_gex_by_strike, key=call_gex_by_strike.get) if call_gex_by_strike else None
     put_wall = min(put_gex_by_strike, key=put_gex_by_strike.get) if put_gex_by_strike else None
@@ -628,7 +652,7 @@ def summarize_chain(
     total_oi = 0.0
     iv_samples: list[tuple[float, str, float | None, float]] = []
     selected_expiries = _pick_chain_expiries(expiries, expiry_mode, snapshot_date)
-    if _normalize_expiry_mode(expiry_mode or GAMMA_HISTORY_EXPIRY_MODE) == "90dte" and not selected_expiries:
+    if _normalize_expiry_mode(expiry_mode or GAMMA_HISTORY_EXPIRY_MODE) in {"90dte", "aggregate_90dte"} and not selected_expiries:
         raise ValueError("No valid forward 90DTE expiry available in options chain")
 
     multiplier = 100.0
@@ -664,7 +688,7 @@ def summarize_chain(
             elif side == "put":
                 oi_put += oi
             try:
-                expiry_date = parse_yyyy_mm_dd(str(expiry_raw)[:10]) if expiry_raw else None
+                expiry_date = _to_date(expiry_raw) if expiry_raw else None
                 if expiry_date == target_date:
                     zero_dte_oi += oi
             except Exception:
@@ -745,6 +769,7 @@ def summarize_chain(
             gex_by_strike,
             call_gex_by_strike,
             put_gex_by_strike,
+            spot=spot,
         )
 
     atm_iv = None

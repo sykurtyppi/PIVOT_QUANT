@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import threading
 import time
@@ -15,6 +16,8 @@ except Exception:  # pragma: no cover
     ZoneInfo = None
 
 from ib_insync import IB, Index, Option, Stock, ContFuture
+
+log = logging.getLogger("ibkr_gamma_bridge")
 
 IB_HOST = os.getenv("IB_HOST", "127.0.0.1")
 IB_PORT = int(os.getenv("IB_PORT", "4002"))
@@ -53,6 +56,7 @@ MDA_GAMMA_DTE_DAYS = int(os.getenv("MDA_GAMMA_DTE_DAYS", "120"))
 # dashboard auto-refresh (default 60s). 1800s = 30 min; tune down to 300 if
 # you want faster reaction to intraday gamma shifts.
 MDA_GAMMA_CACHE_TTL_SEC = int(os.getenv("MDA_GAMMA_CACHE_TTL_SEC", "1800"))
+MDA_GAMMA_CACHE_MAX_SIZE = int(os.getenv("MDA_GAMMA_CACHE_MAX_SIZE", "32"))
 # After an upstream marketdata.app failure (for example 429), suppress new
 # upstream requests for this many seconds per symbol and serve stale cache when
 # available to avoid a request loop.
@@ -100,7 +104,8 @@ def _parse_retry_after_seconds(raw_value) -> float | None:
             seconds = (dt - _utc_now()).total_seconds()
             if seconds > 0:
                 return seconds
-        except Exception:
+        except Exception as exc:
+            log.warning("Could not parse Retry-After header %r: %s", text, exc)
             return None
     return None
 
@@ -113,6 +118,23 @@ def _is_market_session_closed(now_utc: datetime) -> bool:
         return now_utc.hour >= 21
     now_et = now_utc.astimezone(NY_TZ)
     return now_et.hour > 16 or (now_et.hour == 16 and now_et.minute >= 0)
+
+
+def _prune_mda_gamma_cache(now_mono=None):
+    if now_mono is None:
+        now_mono = time.monotonic()
+    expired = [key for key, (_, expires_at) in _mda_gamma_cache.items() if expires_at <= now_mono]
+    for key in expired:
+        _mda_gamma_cache.pop(key, None)
+    max_entries = max(1, MDA_GAMMA_CACHE_MAX_SIZE)
+    while len(_mda_gamma_cache) > max_entries:
+        oldest_key = next(iter(_mda_gamma_cache))
+        _mda_gamma_cache.pop(oldest_key, None)
+
+
+def _store_mda_gamma_cache_entry(cache_key, payload):
+    _mda_gamma_cache[cache_key] = (deepcopy(payload), time.monotonic() + MDA_GAMMA_CACHE_TTL_SEC)
+    _prune_mda_gamma_cache()
 
 
 def _parse_allowed_origins() -> list[str]:
@@ -150,8 +172,17 @@ def _safe_price(*values):
 def _request_market_data_type(data_type):
     try:
         ib.reqMarketDataType(data_type)
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("IBKR reqMarketDataType(%s) failed: %s", data_type, exc)
+
+
+def _parse_compact_expiry_text(text):
+    if len(text) != 8 or not text.isdigit():
+        return None
+    try:
+        return datetime.strptime(text, "%Y%m%d")
+    except ValueError:
+        return None
 
 
 def _fetch_ticker_price(contract):
@@ -229,6 +260,10 @@ def _parse_expiry_yyyymmdd(exp):
 
 def _parse_expiry_any(exp):
     if isinstance(exp, (int, float)):
+        if float(exp).is_integer():
+            compact = _parse_compact_expiry_text(str(int(exp)))
+            if compact is not None:
+                return compact
         try:
             ts = float(exp)
             if ts > 10_000_000_000:
@@ -240,6 +275,9 @@ def _parse_expiry_any(exp):
     text = str(exp or "").strip()
     if not text:
         return None
+    compact = _parse_compact_expiry_text(text)
+    if compact is not None:
+        return compact
     if text.isdigit():
         try:
             ts = float(text)
@@ -248,7 +286,7 @@ def _parse_expiry_any(exp):
             return datetime.fromtimestamp(ts, timezone.utc)
         except (TypeError, ValueError, OSError, OverflowError):
             pass
-    for fmt in ("%Y%m%d", "%Y-%m-%d"):
+    for fmt in ("%Y-%m-%d",):
         try:
             return datetime.strptime(text[:10], fmt)
         except ValueError:
@@ -323,16 +361,16 @@ def pick_expiries(expirations, mode):
         # is computed across the full active options book rather than one contract.
         today_dt = _parse_expiry_yyyymmdd(today)
         if today_dt is None:
-            return exp_list[:1]
+            return []
         result = []
         for exp in exp_list:
             dt = _parse_expiry_yyyymmdd(exp)
             if dt is None:
                 continue
             dte = (dt.date() - today_dt.date()).days
-            if 0 <= dte <= 90:
+            if 0 < dte <= 90:
                 result.append(exp)
-        return result if result else exp_list[:1]
+        return result
 
     if safe_mode == "monthly":
         for exp in exp_list:
@@ -802,6 +840,8 @@ def _selected_marketdata_expiries(expiries, mode):
         # Keep every forward expiry whose DTE falls within the structural window.
         today_str = _utc_today_yyyymmdd()
         today_dt = _parse_expiry_yyyymmdd(today_str)
+        if today_dt is None:
+            return set()
         result = set()
         for compact in normalized:
             if compact < today_str:
@@ -810,7 +850,7 @@ def _selected_marketdata_expiries(expiries, mode):
             if dt is None:
                 continue
             dte = (dt.date() - today_dt.date()).days
-            if dte <= 90:
+            if 0 < dte <= 90:
                 result.add(compact)
         return result
 
@@ -840,6 +880,7 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None, expiry_m
     now_mono = time.monotonic()
     stale_payload = None
     with _mda_gamma_cache_lock:
+        _prune_mda_gamma_cache(now_mono)
         cached_entry = _mda_gamma_cache.get(cache_key)
         if cached_entry is not None:
             if now_mono < cached_entry[1]:
@@ -939,7 +980,7 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None, expiry_m
     if dte_fallback_reason is not None:
         dte_fallback_reason = str(dte_fallback_reason)
     selected_expiries = _selected_marketdata_expiries(expiries, mode)
-    if mode == "90dte" and not selected_expiries:
+    if mode in {"90dte", "aggregate_90dte"} and not selected_expiries:
         raise ValueError("No valid forward 90DTE expiry available in options chain")
 
     if not strikes or not gammas:
@@ -1111,7 +1152,7 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None, expiry_m
     # Store in cache so subsequent dashboard refreshes within the TTL window
     # don't burn API credits on a full chain re-download.
     with _mda_gamma_cache_lock:
-        _mda_gamma_cache[cache_key] = (deepcopy(payload), time.monotonic() + MDA_GAMMA_CACHE_TTL_SEC)
+        _store_mda_gamma_cache_entry(cache_key, payload)
 
     return payload
 
