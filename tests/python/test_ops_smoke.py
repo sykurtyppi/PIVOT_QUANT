@@ -3208,19 +3208,34 @@ class OpsSmokeTests(unittest.TestCase):
         )[0]
         visible_ml_block = ml_panel_block.split('<details class="ml-diagnostics" id="ml-diagnostics">', 1)[0]
         self.assertIn('class="ml-summary-note" id="ml-summary-note"', dashboard)
+        self.assertIn('<section class="ml-decision-trace" id="ml-decision-trace" aria-label="ML decision trace">', dashboard)
+        self.assertIn('id="ml-trace-status"', dashboard)
+        self.assertIn('id="ml-trace-blocker"', dashboard)
+        self.assertIn('id="ml-trace-meta-governance"', dashboard)
         self.assertIn('<details class="ml-diagnostics" id="ml-diagnostics">', dashboard)
         self.assertNotIn('<details class="ml-diagnostics" id="ml-diagnostics" open>', dashboard)
         self.assertIn('id="ml-diagnostics-summary"', dashboard)
         self.assertIn("function setMlSummaryNote(value, tone = '')", dashboard)
         self.assertIn("function setMlDiagnosticsSummary(value)", dashboard)
+        self.assertIn("function setMlTraceMetaItem(id, value, note = '', tone = 'muted', title = '')", dashboard)
+        self.assertIn("function buildMlTracePrimaryBlocker(payload)", dashboard)
+        self.assertIn("function updateMlDecisionTrace(payload)", dashboard)
+        self.assertIn("function summarizeMlSuppressions(payload)", dashboard)
         self.assertIn("function buildMlDiagnosticsSummary(metaLabels, flagCount = 0)", dashboard)
         self.assertIn('<details class="ml-diagnostics" id="ml-diagnostics">', ml_panel_block)
         self.assertIn("setMlDiagnosticsSummary(buildMlDiagnosticsSummary(metaLabels));", dashboard)
         self.assertIn("setMlDiagnosticsSummary(buildMlDiagnosticsSummary(metaLabels, flagCount));", dashboard)
+        self.assertIn("updateMlDecisionTrace(null);", dashboard)
+        self.assertIn("updateMlDecisionTrace(payload);", dashboard)
         self.assertIn('class="stat-grid stat-grid-3 ml-trust-grid"', visible_ml_block)
         self.assertIn('id="ml-metric-auc"', visible_ml_block)
         self.assertIn('id="ml-metric-brier"', visible_ml_block)
         self.assertIn('id="ml-metric-ece"', visible_ml_block)
+
+    def test_dashboard_threshold_summary_contract_recognizes_runtime_guard_fields(self) -> None:
+        dashboard = (REPO_ROOT / "production_pivot_dashboard.html").read_text(encoding="utf-8")
+        self.assertIn("const reason = String(entry.guard_reason || entry.reason || '');", dashboard)
+        self.assertIn("entry.guard_applied === true", dashboard)
 
     def test_dashboard_proxy_ops_status_uses_async_file_reads(self) -> None:
         proxy_source = (REPO_ROOT / "server" / "yahoo_proxy.js").read_text(encoding="utf-8")
