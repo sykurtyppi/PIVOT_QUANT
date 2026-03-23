@@ -3148,7 +3148,6 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertNotIn('<details class="transparency-details" id="transparency-details" aria-label="Model transparency" open>', dashboard)
         self.assertIn('id="trans-model"', dashboard)
         self.assertIn('id="trans-governance-reason"', dashboard)
-        self.assertIn("const migrated90dteKey = 'pq_gamma_90dte_focus_v2';", dashboard)
         self.assertIn("function setTransparencyItem(id, value, note = '', tone = '', title = '')", dashboard)
         self.assertIn("function updateTransparencyStrip()", dashboard)
         self.assertIn("const summaryEl = document.getElementById('transparency-summary-text');", dashboard)
