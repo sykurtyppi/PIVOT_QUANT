@@ -2481,7 +2481,6 @@
 
         function normalizeGammaExpiryMode(rawValue, fallback) {
             const value = String(rawValue || '').trim().toLowerCase();
-            if (value === 'quarterly') return '90dte';
             if (GAMMA_EXPIRY_MODES.has(value)) return value;
             return String(fallback || UI_DEFAULTS.gammaExpiry).toLowerCase();
         }

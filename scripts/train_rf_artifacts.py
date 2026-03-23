@@ -53,15 +53,20 @@ def _env_bool(name: str, default: bool) -> bool:
     return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _gamma_mode(name: str, default: str = "90dte") -> str:
+    value = (os.getenv(name, default) or default).strip().lower()
+    if value == "quarterly":
+        raise ValueError(f"{name}=quarterly is no longer supported; use 90dte")
+    if value not in {"0dte", "front", "monthly", "all", "90dte"}:
+        raise ValueError(f"Unsupported {name}={value!r}")
+    return value
+
+
 def _gamma_context_metadata() -> dict[str, object]:
     return {
-        "context_expiry_mode": (
-            os.getenv("GAMMA_CONTEXT_EXPIRY_MODE", "90dte").strip().lower() or "90dte"
-        ),
+        "context_expiry_mode": _gamma_mode("GAMMA_CONTEXT_EXPIRY_MODE", "90dte"),
         "context_dte_window_days": _env_int("GAMMA_CONTEXT_DTE_DAYS", 120),
-        "history_expiry_mode": (
-            os.getenv("GAMMA_HISTORY_EXPIRY_MODE", "90dte").strip().lower() or "90dte"
-        ),
+        "history_expiry_mode": _gamma_mode("GAMMA_HISTORY_EXPIRY_MODE", "90dte"),
         "history_dte_window_days": _env_int("GAMMA_HISTORY_LIVE_DTE_DAYS", 120),
     }
 

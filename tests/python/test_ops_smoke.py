@@ -2337,7 +2337,8 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("selected_expiries = _pick_chain_expiries(expiries, expiry_mode, snapshot_date)", block)
         self.assertIn("if selected_expiries and expiry_compact not in selected_expiries:", block)
         self.assertIn('"selected_expiries": sorted(selected_expiries)', block)
-        self.assertIn('"expiry_mode": str(expiry_mode or GAMMA_HISTORY_EXPIRY_MODE).lower()', block)
+        self.assertIn('"expiry_mode": _normalize_expiry_mode(expiry_mode or GAMMA_HISTORY_EXPIRY_MODE)', block)
+        self.assertIn('raise ValueError("No valid forward 90DTE expiry available in options chain")', block)
 
     def test_backfill_gamma_context_avoids_marketdata_when_bridge_reports_cooldown(self) -> None:
         source = (REPO_ROOT / "scripts" / "backfill_events.py").read_text(encoding="utf-8")
@@ -3415,12 +3416,13 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn('cache_key = f"{symbol.upper()}:{mode or \'default\'}"', source)
         self.assertIn("payload = fetch_gamma_marketdata(symbol, expiry_mode=expiry)", source)
 
-    def test_ibkr_bridge_marketdata_filters_selected_expiries_for_quarterly_mode(self) -> None:
+    def test_ibkr_bridge_marketdata_filters_selected_expiries_for_90dte_mode(self) -> None:
         source = (REPO_ROOT / "server" / "ibkr_gamma_bridge.py").read_text(encoding="utf-8")
         block = source.split("def fetch_gamma_marketdata(", 1)[1].split("class GammaHandler", 1)[0]
         self.assertIn("selected_expiries = _selected_marketdata_expiries(expiries, mode)", block)
         self.assertIn("if selected_expiries and expiry_compact not in selected_expiries:", block)
         self.assertIn('"selectedExpiries": sorted(selected_expiries)', block)
+        self.assertIn('raise ValueError("No valid forward 90DTE expiry available in options chain")', block)
 
     def test_ibkr_bridge_pick_expiries_supports_90dte_mode(self) -> None:
         bridge = load_module(
@@ -3432,9 +3434,43 @@ class OpsSmokeTests(unittest.TestCase):
             bridge._utc_today_yyyymmdd = lambda: "20260323"
             expiries = ["20260417", "20260515", "20260619", "20260717", "20260918"]
             self.assertEqual(bridge.pick_expiries(expiries, "90dte"), ["20260619"])
-            self.assertEqual(bridge.pick_expiries(expiries, "quarterly"), ["20260619"])
         finally:
             bridge._utc_today_yyyymmdd = original_today
+
+    def test_ibkr_bridge_pick_expiries_requires_forward_90dte_candidate(self) -> None:
+        bridge = load_module(
+            "pq_ibkr_pick_expiries_requires_forward_90dte_test",
+            REPO_ROOT / "server" / "ibkr_gamma_bridge.py",
+        )
+        original_today = bridge._utc_today_yyyymmdd
+        try:
+            bridge._utc_today_yyyymmdd = lambda: "20260323"
+            expiries = ["20260320", "20260321"]
+            self.assertEqual(bridge.pick_expiries(expiries, "90dte"), [])
+        finally:
+            bridge._utc_today_yyyymmdd = original_today
+
+    def test_train_artifacts_gamma_context_metadata_rejects_legacy_quarterly_alias(self) -> None:
+        original_context = os.environ.get("GAMMA_CONTEXT_EXPIRY_MODE")
+        original_history = os.environ.get("GAMMA_HISTORY_EXPIRY_MODE")
+        os.environ["GAMMA_CONTEXT_EXPIRY_MODE"] = "quarterly"
+        os.environ["GAMMA_HISTORY_EXPIRY_MODE"] = "quarterly"
+        try:
+            trainer = load_module(
+                "pq_train_rf_artifacts_gamma_mode_rejects_quarterly_test",
+                REPO_ROOT / "scripts" / "train_rf_artifacts.py",
+            )
+            with self.assertRaisesRegex(ValueError, "GAMMA_CONTEXT_EXPIRY_MODE=quarterly"):
+                trainer._gamma_context_metadata()
+        finally:
+            if original_context is None:
+                os.environ.pop("GAMMA_CONTEXT_EXPIRY_MODE", None)
+            else:
+                os.environ["GAMMA_CONTEXT_EXPIRY_MODE"] = original_context
+            if original_history is None:
+                os.environ.pop("GAMMA_HISTORY_EXPIRY_MODE", None)
+            else:
+                os.environ["GAMMA_HISTORY_EXPIRY_MODE"] = original_history
 
     def test_ibkr_bridge_normalizes_marketdata_timestamp_expiries(self) -> None:
         bridge = load_module(
@@ -3443,6 +3479,12 @@ class OpsSmokeTests(unittest.TestCase):
         )
         self.assertEqual(bridge._normalize_expiry_yyyymmdd(1775529600), "20260407")
         self.assertEqual(bridge._normalize_expiry_yyyymmdd("1775529600"), "20260407")
+
+    def test_yahoo_proxy_rejects_legacy_quarterly_alias_in_gamma_fallback(self) -> None:
+        source = (REPO_ROOT / "server" / "yahoo_proxy.js").read_text(encoding="utf-8")
+        self.assertIn("expiry=quarterly is no longer supported; use 90dte", source)
+        self.assertIn("No valid forward 90DTE expiry available in Yahoo options chain", source)
+        self.assertIn("selectedExpiries: selectedExpiry ? [selectedExpiry] : []", source)
 
     def test_ibkr_bridge_market_close_uses_new_york_timezone(self) -> None:
         bridge = load_module(

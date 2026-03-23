@@ -61,6 +61,10 @@ GAMMA_CONTEXT_MARKETDATA_TIMEOUT_SEC = int(os.getenv("GAMMA_CONTEXT_MARKETDATA_T
 GAMMA_CONTEXT_MAX_SNAPSHOT_AGE_DAYS = int(os.getenv("GAMMA_CONTEXT_MAX_SNAPSHOT_AGE_DAYS", "3"))
 # Structural gamma context should come from the expiry nearest 90DTE.
 GAMMA_CONTEXT_EXPIRY_MODE = (os.getenv("GAMMA_CONTEXT_EXPIRY_MODE", "90dte") or "90dte").strip().lower()
+if GAMMA_CONTEXT_EXPIRY_MODE == "quarterly":
+    raise ValueError("GAMMA_CONTEXT_EXPIRY_MODE=quarterly is no longer supported; use 90dte")
+if GAMMA_CONTEXT_EXPIRY_MODE not in {"0dte", "front", "monthly", "all", "90dte"}:
+    raise ValueError(f"Unsupported GAMMA_CONTEXT_EXPIRY_MODE={GAMMA_CONTEXT_EXPIRY_MODE!r}")
 # Use a slightly wider fetch window so the nearest 90DTE contract is still
 # available when it lands a few days around the target tenor.
 GAMMA_CONTEXT_DTE_DAYS = int(os.getenv("GAMMA_CONTEXT_DTE_DAYS", "120"))

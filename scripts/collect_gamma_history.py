@@ -24,6 +24,10 @@ DEFAULT_SYMBOLS = os.getenv("LIVE_COLLECTOR_SYMBOLS", "SPY")
 DEFAULT_RANGE_PCT = float(os.getenv("GAMMA_HISTORY_STRIKE_RANGE_PCT", "0.2"))
 DEFAULT_MAX_STRIKES = int(os.getenv("GAMMA_HISTORY_MAX_STRIKES", "120"))
 GAMMA_HISTORY_EXPIRY_MODE = (os.getenv("GAMMA_HISTORY_EXPIRY_MODE", "90dte") or "90dte").strip().lower()
+if GAMMA_HISTORY_EXPIRY_MODE == "quarterly":
+    raise ValueError("GAMMA_HISTORY_EXPIRY_MODE=quarterly is no longer supported; use 90dte")
+if GAMMA_HISTORY_EXPIRY_MODE not in {"0dte", "front", "monthly", "all", "90dte"}:
+    raise ValueError(f"Unsupported GAMMA_HISTORY_EXPIRY_MODE={GAMMA_HISTORY_EXPIRY_MODE!r}")
 # Use a wider fetch window than the target 90DTE tenor so the nearest
 # structural expiry is still present when it lands slightly beyond 90DTE.
 GAMMA_HISTORY_LIVE_DTE_DAYS = max(1, int(os.getenv("GAMMA_HISTORY_LIVE_DTE_DAYS", "120")))
@@ -264,16 +268,16 @@ def _is_monthly_expiry(expiry_date: date) -> bool:
     return 15 <= expiry_date.day <= 21 and expiry_date.weekday() == 4
 
 
-def _is_quarterly_expiry(expiry_date: date) -> bool:
-    return _is_monthly_expiry(expiry_date) and expiry_date.month in {3, 6, 9, 12}
-
-
 def _normalize_expiry_mode(mode: str) -> str:
-    safe_mode = str(mode or "90dte").lower()
-    return "90dte" if safe_mode == "quarterly" else safe_mode
+    safe_mode = str(mode or "90dte").strip().lower()
+    if safe_mode == "quarterly":
+        raise ValueError("expiry_mode=quarterly is no longer supported; use 90dte")
+    if safe_mode not in {"0dte", "front", "monthly", "all", "90dte"}:
+        raise ValueError(f"Unsupported expiry_mode={safe_mode!r}")
+    return safe_mode
 
 
-def _pick_target_dte_expiry(expiries: list[str], today: date, target_days: int) -> str:
+def _pick_target_dte_expiry(expiries: list[str], today: date, target_days: int) -> str | None:
     candidates: list[tuple[int, int, str]] = []
     for exp in expiries:
         expiry_date = parse_yyyy_mm_dd(exp[:4] + "-" + exp[4:6] + "-" + exp[6:8])
@@ -284,7 +288,7 @@ def _pick_target_dte_expiry(expiries: list[str], today: date, target_days: int) 
     if candidates:
         candidates.sort(key=lambda item: (item[0], item[1], item[2]))
         return candidates[0][2]
-    return expiries[0]
+    return None
 
 
 def _pick_chain_expiries(expiries: list[object], mode: str, today: date) -> set[str]:
@@ -314,7 +318,8 @@ def _pick_chain_expiries(expiries: list[object], mode: str, today: date) -> set[
         return {future[0] if future else normalized[0]}
 
     if safe_mode == "90dte":
-        return {_pick_target_dte_expiry(normalized, today, 90)}
+        target = _pick_target_dte_expiry(normalized, today, 90)
+        return {target} if target else set()
 
     if safe_mode == "monthly":
         monthly = [
@@ -483,6 +488,8 @@ def summarize_chain(
     total_oi = 0.0
     iv_samples: list[tuple[float, str, float | None, float]] = []
     selected_expiries = _pick_chain_expiries(expiries, expiry_mode, snapshot_date)
+    if _normalize_expiry_mode(expiry_mode or GAMMA_HISTORY_EXPIRY_MODE) == "90dte" and not selected_expiries:
+        raise ValueError("No valid forward 90DTE expiry available in options chain")
 
     multiplier = 100.0
     target_date = snapshot_date
@@ -645,7 +652,7 @@ def summarize_chain(
             {
                 "symbol": symbol.upper(),
                 "snapshot_date": snapshot_date.strftime("%Y-%m-%d"),
-                "expiry_mode": str(expiry_mode or GAMMA_HISTORY_EXPIRY_MODE).lower(),
+                "expiry_mode": _normalize_expiry_mode(expiry_mode or GAMMA_HISTORY_EXPIRY_MODE),
                 "selected_expiries": sorted(selected_expiries),
                 "dte_window_days": GAMMA_HISTORY_LIVE_DTE_DAYS,
                 "spot": spot,

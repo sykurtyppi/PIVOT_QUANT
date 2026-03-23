@@ -24,7 +24,11 @@ IB_BRIDGE_PORT = int(os.getenv("IB_BRIDGE_PORT", "5001"))
 IB_EXCHANGE = os.getenv("IB_EXCHANGE", "CBOE")
 IB_MAX_STRIKES = int(os.getenv("IB_MAX_STRIKES", "60"))
 IB_STRIKE_RANGE = float(os.getenv("IB_STRIKE_RANGE", "0.05"))  # +/- 5%
-IB_EXPIRY_MODE = os.getenv("IB_EXPIRY_MODE", "90dte")  # strict structural default
+IB_EXPIRY_MODE = (os.getenv("IB_EXPIRY_MODE", "90dte") or "90dte").strip().lower()
+if IB_EXPIRY_MODE == "quarterly":
+    raise ValueError("IB_EXPIRY_MODE=quarterly is no longer supported; use 90dte")
+if IB_EXPIRY_MODE not in {"0dte", "front", "monthly", "all", "90dte"}:
+    raise ValueError(f"Unsupported IB_EXPIRY_MODE={IB_EXPIRY_MODE!r}")
 IB_MAX_EXPIRIES = int(os.getenv("IB_MAX_EXPIRIES", "1"))
 IB_WEIGHT_0DTE = float(os.getenv("IB_WEIGHT_0DTE", "1.0"))
 IB_WEIGHT_FRONT = float(os.getenv("IB_WEIGHT_FRONT", "0.6"))
@@ -258,23 +262,19 @@ def _is_monthly_expiry(dt):
     return 15 <= dt.day <= 21 and dt.weekday() == 4
 
 
-def _is_quarterly_expiry(dt):
-    return _is_monthly_expiry(dt) and dt.month in (3, 6, 9, 12)
-
-
 def _normalize_expiry_mode(mode):
     value = str(mode or IB_EXPIRY_MODE or "90dte").strip().lower()
-    # Legacy alias preserved so older prefs/env values still resolve to the
-    # intended structural 90DTE behavior instead of a calendar-quarter proxy.
     if value == "quarterly":
-        return "90dte"
+        raise ValueError("expiry=quarterly is no longer supported; use 90dte")
+    if value not in {"0dte", "front", "monthly", "all", "90dte"}:
+        raise ValueError(f"Unsupported expiry mode: {value!r}")
     return value
 
 
 def _pick_target_dte_expiry(expirations, today, target_days):
     today_dt = _parse_expiry_yyyymmdd(today)
     if today_dt is None:
-        return [expirations[0]]
+        return []
 
     candidates = []
     for exp in expirations:
@@ -290,7 +290,7 @@ def _pick_target_dte_expiry(expirations, today, target_days):
         candidates.sort(key=lambda item: (item[0], item[1], item[2]))
         return [candidates[0][2]]
 
-    return [expirations[0]]
+    return []
 
 
 def pick_expiries(expirations, mode):
@@ -414,6 +414,8 @@ def compute_gamma_walls(symbol, expiry_mode, limit):
     expiries = pick_expiries(opt_param.expirations, expiry_mode)
     if expiry_mode == "all":
         expiries = sorted(opt_param.expirations)[: max(1, IB_MAX_EXPIRIES)]
+    elif expiry_mode == "90dte" and not expiries:
+        raise ValueError("No valid forward 90DTE expiry available in IBKR options chain")
     strikes = select_strikes(opt_param.strikes, spot)
     strikes = strikes[:limit]
 
@@ -621,7 +623,6 @@ _EXPIRY_MODE_DTE = {
     "weekly":    7,
     "monthly":  45,   # nearest monthly expiry can sit >30D out
     "90dte":    120,  # wide fetch window so the closest 90DTE expiry is present
-    "quarterly": 120, # legacy alias for 90dte
 }
 
 
@@ -754,6 +755,8 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None, expiry_m
     if dte_fallback_reason is not None:
         dte_fallback_reason = str(dte_fallback_reason)
     selected_expiries = _selected_marketdata_expiries(expiries, mode)
+    if mode == "90dte" and not selected_expiries:
+        raise ValueError("No valid forward 90DTE expiry available in options chain")
 
     if not strikes or not gammas:
         raise ValueError("marketdata.app returned options chain with no strike/gamma data")
@@ -912,7 +915,7 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None, expiry_m
         "source": "marketdata.app",
         "symbol": symbol.upper(),
         "spot": spot,
-        "expiryMode": mode or "90dte",
+        "expiryMode": mode,
         "dteFallback": dte_fallback,
         "dteFallbackReason": dte_fallback_reason,
         "generatedAt": _utc_iso_z(),

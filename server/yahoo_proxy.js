@@ -1315,16 +1315,15 @@ function isMonthlyExpiry(expiryYmd) {
   return weekday === 5 && day >= 15 && day <= 21;
 }
 
-function isQuarterlyExpiry(expiryYmd) {
-  const value = String(expiryYmd || '');
-  if (!isMonthlyExpiry(value)) return false;
-  const month = Number(value.slice(4, 6));
-  return month === 3 || month === 6 || month === 9 || month === 12;
-}
-
 function normalizeOptionsExpiryMode(mode) {
   const safeMode = String(mode || '90dte').toLowerCase();
-  return safeMode === 'quarterly' ? '90dte' : safeMode;
+  if (safeMode === 'quarterly') {
+    throw new Error('expiry=quarterly is no longer supported; use 90dte');
+  }
+  if (!['0dte', 'front', 'monthly', 'all', '90dte'].includes(safeMode)) {
+    throw new Error(`Unsupported expiry mode: ${safeMode}`);
+  }
+  return safeMode;
 }
 
 function daysUntilExpiry(expiryYmd, todayYmd) {
@@ -1367,7 +1366,7 @@ function pickOptionsExpiry(expirations, mode) {
         return a.exp.localeCompare(b.exp);
       });
     if (candidates.length) return candidates[0].exp;
-    return normalized[0];
+    return null;
   }
 
   if (safeMode === 'monthly') {
@@ -1567,6 +1566,9 @@ async function fetchYahooGammaFallback({ symbol, expiryMode = '90dte', limit = 6
     .filter((value) => /^\d{8}$/.test(value))
     .sort();
   const selectedExpiry = pickOptionsExpiry(expiries, safeExpiryMode);
+  if (safeExpiryMode === '90dte' && !selectedExpiry) {
+    throw new Error('No valid forward 90DTE expiry available in Yahoo options chain');
+  }
 
   let selectedResult = first;
   let attempts = firstFetch.attempts;
@@ -1626,6 +1628,7 @@ async function fetchYahooGammaFallback({ symbol, expiryMode = '90dte', limit = 6
       atmIV: summary.atmIV,
       skew25d: summary.skew25d,
       expiries,
+      selectedExpiries: selectedExpiry ? [selectedExpiry] : [],
     },
     fetch: {
       attempts,
