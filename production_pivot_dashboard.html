@@ -4739,8 +4739,10 @@
             }
 
             const gammaSource = state.gammaData?.source || 'Proxy';
+            const flipIsTrueCrossing = state.gammaData?.gammaFlipIsTrueCrossing;
+            const flipSuffix = flipIsTrueCrossing === false ? ' · regime floor' : '';
             const gammaLabel = Number.isFinite(gammaLevel)
-                ? `${formatNumber(gammaLevel)} (${gammaSource})`
+                ? `${formatNumber(gammaLevel)} (${gammaSource}${flipSuffix})`
                 : '--';
             setLabeledText('gamma-level', 'Gamma flip:', gammaLabel);
 
@@ -4858,7 +4860,13 @@
             if (Number.isFinite(gammaLevel)) {
                 const diff = ((referencePrice - gammaLevel) / referencePrice) * 100;
                 flipDistance = `${diff >= 0 ? '+' : ''}${formatNumber(diff, 2)}%`;
-                if (Math.abs(diff) < 0.15) {
+                // When the flip is not a true zero-crossing the entire book is
+                // in one gamma regime — treat as Net Short regardless of spot
+                // position, since the "flip" price is just the softest level.
+                if (flipIsTrueCrossing === false) {
+                    gammaMode = 'Net Short';
+                    playbook = 'Trend / Speed';
+                } else if (Math.abs(diff) < 0.15) {
                     gammaMode = 'Mixed';
                     playbook = 'Chop / Balanced';
                 } else if (diff >= 0) {

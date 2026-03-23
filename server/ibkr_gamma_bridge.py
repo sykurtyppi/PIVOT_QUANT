@@ -372,12 +372,13 @@ def get_es_fallback():
     return ContFuture("ES", "CME")
 
 
-def select_strikes(strikes, spot):
+def select_strikes(strikes, spot, strike_range=None):
     strikes = sorted([float(s) for s in strikes])
     if not strikes:
         return []
-    lower = spot * (1 - IB_STRIKE_RANGE)
-    upper = spot * (1 + IB_STRIKE_RANGE)
+    sr = strike_range if strike_range is not None else IB_STRIKE_RANGE
+    lower = spot * (1 - sr)
+    upper = spot * (1 + sr)
     filtered = [s for s in strikes if lower <= s <= upper]
     if len(filtered) <= IB_MAX_STRIKES:
         return filtered
@@ -411,6 +412,7 @@ def _summarize_gamma_structure(gex_by_strike, call_gex_by_strike, put_gex_by_str
     sorted_strikes = sorted(gex_by_strike.keys())
     cumulative = 0.0
     flip = None
+    is_true_crossing = False
     last_sign = None
 
     for strike in sorted_strikes:
@@ -418,10 +420,15 @@ def _summarize_gamma_structure(gex_by_strike, call_gex_by_strike, put_gex_by_str
         sign = 1 if cumulative > 0 else -1 if cumulative < 0 else 0
         if last_sign is not None and sign != last_sign and sign != 0:
             flip = strike
+            is_true_crossing = True
             break
         last_sign = sign
 
     if flip is None:
+        # No sign change: book is entirely in one gamma regime.
+        # Fall back to the strike with the smallest absolute net GEX (the
+        # "softest" or most neutral level), but flag this is not a true
+        # zero-crossing so callers can present it correctly.
         flip = min(sorted_strikes, key=lambda s: abs(gex_by_strike[s]))
 
     call_wall = max(call_gex_by_strike, key=call_gex_by_strike.get) if call_gex_by_strike else None
@@ -445,6 +452,7 @@ def _summarize_gamma_structure(gex_by_strike, call_gex_by_strike, put_gex_by_str
 
     return {
         "gammaFlip": flip,
+        "gammaFlipIsTrueCrossing": is_true_crossing,
         "callWall": wall_payload(call_wall, call_gex_by_strike),
         "putWall": wall_payload(put_wall, put_gex_by_strike),
         "pin": wall_payload(pin, gex_by_strike),
@@ -480,9 +488,10 @@ def compute_gamma_walls(symbol, expiry_mode, limit):
     expiries = pick_expiries(opt_param.expirations, expiry_mode)
     if expiry_mode == "all":
         expiries = sorted(opt_param.expirations)[: max(1, IB_MAX_EXPIRIES)]
-    elif expiry_mode == "90dte" and not expiries:
+    elif expiry_mode in {"90dte", "aggregate_90dte"} and not expiries:
         raise ValueError("No valid forward 90DTE expiry available in IBKR options chain")
-    strikes = select_strikes(opt_param.strikes, spot)
+    ibkr_sr = IB_AGGREGATE_STRIKE_RANGE if expiry_mode == "aggregate_90dte" else None
+    strikes = select_strikes(opt_param.strikes, spot, strike_range=ibkr_sr)
     strikes = strikes[:limit]
 
     contracts = []
@@ -643,6 +652,7 @@ def compute_gamma_walls(symbol, expiry_mode, limit):
         "expiryMode": expiry_mode,
         "generatedAt": _utc_iso_z(),
         "gammaFlip": levels["gammaFlip"],
+        "gammaFlipIsTrueCrossing": levels["gammaFlipIsTrueCrossing"],
         "callWall": levels["callWall"],
         "putWall": levels["putWall"],
         "pin": levels["pin"],
@@ -1043,6 +1053,7 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None, expiry_m
         "dteFallbackReason": dte_fallback_reason,
         "generatedAt": _utc_iso_z(),
         "gammaFlip": levels["gammaFlip"],
+        "gammaFlipIsTrueCrossing": levels["gammaFlipIsTrueCrossing"],
         "callWall": levels["callWall"],
         "putWall": levels["putWall"],
         "pin": levels["pin"],

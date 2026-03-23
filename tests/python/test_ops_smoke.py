@@ -3561,11 +3561,41 @@ class OpsSmokeTests(unittest.TestCase):
             {630.0: -1000.0, 650.0: -350.0, 675.0: -90.0},
         )
         self.assertEqual(levels["gammaFlip"], 675.0)
+        # All-negative net regime — no true zero-crossing, fallback to min-abs strike
+        self.assertFalse(levels["gammaFlipIsTrueCrossing"])
         self.assertEqual(levels["callWall"]["price"], 650.0)
         self.assertGreater(levels["callWall"]["gex"], 0.0)
         self.assertEqual(levels["putWall"]["price"], 630.0)
         self.assertLess(levels["putWall"]["gex"], 0.0)
         self.assertEqual(levels["pin"]["price"], 630.0)
+
+    def test_ibkr_bridge_gamma_flip_true_crossing_detected(self) -> None:
+        bridge = load_module(
+            "pq_ibkr_gamma_flip_true_crossing_test",
+            REPO_ROOT / "server" / "ibkr_gamma_bridge.py",
+        )
+        # Net GEX crosses from negative to positive at 650: true crossing
+        levels = bridge._summarize_gamma_structure(
+            {630.0: -500.0, 650.0: 800.0, 670.0: 300.0},
+            {650.0: 800.0, 670.0: 300.0},
+            {630.0: -500.0},
+        )
+        self.assertEqual(levels["gammaFlip"], 650.0)
+        self.assertTrue(levels["gammaFlipIsTrueCrossing"])
+
+    def test_ibkr_bridge_select_strikes_respects_custom_range(self) -> None:
+        bridge = load_module(
+            "pq_ibkr_select_strikes_custom_range_test",
+            REPO_ROOT / "server" / "ibkr_gamma_bridge.py",
+        )
+        spot = 650.0
+        # Strikes from 560 to 740 in $5 steps
+        strikes = [float(s) for s in range(560, 745, 5)]
+        narrow = bridge.select_strikes(strikes, spot, strike_range=0.05)  # ±5%  →  617–683
+        wide = bridge.select_strikes(strikes, spot, strike_range=0.15)    # ±15% →  552–748
+        self.assertTrue(all(spot * 0.95 <= s <= spot * 1.05 for s in narrow))
+        self.assertGreater(len(wide), len(narrow))
+        self.assertTrue(all(spot * 0.85 <= s <= spot * 1.15 for s in wide))
 
     def test_train_artifacts_gamma_context_metadata_rejects_legacy_quarterly_alias(self) -> None:
         original_context = os.environ.get("GAMMA_CONTEXT_EXPIRY_MODE")
