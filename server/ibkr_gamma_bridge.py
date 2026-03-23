@@ -405,7 +405,7 @@ def expiry_type(expiration, today, front_expiry):
     return "other"
 
 
-def _summarize_gamma_structure(gex_by_strike, call_gex_by_strike, put_gex_by_strike):
+def _summarize_gamma_structure(gex_by_strike, call_gex_by_strike, put_gex_by_strike, spot=None):
     if not gex_by_strike:
         raise ValueError("No gamma structure available")
 
@@ -435,15 +435,29 @@ def _summarize_gamma_structure(gex_by_strike, call_gex_by_strike, put_gex_by_str
         flip = min(sorted_strikes, key=lambda s: abs(gex_by_strike[s]))
 
     if is_true_crossing:
-        gamma_regime = "crossing"
+        # Resolve the crossing to a directional label using spot price.
+        # This gives the dashboard a server-authoritative 5-value enum so it
+        # never has to derive regime from flip distance client-side.
+        if spot is not None and spot > 0:
+            pct_from_flip = abs(spot - flip) / spot * 100
+            if pct_from_flip < 0.15:
+                gamma_regime = "at_flip"
+            elif spot > flip:
+                gamma_regime = "positive"
+            else:
+                gamma_regime = "negative"
+        else:
+            # No spot available (unit tests / legacy callers): retain
+            # "crossing" so existing assertions remain valid.
+            gamma_regime = "crossing"
     elif observed_signs == {-1}:
         gamma_regime = "net_short"
     elif observed_signs == {1}:
         gamma_regime = "net_long"
     else:
-        # Degenerate all-zero / ambiguous cumulative path: preserve neutral
-        # semantics rather than misclassifying a one-sided regime.
-        gamma_regime = "crossing"
+        # Degenerate all-zero / ambiguous cumulative path: at_flip is the
+        # most honest label — the book has no directional lean.
+        gamma_regime = "at_flip"
 
     call_wall = max(call_gex_by_strike, key=call_gex_by_strike.get) if call_gex_by_strike else None
     put_wall = min(put_gex_by_strike, key=put_gex_by_strike.get) if put_gex_by_strike else None
@@ -636,7 +650,7 @@ def compute_gamma_walls(symbol, expiry_mode, limit):
             "Check IBKR options market-data permissions or use delayed options greeks."
         )
 
-    levels = _summarize_gamma_structure(gex_by_strike, call_gex_by_strike, put_gex_by_strike)
+    levels = _summarize_gamma_structure(gex_by_strike, call_gex_by_strike, put_gex_by_strike, spot=spot)
 
     total_oi = oi_call + oi_put
     top_strikes = sorted(oi_by_strike.items(), key=lambda kv: kv[1], reverse=True)[:5]
@@ -1037,7 +1051,7 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None, expiry_m
         gex_by_strike = {k: v for k, v in gex_by_strike.items() if k in keep}
         call_gex_by_strike = {k: v for k, v in call_gex_by_strike.items() if k in keep}
         put_gex_by_strike = {k: v for k, v in put_gex_by_strike.items() if k in keep}
-    levels = _summarize_gamma_structure(gex_by_strike, call_gex_by_strike, put_gex_by_strike)
+    levels = _summarize_gamma_structure(gex_by_strike, call_gex_by_strike, put_gex_by_strike, spot=spot)
 
     # IV analysis
     atm_iv = None

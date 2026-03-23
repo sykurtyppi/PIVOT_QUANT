@@ -3988,19 +3988,27 @@
 
             entries.forEach((entry) => {
                 const isNearest = entry.label === nearestLabel;
+                const structural = mode === 'structural';
                 const baseLabel = entry.label.replace(/^I\s+/i, '').toUpperCase();
+                // Structural walls: full-strength; intraday walls: muted guide lines
+                // with no right-rail label so they don't stack with structural labels.
+                const alpha = structural
+                    ? (baseLabel === 'PIN'
+                        ? (isNearest ? 0.9 : 0.54)
+                        : (isNearest ? 0.92 : 0.62))
+                    : 0.28;
                 const color = baseLabel === 'CALL WALL'
-                    ? `rgba(249, 115, 22, ${isNearest ? 0.92 : 0.62})`
+                    ? `rgba(249, 115, 22, ${alpha})`
                     : baseLabel === 'PUT WALL'
-                        ? `rgba(16, 185, 129, ${isNearest ? 0.92 : 0.62})`
-                        : `rgba(168, 85, 247, ${isNearest ? 0.9 : 0.54})`;
+                        ? `rgba(16, 185, 129, ${alpha})`
+                        : `rgba(168, 85, 247, ${alpha})`;
                 const line = (state._addLine || ((chart, options) => chart.addLineSeries(options)))(state.chart, {
                     color,
-                    lineWidth: isNearest ? (useDashed ? 1 : 2) : 1,
+                    lineWidth: structural ? (isNearest ? 2 : 1) : 1,
                     lineStyle: useDashed || baseLabel === 'PIN' ? 2 : 0,
-                    priceLineVisible: isNearest && mode === 'structural',
-                    lastValueVisible: isNearest && mode === 'structural',
-                    title: entry.shortLabel,
+                    priceLineVisible: isNearest && structural,
+                    lastValueVisible: isNearest && structural,
+                    title: structural ? entry.shortLabel : '',
                 });
 
                 line.setData([
@@ -4745,6 +4753,8 @@
                 flipSuffix = ' · regime floor';
             } else if (gammaRegime === 'net_long') {
                 flipSuffix = ' · regime ceiling';
+            } else if (gammaRegime === 'at_flip') {
+                flipSuffix = ' · at flip';
             }
             const gammaLabel = Number.isFinite(gammaLevel)
                 ? `${formatNumber(gammaLevel)} (${gammaSource}${flipSuffix})`
@@ -4866,21 +4876,41 @@
             if (Number.isFinite(gammaLevel)) {
                 const diff = ((referencePrice - gammaLevel) / referencePrice) * 100;
                 flipDistance = `${diff >= 0 ? '+' : ''}${formatNumber(diff, 2)}%`;
+                // Server-authoritative 5-value regime enum — no client-side derivation
+                // for any value the server explicitly sends.
                 if (gammaRegime === 'net_short') {
+                    // Entire book net short: no zero-crossing, dealer amplifies moves
                     gammaMode = 'Net Short';
                     playbook = 'Trend / Speed';
                 } else if (gammaRegime === 'net_long') {
+                    // Entire book net long: no zero-crossing, dealer dampens moves
                     gammaMode = 'Net Long';
                     playbook = 'Pin / Fade';
-                } else if (Math.abs(diff) < 0.15) {
-                    gammaMode = 'Mixed';
+                } else if (gammaRegime === 'at_flip') {
+                    // Price within 0.15% of the true zero-crossing: balanced/choppy
+                    gammaMode = 'At Flip';
                     playbook = 'Chop / Balanced';
-                } else if (diff >= 0) {
+                } else if (gammaRegime === 'positive') {
+                    // True crossing exists, price is above it: mean-reversion regime
                     gammaMode = 'Positive';
                     playbook = 'Pin / Fade';
-                } else {
+                } else if (gammaRegime === 'negative') {
+                    // True crossing exists, price is below it: trend regime
                     gammaMode = 'Negative';
                     playbook = 'Trend / Speed';
+                } else {
+                    // 'crossing' (legacy, no spot at compute time) or unknown:
+                    // derive from flip distance as fallback only.
+                    if (Math.abs(diff) < 0.15) {
+                        gammaMode = 'At Flip';
+                        playbook = 'Chop / Balanced';
+                    } else if (diff >= 0) {
+                        gammaMode = 'Positive';
+                        playbook = 'Pin / Fade';
+                    } else {
+                        gammaMode = 'Negative';
+                        playbook = 'Trend / Speed';
+                    }
                 }
             }
 

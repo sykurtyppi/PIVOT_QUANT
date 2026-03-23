@@ -3651,7 +3651,7 @@ class OpsSmokeTests(unittest.TestCase):
             "pq_ibkr_gamma_flip_true_crossing_test",
             REPO_ROOT / "server" / "ibkr_gamma_bridge.py",
         )
-        # Net GEX crosses from negative to positive at 650: true crossing
+        # No spot passed → legacy "crossing" label preserved for backward compat
         levels = bridge._summarize_gamma_structure(
             {630.0: -500.0, 650.0: 800.0, 670.0: 300.0},
             {650.0: 800.0, 670.0: 300.0},
@@ -3660,6 +3660,54 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(levels["gammaFlip"], 650.0)
         self.assertTrue(levels["gammaFlipIsTrueCrossing"])
         self.assertEqual(levels["gammaRegime"], "crossing")
+
+    def test_ibkr_bridge_gamma_regime_positive_when_spot_above_flip(self) -> None:
+        """True crossing at 650; spot 670 (above) → regime = positive."""
+        bridge = load_module(
+            "pq_ibkr_gamma_regime_positive_test",
+            REPO_ROOT / "server" / "ibkr_gamma_bridge.py",
+        )
+        levels = bridge._summarize_gamma_structure(
+            {630.0: -500.0, 650.0: 800.0, 670.0: 300.0},
+            {650.0: 800.0, 670.0: 300.0},
+            {630.0: -500.0},
+            spot=670.0,
+        )
+        self.assertEqual(levels["gammaFlip"], 650.0)
+        self.assertTrue(levels["gammaFlipIsTrueCrossing"])
+        self.assertEqual(levels["gammaRegime"], "positive")
+
+    def test_ibkr_bridge_gamma_regime_negative_when_spot_below_flip(self) -> None:
+        """True crossing at 650; spot 620 (below) → regime = negative."""
+        bridge = load_module(
+            "pq_ibkr_gamma_regime_negative_test",
+            REPO_ROOT / "server" / "ibkr_gamma_bridge.py",
+        )
+        levels = bridge._summarize_gamma_structure(
+            {600.0: -500.0, 650.0: 800.0, 670.0: 300.0},
+            {650.0: 800.0, 670.0: 300.0},
+            {600.0: -500.0},
+            spot=620.0,
+        )
+        self.assertEqual(levels["gammaFlip"], 650.0)
+        self.assertTrue(levels["gammaFlipIsTrueCrossing"])
+        self.assertEqual(levels["gammaRegime"], "negative")
+
+    def test_ibkr_bridge_gamma_regime_at_flip_when_spot_within_015pct(self) -> None:
+        """True crossing at 650; spot 650.5 (within 0.15%) → regime = at_flip."""
+        bridge = load_module(
+            "pq_ibkr_gamma_regime_at_flip_test",
+            REPO_ROOT / "server" / "ibkr_gamma_bridge.py",
+        )
+        levels = bridge._summarize_gamma_structure(
+            {630.0: -500.0, 650.0: 800.0, 670.0: 300.0},
+            {650.0: 800.0, 670.0: 300.0},
+            {630.0: -500.0},
+            spot=650.5,  # 0.077% from flip — inside 0.15% threshold
+        )
+        self.assertEqual(levels["gammaFlip"], 650.0)
+        self.assertTrue(levels["gammaFlipIsTrueCrossing"])
+        self.assertEqual(levels["gammaRegime"], "at_flip")
 
     def test_ibkr_bridge_gamma_regime_reports_net_long_without_crossing(self) -> None:
         bridge = load_module(
@@ -3691,10 +3739,18 @@ class OpsSmokeTests(unittest.TestCase):
     def test_dashboard_gamma_panel_uses_explicit_gamma_regime(self) -> None:
         dashboard = (REPO_ROOT / "production_pivot_dashboard.html").read_text(encoding="utf-8")
         self.assertIn("const gammaRegime = String(state.gammaData?.gammaRegime || '').toLowerCase();", dashboard)
+        # flipSuffix labels for regime-floor/ceiling and at-flip
         self.assertIn("flipSuffix = ' · regime floor';", dashboard)
         self.assertIn("flipSuffix = ' · regime ceiling';", dashboard)
+        self.assertIn("flipSuffix = ' · at flip';", dashboard)
+        # All 5 regime values handled server-authoritatively
         self.assertIn("gammaMode = 'Net Short';", dashboard)
         self.assertIn("gammaMode = 'Net Long';", dashboard)
+        self.assertIn("gammaMode = 'At Flip';", dashboard)
+        self.assertIn("gammaMode = 'Positive';", dashboard)
+        self.assertIn("gammaMode = 'Negative';", dashboard)
+        # Intraday walls should carry no right-rail title label
+        self.assertIn("title: structural ? entry.shortLabel : '',", dashboard)
 
     def test_dashboard_touch_events_use_gamma_regime_for_gamma_mode(self) -> None:
         dashboard = (REPO_ROOT / "production_pivot_dashboard.html").read_text(encoding="utf-8")
