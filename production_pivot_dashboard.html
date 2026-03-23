@@ -919,6 +919,10 @@
             color: var(--danger);
         }
 
+        .ml-trust-grid {
+            margin-top: 2px;
+        }
+
         .ml-controls {
             display: flex;
             align-items: center;
@@ -2167,10 +2171,24 @@
                         </div>
                     </div>
                 </div>
+                <div class="stat-grid stat-grid-3 ml-trust-grid">
+                    <div class="stat">
+                        <div class="stat-label" title="Area Under ROC Curve — 1.0 is perfect, 0.5 is random. Measures ranking quality of predictions">Rolling AUC</div>
+                        <div id="ml-metric-auc" class="stat-value">--</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-label" title="Brier Score — 0.0 is perfect. Lower means better-calibrated probabilities. Baseline depends on class frequency">Rolling Brier</div>
+                        <div id="ml-metric-brier" class="stat-value">--</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-label" title="Expected Calibration Error — measures gap between predicted probabilities and actual outcomes. Lower is better">Calib Drift (ECE)</div>
+                        <div id="ml-metric-ece" class="stat-value">--</div>
+                    </div>
+                </div>
                 <details class="ml-diagnostics" id="ml-diagnostics">
                     <summary>
                         <span class="ml-diagnostics-label">Model Diagnostics</span>
-                        <span class="ml-diagnostics-summary" id="ml-diagnostics-summary">Detailed flags, calibration, drift, and model-age context.</span>
+                        <span class="ml-diagnostics-summary" id="ml-diagnostics-summary">Detailed flags, calibration context, trend sparklines, and model-age context.</span>
                     </summary>
                     <div class="ml-diagnostics-body">
                         <div class="stat-grid stat-grid-3">
@@ -2185,20 +2203,6 @@
                             <div class="stat">
                                 <div class="stat-label" title="Post-training probability calibration method (e.g. sigmoid, isotonic)">Calibration</div>
                                 <div id="ml-calibration" class="stat-value">--</div>
-                            </div>
-                        </div>
-                        <div class="stat-grid stat-grid-3">
-                            <div class="stat">
-                                <div class="stat-label" title="Area Under ROC Curve — 1.0 is perfect, 0.5 is random. Measures ranking quality of predictions">Rolling AUC</div>
-                                <div id="ml-metric-auc" class="stat-value">--</div>
-                            </div>
-                            <div class="stat">
-                                <div class="stat-label" title="Brier Score — 0.0 is perfect. Lower means better-calibrated probabilities. Baseline depends on class frequency">Rolling Brier</div>
-                                <div id="ml-metric-brier" class="stat-value">--</div>
-                            </div>
-                            <div class="stat">
-                                <div class="stat-label" title="Expected Calibration Error — measures gap between predicted probabilities and actual outcomes. Lower is better">Calib Drift (ECE)</div>
-                                <div id="ml-metric-ece" class="stat-value">--</div>
                             </div>
                         </div>
                         <div class="ml-sparkline-grid">
@@ -6554,7 +6558,7 @@
         function setMlDiagnosticsSummary(value) {
             const el = document.getElementById('ml-diagnostics-summary');
             if (el) {
-                el.textContent = value || 'Detailed flags, calibration, drift, and model-age context.';
+                el.textContent = value || 'Detailed flags, calibration context, trend sparklines, and model-age context.';
             }
         }
 

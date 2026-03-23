@@ -3206,6 +3206,7 @@ class OpsSmokeTests(unittest.TestCase):
             '<section class="panel insights-panel">',
             1,
         )[0]
+        visible_ml_block = ml_panel_block.split('<details class="ml-diagnostics" id="ml-diagnostics">', 1)[0]
         self.assertIn('class="ml-summary-note" id="ml-summary-note"', dashboard)
         self.assertIn('<details class="ml-diagnostics" id="ml-diagnostics">', dashboard)
         self.assertNotIn('<details class="ml-diagnostics" id="ml-diagnostics" open>', dashboard)
@@ -3216,6 +3217,10 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn('<details class="ml-diagnostics" id="ml-diagnostics">', ml_panel_block)
         self.assertIn("setMlDiagnosticsSummary(buildMlDiagnosticsSummary(metaLabels));", dashboard)
         self.assertIn("setMlDiagnosticsSummary(buildMlDiagnosticsSummary(metaLabels, flagCount));", dashboard)
+        self.assertIn('class="stat-grid stat-grid-3 ml-trust-grid"', visible_ml_block)
+        self.assertIn('id="ml-metric-auc"', visible_ml_block)
+        self.assertIn('id="ml-metric-brier"', visible_ml_block)
+        self.assertIn('id="ml-metric-ece"', visible_ml_block)
 
     def test_dashboard_proxy_ops_status_uses_async_file_reads(self) -> None:
         proxy_source = (REPO_ROOT / "server" / "yahoo_proxy.js").read_text(encoding="utf-8")
