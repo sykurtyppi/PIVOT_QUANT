@@ -525,13 +525,66 @@
             border-color: rgba(239, 68, 68, 0.4);
         }
 
+        .transparency-details {
+            border-bottom: 1px solid var(--border);
+            background: rgba(6, 10, 24, 0.36);
+        }
+
+        .transparency-details > summary {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 8px 28px;
+            cursor: pointer;
+            list-style: none;
+            color: var(--muted);
+            user-select: none;
+        }
+
+        .transparency-details > summary::-webkit-details-marker {
+            display: none;
+        }
+
+        .transparency-details > summary::after {
+            content: 'Show detail';
+            margin-left: auto;
+            font-size: 10px;
+            letter-spacing: 0.35px;
+            text-transform: uppercase;
+            color: var(--muted);
+        }
+
+        .transparency-details[open] > summary {
+            border-bottom: 1px solid rgba(148, 163, 184, 0.1);
+        }
+
+        .transparency-details[open] > summary::after {
+            content: 'Hide detail';
+        }
+
+        .transparency-summary-label {
+            font-size: 10px;
+            letter-spacing: 0.4px;
+            text-transform: uppercase;
+            font-weight: 700;
+            color: #9fb3d1;
+            white-space: nowrap;
+        }
+
+        .transparency-summary-text {
+            min-width: 0;
+            font-size: 11px;
+            color: var(--text);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
         .transparency-strip {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
             gap: 8px;
             padding: 10px 28px;
-            border-bottom: 1px solid var(--border);
-            background: rgba(6, 10, 24, 0.36);
         }
 
         .transparency-item {
@@ -842,9 +895,28 @@
             white-space: normal;
             overflow-wrap: anywhere;
             line-height: 1.28;
-            max-height: 220px;
+            max-height: 180px;
             overflow: auto;
             padding-right: 2px;
+        }
+
+        .ml-summary-grid {
+            grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+        }
+
+        .ml-summary-note {
+            font-size: 11px;
+            color: var(--muted);
+            line-height: 1.35;
+            min-height: 16px;
+        }
+
+        .ml-summary-note.warning {
+            color: var(--warning);
+        }
+
+        .ml-summary-note.risk {
+            color: var(--danger);
         }
 
         .ml-controls {
@@ -1086,6 +1158,68 @@
         .ml-metrics-note {
             font-size: 11px;
             color: var(--muted);
+        }
+
+        .ml-diagnostics {
+            border: 1px solid rgba(148, 163, 184, 0.12);
+            border-radius: 10px;
+            background: rgba(2, 6, 23, 0.34);
+        }
+
+        .ml-diagnostics > summary {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            cursor: pointer;
+            list-style: none;
+            padding: 9px 10px;
+            color: var(--muted);
+            user-select: none;
+        }
+
+        .ml-diagnostics > summary::-webkit-details-marker {
+            display: none;
+        }
+
+        .ml-diagnostics > summary::after {
+            content: 'Show diagnostics';
+            margin-left: auto;
+            font-size: 10px;
+            letter-spacing: 0.35px;
+            text-transform: uppercase;
+            color: var(--muted);
+        }
+
+        .ml-diagnostics[open] > summary {
+            border-bottom: 1px solid rgba(148, 163, 184, 0.1);
+        }
+
+        .ml-diagnostics[open] > summary::after {
+            content: 'Hide diagnostics';
+        }
+
+        .ml-diagnostics-label {
+            font-size: 10px;
+            letter-spacing: 0.4px;
+            text-transform: uppercase;
+            font-weight: 700;
+            color: #9fb3d1;
+        }
+
+        .ml-diagnostics-summary {
+            min-width: 0;
+            font-size: 11px;
+            color: var(--muted);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .ml-diagnostics-body {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            padding: 10px;
         }
 
         .ml-sparkline-grid {
@@ -1430,6 +1564,10 @@
                 grid-template-columns: 1fr 1fr;
             }
 
+            .transparency-details > summary {
+                padding: 8px 16px;
+            }
+
             .transparency-item-wide {
                 grid-column: span 2;
             }
@@ -1468,6 +1606,11 @@
 
             .timeframe-toolbar {
                 justify-content: flex-start;
+            }
+
+            .ml-diagnostics > summary {
+                align-items: flex-start;
+                flex-wrap: wrap;
             }
         }
 
@@ -1764,43 +1907,49 @@
             <div class="system-pill" id="sys-refresh">Refresh: --</div>
         </section>
 
-        <section class="transparency-strip" aria-label="Model transparency">
-            <div class="transparency-item" id="trans-model">
-                <strong>Model State</strong>
-                <div class="transparency-value" data-role="value">--</div>
-                <small data-role="note">--</small>
-            </div>
-            <div class="transparency-item" id="trans-retrain">
-                <strong>Retrain / Reload</strong>
-                <div class="transparency-value" data-role="value">--</div>
-                <small data-role="note">--</small>
-            </div>
-            <div class="transparency-item" id="trans-governance">
-                <strong>Governance</strong>
-                <div class="transparency-value" data-role="value">--</div>
-                <small data-role="note">--</small>
-            </div>
-            <div class="transparency-item" id="trans-gamma">
-                <strong>Gamma Source</strong>
-                <div class="transparency-value" data-role="value">--</div>
-                <small data-role="note">--</small>
-            </div>
-            <div class="transparency-item" id="trans-ema">
-                <strong>EMA Method</strong>
-                <div class="transparency-value" data-role="value">--</div>
-                <small data-role="note">--</small>
-            </div>
-            <div class="transparency-item" id="trans-thresholds">
-                <strong>Threshold Guard</strong>
-                <div class="transparency-value" data-role="value">--</div>
-                <small data-role="note">--</small>
-            </div>
-            <div class="transparency-item transparency-item-wide" id="trans-governance-reason">
-                <strong>Last Governance Reason</strong>
-                <div class="transparency-value" data-role="value">--</div>
-                <small data-role="note">--</small>
-            </div>
-        </section>
+        <details class="transparency-details" id="transparency-details" aria-label="Model transparency">
+            <summary>
+                <span class="transparency-summary-label">Model Transparency</span>
+                <span class="transparency-summary-text" id="transparency-summary-text">--</span>
+            </summary>
+            <section class="transparency-strip">
+                <div class="transparency-item" id="trans-model">
+                    <strong>Model State</strong>
+                    <div class="transparency-value" data-role="value">--</div>
+                    <small data-role="note">--</small>
+                </div>
+                <div class="transparency-item" id="trans-retrain">
+                    <strong>Retrain / Reload</strong>
+                    <div class="transparency-value" data-role="value">--</div>
+                    <small data-role="note">--</small>
+                </div>
+                <div class="transparency-item" id="trans-governance">
+                    <strong>Governance</strong>
+                    <div class="transparency-value" data-role="value">--</div>
+                    <small data-role="note">--</small>
+                </div>
+                <div class="transparency-item" id="trans-gamma">
+                    <strong>Gamma Source</strong>
+                    <div class="transparency-value" data-role="value">--</div>
+                    <small data-role="note">--</small>
+                </div>
+                <div class="transparency-item" id="trans-ema">
+                    <strong>EMA Method</strong>
+                    <div class="transparency-value" data-role="value">--</div>
+                    <small data-role="note">--</small>
+                </div>
+                <div class="transparency-item" id="trans-thresholds">
+                    <strong>Threshold Guard</strong>
+                    <div class="transparency-value" data-role="value">--</div>
+                    <small data-role="note">--</small>
+                </div>
+                <div class="transparency-item transparency-item-wide" id="trans-governance-reason">
+                    <strong>Last Governance Reason</strong>
+                    <div class="transparency-value" data-role="value">--</div>
+                    <small data-role="note">--</small>
+                </div>
+            </section>
+        </details>
 
         <section class="decision-strip" aria-label="Decision summary">
             <div class="decision-card">
@@ -1950,32 +2099,21 @@
                     </div>
                     <div class="ml-health-note" id="ml-health-note" title="">--</div>
                 </div>
-                <div class="stat-grid stat-grid-3">
+                <div class="stat-grid stat-grid-3 ml-summary-grid">
                     <div class="stat">
                         <div class="stat-label" title="Current ML scoring status — Waiting, Scored, or Error">Status</div>
                         <div id="ml-status" class="stat-value">Waiting for touch</div>
-                    </div>
-                    <div class="stat">
-                        <div class="stat-label" title="Additional context about the latest ML scoring result">Detail</div>
-                        <div id="ml-detail" class="stat-value">No ML score yet</div>
                     </div>
                     <div class="stat">
                         <div class="stat-label" title="Model version and feature set used for predictions">Model</div>
                         <div id="ml-model" class="stat-value">--</div>
                     </div>
                     <div class="stat">
-                        <div class="stat-label" title="Last date in the training dataset — older models may drift">Trained End</div>
-                        <div id="ml-trained" class="stat-value">--</div>
-                    </div>
-                    <div class="stat">
-                        <div class="stat-label" title="Post-training probability calibration method (e.g. sigmoid, isotonic)">Calibration</div>
-                        <div id="ml-calibration" class="stat-value">--</div>
-                    </div>
-                    <div class="stat">
                         <div class="stat-label" title="Horizon with the strongest signal above its optimal threshold">Best Horizon</div>
                         <div id="ml-best-horizon" class="stat-value">--</div>
                     </div>
                 </div>
+                <div class="ml-summary-note" id="ml-summary-note">Monitoring preview/touch events.</div>
                 <div class="ml-abstain-banner" id="ml-abstain-banner">
                     ⚠ NO EDGE — Models below threshold at all horizons. Consider sitting out.
                 </div>
@@ -2029,35 +2167,57 @@
                         </div>
                     </div>
                 </div>
-                <div class="stat-grid stat-grid-3">
-                    <div class="stat">
-                        <div class="stat-label" title="Area Under ROC Curve — 1.0 is perfect, 0.5 is random. Measures ranking quality of predictions">Rolling AUC</div>
-                        <div id="ml-metric-auc" class="stat-value">--</div>
+                <details class="ml-diagnostics" id="ml-diagnostics">
+                    <summary>
+                        <span class="ml-diagnostics-label">Model Diagnostics</span>
+                        <span class="ml-diagnostics-summary" id="ml-diagnostics-summary">Detailed flags, calibration, drift, and model-age context.</span>
+                    </summary>
+                    <div class="ml-diagnostics-body">
+                        <div class="stat-grid stat-grid-3">
+                            <div class="stat">
+                                <div class="stat-label" title="Additional context about the latest ML scoring result">Detail</div>
+                                <div id="ml-detail" class="stat-value">No ML score yet</div>
+                            </div>
+                            <div class="stat">
+                                <div class="stat-label" title="Last date in the training dataset — older models may drift">Trained End</div>
+                                <div id="ml-trained" class="stat-value">--</div>
+                            </div>
+                            <div class="stat">
+                                <div class="stat-label" title="Post-training probability calibration method (e.g. sigmoid, isotonic)">Calibration</div>
+                                <div id="ml-calibration" class="stat-value">--</div>
+                            </div>
+                        </div>
+                        <div class="stat-grid stat-grid-3">
+                            <div class="stat">
+                                <div class="stat-label" title="Area Under ROC Curve — 1.0 is perfect, 0.5 is random. Measures ranking quality of predictions">Rolling AUC</div>
+                                <div id="ml-metric-auc" class="stat-value">--</div>
+                            </div>
+                            <div class="stat">
+                                <div class="stat-label" title="Brier Score — 0.0 is perfect. Lower means better-calibrated probabilities. Baseline depends on class frequency">Rolling Brier</div>
+                                <div id="ml-metric-brier" class="stat-value">--</div>
+                            </div>
+                            <div class="stat">
+                                <div class="stat-label" title="Expected Calibration Error — measures gap between predicted probabilities and actual outcomes. Lower is better">Calib Drift (ECE)</div>
+                                <div id="ml-metric-ece" class="stat-value">--</div>
+                            </div>
+                        </div>
+                        <div class="ml-sparkline-grid">
+                            <div class="ml-sparkline-card">
+                                <div class="ml-sparkline-title">AUC Trend</div>
+                                <svg id="ml-spark-auc" viewBox="0 0 120 32" preserveAspectRatio="none"></svg>
+                            </div>
+                            <div class="ml-sparkline-card">
+                                <div class="ml-sparkline-title">Brier Trend</div>
+                                <svg id="ml-spark-brier" viewBox="0 0 120 32" preserveAspectRatio="none"></svg>
+                            </div>
+                            <div class="ml-sparkline-card">
+                                <div class="ml-sparkline-title">ECE Trend</div>
+                                <svg id="ml-spark-ece" viewBox="0 0 120 32" preserveAspectRatio="none"></svg>
+                            </div>
+                        </div>
+                        <div class="ml-metrics-note" id="ml-metric-note">Metrics: --</div>
                     </div>
-                    <div class="stat">
-                        <div class="stat-label" title="Brier Score — 0.0 is perfect. Lower means better-calibrated probabilities. Baseline depends on class frequency">Rolling Brier</div>
-                        <div id="ml-metric-brier" class="stat-value">--</div>
-                    </div>
-                    <div class="stat">
-                        <div class="stat-label" title="Expected Calibration Error — measures gap between predicted probabilities and actual outcomes. Lower is better">Calib Drift (ECE)</div>
-                        <div id="ml-metric-ece" class="stat-value">--</div>
-                    </div>
-                </div>
-                <div class="ml-sparkline-grid">
-                    <div class="ml-sparkline-card">
-                        <div class="ml-sparkline-title">AUC Trend</div>
-                        <svg id="ml-spark-auc" viewBox="0 0 120 32" preserveAspectRatio="none"></svg>
-                    </div>
-                    <div class="ml-sparkline-card">
-                        <div class="ml-sparkline-title">Brier Trend</div>
-                        <svg id="ml-spark-brier" viewBox="0 0 120 32" preserveAspectRatio="none"></svg>
-                    </div>
-                    <div class="ml-sparkline-card">
-                        <div class="ml-sparkline-title">ECE Trend</div>
-                        <svg id="ml-spark-ece" viewBox="0 0 120 32" preserveAspectRatio="none"></svg>
-                    </div>
-                </div>
-                <div class="ml-metrics-note" id="ml-metric-note">Metrics: --</div>
+                </details>
             </section>
 
             <section class="panel insights-panel">
@@ -3322,6 +3482,19 @@
                 govTone,
                 governance.last_reason || ''
             );
+
+            const summaryEl = document.getElementById('transparency-summary-text');
+            if (summaryEl) {
+                const summaryParts = [
+                    `${modelVersion} ${rawMlStatus.toUpperCase()}`,
+                    `governance ${govAction.toUpperCase()}`,
+                    `${gammaMainSource} ${gammaMainExpiry}`,
+                    thresholdSummary.value,
+                ].filter(Boolean);
+                const summaryText = summaryParts.join(' · ');
+                summaryEl.textContent = summaryText || '--';
+                summaryEl.title = governance.last_reason || summaryText;
+            }
         }
 
         function normalizeExportInstrument(raw) {
@@ -6368,6 +6541,23 @@
             }
         }
 
+        function setMlSummaryNote(value, tone = '') {
+            const el = document.getElementById('ml-summary-note');
+            if (!el) return;
+            el.textContent = value || '--';
+            el.classList.remove('warning', 'risk');
+            if (tone) {
+                el.classList.add(tone);
+            }
+        }
+
+        function setMlDiagnosticsSummary(value) {
+            const el = document.getElementById('ml-diagnostics-summary');
+            if (el) {
+                el.textContent = value || 'Detailed flags, calibration, drift, and model-age context.';
+            }
+        }
+
         function resetMlHorizonCards() {
             const horizons = [5, 15, 30, 60];
             horizons.forEach((h, idx) => {
@@ -6855,7 +7045,7 @@
         }
 
         function updateMlMetaFields(metaSource) {
-            if (!metaSource) return;
+            if (!metaSource) return null;
             const modelVersion = metaSource.model_version || metaSource.version || '--';
             const trainedEnd = metaSource.trained_end_ts;
             const trainedLabel = Number.isFinite(trainedEnd) ? formatDateTime(trainedEnd) : '--';
@@ -6866,6 +7056,24 @@
             setMlText('ml-model', modelVersion);
             setMlText('ml-trained', trainedLabel);
             setMlText('ml-calibration', calibrationLabel);
+            return { modelVersion, trainedLabel, calibrationLabel };
+        }
+
+        function buildMlDiagnosticsSummary(metaLabels, flagCount = 0) {
+            const parts = [];
+            if (flagCount > 0) {
+                parts.push(`${flagCount} quality ${flagCount === 1 ? 'flag' : 'flags'}`);
+            }
+            if (metaLabels?.modelVersion && metaLabels.modelVersion !== '--') {
+                parts.push(`model ${metaLabels.modelVersion}`);
+            }
+            if (metaLabels?.calibrationLabel && metaLabels.calibrationLabel !== '--') {
+                parts.push(metaLabels.calibrationLabel);
+            }
+            if (metaLabels?.trainedLabel && metaLabels.trainedLabel !== '--') {
+                parts.push(`trained ${metaLabels.trainedLabel}`);
+            }
+            return parts.join(' · ') || 'Detailed flags, calibration, drift, and model-age context.';
         }
 
         function updateMlPanel(payload) {
@@ -6875,7 +7083,11 @@
             const abstainBanner = document.getElementById('ml-abstain-banner');
             if (!panel || !status || !detail) return;
 
-            updateMlMetaFields(payload || state.mlMeta);
+            const metaLabels = updateMlMetaFields(payload || state.mlMeta) || {
+                modelVersion: '--',
+                trainedLabel: '--',
+                calibrationLabel: '--',
+            };
             const symbol = (state.symbol || '--').toUpperCase();
             const mlSupported = isMlSupportedSymbol(symbol);
 
@@ -6885,6 +7097,8 @@
                 setMlText('ml-best-horizon', '--');
                 status.textContent = 'Coverage limited';
                 detail.textContent = `ML scoring is currently SPY-only. ${symbol} shows chart + structure analytics only.`;
+                setMlSummaryNote(`Coverage is limited for ${symbol}; chart and structure analytics remain available.`, 'warning');
+                setMlDiagnosticsSummary(buildMlDiagnosticsSummary(metaLabels));
                 return;
             }
 
@@ -6895,16 +7109,21 @@
                 if (state.mlServiceStatus === 'offline') {
                     status.textContent = 'ML service unavailable';
                     detail.textContent = state.mlServiceMessage || 'Unable to reach ML API on port 5003';
+                    setMlSummaryNote(detail.textContent, 'risk');
                 } else if (state.mlServiceStatus === 'checking') {
                     status.textContent = 'Checking ML service';
                     detail.textContent = 'Waiting for ML health response';
+                    setMlSummaryNote('Waiting for ML health response before showing live scoring context.');
                 } else if (state.mlServiceStatus === 'degraded') {
                     status.textContent = 'ML scoring restricted';
                     detail.textContent = state.mlServiceMessage || 'Read-only mode: scoring endpoint is blocked.';
+                    setMlSummaryNote(detail.textContent, 'warning');
                 } else {
                     status.textContent = 'Waiting for touch';
                     detail.textContent = 'No ML score yet. Monitoring preview/touch events.';
+                    setMlSummaryNote('Monitoring preview and touch events for the first scored setup.');
                 }
+                setMlDiagnosticsSummary(buildMlDiagnosticsSummary(metaLabels));
                 return;
             }
 
@@ -6925,6 +7144,7 @@
             const flags = payload.quality_flags && payload.quality_flags.length
                 ? ` | Flags: ${payload.quality_flags.join(', ')}`
                 : '';
+            const flagCount = Array.isArray(payload.quality_flags) ? payload.quality_flags.length : 0;
             const previewTag = payload.preview
                 ? `Preview ${payload.preview_level} (${formatNumber(payload.preview_distance_bps)} bps)`
                 : isAbstain ? 'No Edge (abstain)' : `Best horizon: ${best}`;
@@ -6941,6 +7161,18 @@
             detail.textContent = missingBreak
                 ? `Break model unavailable; showing reject only${flags}`
                 : `Reject/Break/MFE/MAE shown by horizon${flags}`;
+            if (isAbstain) {
+                setMlSummaryNote('No edge across all horizons; standing down remains the base case.', 'warning');
+            } else if (payload.status === 'degraded') {
+                setMlSummaryNote('Scoring is degraded; latest available horizon estimates are shown.', 'warning');
+            } else if (missingBreak) {
+                setMlSummaryNote('Reject probabilities are available; break model is currently unavailable.', 'warning');
+            } else if (payload.preview) {
+                setMlSummaryNote(`Preview signal active at ${payload.preview_level || '--'} with ${best} as the strongest horizon.`);
+            } else {
+                setMlSummaryNote('Reject, break, and excursion estimates are available by horizon.');
+            }
+            setMlDiagnosticsSummary(buildMlDiagnosticsSummary(metaLabels, flagCount));
 
             horizons.forEach((h, idx) => {
                 const reject = scores[`prob_reject_${h}m`];

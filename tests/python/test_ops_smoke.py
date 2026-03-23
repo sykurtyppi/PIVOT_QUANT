@@ -3142,13 +3142,16 @@ class OpsSmokeTests(unittest.TestCase):
 
     def test_dashboard_transparency_strip_contract_present(self) -> None:
         dashboard = (REPO_ROOT / "production_pivot_dashboard.html").read_text(encoding="utf-8")
-        self.assertIn('<section class="transparency-strip" aria-label="Model transparency">', dashboard)
+        self.assertIn('<details class="transparency-details" id="transparency-details" aria-label="Model transparency">', dashboard)
+        self.assertIn('id="transparency-summary-text"', dashboard)
+        self.assertIn('<section class="transparency-strip">', dashboard)
         self.assertIn('id="trans-model"', dashboard)
         self.assertIn('id="trans-governance-reason"', dashboard)
         self.assertIn("gammaExpiryIntraday: '90dte'", dashboard)
         self.assertIn("const migrated90dteKey = 'pq_gamma_90dte_focus_v2';", dashboard)
         self.assertIn("function setTransparencyItem(id, value, note = '', tone = '', title = '')", dashboard)
         self.assertIn("function updateTransparencyStrip()", dashboard)
+        self.assertIn("const summaryEl = document.getElementById('transparency-summary-text');", dashboard)
         self.assertIn("state.mlHealthRaw = payload || null;", dashboard)
         self.assertIn("state.lastEmaMethod = 'daily_warmup_merged';", dashboard)
 
@@ -3160,6 +3163,15 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("function clipSeriesToCandles(series, candles)", dashboard)
         self.assertIn("ema = close;", dashboard)
         self.assertIn("if (isDailyInterval(interval) && state.candles.length < EMA_WARMUP_MIN_BARS)", dashboard)
+
+    def test_dashboard_ml_operator_summary_contract_present(self) -> None:
+        dashboard = (REPO_ROOT / "production_pivot_dashboard.html").read_text(encoding="utf-8")
+        self.assertIn('class="ml-summary-note" id="ml-summary-note"', dashboard)
+        self.assertIn('<details class="ml-diagnostics" id="ml-diagnostics">', dashboard)
+        self.assertIn('id="ml-diagnostics-summary"', dashboard)
+        self.assertIn("function setMlSummaryNote(value, tone = '')", dashboard)
+        self.assertIn("function setMlDiagnosticsSummary(value)", dashboard)
+        self.assertIn("function buildMlDiagnosticsSummary(metaLabels, flagCount = 0)", dashboard)
 
     def test_dashboard_proxy_ops_status_uses_async_file_reads(self) -> None:
         proxy_source = (REPO_ROOT / "server" / "yahoo_proxy.js").read_text(encoding="utf-8")
