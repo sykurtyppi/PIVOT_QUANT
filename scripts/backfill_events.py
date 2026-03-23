@@ -38,10 +38,12 @@ except ImportError:  # pragma: no cover
 
 try:
     from collect_gamma_history import ensure_schema as ensure_gamma_snapshots_schema
+    from collect_gamma_history import fetch_marketdata_chain as fetch_gamma_marketdata_chain
     from collect_gamma_history import summarize_chain as summarize_gamma_chain
     from collect_gamma_history import upsert_snapshot as upsert_gamma_snapshot
 except Exception:  # pragma: no cover
     ensure_gamma_snapshots_schema = None  # type: ignore
+    fetch_gamma_marketdata_chain = None  # type: ignore
     summarize_gamma_chain = None  # type: ignore
     upsert_gamma_snapshot = None  # type: ignore
 
@@ -775,7 +777,7 @@ def _fetch_gamma_context_marketdata_live(
     timeout: int,
     conn: sqlite3.Connection | None,
 ) -> dict | None:
-    if not MARKETDATA_APP_TOKEN or summarize_gamma_chain is None:
+    if not MARKETDATA_APP_TOKEN or summarize_gamma_chain is None or fetch_gamma_marketdata_chain is None:
         return None
     cache_key = symbol.upper()
     now_mono = time.monotonic()
@@ -783,20 +785,15 @@ def _fetch_gamma_context_marketdata_live(
         cooldown_until = float(_gamma_context_marketdata_backoff_until.get(cache_key, 0.0) or 0.0)
         if cooldown_until > now_mono:
             return None
-    url = f"{MARKETDATA_APP_BASE}/options/chain/{symbol.upper()}/?dte={GAMMA_CONTEXT_DTE_DAYS}"
-    req = Request(
-        url,
-        headers={
-            "Authorization": f"Token {MARKETDATA_APP_TOKEN}",
-            "User-Agent": "PivotQuantBackfill/1.0",
-        },
-    )
     try:
-        with urlopen(req, timeout=timeout) as resp:
-            payload = json.loads(resp.read())
+        snapshot_date = datetime.now(NY_TZ).date()
+        payload = fetch_gamma_marketdata_chain(
+            symbol=symbol.upper(),
+            snapshot_date=snapshot_date,
+            timeout_sec=timeout,
+        )
         if payload.get("s") != "ok":
             return None
-        snapshot_date = datetime.now(NY_TZ).date()
         snap = summarize_gamma_chain(
             symbol=symbol.upper(),
             snapshot_date=snapshot_date,

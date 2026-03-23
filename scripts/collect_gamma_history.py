@@ -47,6 +47,23 @@ GAMMA_HISTORY_WAL_AUTOCHECKPOINT = max(
     int(os.getenv("GAMMA_HISTORY_WAL_AUTOCHECKPOINT", "1000")),
 )
 TRANSIENT_HTTP_CODES = {429, 500, 502, 503, 504}
+_MARKETDATA_ROW_FIELDS = (
+    "strike",
+    "side",
+    "gamma",
+    "iv",
+    "openInterest",
+    "delta",
+    "expiration",
+    "underlyingPrice",
+    "bid",
+    "ask",
+    "last",
+    "lastPrice",
+    "mid",
+    "mark",
+    "close",
+)
 GAMMA_COMPUTE_FALLBACK = (
     (os.getenv("GAMMA_COMPUTE_FALLBACK", "false") or "false").strip().lower()
     in {"1", "true", "yes", "on"}
@@ -132,6 +149,49 @@ def _retry_sleep_seconds(
     return max(0.0, wait)
 
 
+def _marketdata_live_dte_queries(mode: str, base_dte_days: int) -> list[int]:
+    safe_mode = _normalize_expiry_mode(mode)
+    safe_base = max(1, int(base_dte_days))
+    if safe_mode != "90dte":
+        return [safe_base]
+    queries: list[int] = []
+    for candidate in (90, 75, 105, safe_base):
+        safe_candidate = max(1, int(candidate))
+        if safe_candidate not in queries:
+            queries.append(safe_candidate)
+    return queries
+
+
+def _merge_marketdata_chain_payloads(payloads: list[dict]) -> dict:
+    merged: dict[str, object] = {"s": "ok"}
+    for field in _MARKETDATA_ROW_FIELDS:
+        merged[field] = []
+    seen_contracts: set[tuple[str, str, str]] = set()
+
+    for payload in payloads or []:
+        strikes = payload.get("strike") or []
+        if not strikes:
+            continue
+        for idx in range(len(strikes)):
+            expiry_series = payload.get("expiration") or []
+            side_series = payload.get("side") or []
+            expiry_raw = expiry_series[idx] if idx < len(expiry_series) else None
+            side_raw = side_series[idx] if idx < len(side_series) else ""
+            contract_key = (
+                _normalize_expiry_yyyymmdd(expiry_raw) or str(expiry_raw or ""),
+                str(strikes[idx]),
+                str(side_raw).lower(),
+            )
+            if contract_key in seen_contracts:
+                continue
+            seen_contracts.add(contract_key)
+            for field in _MARKETDATA_ROW_FIELDS:
+                series = payload.get(field) or []
+                series_list = series if isinstance(series, list) else []
+                merged[field].append(series_list[idx] if idx < len(series_list) else None)
+    return merged
+
+
 def fetch_marketdata_chain(
     symbol: str,
     snapshot_date: date,
@@ -196,11 +256,29 @@ def fetch_marketdata_chain(
     except HTTPError as exc:
         # Same-day date queries can fail with 400 for some accounts.
         # Fall back to a DTE-filtered live chain endpoint so today's snapshot can
-        # still persist without consuming full-chain credits.
+        # still persist without consuming full-chain credits. For structural
+        # 90DTE mode we query a narrow DTE bracket and merge unique contracts so
+        # the selector can choose the true nearest forward expiry.
         if exc.code != 400:
             raise
-        live_url = f"{MARKETDATA_APP_BASE}/options/chain/{symbol.upper()}/?dte={GAMMA_HISTORY_LIVE_DTE_DAYS}"
-        return _request(live_url)
+        dte_queries = _marketdata_live_dte_queries(GAMMA_HISTORY_EXPIRY_MODE, GAMMA_HISTORY_LIVE_DTE_DAYS)
+        payloads: list[dict] = []
+        errors: list[str] = []
+        for dte_query in dte_queries:
+            live_url = f"{MARKETDATA_APP_BASE}/options/chain/{symbol.upper()}/?dte={dte_query}"
+            try:
+                payloads.append(_request(live_url))
+            except Exception as live_exc:
+                errors.append(f"dte={dte_query}: {live_exc}")
+        if not payloads:
+            raise RuntimeError(
+                f"marketdata.app live fallback failed for {symbol} {snapshot_date}: {'; '.join(errors) or 'no payloads'}"
+            )
+        merged = _merge_marketdata_chain_payloads(payloads) if len(payloads) > 1 else payloads[0]
+        merged["dteQueries"] = dte_queries
+        if errors:
+            merged["partialFetchWarnings"] = errors
+        return merged
 
 
 def _to_float(value) -> float | None:

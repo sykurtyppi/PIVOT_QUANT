@@ -2328,8 +2328,16 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("GAMMA_HISTORY_EXPIRY_MODE", source)
         self.assertIn("GAMMA_HISTORY_LIVE_DTE_DAYS", source)
         fetch_block = source.split("def fetch_marketdata_chain(", 1)[1].split("def _to_float", 1)[0]
-        self.assertIn("?dte={GAMMA_HISTORY_LIVE_DTE_DAYS}", fetch_block)
+        self.assertIn("_marketdata_live_dte_queries(GAMMA_HISTORY_EXPIRY_MODE, GAMMA_HISTORY_LIVE_DTE_DAYS)", fetch_block)
+        self.assertIn("?dte={dte_query}", fetch_block)
         self.assertNotIn("?expiration=all", fetch_block)
+
+    def test_collect_gamma_history_brackets_live_queries_for_90dte(self) -> None:
+        collector = load_module(
+            "pq_collect_gamma_history_live_dte_queries_test",
+            REPO_ROOT / "scripts" / "collect_gamma_history.py",
+        )
+        self.assertEqual(collector._marketdata_live_dte_queries("90dte", 120), [90, 75, 105, 120])
 
     def test_collect_gamma_history_summarize_chain_tracks_selected_expiry_family(self) -> None:
         source = (REPO_ROOT / "scripts" / "collect_gamma_history.py").read_text(encoding="utf-8")
@@ -2355,6 +2363,7 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn('GAMMA_CONTEXT_DTE_DAYS = int(os.getenv("GAMMA_CONTEXT_DTE_DAYS", "120"))', source)
         self.assertIn('expiry_mode=GAMMA_CONTEXT_EXPIRY_MODE', source)
         self.assertIn('&expiry={GAMMA_CONTEXT_EXPIRY_MODE}&limit=60', source)
+        self.assertIn("fetch_gamma_marketdata_chain(", source)
 
     def test_backfill_ensure_new_columns_uses_transaction_contract_present(self) -> None:
         source = (REPO_ROOT / "scripts" / "backfill_events.py").read_text(encoding="utf-8")
@@ -3391,7 +3400,7 @@ class OpsSmokeTests(unittest.TestCase):
     def test_ibkr_bridge_marketdata_logs_0dte_fallback_warning(self) -> None:
         source = (REPO_ROOT / "server" / "ibkr_gamma_bridge.py").read_text(encoding="utf-8")
         block = source.split("def fetch_gamma_marketdata(", 1)[1].split("class GammaHandler", 1)[0]
-        self.assertIn("if dte_days == 0 and isinstance(exc, urllib.error.HTTPError) and exc.code == 400:", block)
+        self.assertIn("if dte_query == 0 and isinstance(exc, urllib.error.HTTPError) and exc.code == 400:", block)
         self.assertIn(
             "[gamma_bridge] 0DTE unavailable from marketdata.app, falling back to dte=1",
             block,
@@ -3419,6 +3428,8 @@ class OpsSmokeTests(unittest.TestCase):
     def test_ibkr_bridge_marketdata_filters_selected_expiries_for_90dte_mode(self) -> None:
         source = (REPO_ROOT / "server" / "ibkr_gamma_bridge.py").read_text(encoding="utf-8")
         block = source.split("def fetch_gamma_marketdata(", 1)[1].split("class GammaHandler", 1)[0]
+        self.assertIn("dte_queries = _marketdata_dte_queries(mode, dte_days)", block)
+        self.assertIn("data = _merge_marketdata_payloads(payloads) if len(payloads) > 1 else payloads[0]", block)
         self.assertIn("selected_expiries = _selected_marketdata_expiries(expiries, mode)", block)
         self.assertIn("if selected_expiries and expiry_compact not in selected_expiries:", block)
         self.assertIn('"selectedExpiries": sorted(selected_expiries)', block)
@@ -3449,6 +3460,13 @@ class OpsSmokeTests(unittest.TestCase):
             self.assertEqual(bridge.pick_expiries(expiries, "90dte"), [])
         finally:
             bridge._utc_today_yyyymmdd = original_today
+
+    def test_ibkr_bridge_brackets_marketdata_queries_for_90dte(self) -> None:
+        bridge = load_module(
+            "pq_ibkr_marketdata_dte_queries_90dte_test",
+            REPO_ROOT / "server" / "ibkr_gamma_bridge.py",
+        )
+        self.assertEqual(bridge._marketdata_dte_queries("90dte", 120), [90, 75, 105, 120])
 
     def test_train_artifacts_gamma_context_metadata_rejects_legacy_quarterly_alias(self) -> None:
         original_context = os.environ.get("GAMMA_CONTEXT_EXPIRY_MODE")

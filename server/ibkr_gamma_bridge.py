@@ -625,6 +625,67 @@ _EXPIRY_MODE_DTE = {
     "90dte":    120,  # wide fetch window so the closest 90DTE expiry is present
 }
 
+_MARKETDATA_ROW_FIELDS = (
+    "strike",
+    "side",
+    "gamma",
+    "iv",
+    "openInterest",
+    "delta",
+    "expiration",
+    "underlyingPrice",
+    "bid",
+    "ask",
+    "last",
+    "lastPrice",
+    "mid",
+    "mark",
+    "close",
+)
+
+
+def _marketdata_dte_queries(mode, base_dte):
+    safe_mode = _normalize_expiry_mode(mode)
+    safe_base = max(0, int(base_dte or 0))
+    if safe_mode != "90dte":
+        return [safe_base]
+    queries = []
+    for candidate in (90, 75, 105, safe_base):
+        candidate = max(1, int(candidate))
+        if candidate not in queries:
+            queries.append(candidate)
+    return queries
+
+
+def _merge_marketdata_payloads(payloads):
+    merged = {"s": "ok"}
+    for field in _MARKETDATA_ROW_FIELDS:
+        merged[field] = []
+    seen_contracts = set()
+
+    for payload in payloads or []:
+        strikes = payload.get("strike") or []
+        if not strikes:
+            continue
+        for idx in range(len(strikes)):
+            expiry_series = payload.get("expiration") or []
+            side_series = payload.get("side") or []
+            expiry_raw = expiry_series[idx] if idx < len(expiry_series) else None
+            side_raw = side_series[idx] if idx < len(side_series) else ""
+            contract_key = (
+                _normalize_expiry_yyyymmdd(expiry_raw) or str(expiry_raw or ""),
+                str(strikes[idx]),
+                str(side_raw).lower(),
+            )
+            if contract_key in seen_contracts:
+                continue
+            seen_contracts.add(contract_key)
+            for field in _MARKETDATA_ROW_FIELDS:
+                series = payload.get(field) or []
+                merged[field].append(series[idx] if idx < len(series) else None)
+
+    return merged
+
 
 def _selected_marketdata_expiries(expiries, mode):
     if mode == "all":
@@ -688,58 +749,64 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None, expiry_m
     sr = strike_range or IB_STRIKE_RANGE
     ms = max_strikes or IB_MAX_STRIKES
 
-    # Limit to a bounded DTE window to avoid fetching the full chain
-    # (all expiries). We still apply exact expiry-family filtering below so
-    # 90DTE mode resolves to the nearest structural expiry rather than
-    # aggregating every expiry inside the DTE window.
-    url = f"{MARKETDATA_APP_BASE}/options/chain/{symbol.upper()}/?dte={dte_days}"
-    req = urllib.request.Request(url, headers={"Authorization": f"Token {MARKETDATA_APP_TOKEN}"})
-    try:
+    # Query a small bracket around 90DTE so structural mode can choose the
+    # actual nearest forward expiry instead of trusting a single provider DTE.
+    def _request_chain(dte_query):
+        url = f"{MARKETDATA_APP_BASE}/options/chain/{symbol.upper()}/?dte={dte_query}"
+        req = urllib.request.Request(url, headers={"Authorization": f"Token {MARKETDATA_APP_TOKEN}"})
         with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read())
-        if data.get("s") != "ok":
+            payload = json.loads(resp.read())
+        if payload.get("s") != "ok":
             raise ValueError(
                 f"marketdata.app options chain error for {symbol}: "
-                f"{data.get('errmsg', data.get('s', 'unknown'))}"
+                f"{payload.get('errmsg', payload.get('s', 'unknown'))}"
             )
+        return payload
+
+    dte_queries = _marketdata_dte_queries(mode, dte_days)
+    try:
+        payloads = []
+        partial_errors = []
+        for dte_query in dte_queries:
+            try:
+                payloads.append(_request_chain(dte_query))
+            except Exception as exc:
+                if dte_query == 0 and isinstance(exc, urllib.error.HTTPError) and exc.code == 400:
+                    print(
+                        "[gamma_bridge] 0DTE unavailable from marketdata.app, falling back to dte=1",
+                        flush=True,
+                    )
+                    payload = _request_chain(1)
+                    payload["dteFallback"] = 1
+                    payload["dteFallbackReason"] = "marketdata.app rejected dte=0; used dte=1"
+                    payloads.append(payload)
+                    continue
+                partial_errors.append(f"dte={dte_query}: {exc}")
+                if mode != "90dte":
+                    raise
+        if not payloads:
+            raise ValueError("; ".join(partial_errors) or f"marketdata.app options chain fetch failed for {symbol}")
+        data = _merge_marketdata_payloads(payloads) if len(payloads) > 1 else payloads[0]
+        data["dteQueries"] = dte_queries
+        if partial_errors:
+            data["partialFetchWarnings"] = partial_errors
         with _mda_gamma_cache_lock:
             _mda_gamma_error_backoff_until.pop(cache_key, None)
     except Exception as exc:
-        # marketdata.app rejects dte=0; retry with dte=1 for intraday fallback
-        if dte_days == 0 and isinstance(exc, urllib.error.HTTPError) and exc.code == 400:
-            print(
-                "[gamma_bridge] 0DTE unavailable from marketdata.app, falling back to dte=1",
-                flush=True,
-            )
-            fallback_url = f"{MARKETDATA_APP_BASE}/options/chain/{symbol.upper()}/?dte=1"
-            fallback_req = urllib.request.Request(
-                fallback_url,
-                headers={"Authorization": f"Token {MARKETDATA_APP_TOKEN}"}
-            )
-            with urllib.request.urlopen(fallback_req, timeout=30) as resp:
-                data = json.loads(resp.read())
-            if data.get("s") != "ok":
-                raise ValueError(
-                    f"marketdata.app options chain error for {symbol}: "
-                    f"{data.get('errmsg', data.get('s', 'unknown'))}"
-                )
-            data["dteFallback"] = 1
-            data["dteFallbackReason"] = "marketdata.app rejected dte=0; used dte=1"
-        else:
-            backoff_sec = MDA_GAMMA_ERROR_BACKOFF_SEC
-            if isinstance(exc, urllib.error.HTTPError):
-                retry_after = _parse_retry_after_seconds(exc.headers.get("Retry-After"))
-                if retry_after is not None:
-                    # Respect upstream cooldown guidance when present.
-                    backoff_sec = max(1, int(retry_after))
-            with _mda_gamma_cache_lock:
-                _mda_gamma_error_backoff_until[cache_key] = time.monotonic() + max(1, backoff_sec)
-            if stale_payload is not None:
-                stale_payload["cacheStale"] = True
-                stale_payload["cacheStaleReason"] = str(exc)
-                stale_payload["cacheStaleAt"] = _utc_iso_z()
-                return stale_payload
-            raise
+        backoff_sec = MDA_GAMMA_ERROR_BACKOFF_SEC
+        if isinstance(exc, urllib.error.HTTPError):
+            retry_after = _parse_retry_after_seconds(exc.headers.get("Retry-After"))
+            if retry_after is not None:
+                # Respect upstream cooldown guidance when present.
+                backoff_sec = max(1, int(retry_after))
+        with _mda_gamma_cache_lock:
+            _mda_gamma_error_backoff_until[cache_key] = time.monotonic() + max(1, backoff_sec)
+        if stale_payload is not None:
+            stale_payload["cacheStale"] = True
+            stale_payload["cacheStaleReason"] = str(exc)
+            stale_payload["cacheStaleAt"] = _utc_iso_z()
+            return stale_payload
+        raise
 
     # Extract arrays from the response
     strikes = data.get("strike", [])
