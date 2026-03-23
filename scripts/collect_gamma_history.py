@@ -516,6 +516,34 @@ def _bsm_gamma(
     return gamma
 
 
+def _derive_gamma_levels(
+    gex_by_strike: dict[float, float],
+    call_gex_by_strike: dict[float, float],
+    put_gex_by_strike: dict[float, float],
+) -> tuple[float | None, float | None, float | None, float | None]:
+    ordered = sorted(gex_by_strike.keys())
+    if not ordered:
+        return None, None, None, None
+
+    gamma_flip = None
+    cumulative = 0.0
+    last_sign: int | None = None
+    for strike in ordered:
+        cumulative += gex_by_strike[strike]
+        sign = 1 if cumulative > 0 else -1 if cumulative < 0 else 0
+        if last_sign is not None and sign != 0 and sign != last_sign:
+            gamma_flip = strike
+            break
+        last_sign = sign
+    if gamma_flip is None:
+        gamma_flip = min(ordered, key=lambda s: abs(gex_by_strike[s]))
+
+    call_wall = max(call_gex_by_strike, key=call_gex_by_strike.get) if call_gex_by_strike else None
+    put_wall = min(put_gex_by_strike, key=put_gex_by_strike.get) if put_gex_by_strike else None
+    pin = max(ordered, key=lambda s: abs(gex_by_strike[s]))
+    return gamma_flip, call_wall, put_wall, pin
+
+
 def summarize_chain(
     symbol: str,
     snapshot_date: date,
@@ -552,6 +580,8 @@ def summarize_chain(
     high = spot * (1.0 + strike_range_pct)
 
     gex_by_strike: dict[float, float] = {}
+    call_gex_by_strike: dict[float, float] = {}
+    put_gex_by_strike: dict[float, float] = {}
     oi_by_strike: dict[float, float] = {}
     total_contracts = 0
     with_greeks = 0
@@ -655,6 +685,10 @@ def summarize_chain(
         if side == "put":
             gex = -gex
         gex_by_strike[strike] = gex_by_strike.get(strike, 0.0) + gex
+        if side == "call":
+            call_gex_by_strike[strike] = call_gex_by_strike.get(strike, 0.0) + gex
+        elif side == "put":
+            put_gex_by_strike[strike] = put_gex_by_strike.get(strike, 0.0) + gex
 
     gamma_flip = None
     call_wall = None
@@ -669,23 +703,15 @@ def summarize_chain(
             end = min(len(ordered), start + max_strikes)
             keep = set(ordered[start:end])
             gex_by_strike = {k: v for k, v in gex_by_strike.items() if k in keep}
+            call_gex_by_strike = {k: v for k, v in call_gex_by_strike.items() if k in keep}
+            put_gex_by_strike = {k: v for k, v in put_gex_by_strike.items() if k in keep}
             ordered = sorted(gex_by_strike.keys())
 
-        cumulative = 0.0
-        last_sign: int | None = None
-        for strike in ordered:
-            cumulative += gex_by_strike[strike]
-            sign = 1 if cumulative > 0 else -1 if cumulative < 0 else 0
-            if last_sign is not None and sign != 0 and sign != last_sign:
-                gamma_flip = strike
-                break
-            last_sign = sign
-        if gamma_flip is None:
-            gamma_flip = min(ordered, key=lambda s: abs(gex_by_strike[s]))
-
-        call_wall = max(ordered, key=lambda s: gex_by_strike[s])
-        put_wall = min(ordered, key=lambda s: gex_by_strike[s])
-        pin = max(ordered, key=lambda s: abs(gex_by_strike[s]))
+        gamma_flip, call_wall, put_wall, pin = _derive_gamma_levels(
+            gex_by_strike,
+            call_gex_by_strike,
+            put_gex_by_strike,
+        )
 
     atm_iv = None
     if iv_samples:

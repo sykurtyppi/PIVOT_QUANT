@@ -385,6 +385,53 @@ def expiry_type(expiration, today, front_expiry):
     return "other"
 
 
+def _summarize_gamma_structure(gex_by_strike, call_gex_by_strike, put_gex_by_strike):
+    if not gex_by_strike:
+        raise ValueError("No gamma structure available")
+
+    sorted_strikes = sorted(gex_by_strike.keys())
+    cumulative = 0.0
+    flip = None
+    last_sign = None
+
+    for strike in sorted_strikes:
+        cumulative += gex_by_strike[strike]
+        sign = 1 if cumulative > 0 else -1 if cumulative < 0 else 0
+        if last_sign is not None and sign != last_sign and sign != 0:
+            flip = strike
+            break
+        last_sign = sign
+
+    if flip is None:
+        flip = min(sorted_strikes, key=lambda s: abs(gex_by_strike[s]))
+
+    call_wall = max(call_gex_by_strike, key=call_gex_by_strike.get) if call_gex_by_strike else None
+    put_wall = min(put_gex_by_strike, key=put_gex_by_strike.get) if put_gex_by_strike else None
+    pin = max(sorted_strikes, key=lambda s: abs(gex_by_strike[s]))
+
+    strength_scale = 0.0
+    if gex_by_strike:
+        strength_scale = max(strength_scale, max(abs(v) for v in gex_by_strike.values()))
+    if call_gex_by_strike:
+        strength_scale = max(strength_scale, max(abs(v) for v in call_gex_by_strike.values()))
+    if put_gex_by_strike:
+        strength_scale = max(strength_scale, max(abs(v) for v in put_gex_by_strike.values()))
+
+    def wall_payload(strike, wall_map):
+        if strike is None:
+            return None
+        gex = wall_map[strike]
+        strength = round(abs(gex) / strength_scale * 100) if strength_scale else 0
+        return {"price": strike, "gex": gex, "strength": strength}
+
+    return {
+        "gammaFlip": flip,
+        "callWall": wall_payload(call_wall, call_gex_by_strike),
+        "putWall": wall_payload(put_wall, put_gex_by_strike),
+        "pin": wall_payload(pin, gex_by_strike),
+    }
+
+
 def compute_gamma_walls(symbol, expiry_mode, limit):
     expiry_mode = _normalize_expiry_mode(expiry_mode)
     ensure_connected()
@@ -481,7 +528,8 @@ def compute_gamma_walls(symbol, expiry_mode, limit):
             break
 
     gex_by_strike = {}
-    max_abs = 0.0
+    call_gex_by_strike = {}
+    put_gex_by_strike = {}
     used_oi = False
     total_contracts = 0
     with_greeks = 0
@@ -528,8 +576,10 @@ def compute_gamma_walls(symbol, expiry_mode, limit):
             gex = -gex
 
         gex_by_strike[strike] = gex_by_strike.get(strike, 0.0) + gex
-        max_abs = max(max_abs, abs(gex_by_strike[strike]))
-
+        if right.upper() == "C":
+            call_gex_by_strike[strike] = call_gex_by_strike.get(strike, 0.0) + gex
+        else:
+            put_gex_by_strike[strike] = put_gex_by_strike.get(strike, 0.0) + gex
         oi_by_strike[strike] = oi_by_strike.get(strike, 0.0) + (size or 0)
         oi_by_expiry[expiry] = oi_by_expiry.get(expiry, 0.0) + (size or 0)
         if right.upper() == "C":
@@ -543,30 +593,7 @@ def compute_gamma_walls(symbol, expiry_mode, limit):
             "Check IBKR options market-data permissions or use delayed options greeks."
         )
 
-    sorted_strikes = sorted(gex_by_strike.keys())
-    cumulative = 0.0
-    flip = None
-    last_sign = None
-
-    for strike in sorted_strikes:
-        cumulative += gex_by_strike[strike]
-        sign = 1 if cumulative > 0 else -1 if cumulative < 0 else 0
-        if last_sign is not None and sign != last_sign and sign != 0:
-            flip = strike
-            break
-        last_sign = sign
-
-    if flip is None:
-        flip = min(sorted_strikes, key=lambda s: abs(gex_by_strike[s]))
-
-    call_wall = max(sorted_strikes, key=lambda s: gex_by_strike[s])
-    put_wall = min(sorted_strikes, key=lambda s: gex_by_strike[s])
-    pin = max(sorted_strikes, key=lambda s: abs(gex_by_strike[s]))
-
-    def wall_payload(strike):
-        gex = gex_by_strike[strike]
-        strength = round(abs(gex) / max_abs * 100) if max_abs else 0
-        return {"price": strike, "gex": gex, "strength": strength}
+    levels = _summarize_gamma_structure(gex_by_strike, call_gex_by_strike, put_gex_by_strike)
 
     total_oi = oi_call + oi_put
     top_strikes = sorted(oi_by_strike.items(), key=lambda kv: kv[1], reverse=True)[:5]
@@ -596,10 +623,10 @@ def compute_gamma_walls(symbol, expiry_mode, limit):
         "spot": spot,
         "expiryMode": expiry_mode,
         "generatedAt": _utc_iso_z(),
-        "gammaFlip": flip,
-        "callWall": wall_payload(call_wall),
-        "putWall": wall_payload(put_wall),
-        "pin": wall_payload(pin),
+        "gammaFlip": levels["gammaFlip"],
+        "callWall": levels["callWall"],
+        "putWall": levels["putWall"],
+        "pin": levels["pin"],
         "usedOpenInterest": used_oi,
         "stats": {
             "totalContracts": total_contracts,
@@ -839,7 +866,8 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None, expiry_m
     upper = spot * (1 + sr)
 
     gex_by_strike = {}
-    max_abs = 0.0
+    call_gex_by_strike = {}
+    put_gex_by_strike = {}
     total_contracts = 0
     with_greeks = 0
     with_iv = 0
@@ -902,8 +930,10 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None, expiry_m
             gex = -gex
 
         gex_by_strike[strike] = gex_by_strike.get(strike, 0.0) + gex
-        max_abs = max(max_abs, abs(gex_by_strike[strike]))
-
+        if side == "call":
+            call_gex_by_strike[strike] = call_gex_by_strike.get(strike, 0.0) + gex
+        elif side == "put":
+            put_gex_by_strike[strike] = put_gex_by_strike.get(strike, 0.0) + gex
         if side == "call":
             oi_call += size
         else:
@@ -929,33 +959,9 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None, expiry_m
         end = min(len(sorted_all), start + ms)
         keep = set(sorted_all[start:end])
         gex_by_strike = {k: v for k, v in gex_by_strike.items() if k in keep}
-        max_abs = max(abs(v) for v in gex_by_strike.values()) if gex_by_strike else 0.0
-
-    # Compute gamma flip, call wall, put wall, pin
-    sorted_strikes = sorted(gex_by_strike.keys())
-    cumulative = 0.0
-    flip = None
-    last_sign = None
-
-    for strike in sorted_strikes:
-        cumulative += gex_by_strike[strike]
-        sign = 1 if cumulative > 0 else -1 if cumulative < 0 else 0
-        if last_sign is not None and sign != last_sign and sign != 0:
-            flip = strike
-            break
-        last_sign = sign
-
-    if flip is None:
-        flip = min(sorted_strikes, key=lambda s: abs(gex_by_strike[s]))
-
-    call_wall = max(sorted_strikes, key=lambda s: gex_by_strike[s])
-    put_wall = min(sorted_strikes, key=lambda s: gex_by_strike[s])
-    pin = max(sorted_strikes, key=lambda s: abs(gex_by_strike[s]))
-
-    def wall_payload(strike):
-        gex = gex_by_strike[strike]
-        strength = round(abs(gex) / max_abs * 100) if max_abs else 0
-        return {"price": strike, "gex": gex, "strength": strength}
+        call_gex_by_strike = {k: v for k, v in call_gex_by_strike.items() if k in keep}
+        put_gex_by_strike = {k: v for k, v in put_gex_by_strike.items() if k in keep}
+    levels = _summarize_gamma_structure(gex_by_strike, call_gex_by_strike, put_gex_by_strike)
 
     # IV analysis
     atm_iv = None
@@ -986,10 +992,10 @@ def fetch_gamma_marketdata(symbol, strike_range=None, max_strikes=None, expiry_m
         "dteFallback": dte_fallback,
         "dteFallbackReason": dte_fallback_reason,
         "generatedAt": _utc_iso_z(),
-        "gammaFlip": flip,
-        "callWall": wall_payload(call_wall),
-        "putWall": wall_payload(put_wall),
-        "pin": wall_payload(pin),
+        "gammaFlip": levels["gammaFlip"],
+        "callWall": levels["callWall"],
+        "putWall": levels["putWall"],
+        "pin": levels["pin"],
         "usedOpenInterest": nonzero_oi > 0,
         "gammaOnlyMode": nonzero_oi == 0,
         "stats": {

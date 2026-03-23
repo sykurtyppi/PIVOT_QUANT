@@ -2259,6 +2259,34 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertGreater(int(payload.get("computed_gamma_count", 0)), 0)
         self.assertGreater(int(payload.get("computed_gamma_from_iv", 0)), 0)
 
+    def test_collect_gamma_history_uses_side_specific_walls(self) -> None:
+        collector = load_module(
+            "pq_collect_gamma_side_specific_walls_test",
+            REPO_ROOT / "scripts" / "collect_gamma_history.py",
+        )
+        snap = collector.summarize_chain(
+            symbol="SPY",
+            snapshot_date=date(2026, 3, 23),
+            chain={
+                "strike": [630, 650, 650, 675],
+                "side": ["put", "call", "put", "call"],
+                "gamma": [0.0025, 0.0015, 0.0035, 0.0004],
+                "iv": [0.22, 0.21, 0.23, 0.2],
+                "openInterest": [9000, 1600, 2600, 200],
+                "delta": [-0.35, 0.35, -0.2, 0.15],
+                "expiration": ["2026-06-18", "2026-06-18", "2026-06-18", "2026-06-18"],
+                "underlyingPrice": [653.51, 653.51, 653.51, 653.51],
+            },
+            strike_range_pct=0.6,
+            max_strikes=200,
+            expiry_mode="90dte",
+        )
+        payload = json.loads(snap["payload_json"])
+        self.assertEqual(payload["selected_expiries"], ["20260618"])
+        self.assertEqual(float(snap["call_wall"]), 650.0)
+        self.assertEqual(float(snap["put_wall"]), 630.0)
+        self.assertEqual(float(snap["pin"]), 630.0)
+
     def test_collect_gamma_history_retries_429_then_succeeds(self) -> None:
         collector = load_module(
             "pq_collect_gamma_retry_429_test",
@@ -3467,6 +3495,23 @@ class OpsSmokeTests(unittest.TestCase):
             REPO_ROOT / "server" / "ibkr_gamma_bridge.py",
         )
         self.assertEqual(bridge._marketdata_dte_queries("90dte", 120), [90, 75, 105, 120])
+
+    def test_ibkr_bridge_uses_side_specific_walls(self) -> None:
+        bridge = load_module(
+            "pq_ibkr_side_specific_walls_test",
+            REPO_ROOT / "server" / "ibkr_gamma_bridge.py",
+        )
+        levels = bridge._summarize_gamma_structure(
+            {630.0: -1000.0, 650.0: -200.0, 675.0: -50.0},
+            {650.0: 150.0, 675.0: 40.0},
+            {630.0: -1000.0, 650.0: -350.0, 675.0: -90.0},
+        )
+        self.assertEqual(levels["gammaFlip"], 675.0)
+        self.assertEqual(levels["callWall"]["price"], 650.0)
+        self.assertGreater(levels["callWall"]["gex"], 0.0)
+        self.assertEqual(levels["putWall"]["price"], 630.0)
+        self.assertLess(levels["putWall"]["gex"], 0.0)
+        self.assertEqual(levels["pin"]["price"], 630.0)
 
     def test_train_artifacts_gamma_context_metadata_rejects_legacy_quarterly_alias(self) -> None:
         original_context = os.environ.get("GAMMA_CONTEXT_EXPIRY_MODE")
