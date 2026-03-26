@@ -12,6 +12,8 @@ Also supports rollback to previous/explicit model versions.
 
 from __future__ import annotations
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
