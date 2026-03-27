@@ -4143,10 +4143,38 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("ML_SESSION_PREOPEN_HOUR", checker)
         self.assertIn("ML_SESSION_POSTOPEN_HOUR", checker)
         self.assertIn("ML_SESSION_OPS_STATUS_URL", checker)
+        self.assertIn("ML_SESSION_ROUTINE_HEALTH_MAX_AGE_MIN", checker)
         self.assertIn("expiry=90dte", checker)
 
         proc = run_cmd([PYTHON, "-m", "py_compile", "scripts/session_routine_check.py"], cwd=REPO_ROOT)
         self.assertEqual(proc.returncode, 0, msg=f"{proc.stdout}\n{proc.stderr}")
+
+    def test_session_routine_downgrades_stale_host_health_to_warning(self) -> None:
+        module = load_module(
+            "session_routine_check_stale_host_health",
+            REPO_ROOT / "scripts" / "session_routine_check.py",
+        )
+        now_et = datetime(2026, 3, 27, 9, 20, 0, tzinfo=module.ZoneInfo("America/New_York"))
+
+        def fake_fetch_json(url: str, timeout_sec: float) -> tuple[int, dict[str, object] | None, str]:
+            if "5003" in url:
+                return 200, {"status": "ok"}, ""
+            if "5004" in url:
+                return 200, {"status": "ok"}, ""
+            if "3000" in url:
+                return 200, {
+                    "backup": {"status": "ok"},
+                    "restore_drill": {"status": "ok"},
+                    "host_health": {"status": "critical", "age_min": 180},
+                }, ""
+            return 0, None, "Remote end closed connection without response"
+
+        with patch.object(module, "fetch_json", side_effect=fake_fetch_json):
+            with patch.dict(os.environ, {"ML_SESSION_ROUTINE_HEALTH_MAX_AGE_MIN": "120"}, clear=False):
+                result = module.build_preopen_result(now_et=now_et, timeout_sec=4.0)
+
+        self.assertEqual(result["level"], "warn")
+        self.assertIn("host=unknown/stale (age_min=180.0)", result["body"])
 
     def test_retrain_cycle_sources_dotenv(self) -> None:
         retrain_script = (REPO_ROOT / "scripts" / "run_retrain_cycle.sh").read_text(encoding="utf-8")
@@ -4200,6 +4228,7 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("build_ops_smoke_alert_body", retrain_script)
         self.assertIn("summary=", retrain_script)
         self.assertIn("hint=", retrain_script)
+        self.assertIn("ops_smoke.log", retrain_script)
 
         env_example = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
         self.assertIn("RF_THRESHOLD_MIN_SIGNALS_OVERRIDES=", env_example)
@@ -4208,6 +4237,7 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("MODEL_GOV_MIN_TRAINED_END_DELTA_MS=21600000", env_example)
         self.assertIn("MODEL_GOV_ENFORCE_THRESHOLD_UTILITY_GUARD=", env_example)
         self.assertIn("MODEL_GOV_THRESHOLD_UTILITY_TARGETS=", env_example)
+        self.assertIn("ML_SESSION_ROUTINE_HEALTH_MAX_AGE_MIN=120", env_example)
         self.assertIn("MODEL_GOV_THRESHOLD_UTILITY_MIN_SCORE=", env_example)
         self.assertIn("MODEL_GOV_ENFORCE_LIVE_EMISSION_GATE=", env_example)
         self.assertIn("MODEL_GOV_EMISSION_LOOKBACK_DAYS=", env_example)

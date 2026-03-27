@@ -4,6 +4,7 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOG_DIR="${ROOT_DIR}/logs"
 mkdir -p "${LOG_DIR}"
+OPS_SMOKE_LOG="${LOG_DIR}/ops_smoke.log"
 LOCK_DIR="${LOG_DIR}/run_retrain_cycle.lock"
 LOCK_OWNED=0
 ENV_FILE="${ROOT_DIR}/.env"
@@ -83,12 +84,22 @@ run_step() {
 }
 
 run_ops_smoke() {
-  local attempt
-  echo "[$(timestamp)] INFO ops_smoke running direct unittest runner" | tee -a "${LOG_DIR}/retrain.log"
+  local attempt summary
+  : > "${OPS_SMOKE_LOG}"
+  echo "[$(timestamp)] INFO ops_smoke running direct unittest runner (details: ${OPS_SMOKE_LOG})" | tee -a "${LOG_DIR}/retrain.log"
   for attempt in 1 2; do
-    if "${PYTHON}" -m unittest discover -s tests/python -p "test_*.py" -v >> "${LOG_DIR}/retrain.log" 2>&1; then
+    if {
+      echo "[$(timestamp)] START ops_smoke attempt=${attempt}"
+      "${PYTHON}" -m unittest discover -s tests/python -p "test_*.py" -v
+      echo "[$(timestamp)] END   ops_smoke attempt=${attempt}"
+    } >> "${OPS_SMOKE_LOG}" 2>&1; then
+      summary="$(grep -E '^Ran [0-9]+ tests? in ' "${OPS_SMOKE_LOG}" | tail -n 1 || true)"
+      summary="$(sanitize_single_line "${summary}")"
+      [[ -n "${summary}" ]] || summary="ops_smoke passed"
       if (( attempt > 1 )); then
-        echo "[$(timestamp)] WARN ops_smoke passed on retry ${attempt}" | tee -a "${LOG_DIR}/retrain.log"
+        echo "[$(timestamp)] INFO ops_smoke summary: ${summary}; passed on retry ${attempt} (details: ${OPS_SMOKE_LOG})" | tee -a "${LOG_DIR}/retrain.log"
+      else
+        echo "[$(timestamp)] INFO ops_smoke summary: ${summary} (details: ${OPS_SMOKE_LOG})" | tee -a "${LOG_DIR}/retrain.log"
       fi
       return 0
     fi
@@ -110,9 +121,9 @@ sanitize_single_line() {
 
 capture_ops_smoke_failure_details() {
   local window summary hint
-  window="$(tail -n 800 "${LOG_DIR}/retrain.log" 2>/dev/null || true)"
+  window="$(tail -n 800 "${OPS_SMOKE_LOG}" 2>/dev/null || true)"
   summary=""
-  hint="Check retrain.log for the latest traceback."
+  hint="Check ${OPS_SMOKE_LOG} for the latest traceback."
 
   if [[ -n "${window}" ]]; then
     summary="$(printf '%s\n' "${window}" | grep -E "AssertionError: " | tail -n 1 || true)"
@@ -149,7 +160,7 @@ build_ops_smoke_alert_body() {
     "$(hostname)" \
     "${OPS_SMOKE_FAILURE_SUMMARY}" \
     "${OPS_SMOKE_FAILURE_HINT}" \
-    "${LOG_DIR}/retrain.log"
+    "${OPS_SMOKE_LOG}"
 }
 
 is_truthy() {
