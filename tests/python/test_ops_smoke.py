@@ -9204,6 +9204,336 @@ class OpsSmokeTests(unittest.TestCase):
             )
         )
 
+    def test_model_governance_rejects_gate_loosening_without_override(self) -> None:
+        module = load_module(
+            "model_governance_gate_loosening_reject",
+            REPO_ROOT / "scripts" / "model_governance.py",
+        )
+        models_dir = self.tmp / "models"
+        metadata_dir = models_dir / "metadata_runtime"
+        models_dir.mkdir(parents=True, exist_ok=True)
+        metadata_dir.mkdir(parents=True, exist_ok=True)
+
+        for name in ["rf_reject_15m_active.pkl", "rf_reject_15m_candidate.pkl"]:
+            (models_dir / name).write_text("stub", encoding="utf-8")
+
+        active_manifest = {
+            "version": "v212",
+            "feature_version": "v3",
+            "models": {"reject": {"15": "rf_reject_15m_active.pkl"}},
+            "thresholds": {"reject": {"15": 0.91}},
+            "thresholds_meta": {
+                "reject": {"15": {"objective": "utility_bps", "score": 10.0, "guard_applied": False}}
+            },
+            "stats": {
+                "15": {
+                    "reject": {
+                        "sample_size": 120,
+                        "reject_count": 30,
+                        "mfe_bps_reject": 8.0,
+                        "mae_bps_reject": -10.0,
+                    }
+                }
+            },
+            "trained_end_ts": 1774544400000,
+        }
+        candidate_manifest = {
+            "version": "v213",
+            "feature_version": "v3",
+            "models": {"reject": {"15": "rf_reject_15m_candidate.pkl"}},
+            "thresholds": {"reject": {"15": 0.92}},
+            "thresholds_meta": {
+                "reject": {"15": {"objective": "utility_bps", "score": 11.0, "guard_applied": False}}
+            },
+            "stats": {
+                "15": {
+                    "reject": {
+                        "sample_size": 130,
+                        "reject_count": 33,
+                        "mfe_bps_reject": 8.4,
+                        "mae_bps_reject": -9.7,
+                    }
+                }
+            },
+            "trained_end_ts": 1774552516000,
+        }
+
+        (models_dir / "manifest_active.json").write_text(json.dumps(active_manifest), encoding="utf-8")
+        (models_dir / "manifest_runtime_latest.json").write_text(
+            json.dumps(candidate_manifest),
+            encoding="utf-8",
+        )
+        (models_dir / "model_registry.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "active_version": "v212",
+                    "previous_active_version": "v211",
+                    "candidate_version": "v212",
+                    "history": [
+                        {
+                            "ts_ms": 1774600000000,
+                            "action": "rejected",
+                            "reason": "prior strict policy",
+                            "gate_config": {
+                                "required_targets": ["reject"],
+                                "required_horizons": [5, 15, 60],
+                                "min_trained_end_delta_ms": 21600000,
+                                "max_mfe_regression_bps": 1.5,
+                                "max_mae_worsening_bps": 2.0,
+                                "min_total_samples": 0,
+                                "min_positive_samples_reject": 0,
+                                "min_positive_samples_break": 0,
+                                "allow_feature_version_change": False,
+                                "regime_aware": False,
+                                "regime_buckets": ["compression", "expansion", "neutral"],
+                                "regime_min_total_samples": 0,
+                                "regime_min_positive_samples_reject": 0,
+                                "regime_min_positive_samples_break": 0,
+                                "regime_min_compared_buckets": 1,
+                                "enforce_threshold_utility_guard": True,
+                                "threshold_utility_targets": ["reject"],
+                                "threshold_utility_min_score": 0.0,
+                                "enforce_live_emission_gate": True,
+                                "emission_lookback_days": 5,
+                                "emission_max_pred_lag_hours": 6.0,
+                                "emission_prediction_basis": "first",
+                                "emission_source": "preview",
+                                "emission_min_rows": 25,
+                                "emission_min_coverage": 0.9,
+                                "emission_min_signals": 1,
+                                "emission_max_abstain_rate": 0.95,
+                                "emission_symbols": ["SPY"],
+                            },
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        args = argparse.Namespace(
+            models_dir=str(models_dir),
+            metadata_dir="metadata_runtime",
+            candidate_manifest="manifest_runtime_latest.json",
+            active_manifest="manifest_active.json",
+            prev_active_manifest="manifest_active_prev.json",
+            state_file="model_registry.json",
+            ops_db=str(self.tmp / "ops.sqlite"),
+            required_targets="reject",
+            required_horizons="15",
+            min_trained_end_delta_ms=0,
+            max_mfe_regression_bps=1.5,
+            max_mae_worsening_bps=2.0,
+            min_total_samples=0,
+            min_positive_samples=0,
+            min_positive_samples_reject=0,
+            min_positive_samples_break=0,
+            allow_feature_version_change=False,
+            regime_aware=False,
+            regime_buckets="compression,expansion,neutral",
+            regime_min_total_samples=0,
+            regime_min_positive_samples=0,
+            regime_min_positive_samples_reject=0,
+            regime_min_positive_samples_break=0,
+            regime_min_compared_buckets=1,
+            enforce_threshold_utility_guard=True,
+            threshold_utility_targets="reject",
+            threshold_utility_min_score=-20.0,
+            enforce_live_emission_gate=True,
+            emission_db="",
+            emission_lookback_days=5,
+            emission_max_pred_lag_hours=6.0,
+            emission_prediction_basis="first",
+            emission_source="preview",
+            emission_min_rows=25,
+            emission_min_coverage=0.9,
+            emission_min_signals=1,
+            emission_max_abstain_rate=0.98,
+            emission_symbols="SPY",
+            allow_gate_loosening=False,
+            gate_loosening_reason="",
+            force_promote=False,
+        )
+
+        with patch("sys.stdout", new=io.StringIO()):
+            rc = module.cmd_evaluate(args)
+
+        self.assertEqual(rc, 0)
+        state = json.loads((models_dir / "model_registry.json").read_text(encoding="utf-8"))
+        history_entry = state["history"][-1]
+        self.assertEqual(history_entry["action"], "rejected")
+        self.assertTrue(
+            any(item.startswith("GATE_LOOSENED ") for item in history_entry.get("gate_failures", []))
+        )
+        self.assertIn("threshold_utility_min_score decreased", state["last_reason"])
+
+    def test_model_governance_records_gate_loosening_override_reason(self) -> None:
+        module = load_module(
+            "model_governance_gate_loosening_allowed",
+            REPO_ROOT / "scripts" / "model_governance.py",
+        )
+        models_dir = self.tmp / "models"
+        metadata_dir = models_dir / "metadata_runtime"
+        models_dir.mkdir(parents=True, exist_ok=True)
+        metadata_dir.mkdir(parents=True, exist_ok=True)
+
+        for name in ["rf_reject_15m_active.pkl", "rf_reject_15m_candidate.pkl"]:
+            (models_dir / name).write_text("stub", encoding="utf-8")
+
+        active_manifest = {
+            "version": "v212",
+            "feature_version": "v3",
+            "models": {"reject": {"15": "rf_reject_15m_active.pkl"}},
+            "thresholds": {"reject": {"15": 0.91}},
+            "thresholds_meta": {
+                "reject": {"15": {"objective": "utility_bps", "score": 10.0, "guard_applied": False}}
+            },
+            "stats": {
+                "15": {
+                    "reject": {
+                        "sample_size": 120,
+                        "reject_count": 30,
+                        "mfe_bps_reject": 8.0,
+                        "mae_bps_reject": -10.0,
+                    }
+                }
+            },
+            "trained_end_ts": 1774544400000,
+        }
+        candidate_manifest = {
+            "version": "v213",
+            "feature_version": "v3",
+            "models": {"reject": {"15": "rf_reject_15m_candidate.pkl"}},
+            "thresholds": {"reject": {"15": 0.92}},
+            "thresholds_meta": {
+                "reject": {"15": {"objective": "utility_bps", "score": 11.0, "guard_applied": False}}
+            },
+            "stats": {
+                "15": {
+                    "reject": {
+                        "sample_size": 130,
+                        "reject_count": 33,
+                        "mfe_bps_reject": 8.4,
+                        "mae_bps_reject": -9.7,
+                    }
+                }
+            },
+            "trained_end_ts": 1774552516000,
+        }
+
+        (models_dir / "manifest_active.json").write_text(json.dumps(active_manifest), encoding="utf-8")
+        (models_dir / "manifest_runtime_latest.json").write_text(
+            json.dumps(candidate_manifest),
+            encoding="utf-8",
+        )
+        (models_dir / "model_registry.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "active_version": "v212",
+                    "previous_active_version": "v211",
+                    "candidate_version": "v212",
+                    "history": [
+                        {
+                            "ts_ms": 1774600000000,
+                            "action": "rejected",
+                            "reason": "prior strict policy",
+                            "gate_config": {
+                                "required_targets": ["reject"],
+                                "required_horizons": [5, 15, 60],
+                                "min_trained_end_delta_ms": 21600000,
+                                "max_mfe_regression_bps": 1.5,
+                                "max_mae_worsening_bps": 2.0,
+                                "min_total_samples": 0,
+                                "min_positive_samples_reject": 0,
+                                "min_positive_samples_break": 0,
+                                "allow_feature_version_change": False,
+                                "regime_aware": False,
+                                "regime_buckets": ["compression", "expansion", "neutral"],
+                                "regime_min_total_samples": 0,
+                                "regime_min_positive_samples_reject": 0,
+                                "regime_min_positive_samples_break": 0,
+                                "regime_min_compared_buckets": 1,
+                                "enforce_threshold_utility_guard": True,
+                                "threshold_utility_targets": ["reject"],
+                                "threshold_utility_min_score": 0.0,
+                                "enforce_live_emission_gate": False,
+                                "emission_lookback_days": 5,
+                                "emission_max_pred_lag_hours": 6.0,
+                                "emission_prediction_basis": "first",
+                                "emission_source": "preview",
+                                "emission_min_rows": 25,
+                                "emission_min_coverage": 0.9,
+                                "emission_min_signals": 1,
+                                "emission_max_abstain_rate": 0.98,
+                                "emission_symbols": ["SPY"],
+                            },
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        args = argparse.Namespace(
+            models_dir=str(models_dir),
+            metadata_dir="metadata_runtime",
+            candidate_manifest="manifest_runtime_latest.json",
+            active_manifest="manifest_active.json",
+            prev_active_manifest="manifest_active_prev.json",
+            state_file="model_registry.json",
+            ops_db=str(self.tmp / "ops.sqlite"),
+            required_targets="reject",
+            required_horizons="15",
+            min_trained_end_delta_ms=0,
+            max_mfe_regression_bps=1.5,
+            max_mae_worsening_bps=2.0,
+            min_total_samples=0,
+            min_positive_samples=0,
+            min_positive_samples_reject=0,
+            min_positive_samples_break=0,
+            allow_feature_version_change=False,
+            regime_aware=False,
+            regime_buckets="compression,expansion,neutral",
+            regime_min_total_samples=0,
+            regime_min_positive_samples=0,
+            regime_min_positive_samples_reject=0,
+            regime_min_positive_samples_break=0,
+            regime_min_compared_buckets=1,
+            enforce_threshold_utility_guard=True,
+            threshold_utility_targets="reject",
+            threshold_utility_min_score=0.0,
+            enforce_live_emission_gate=False,
+            emission_db="",
+            emission_lookback_days=5,
+            emission_max_pred_lag_hours=6.0,
+            emission_prediction_basis="first",
+            emission_source="preview",
+            emission_min_rows=25,
+            emission_min_coverage=0.9,
+            emission_min_signals=1,
+            emission_max_abstain_rate=0.98,
+            emission_symbols="SPY",
+            allow_gate_loosening=True,
+            gate_loosening_reason="Intentional interim freeze to single-horizon specialist policy",
+            force_promote=False,
+        )
+
+        with patch("sys.stdout", new=io.StringIO()):
+            rc = module.cmd_evaluate(args)
+
+        self.assertEqual(rc, 0)
+        state = json.loads((models_dir / "model_registry.json").read_text(encoding="utf-8"))
+        history_entry = state["history"][-1]
+        self.assertEqual(history_entry["action"], "promoted")
+        self.assertTrue(bool(history_entry["allow_gate_loosening"]))
+        self.assertEqual(
+            history_entry["gate_loosening_reason"],
+            "Intentional interim freeze to single-horizon specialist policy",
+        )
+        self.assertTrue(any("required_horizons removed" in item for item in history_entry["gate_loosening_diffs"]))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

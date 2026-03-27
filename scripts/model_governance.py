@@ -457,6 +457,104 @@ def load_state(path: Path) -> dict[str, Any]:
     return payload
 
 
+def _latest_gate_config_from_history(state: dict[str, Any]) -> dict[str, Any] | None:
+    history = state.get("history")
+    if not isinstance(history, list):
+        return None
+    for entry in reversed(history):
+        if not isinstance(entry, dict):
+            continue
+        gate_config = entry.get("gate_config_frozen")
+        if not isinstance(gate_config, dict):
+            gate_config = entry.get("gate_config")
+        if isinstance(gate_config, dict):
+            return copy.deepcopy(gate_config)
+    return None
+
+
+def _coerce_config_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str):
+        return parse_csv_list(value)
+    return []
+
+
+def _collect_gate_loosening(
+    previous: dict[str, Any] | None,
+    current: GateConfig,
+) -> list[str]:
+    if not isinstance(previous, dict):
+        return []
+
+    current_cfg = asdict(current)
+    loosenings: list[str] = []
+
+    previous_targets = {item for item in _coerce_config_list(previous.get("required_targets"))}
+    current_targets = {item for item in _coerce_config_list(current_cfg.get("required_targets"))}
+    removed_targets = sorted(previous_targets - current_targets)
+    if removed_targets:
+        loosenings.append(
+            "required_targets removed "
+            f"({','.join(removed_targets)}; previous={sorted(previous_targets)} current={sorted(current_targets)})"
+        )
+
+    previous_horizons = {to_int(item) for item in _coerce_config_list(previous.get("required_horizons"))}
+    current_horizons = {to_int(item) for item in _coerce_config_list(current_cfg.get("required_horizons"))}
+    previous_horizon_values = {item for item in previous_horizons if item is not None}
+    current_horizon_values = {item for item in current_horizons if item is not None}
+    removed_horizons = sorted(previous_horizon_values - current_horizon_values)
+    if removed_horizons:
+        loosenings.append(
+            "required_horizons removed "
+            f"({removed_horizons}; previous={sorted(previous_horizon_values)} current={sorted(current_horizon_values)})"
+        )
+
+    previous_min_score = to_float(previous.get("threshold_utility_min_score"))
+    current_min_score = to_float(current_cfg.get("threshold_utility_min_score"))
+    if (
+        previous_min_score is not None
+        and current_min_score is not None
+        and current_min_score < previous_min_score
+    ):
+        loosenings.append(
+            "threshold_utility_min_score decreased "
+            f"({previous_min_score:.3f} -> {current_min_score:.3f})"
+        )
+
+    previous_delta = to_int(previous.get("min_trained_end_delta_ms"))
+    current_delta = to_int(current_cfg.get("min_trained_end_delta_ms"))
+    if previous_delta is not None and current_delta is not None and current_delta < previous_delta:
+        loosenings.append(
+            "min_trained_end_delta_ms decreased "
+            f"({previous_delta} -> {current_delta})"
+        )
+
+    previous_emission_enabled = bool(previous.get("enforce_live_emission_gate"))
+    current_emission_enabled = bool(current_cfg.get("enforce_live_emission_gate"))
+    if previous_emission_enabled and not current_emission_enabled:
+        loosenings.append("enforce_live_emission_gate disabled (true -> false)")
+
+    if previous_emission_enabled and current_emission_enabled:
+        comparisons: list[tuple[str, Any, Any, bool]] = [
+            ("emission_lookback_days", to_int(previous.get("emission_lookback_days")), to_int(current_cfg.get("emission_lookback_days")), False),
+            ("emission_max_pred_lag_hours", to_float(previous.get("emission_max_pred_lag_hours")), to_float(current_cfg.get("emission_max_pred_lag_hours")), True),
+            ("emission_min_rows", to_int(previous.get("emission_min_rows")), to_int(current_cfg.get("emission_min_rows")), False),
+            ("emission_min_coverage", to_float(previous.get("emission_min_coverage")), to_float(current_cfg.get("emission_min_coverage")), False),
+            ("emission_min_signals", to_int(previous.get("emission_min_signals")), to_int(current_cfg.get("emission_min_signals")), False),
+            ("emission_max_abstain_rate", to_float(previous.get("emission_max_abstain_rate")), to_float(current_cfg.get("emission_max_abstain_rate")), True),
+        ]
+        for key, previous_value, current_value, higher_is_looser in comparisons:
+            if previous_value is None or current_value is None:
+                continue
+            if higher_is_looser and current_value > previous_value:
+                loosenings.append(f"{key} loosened ({previous_value} -> {current_value})")
+            if not higher_is_looser and current_value < previous_value:
+                loosenings.append(f"{key} loosened ({previous_value} -> {current_value})")
+
+    return loosenings
+
+
 def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
     row = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
@@ -1176,6 +1274,11 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
     prev_path = models_dir / args.prev_active_manifest
     state_path = models_dir / args.state_file
 
+    allow_gate_loosening = bool(getattr(args, "allow_gate_loosening", False))
+    gate_loosening_reason = str(getattr(args, "gate_loosening_reason", "") or "").strip()
+    if allow_gate_loosening and not gate_loosening_reason:
+        raise ValueError("--gate-loosening-reason is required with --allow-gate-loosening")
+
     gates = GateConfig(
         required_targets=parse_csv_list(args.required_targets),
         required_horizons=parse_horizons(args.required_horizons),
@@ -1277,6 +1380,8 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
 
     candidate = load_manifest(candidate_path)
     candidate_version = version_of(candidate)
+    previous_gate_config = _latest_gate_config_from_history(state)
+    gate_loosening_diffs = _collect_gate_loosening(previous_gate_config, gates)
 
     result: dict[str, Any] = {
         "status": "ok",
@@ -1297,6 +1402,11 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
         },
         "gates": asdict(gates),
     }
+    if allow_gate_loosening:
+        result["allow_gate_loosening"] = True
+        result["gate_loosening_reason"] = gate_loosening_reason
+    if gate_loosening_diffs:
+        result["gate_loosening_diffs"] = list(gate_loosening_diffs)
 
     emission_db = (
         str(getattr(args, "emission_db", "") or args.ops_db or "").strip() or DEFAULT_DB
@@ -1308,6 +1418,42 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
         "candidate_version": candidate_version,
         "db_path": emission_db,
     }
+
+    if gate_loosening_diffs and not allow_gate_loosening:
+        reason = "GATE_LOOSENED: governance policy loosened without explicit override"
+        gate_failures = [f"GATE_LOOSENED {item}" for item in gate_loosening_diffs]
+        result.update(
+            {
+                "action": "rejected",
+                "reason": reason,
+                "gate_failures": gate_failures,
+                "active_version": state.get("active_version"),
+            }
+        )
+        state.update(
+            {
+                "candidate_version": candidate_version,
+                "last_action": "rejected",
+                "last_reason": reason + ": " + "; ".join(gate_failures),
+                "last_checked_at_ms": now_ms(),
+            }
+        )
+        push_history(
+            state,
+            _history_entry(
+                action="rejected",
+                reason=state["last_reason"],
+                gates=gates,
+                gate_failures=gate_failures,
+                candidate_version=candidate_version,
+                active_version=state.get("active_version"),
+                gate_loosening_diffs=gate_loosening_diffs,
+                allow_gate_loosening=False,
+            ),
+        )
+        _persist_state_and_ops(state_path, state, args.ops_db, result)
+        print(json.dumps(result))
+        return 0
 
     manifest_errors = validate_manifest(candidate, models_dir, gates)
     if manifest_errors:
@@ -1337,6 +1483,9 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
                 gate_failures=manifest_errors,
                 candidate_version=candidate_version,
                 active_version=state.get("active_version"),
+                allow_gate_loosening=allow_gate_loosening,
+                gate_loosening_reason=gate_loosening_reason if allow_gate_loosening else "",
+                gate_loosening_diffs=gate_loosening_diffs,
             ),
         )
         _persist_state_and_ops(state_path, state, args.ops_db, result)
@@ -1381,6 +1530,9 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
                     candidate_version=candidate_version,
                     active_version=state.get("active_version"),
                     emission_gate=emission_gate_summary,
+                    allow_gate_loosening=allow_gate_loosening,
+                    gate_loosening_reason=gate_loosening_reason if allow_gate_loosening else "",
+                    gate_loosening_diffs=gate_loosening_diffs,
                 ),
             )
             _persist_state_and_ops(state_path, state, args.ops_db, result)
@@ -1407,6 +1559,9 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
                 candidate_version=candidate_version,
                 active_version=candidate_version,
                 emission_gate=emission_gate_summary,
+                allow_gate_loosening=allow_gate_loosening,
+                gate_loosening_reason=gate_loosening_reason if allow_gate_loosening else "",
+                gate_loosening_diffs=gate_loosening_diffs,
             ),
         )
         result.update(
@@ -1443,6 +1598,9 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
                 gates=gates,
                 candidate_version=candidate_version,
                 active_version=active_version,
+                allow_gate_loosening=allow_gate_loosening,
+                gate_loosening_reason=gate_loosening_reason if allow_gate_loosening else "",
+                gate_loosening_diffs=gate_loosening_diffs,
             ),
         )
         result["reason"] = state["last_reason"]
@@ -1485,6 +1643,9 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
                 candidate_version=candidate_version,
                 active_version=active_version,
                 emission_gate=emission_gate_summary,
+                allow_gate_loosening=allow_gate_loosening,
+                gate_loosening_reason=gate_loosening_reason if allow_gate_loosening else "",
+                gate_loosening_diffs=gate_loosening_diffs,
             ),
         )
         _persist_state_and_ops(state_path, state, args.ops_db, result)
@@ -1519,6 +1680,9 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
             previous_active_version=active_version,
             forced=bool(args.force_promote),
             emission_gate=emission_gate_summary,
+            allow_gate_loosening=allow_gate_loosening,
+            gate_loosening_reason=gate_loosening_reason if allow_gate_loosening else "",
+            gate_loosening_diffs=gate_loosening_diffs,
         ),
     )
     result.update(
@@ -1864,6 +2028,17 @@ def build_parser() -> argparse.ArgumentParser:
             "Optional comma-separated symbol universe for candidate emission checks. "
             "Use this to align governance with the candidate shadow-scoring universe."
         ),
+    )
+    eval_cmd.add_argument(
+        "--allow-gate-loosening",
+        action="store_true",
+        default=False,
+        help="Allow governance evaluation to proceed even if the current gate policy is looser than the last recorded policy.",
+    )
+    eval_cmd.add_argument(
+        "--gate-loosening-reason",
+        default="",
+        help="Required reason recorded in history when --allow-gate-loosening is used.",
     )
     eval_cmd.add_argument("--force-promote", action="store_true", default=False)
     eval_cmd.set_defaults(func=cmd_evaluate)
