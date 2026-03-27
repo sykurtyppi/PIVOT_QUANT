@@ -8302,6 +8302,28 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertAlmostEqual(float(diagnostics.get("selected_fp_utility_sum") or 0.0), -8.0, places=9)
         self.assertAlmostEqual(float(diagnostics.get("selected_utility_sum") or 0.0), -6.0, places=9)
 
+    def test_train_artifacts_merge_tune_date_range_tracks_min_and_max(self) -> None:
+        module = load_module(
+            "train_rf_artifacts_tune_date_range",
+            REPO_ROOT / "scripts" / "train_rf_artifacts.py",
+        )
+        merged = module._merge_tune_date_range(
+            None,
+            ["2026-03-25", "2026-03-23", "2026-03-24"],
+        )
+        self.assertEqual(
+            merged,
+            {"min_event_date_et": "2026-03-23", "max_event_date_et": "2026-03-25"},
+        )
+        merged = module._merge_tune_date_range(
+            merged,
+            ["2026-03-22", "2026-03-27"],
+        )
+        self.assertEqual(
+            merged,
+            {"min_event_date_et": "2026-03-22", "max_event_date_et": "2026-03-27"},
+        )
+
     def test_model_governance_skips_active_support_check_only_with_bootstrap_waiver(self) -> None:
         module = load_module("model_governance", REPO_ROOT / "scripts" / "model_governance.py")
         gates = module.GateConfig(
@@ -9607,6 +9629,43 @@ class OpsSmokeTests(unittest.TestCase):
                 "reject:15m threshold utility score" in item
                 for item in history_entry.get("gate_failures", [])
             )
+        )
+
+    def test_model_governance_defaults_match_documented_policy(self) -> None:
+        module = load_module(
+            "model_governance_documented_defaults",
+            REPO_ROOT / "scripts" / "model_governance.py",
+        )
+        documented = {}
+        for raw_line in (REPO_ROOT / ".env.example").read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            documented[key] = value
+
+        self.assertEqual(module.DEFAULT_REQUIRED_HORIZONS, documented["MODEL_GOV_REQUIRED_HORIZONS"])
+        self.assertEqual(
+            module.DEFAULT_MIN_TRAINED_END_DELTA_MS,
+            int(documented["MODEL_GOV_MIN_TRAINED_END_DELTA_MS"]),
+        )
+        self.assertEqual(
+            module.DEFAULT_MIN_TOTAL_SAMPLES,
+            int(documented["MODEL_GOV_MIN_TOTAL_SAMPLES"]),
+        )
+        self.assertEqual(
+            module.DEFAULT_MIN_POSITIVE_SAMPLES,
+            int(documented["MODEL_GOV_MIN_POSITIVE_SAMPLES"]),
+        )
+        self.assertAlmostEqual(
+            module.DEFAULT_THRESHOLD_UTILITY_MIN_SCORE,
+            float(documented["MODEL_GOV_THRESHOLD_UTILITY_MIN_SCORE"]),
+            places=9,
+        )
+        self.assertAlmostEqual(
+            module.DEFAULT_EMISSION_MAX_ABSTAIN_RATE,
+            float(documented["MODEL_GOV_EMISSION_MAX_ABSTAIN_RATE"]),
+            places=9,
         )
 
     def test_model_governance_load_state_marks_legacy_history_entries(self) -> None:
