@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import importlib.util
 import asyncio
@@ -558,6 +559,108 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("Tradeable matured signals: 0", joined)
         self.assertIn("no reject/break signals emitted on matured rows", joined)
 
+    def test_daily_report_impact_scopes_to_model_version(self) -> None:
+        db = self.tmp / "daily_report_model_scope.sqlite"
+        conn = sqlite3.connect(str(db))
+        try:
+            conn.execute(
+                """
+                CREATE TABLE touch_events(
+                    event_id TEXT,
+                    ts_event INTEGER,
+                    touch_side INTEGER
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE event_labels(
+                    event_id TEXT,
+                    horizon_min INTEGER,
+                    return_bps REAL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE prediction_log(
+                    event_id TEXT,
+                    ts_prediction INTEGER,
+                    model_version TEXT,
+                    signal_5m TEXT,
+                    is_preview INTEGER
+                )
+                """
+            )
+
+            send_daily_report = load_module(
+                "pq_send_daily_report_model_scope_test",
+                REPO_ROOT / "scripts" / "send_daily_report.py",
+            )
+            report_day = date(2026, 3, 26)
+            start_ms, _ = send_daily_report.et_day_bounds_ms(report_day)
+
+            conn.execute(
+                "INSERT INTO touch_events(event_id, ts_event, touch_side) VALUES (?, ?, ?)",
+                ("evt_v211", start_ms + 60_000, -1),
+            )
+            conn.execute(
+                "INSERT INTO event_labels(event_id, horizon_min, return_bps) VALUES (?, ?, ?)",
+                ("evt_v211", 5, -10.0),
+            )
+            conn.execute(
+                """
+                INSERT INTO prediction_log(event_id, ts_prediction, model_version, signal_5m, is_preview)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                ("evt_v211", start_ms + 61_000, "v211", "reject", 0),
+            )
+
+            conn.execute(
+                "INSERT INTO touch_events(event_id, ts_event, touch_side) VALUES (?, ?, ?)",
+                ("evt_v212", start_ms + 120_000, -1),
+            )
+            conn.execute(
+                "INSERT INTO event_labels(event_id, horizon_min, return_bps) VALUES (?, ?, ?)",
+                ("evt_v212", 5, -10.0),
+            )
+            conn.execute(
+                """
+                INSERT INTO prediction_log(event_id, ts_prediction, model_version, signal_5m, is_preview)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                ("evt_v212", start_ms + 121_000, "v212", "no_edge", 0),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        impact_all = send_daily_report.compute_impact_stats(
+            str(db),
+            report_day,
+            include_preview=False,
+            prediction_basis="first",
+        )
+        impact_v211 = send_daily_report.compute_impact_stats(
+            str(db),
+            report_day,
+            include_preview=False,
+            prediction_basis="first",
+            model_version="v211",
+        )
+        impact_v212 = send_daily_report.compute_impact_stats(
+            str(db),
+            report_day,
+            include_preview=False,
+            prediction_basis="first",
+            model_version="v212",
+        )
+
+        self.assertEqual(int(impact_all["signals"]), 1)
+        self.assertEqual(int(impact_v211["signals"]), 1)
+        self.assertEqual(int(impact_v212["signals"]), 0)
+        self.assertAlmostEqual(float(impact_v211["avg_net"]), 8.7, places=6)
+
     def test_daily_report_context_parses_prediction_basis_and_scored_line(self) -> None:
         send_daily_report = load_module(
             "pq_send_daily_report_basis_parse_test",
@@ -570,7 +673,11 @@ class OpsSmokeTests(unittest.TestCase):
                 "- Model Readiness: **STALE**",
                 "- Trading Utility: **STAND ASIDE**",
                 "- Operator Note: No matured tradeable signals in this window.",
+                "- Model: `v212` (feature `v3`)",
                 "- Prediction basis for scored rows: first prediction per event",
+                "- Prediction Row Scope: current manifest model only (`v212`)",
+                "- Window Model-Version Mix: v211=47, v212=41",
+                "- Excluded Other-Model Events: 47",
                 "- Scored predictions (first prediction per event): 42",
             ]
         )
@@ -580,6 +687,10 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(ctx.get("model_readiness"), "STALE")
         self.assertEqual(ctx.get("trading_utility"), "STAND ASIDE")
         self.assertEqual(ctx.get("operator_note"), "No matured tradeable signals in this window.")
+        self.assertEqual(ctx.get("prediction_row_scope"), "current manifest model only (v212)")
+        self.assertEqual(ctx.get("window_model_mix"), "v211=47, v212=41")
+        self.assertEqual(ctx.get("excluded_other_model_events"), "47")
+        self.assertEqual(send_daily_report.extract_model_version(ctx.get("prediction_row_scope")), "v212")
 
     def test_daily_report_retrain_status_uses_completed_cycle_over_stale_running_flag(self) -> None:
         send_daily_report = load_module(
@@ -6440,6 +6551,195 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(int(filter_summary["candidate_signals"]), 3)
         self.assertEqual(int(filter_summary["applied_signals"]), 1)
 
+    def test_generate_daily_report_scopes_to_manifest_model_on_mixed_rollout_day(self) -> None:
+        report = load_module(
+            "pq_daily_report_model_scope_test",
+            REPO_ROOT / "scripts" / "generate_daily_ml_report.py",
+        )
+        db = self.tmp / "daily_report_mixed_models.sqlite"
+        conn = sqlite3.connect(str(db))
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.execute(
+                """
+                CREATE TABLE touch_events(
+                    event_id TEXT,
+                    ts_event INTEGER,
+                    symbol TEXT,
+                    level_type TEXT,
+                    touch_side INTEGER,
+                    regime_type TEXT,
+                    rv_regime TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE event_labels(
+                    event_id TEXT,
+                    horizon_min INTEGER,
+                    reject INTEGER,
+                    break INTEGER,
+                    return_bps REAL,
+                    mfe_bps REAL,
+                    mae_bps REAL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE prediction_log(
+                    event_id TEXT,
+                    ts_prediction INTEGER,
+                    model_version TEXT,
+                    feature_version TEXT,
+                    abstain INTEGER,
+                    signal_5m TEXT,
+                    signal_15m TEXT,
+                    signal_30m TEXT,
+                    signal_60m TEXT,
+                    prob_reject_5m REAL,
+                    prob_reject_15m REAL,
+                    prob_reject_30m REAL,
+                    prob_reject_60m REAL,
+                    prob_break_5m REAL,
+                    prob_break_15m REAL,
+                    prob_break_30m REAL,
+                    prob_break_60m REAL,
+                    is_preview INTEGER
+                )
+                """
+            )
+
+            report_day = date(2026, 3, 26)
+            start_ms, end_ms = report.day_bounds_ms(report_day)
+
+            conn.execute(
+                """
+                INSERT INTO touch_events(event_id, ts_event, symbol, level_type, touch_side, regime_type, rv_regime)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("evt_v211", start_ms + 60_000, "SPY", "resistance", -1, "range", "normal"),
+            )
+            conn.execute(
+                """
+                INSERT INTO event_labels(event_id, horizon_min, reject, break, return_bps, mfe_bps, mae_bps)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("evt_v211", 15, 1, 0, -8.0, 12.0, -5.0),
+            )
+            conn.execute(
+                """
+                INSERT INTO prediction_log(
+                    event_id, ts_prediction, model_version, feature_version, abstain,
+                    signal_5m, signal_15m, signal_30m, signal_60m,
+                    prob_reject_5m, prob_reject_15m, prob_reject_30m, prob_reject_60m,
+                    prob_break_5m, prob_break_15m, prob_break_30m, prob_break_60m, is_preview
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "evt_v211",
+                    start_ms + 61_000,
+                    "v211",
+                    "v3",
+                    0,
+                    "no_edge",
+                    "reject",
+                    "no_edge",
+                    "no_edge",
+                    0.10,
+                    0.91,
+                    0.10,
+                    0.10,
+                    0.05,
+                    0.05,
+                    0.05,
+                    0.05,
+                    0,
+                ),
+            )
+
+            conn.execute(
+                """
+                INSERT INTO touch_events(event_id, ts_event, symbol, level_type, touch_side, regime_type, rv_regime)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("evt_v212", start_ms + 120_000, "SPY", "support", 1, "range", "normal"),
+            )
+            conn.execute(
+                """
+                INSERT INTO event_labels(event_id, horizon_min, reject, break, return_bps, mfe_bps, mae_bps)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("evt_v212", 15, 0, 1, 9.0, 14.0, -4.0),
+            )
+            conn.execute(
+                """
+                INSERT INTO prediction_log(
+                    event_id, ts_prediction, model_version, feature_version, abstain,
+                    signal_5m, signal_15m, signal_30m, signal_60m,
+                    prob_reject_5m, prob_reject_15m, prob_reject_30m, prob_reject_60m,
+                    prob_break_5m, prob_break_15m, prob_break_30m, prob_break_60m, is_preview
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "evt_v212",
+                    start_ms + 121_000,
+                    "v212",
+                    "v3",
+                    0,
+                    "no_edge",
+                    "reject",
+                    "no_edge",
+                    "no_edge",
+                    0.11,
+                    0.93,
+                    0.11,
+                    0.11,
+                    0.06,
+                    0.06,
+                    0.06,
+                    0.06,
+                    0,
+                ),
+            )
+            conn.commit()
+
+            model_mix = report.fetch_prediction_model_mix(
+                conn,
+                start_ms,
+                end_ms,
+                include_preview=False,
+                prediction_basis="first",
+            )
+            latest_predictions = report.fetch_latest_predictions(
+                conn,
+                start_ms,
+                end_ms,
+                include_preview=False,
+                prediction_basis="first",
+                model_version="v212",
+            )
+            labeled_records = report.fetch_labeled_records(
+                conn,
+                start_ms,
+                end_ms,
+                include_preview=False,
+                prediction_basis="first",
+                model_version="v212",
+            )
+        finally:
+            conn.close()
+
+        self.assertEqual(model_mix, [("v211", 1), ("v212", 1)])
+        self.assertEqual(report._format_model_version_mix(model_mix), "v211=1, v212=1")
+        self.assertEqual([row["event_id"] for row in latest_predictions], ["evt_v212"])
+        self.assertEqual([row["model_version"] for row in latest_predictions], ["v212"])
+        self.assertEqual([row["event_id"] for row in labeled_records], ["evt_v212"])
+        self.assertEqual([row["model_version"] for row in labeled_records], ["v212"])
+
     def test_report_analog_shadow_summary_and_deltas(self) -> None:
         report = load_module(
             "pq_daily_report_analog_summary_test",
@@ -7561,6 +7861,9 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("Trading Utility", source)
         self.assertIn("Operator Note", source)
         self.assertIn("Prediction basis for scored rows", source)
+        self.assertIn("Prediction Row Scope", source)
+        self.assertIn("Window Model-Version Mix", source)
+        self.assertIn("Excluded Other-Model Events", source)
         self.assertIn("--prediction-basis", source)
 
     def test_train_artifacts_horizon_stats_use_target_specific_other_bucket(self) -> None:
@@ -8278,6 +8581,213 @@ class OpsSmokeTests(unittest.TestCase):
         failures, skips = module.evaluate_gates(active, candidate, gates)
         self.assertTrue(any("break:5m mae_bps_break worsened" in item for item in failures))
         self.assertEqual(skips, [])
+
+    def test_model_governance_rollback_can_harden_active_break_fallbacks(self) -> None:
+        module = load_module(
+            "model_governance_rollback_hardening",
+            REPO_ROOT / "scripts" / "model_governance.py",
+        )
+        models_dir = self.tmp / "models"
+        metadata_dir = models_dir / "metadata_runtime"
+        models_dir.mkdir(parents=True, exist_ok=True)
+        metadata_dir.mkdir(parents=True, exist_ok=True)
+
+        active_manifest = {
+            "version": "v211",
+            "feature_version": "v3",
+            "models": {
+                "reject": {"15": "rf_reject_15m_v211.pkl"},
+                "break": {
+                    "5": "rf_break_5m_v211.pkl",
+                    "15": "rf_break_15m_v211.pkl",
+                    "60": "rf_break_60m_v211.pkl",
+                },
+            },
+            "thresholds": {
+                "reject": {"15": 0.8693},
+                "break": {"5": 0.5, "15": 0.62, "60": 0.5},
+            },
+            "thresholds_meta": {
+                "break": {
+                    "5": {"fallback": True},
+                    "15": {"fallback": False},
+                    "60": {"fallback": True},
+                }
+            },
+            "trained_end_ts": 1774552516000,
+        }
+        (models_dir / "manifest_active.json").write_text(
+            json.dumps(active_manifest),
+            encoding="utf-8",
+        )
+        (models_dir / "manifest_active_prev.json").write_text(
+            json.dumps({"version": "v212"}),
+            encoding="utf-8",
+        )
+        (models_dir / "model_registry.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "active_version": "v211",
+                    "previous_active_version": "v212",
+                    "candidate_version": "v214",
+                    "history": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        args = argparse.Namespace(
+            models_dir=str(models_dir),
+            metadata_dir="metadata_runtime",
+            active_manifest="manifest_active.json",
+            prev_active_manifest="manifest_active_prev.json",
+            state_file="model_registry.json",
+            ops_db=str(self.tmp / "ops.sqlite"),
+            to_version="v211",
+            harden_break_fallbacks=True,
+            no_trade_threshold=1.0,
+        )
+
+        rc = module.cmd_rollback(args)
+        self.assertEqual(rc, 0)
+
+        hardened_active = json.loads((models_dir / "manifest_active.json").read_text(encoding="utf-8"))
+        previous_manifest = json.loads((models_dir / "manifest_active_prev.json").read_text(encoding="utf-8"))
+        state = json.loads((models_dir / "model_registry.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(hardened_active["thresholds"]["break"]["5"], 1.0)
+        self.assertEqual(hardened_active["thresholds"]["break"]["60"], 1.0)
+        self.assertEqual(hardened_active["thresholds"]["break"]["15"], 0.62)
+        self.assertEqual(previous_manifest["thresholds"]["break"]["5"], 0.5)
+        self.assertEqual(previous_manifest["thresholds"]["break"]["60"], 0.5)
+        self.assertEqual(
+            hardened_active["runtime_overrides"]["rollback"]["break_fallbacks_hardened"],
+            [5, 60],
+        )
+        self.assertEqual(state["active_version"], "v211")
+        self.assertEqual(state["last_action"], "hardened_active")
+        self.assertEqual(state["history"][-1]["hardened_break_horizons"], [5, 60])
+
+    def test_model_governance_history_records_gate_config_on_rejection(self) -> None:
+        module = load_module(
+            "model_governance_history_gate_config",
+            REPO_ROOT / "scripts" / "model_governance.py",
+        )
+        models_dir = self.tmp / "models"
+        metadata_dir = models_dir / "metadata_runtime"
+        models_dir.mkdir(parents=True, exist_ok=True)
+        metadata_dir.mkdir(parents=True, exist_ok=True)
+
+        for name in ["rf_reject_15m_active.pkl", "rf_reject_15m_candidate.pkl"]:
+            (models_dir / name).write_text("stub", encoding="utf-8")
+
+        active_manifest = {
+            "version": "v212",
+            "feature_version": "v3",
+            "models": {"reject": {"15": "rf_reject_15m_active.pkl"}},
+            "thresholds": {"reject": {"15": 0.91}},
+            "thresholds_meta": {
+                "reject": {
+                    "15": {
+                        "objective": "utility_bps",
+                        "score": 177.11,
+                        "guard_applied": False,
+                    }
+                }
+            },
+            "stats": {
+                "15": {
+                    "reject": {
+                        "sample_size": 100,
+                        "reject_count": 20,
+                        "mfe_bps_reject": 8.0,
+                        "mae_bps_reject": -10.0,
+                    }
+                }
+            },
+            "trained_end_ts": 1774544400000,
+        }
+        candidate_manifest = {
+            "version": "v213",
+            "feature_version": "v3",
+            "models": {"reject": {"15": "rf_reject_15m_candidate.pkl"}},
+            "thresholds": {"reject": {"15": 0.86}},
+            "thresholds_meta": {
+                "reject": {
+                    "15": {
+                        "objective": "utility_bps",
+                        "score": -5.0,
+                        "guard_applied": False,
+                    }
+                }
+            },
+            "stats": {
+                "15": {
+                    "reject": {
+                        "sample_size": 100,
+                        "reject_count": 20,
+                        "mfe_bps_reject": 8.1,
+                        "mae_bps_reject": -9.9,
+                    }
+                }
+            },
+            "trained_end_ts": 1774552516000,
+        }
+
+        (models_dir / "manifest_active.json").write_text(json.dumps(active_manifest), encoding="utf-8")
+        (models_dir / "manifest_runtime_latest.json").write_text(
+            json.dumps(candidate_manifest),
+            encoding="utf-8",
+        )
+
+        args = argparse.Namespace(
+            models_dir=str(models_dir),
+            metadata_dir="metadata_runtime",
+            candidate_manifest="manifest_runtime_latest.json",
+            active_manifest="manifest_active.json",
+            prev_active_manifest="manifest_active_prev.json",
+            state_file="model_registry.json",
+            ops_db=str(self.tmp / "ops.sqlite"),
+            required_targets="reject",
+            required_horizons="15",
+            min_trained_end_delta_ms=0,
+            max_mfe_regression_bps=1.5,
+            max_mae_worsening_bps=2.0,
+            min_total_samples=0,
+            min_positive_samples=0,
+            min_positive_samples_reject=0,
+            min_positive_samples_break=0,
+            allow_feature_version_change=False,
+            regime_aware=False,
+            regime_buckets="compression,expansion,neutral",
+            regime_min_total_samples=0,
+            regime_min_positive_samples=0,
+            regime_min_positive_samples_reject=0,
+            regime_min_positive_samples_break=0,
+            regime_min_compared_buckets=1,
+            enforce_threshold_utility_guard=True,
+            threshold_utility_targets="reject",
+            threshold_utility_min_score=0.0,
+            force_promote=False,
+        )
+
+        rc = module.cmd_evaluate(args)
+        self.assertEqual(rc, 0)
+
+        state = json.loads((models_dir / "model_registry.json").read_text(encoding="utf-8"))
+        history_entry = state["history"][-1]
+
+        self.assertEqual(history_entry["action"], "rejected")
+        self.assertIn("gate_config", history_entry)
+        self.assertEqual(history_entry["gate_config"]["required_horizons"], [15])
+        self.assertEqual(history_entry["gate_config"]["threshold_utility_min_score"], 0.0)
+        self.assertTrue(
+            any(
+                "reject:15m threshold utility score" in item
+                for item in history_entry.get("gate_failures", [])
+            )
+        )
 
 
 if __name__ == "__main__":

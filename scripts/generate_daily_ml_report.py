@@ -443,12 +443,70 @@ def _prediction_basis_label(prediction_basis: str) -> str:
     return "first prediction per event"
 
 
+def _normalize_model_version(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _format_model_version_mix(model_version_mix: list[tuple[str, int]]) -> str:
+    parts: list[str] = []
+    for model_version, count in model_version_mix:
+        label = model_version if model_version and model_version != "<null>" else "<null>"
+        parts.append(f"{label}={int(count)}")
+    return ", ".join(parts)
+
+
+def fetch_prediction_model_mix(
+    conn: sqlite3.Connection,
+    start_ms: int,
+    end_ms: int,
+    include_preview: bool,
+    prediction_basis: str,
+) -> list[tuple[str, int]]:
+    pred_order = _prediction_order_sql(prediction_basis)
+    pred_cols = {r[1] for r in conn.execute("PRAGMA table_info(prediction_log)").fetchall()}
+    has_preview = "is_preview" in pred_cols
+    preview_filter = ""
+    if has_preview and not include_preview:
+        preview_filter = "AND COALESCE(lp.is_preview, 0) = 0"
+
+    sql = f"""
+        WITH selected_pred AS (
+            SELECT *
+            FROM (
+                SELECT
+                    pl.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY pl.event_id
+                        ORDER BY pl.ts_prediction {pred_order}
+                    ) AS rn
+                FROM prediction_log pl
+            )
+            WHERE rn = 1
+        )
+        SELECT
+            COALESCE(lp.model_version, '<null>') AS model_version,
+            COUNT(*) AS row_count
+        FROM selected_pred lp
+        JOIN touch_events te ON te.event_id = lp.event_id
+        WHERE te.ts_event >= ? AND te.ts_event < ?
+        {preview_filter}
+        GROUP BY 1
+        ORDER BY row_count DESC, model_version ASC
+    """
+    rows = conn.execute(sql, (start_ms, end_ms)).fetchall()
+    return [(str(r["model_version"]), int(r["row_count"] or 0)) for r in rows]
+
+
 def fetch_labeled_records(
     conn: sqlite3.Connection,
     start_ms: int,
     end_ms: int,
     include_preview: bool,
     prediction_basis: str,
+    model_version: str | None = None,
 ) -> list[dict[str, Any]]:
     pred_order = _prediction_order_sql(prediction_basis)
     pred_cols = {r[1] for r in conn.execute("PRAGMA table_info(prediction_log)").fetchall()}
@@ -467,6 +525,12 @@ def fetch_labeled_records(
     preview_filter = ""
     if has_preview and not include_preview:
         preview_filter = "AND COALESCE(lp.is_preview, 0) = 0"
+    model_filter = ""
+    params: list[Any] = [start_ms, end_ms]
+    scoped_model_version = _normalize_model_version(model_version)
+    if scoped_model_version is not None:
+        model_filter = "AND COALESCE(lp.model_version, '') = ?"
+        params.append(scoped_model_version)
 
     sql = f"""
         WITH selected_pred AS (
@@ -528,9 +592,10 @@ def fetch_labeled_records(
         JOIN event_labels el ON el.event_id = lp.event_id
         WHERE te.ts_event >= ? AND te.ts_event < ?
         {preview_filter}
+        {model_filter}
         ORDER BY te.ts_event ASC
     """
-    rows = conn.execute(sql, (start_ms, end_ms)).fetchall()
+    rows = conn.execute(sql, params).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -540,6 +605,7 @@ def fetch_latest_predictions(
     end_ms: int,
     include_preview: bool,
     prediction_basis: str,
+    model_version: str | None = None,
 ) -> list[dict[str, Any]]:
     pred_order = _prediction_order_sql(prediction_basis)
     pred_cols = {r[1] for r in conn.execute("PRAGMA table_info(prediction_log)").fetchall()}
@@ -558,6 +624,12 @@ def fetch_latest_predictions(
     preview_filter = ""
     if has_preview and not include_preview:
         preview_filter = "AND COALESCE(lp.is_preview, 0) = 0"
+    model_filter = ""
+    params: list[Any] = [start_ms, end_ms]
+    scoped_model_version = _normalize_model_version(model_version)
+    if scoped_model_version is not None:
+        model_filter = "AND COALESCE(lp.model_version, '') = ?"
+        params.append(scoped_model_version)
 
     sql = f"""
         WITH selected_pred AS (
@@ -612,9 +684,10 @@ def fetch_latest_predictions(
         JOIN touch_events te ON te.event_id = lp.event_id
         WHERE te.ts_event >= ? AND te.ts_event < ?
         {preview_filter}
+        {model_filter}
         ORDER BY te.ts_event ASC
     """
-    rows = conn.execute(sql, (start_ms, end_ms)).fetchall()
+    rows = conn.execute(sql, params).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -1745,6 +1818,8 @@ def render_report(
     predictions: list[dict[str, Any]],
     prediction_basis: str,
     labeled_records: list[dict[str, Any]],
+    prediction_model_mix: list[tuple[str, int]],
+    scoped_model_version: str | None,
     bundles: list[MetricBundle],
     analog_summaries: list[AnalogHorizonSummary],
     analog_gate: AnalogPromotionGate,
@@ -1769,6 +1844,19 @@ def render_report(
     stale_hours_session = compute_session_staleness_hours(trained_end_ts, now_ms)
     gamma_permission_missing = gamma_permission_missing_detected()
     gamma_coverage = fetch_gamma_coverage(conn, start_ms, end_ms)
+    scoped_model_version = _normalize_model_version(scoped_model_version or model_version)
+    total_window_predictions = sum(int(count) for _, count in prediction_model_mix)
+    scoped_window_predictions = sum(
+        int(count)
+        for version, count in prediction_model_mix
+        if _normalize_model_version(version) == scoped_model_version
+    )
+    excluded_other_model_events = (
+        max(0, total_window_predictions - scoped_window_predictions)
+        if scoped_model_version is not None
+        else 0
+    )
+    model_mix_label = _format_model_version_mix(prediction_model_mix) if prediction_model_mix else ""
 
     health, health_notes = determine_health_status(
         bundles=bundles,
@@ -1813,6 +1901,12 @@ def render_report(
     lines.append(f"- Model: `{model_version}` (feature `{feature_version}`)")
     lines.append(f"- Trained End: {trained_end}")
     lines.append(f"- Prediction basis for scored rows: {prediction_basis_label}")
+    if scoped_model_version is not None:
+        lines.append(f"- Prediction Row Scope: current manifest model only (`{scoped_model_version}`)")
+    if model_mix_label:
+        lines.append(f"- Window Model-Version Mix: {model_mix_label}")
+    if excluded_other_model_events > 0:
+        lines.append(f"- Excluded Other-Model Events: {excluded_other_model_events}")
     lines.append(
         f"- Model Staleness: "
         f"{f'{stale_hours_session:.1f}h' if stale_hours_session is not None else '--'} "
@@ -2223,12 +2317,22 @@ def main() -> None:
         gate_eval_mode = str(args.analog_gate_eval_mode or ANALOG_PROMOTION_EVAL_MODE).strip().lower()
         if gate_eval_mode not in {"analog", "blend"}:
             gate_eval_mode = ANALOG_PROMOTION_EVAL_MODE
+        manifest = parse_manifest()
+        scoped_model_version = _normalize_model_version(manifest.get("version"))
+        prediction_model_mix = fetch_prediction_model_mix(
+            conn,
+            start_ms,
+            end_ms,
+            args.include_preview,
+            args.prediction_basis,
+        )
         predictions = fetch_latest_predictions(
             conn,
             start_ms,
             end_ms,
             args.include_preview,
             args.prediction_basis,
+            scoped_model_version,
         )
         labeled_records = fetch_labeled_records(
             conn,
@@ -2236,6 +2340,7 @@ def main() -> None:
             end_ms,
             args.include_preview,
             args.prediction_basis,
+            scoped_model_version,
         )
         labeled_records_gate = fetch_labeled_records(
             conn,
@@ -2243,6 +2348,7 @@ def main() -> None:
             end_ms,
             args.include_preview,
             args.prediction_basis,
+            scoped_model_version,
         )
 
         horizons = REPORT_HORIZONS or [5, 15, 30, 60]
@@ -2262,7 +2368,6 @@ def main() -> None:
         regime_policy_summary = compute_regime_policy_summary(predictions)
 
         persist_daily_metrics(conn, report_day.strftime("%Y-%m-%d"), regime_summary, bundles)
-        manifest = parse_manifest()
         content = render_report(
             report_day=report_day,
             start_ms=start_ms,
@@ -2270,6 +2375,8 @@ def main() -> None:
             predictions=predictions,
             prediction_basis=args.prediction_basis,
             labeled_records=labeled_records,
+            prediction_model_mix=prediction_model_mix,
+            scoped_model_version=scoped_model_version,
             bundles=bundles,
             analog_summaries=analog_summaries,
             analog_gate=analog_gate,

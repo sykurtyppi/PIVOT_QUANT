@@ -12,9 +12,8 @@ Also supports rollback to previous/explicit model versions.
 
 from __future__ import annotations
 
-from __future__ import annotations
-
 import argparse
+import copy
 import json
 import os
 import shutil
@@ -431,6 +430,101 @@ def push_history(state: dict[str, Any], entry: dict[str, Any]) -> None:
     history.append(entry)
     if len(history) > MAX_HISTORY:
         del history[: len(history) - MAX_HISTORY]
+
+
+def _history_entry(
+    *,
+    action: str,
+    reason: str,
+    gates: GateConfig | None = None,
+    gate_failures: list[str] | None = None,
+    gate_skips: list[str] | None = None,
+    **extra: Any,
+) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "ts_ms": now_ms(),
+        "action": action,
+        "reason": reason,
+    }
+    if gates is not None:
+        entry["gate_config"] = asdict(gates)
+    if gate_failures is not None:
+        entry["gate_failures"] = [str(item) for item in gate_failures]
+    if gate_skips is not None:
+        entry["gate_skips"] = [str(item) for item in gate_skips]
+    entry.update(extra)
+    return entry
+
+
+def _format_horizon_labels(horizons: list[int]) -> str:
+    return ",".join(f"{horizon}m" for horizon in horizons)
+
+
+def harden_break_fallback_thresholds(
+    manifest: dict[str, Any],
+    *,
+    no_trade_threshold: float = 1.0,
+    applied_at_ms: int | None = None,
+) -> tuple[dict[str, Any], list[int]]:
+    threshold_value = float(no_trade_threshold)
+    if threshold_value < 0.0 or threshold_value > 1.0:
+        raise ValueError(f"no_trade_threshold must be within [0.0, 1.0], got {threshold_value}")
+
+    hardened = copy.deepcopy(manifest)
+    thresholds = hardened.get("thresholds")
+    if not isinstance(thresholds, dict):
+        return hardened, []
+
+    break_thresholds = thresholds.get("break")
+    if not isinstance(break_thresholds, dict):
+        return hardened, []
+
+    thresholds_meta = hardened.get("thresholds_meta")
+    break_meta = thresholds_meta.get("break", {}) if isinstance(thresholds_meta, dict) else {}
+    if not isinstance(break_meta, dict):
+        break_meta = {}
+
+    hardened_horizons: list[int] = []
+    override_details: dict[str, dict[str, Any]] = {}
+    for horizon_key, raw_threshold in list(break_thresholds.items()):
+        threshold = to_float(raw_threshold)
+        if threshold is None or threshold >= threshold_value:
+            continue
+        meta = break_meta.get(horizon_key, {})
+        if not isinstance(meta, dict) or not bool(meta.get("fallback")):
+            continue
+        break_thresholds[horizon_key] = threshold_value
+        horizon = to_int(horizon_key)
+        if horizon is not None:
+            hardened_horizons.append(horizon)
+        override_details[str(horizon_key)] = {
+            "from": threshold,
+            "to": threshold_value,
+            "reason": "fallback_threshold",
+        }
+
+    if not override_details:
+        return hardened, []
+
+    runtime_overrides = hardened.get("runtime_overrides")
+    if not isinstance(runtime_overrides, dict):
+        runtime_overrides = {}
+        hardened["runtime_overrides"] = runtime_overrides
+
+    rollback_overrides = runtime_overrides.get("rollback")
+    if not isinstance(rollback_overrides, dict):
+        rollback_overrides = {}
+        runtime_overrides["rollback"] = rollback_overrides
+
+    rollback_overrides.update(
+        {
+            "source_version": version_of(manifest),
+            "applied_at_ms": int(applied_at_ms or now_ms()),
+            "break_threshold_overrides": override_details,
+            "break_fallbacks_hardened": sorted(hardened_horizons),
+        }
+    )
+    return hardened, sorted(hardened_horizons)
 
 
 def validate_manifest(
@@ -859,13 +953,14 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
         )
         push_history(
             state,
-            {
-                "ts_ms": now_ms(),
-                "action": "rejected",
-                "candidate_version": candidate_version,
-                "active_version": state.get("active_version"),
-                "reason": state["last_reason"],
-            },
+            _history_entry(
+                action="rejected",
+                reason=state["last_reason"],
+                gates=gates,
+                gate_failures=manifest_errors,
+                candidate_version=candidate_version,
+                active_version=state.get("active_version"),
+            ),
         )
         _persist_state_and_ops(state_path, state, args.ops_db, result)
         print(json.dumps(result))
@@ -887,13 +982,13 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
         )
         push_history(
             state,
-            {
-                "ts_ms": now_ms(),
-                "action": "bootstrap",
-                "candidate_version": candidate_version,
-                "active_version": candidate_version,
-                "reason": state["last_reason"],
-            },
+            _history_entry(
+                action="bootstrap",
+                reason=state["last_reason"],
+                gates=gates,
+                candidate_version=candidate_version,
+                active_version=candidate_version,
+            ),
         )
         result.update(
             {
@@ -923,13 +1018,13 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
         )
         push_history(
             state,
-            {
-                "ts_ms": now_ms(),
-                "action": "no_change",
-                "candidate_version": candidate_version,
-                "active_version": active_version,
-                "reason": state["last_reason"],
-            },
+            _history_entry(
+                action="no_change",
+                reason=state["last_reason"],
+                gates=gates,
+                candidate_version=candidate_version,
+                active_version=active_version,
+            ),
         )
         result["reason"] = state["last_reason"]
         _persist_state_and_ops(state_path, state, args.ops_db, result)
@@ -960,13 +1055,15 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
         )
         push_history(
             state,
-            {
-                "ts_ms": now_ms(),
-                "action": "rejected",
-                "candidate_version": candidate_version,
-                "active_version": active_version,
-                "reason": state["last_reason"],
-            },
+            _history_entry(
+                action="rejected",
+                reason=state["last_reason"],
+                gates=gates,
+                gate_failures=gate_failures,
+                gate_skips=gate_skips,
+                candidate_version=candidate_version,
+                active_version=active_version,
+            ),
         )
         _persist_state_and_ops(state_path, state, args.ops_db, result)
         print(json.dumps(result))
@@ -989,15 +1086,17 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
     )
     push_history(
         state,
-        {
-            "ts_ms": now_ms(),
-            "action": "promoted",
-            "candidate_version": candidate_version,
-            "active_version": candidate_version,
-            "previous_active_version": active_version,
-            "reason": state["last_reason"],
-            "forced": bool(args.force_promote),
-        },
+        _history_entry(
+            action="promoted",
+            reason=state["last_reason"],
+            gates=gates,
+            gate_failures=gate_failures,
+            gate_skips=gate_skips,
+            candidate_version=candidate_version,
+            active_version=candidate_version,
+            previous_active_version=active_version,
+            forced=bool(args.force_promote),
+        ),
     )
     result.update(
         {
@@ -1034,6 +1133,13 @@ def cmd_rollback(args: argparse.Namespace) -> int:
             if explicit.exists():
                 target_path = explicit
                 break
+    if (
+        target_path is None
+        and args.harden_break_fallbacks
+        and target_version is not None
+        and str(target_version) == active_version
+    ):
+        target_path = active_path
     if target_path is None and prev_path.exists():
         target_path = prev_path
     if target_path is None:
@@ -1043,7 +1149,19 @@ def cmd_rollback(args: argparse.Namespace) -> int:
 
     target_manifest = load_manifest(target_path)
     target_version = version_of(target_manifest)
-    if target_version == active_version:
+    hardened_break_horizons: list[int] = []
+    write_manifest = target_manifest
+    if args.harden_break_fallbacks:
+        source_manifest = target_manifest
+        if target_version == active_version:
+            source_manifest = active_manifest
+        write_manifest, hardened_break_horizons = harden_break_fallback_thresholds(
+            source_manifest,
+            no_trade_threshold=args.no_trade_threshold,
+            applied_at_ms=now_ms(),
+        )
+
+    if target_version == active_version and not hardened_break_horizons:
         out = {
             "status": "ok",
             "action": "no_change",
@@ -1055,34 +1173,59 @@ def cmd_rollback(args: argparse.Namespace) -> int:
         return 0
 
     atomic_copy(active_path, prev_path)
-    atomic_copy(target_path, active_path)
+    if hardened_break_horizons:
+        atomic_write_json(active_path, write_manifest)
+    else:
+        atomic_copy(target_path, active_path)
+
+    action = "rollback"
+    reason = f"rolled back from {active_version} to {target_version}"
+    if target_version == active_version and hardened_break_horizons:
+        action = "hardened_active"
+        reason = (
+            f"hardened active {active_version} break fallback horizons "
+            f"({_format_horizon_labels(hardened_break_horizons)})"
+        )
+    elif hardened_break_horizons:
+        reason += (
+            f"; hardened break fallback horizons "
+            f"({_format_horizon_labels(hardened_break_horizons)})"
+        )
 
     state.update(
         {
-            "previous_active_version": active_version,
+            "previous_active_version": (
+                active_version
+                if target_version != active_version
+                else state.get("previous_active_version")
+            ),
             "active_version": target_version,
-            "last_action": "rollback",
-            "last_reason": f"rolled back from {active_version} to {target_version}",
+            "last_action": action,
+            "last_reason": reason,
             "last_checked_at_ms": now_ms(),
             "last_promoted_at_ms": now_ms(),
         }
     )
     push_history(
         state,
-        {
-            "ts_ms": now_ms(),
-            "action": "rollback",
-            "active_version": target_version,
-            "previous_active_version": active_version,
-            "reason": state["last_reason"],
-        },
+        _history_entry(
+            action=action,
+            reason=state["last_reason"],
+            active_version=target_version,
+            previous_active_version=active_version,
+            candidate_version=state.get("candidate_version"),
+            hardened_break_horizons=hardened_break_horizons,
+            no_trade_threshold=float(args.no_trade_threshold),
+        ),
     )
     result = {
         "status": "ok",
-        "action": "rollback",
+        "action": action,
         "active_version": target_version,
         "candidate_version": state.get("candidate_version"),
         "reason": state["last_reason"],
+        "hardened_break_horizons": hardened_break_horizons,
+        "no_trade_threshold": float(args.no_trade_threshold),
     }
     _persist_state_and_ops(state_path, state, args.ops_db, result)
     print(json.dumps(result))
@@ -1225,6 +1368,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     rollback_cmd = sub.add_parser("rollback", help="Rollback active manifest")
     rollback_cmd.add_argument("--to-version", default=None, help="Version label like v010")
+    rollback_cmd.add_argument(
+        "--harden-break-fallbacks",
+        action="store_true",
+        default=False,
+        help=(
+            "Clamp fallback-derived break thresholds to --no-trade-threshold while "
+            "rolling back or hardening the currently active version."
+        ),
+    )
+    rollback_cmd.add_argument(
+        "--no-trade-threshold",
+        type=float,
+        default=1.0,
+        help="Threshold used when hardening fallback-derived break horizons.",
+    )
     rollback_cmd.set_defaults(func=cmd_rollback)
 
     return parser
