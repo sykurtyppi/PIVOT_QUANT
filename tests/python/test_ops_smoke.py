@@ -9450,14 +9450,48 @@ class OpsSmokeTests(unittest.TestCase):
 
         self.assertEqual(history_entry["action"], "rejected")
         self.assertIn("gate_config", history_entry)
+        self.assertIn("gate_config_frozen", history_entry)
         self.assertEqual(history_entry["gate_config"]["required_horizons"], [15])
         self.assertEqual(history_entry["gate_config"]["threshold_utility_min_score"], 0.0)
+        self.assertEqual(history_entry["gate_config_frozen"]["required_horizons"], [15])
+        self.assertIsInstance(history_entry.get("manifest_sha256"), str)
+        self.assertEqual(len(history_entry["manifest_sha256"]), 64)
+        self.assertIn("rf_reject_15m_candidate.pkl", history_entry.get("pkl_sha256s", {}))
+        self.assertEqual(history_entry.get("trained_end_ts"), 1774552516000)
+        self.assertEqual(history_entry.get("threshold_summary", {}).get("reject", {}).keys(), {"15"})
         self.assertTrue(
             any(
                 "reject:15m threshold utility score" in item
                 for item in history_entry.get("gate_failures", [])
             )
         )
+
+    def test_model_governance_load_state_marks_legacy_history_entries(self) -> None:
+        module = load_module(
+            "model_governance_legacy_history_migration",
+            REPO_ROOT / "scripts" / "model_governance.py",
+        )
+        state_path = self.tmp / "legacy_model_registry.json"
+        state_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "active_version": "v212",
+                    "history": [
+                        {
+                            "ts_ms": 1774600000000,
+                            "action": "promoted",
+                            "reason": "legacy entry",
+                            "gate_config": {"required_horizons": [15]},
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        state = module.load_state(state_path)
+        self.assertTrue(bool(state["history"][0]["pre_audit_legacy"]))
 
     def test_model_governance_rejects_gate_loosening_without_override(self) -> None:
         module = load_module(

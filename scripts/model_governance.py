@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import os
 import shutil
@@ -465,8 +466,115 @@ def load_state(path: Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return empty_state()
     payload.setdefault("schema_version", STATE_SCHEMA_VERSION)
-    payload.setdefault("history", [])
+    history = payload.setdefault("history", [])
+    if not isinstance(history, list):
+        history = []
+        payload["history"] = history
+    for entry in history:
+        if not isinstance(entry, dict):
+            continue
+        has_audit_bundle = all(
+            key in entry
+            for key in (
+                "manifest_sha256",
+                "pkl_sha256s",
+                "gate_config_frozen",
+                "threshold_summary",
+                "trained_end_ts",
+                "calibration_refit_ts",
+                "tune_date_range",
+            )
+        )
+        if not has_audit_bundle:
+            entry["pre_audit_legacy"] = True
     return payload
+
+
+def _sha256_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _candidate_pkl_sha256s(manifest: dict[str, Any], models_dir: Path) -> dict[str, str]:
+    model_map = manifest.get("models")
+    if not isinstance(model_map, dict):
+        return {}
+    filenames: set[str] = set()
+    for target_payload in model_map.values():
+        if not isinstance(target_payload, dict):
+            continue
+        for filename in target_payload.values():
+            if isinstance(filename, str) and filename.strip():
+                filenames.add(filename.strip())
+    hashes: dict[str, str] = {}
+    for filename in sorted(filenames):
+        path = models_dir / filename
+        if path.exists() and path.is_file():
+            hashes[filename] = _sha256_path(path)
+    return hashes
+
+
+def _threshold_summary_for_required_horizons(
+    manifest: dict[str, Any],
+    gates: GateConfig | None,
+) -> dict[str, dict[str, Any]]:
+    threshold_meta = manifest.get("thresholds_meta")
+    if not isinstance(threshold_meta, dict):
+        return {}
+    if gates is None:
+        return copy.deepcopy(threshold_meta)
+    summary: dict[str, dict[str, Any]] = {}
+    required_targets = set(gates.required_targets)
+    required_horizons = {str(horizon) for horizon in gates.required_horizons}
+    for target, horizon_map in threshold_meta.items():
+        if target not in required_targets or not isinstance(horizon_map, dict):
+            continue
+        filtered = {
+            horizon: copy.deepcopy(meta)
+            for horizon, meta in horizon_map.items()
+            if horizon in required_horizons and isinstance(meta, dict)
+        }
+        if filtered:
+            summary[target] = filtered
+    return summary
+
+
+def _extract_tune_date_range(manifest: dict[str, Any]) -> dict[str, Any] | None:
+    direct = manifest.get("tune_date_range")
+    if isinstance(direct, dict):
+        return copy.deepcopy(direct)
+    for key in ("training_slices", "calibration_refit", "training_metadata"):
+        payload = manifest.get(key)
+        if isinstance(payload, dict):
+            tune_range = payload.get("tune_date_range")
+            if isinstance(tune_range, dict):
+                return copy.deepcopy(tune_range)
+    return None
+
+
+def _candidate_history_evidence(
+    *,
+    candidate_path: Path | None,
+    candidate: dict[str, Any] | None,
+    models_dir: Path,
+    gates: GateConfig | None,
+) -> dict[str, Any]:
+    manifest_payload = candidate if isinstance(candidate, dict) else {}
+    manifest_sha256 = None
+    if candidate_path is not None and candidate_path.exists():
+        manifest_sha256 = _sha256_path(candidate_path)
+    return {
+        "manifest_sha256": manifest_sha256,
+        "pkl_sha256s": _candidate_pkl_sha256s(manifest_payload, models_dir),
+        "gate_config_frozen": asdict(gates) if gates is not None else None,
+        "threshold_summary": _threshold_summary_for_required_horizons(manifest_payload, gates),
+        "trained_end_ts": to_int(manifest_payload.get("trained_end_ts")),
+        "calibration_refit_ts": to_int(manifest_payload.get("calibration_refit_ts")),
+        "tune_date_range": _extract_tune_date_range(manifest_payload),
+    }
 
 
 def _latest_gate_config_from_history(state: dict[str, Any]) -> dict[str, Any] | None:
@@ -622,11 +730,19 @@ def _history_entry(
     }
     if gates is not None:
         entry["gate_config"] = asdict(gates)
+        entry["gate_config_frozen"] = asdict(gates)
     if gate_failures is not None:
         entry["gate_failures"] = [str(item) for item in gate_failures]
     if gate_skips is not None:
         entry["gate_skips"] = [str(item) for item in gate_skips]
     entry.update(extra)
+    entry.setdefault("manifest_sha256", None)
+    entry.setdefault("pkl_sha256s", {})
+    entry.setdefault("gate_config_frozen", asdict(gates) if gates is not None else None)
+    entry.setdefault("threshold_summary", {})
+    entry.setdefault("trained_end_ts", None)
+    entry.setdefault("calibration_refit_ts", None)
+    entry.setdefault("tune_date_range", None)
     return entry
 
 
@@ -1466,6 +1582,12 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
 
     candidate = load_manifest(candidate_path)
     candidate_version = version_of(candidate)
+    candidate_evidence = _candidate_history_evidence(
+        candidate_path=candidate_path,
+        candidate=candidate,
+        models_dir=models_dir,
+        gates=gates,
+    )
     previous_gate_config = _latest_gate_config_from_history(state)
     gate_loosening_diffs = _collect_gate_loosening(previous_gate_config, gates)
 
@@ -1535,6 +1657,7 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
                 active_version=state.get("active_version"),
                 gate_loosening_diffs=gate_loosening_diffs,
                 allow_gate_loosening=False,
+                **candidate_evidence,
             ),
         )
         _persist_state_and_ops(state_path, state, args.ops_db, result)
@@ -1572,6 +1695,7 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
                 allow_gate_loosening=allow_gate_loosening,
                 gate_loosening_reason=gate_loosening_reason if allow_gate_loosening else "",
                 gate_loosening_diffs=gate_loosening_diffs,
+                **candidate_evidence,
             ),
         )
         _persist_state_and_ops(state_path, state, args.ops_db, result)
@@ -1619,6 +1743,7 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
                     allow_gate_loosening=allow_gate_loosening,
                     gate_loosening_reason=gate_loosening_reason if allow_gate_loosening else "",
                     gate_loosening_diffs=gate_loosening_diffs,
+                    **candidate_evidence,
                 ),
             )
             _persist_state_and_ops(state_path, state, args.ops_db, result)
@@ -1648,6 +1773,7 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
                 allow_gate_loosening=allow_gate_loosening,
                 gate_loosening_reason=gate_loosening_reason if allow_gate_loosening else "",
                 gate_loosening_diffs=gate_loosening_diffs,
+                **candidate_evidence,
             ),
         )
         result.update(
@@ -1687,6 +1813,7 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
                 allow_gate_loosening=allow_gate_loosening,
                 gate_loosening_reason=gate_loosening_reason if allow_gate_loosening else "",
                 gate_loosening_diffs=gate_loosening_diffs,
+                **candidate_evidence,
             ),
         )
         result["reason"] = state["last_reason"]
@@ -1732,6 +1859,7 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
                 allow_gate_loosening=allow_gate_loosening,
                 gate_loosening_reason=gate_loosening_reason if allow_gate_loosening else "",
                 gate_loosening_diffs=gate_loosening_diffs,
+                **candidate_evidence,
             ),
         )
         _persist_state_and_ops(state_path, state, args.ops_db, result)
@@ -1769,6 +1897,7 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
             allow_gate_loosening=allow_gate_loosening,
             gate_loosening_reason=gate_loosening_reason if allow_gate_loosening else "",
             gate_loosening_diffs=gate_loosening_diffs,
+            **candidate_evidence,
         ),
     )
     result.update(
