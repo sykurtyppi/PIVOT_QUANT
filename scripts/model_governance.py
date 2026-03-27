@@ -486,6 +486,22 @@ def active_manifest_version(path: Path) -> str | None:
     return version_of(load_manifest(path))
 
 
+def active_manifest_identity(path: Path) -> tuple[str | None, str | None]:
+    if not path.exists():
+        return None, None
+    manifest = load_manifest(path)
+    version = version_of(manifest)
+    sha256 = _sha256_path(path)
+    return version, sha256
+
+
+def _format_manifest_identity(identity: tuple[str | None, str | None]) -> str:
+    version, sha256 = identity
+    version_label = version or "none"
+    hash_label = sha256[:12] if sha256 else "none"
+    return f"version={version_label},sha={hash_label}"
+
+
 def empty_state() -> dict[str, Any]:
     return {
         "schema_version": STATE_SCHEMA_VERSION,
@@ -1967,15 +1983,16 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
             if token.strip()
         ],
     )
-    pre_lock_active_version = active_manifest_version(active_path)
+    pre_lock_active_identity = active_manifest_identity(active_path)
     lock_path = models_dir / ".governance.lock"
     with governance_lock(lock_path, timeout_sec=30.0):
         state = load_state(state_path)
-        post_lock_active_version = active_manifest_version(active_path)
-        if pre_lock_active_version != post_lock_active_version:
+        post_lock_active_identity = active_manifest_identity(active_path)
+        if pre_lock_active_identity != post_lock_active_identity:
             message = (
-                "governance compare-and-swap failed: active version changed while waiting for lock "
-                f"({pre_lock_active_version or 'none'} -> {post_lock_active_version or 'none'})"
+                "governance compare-and-swap failed: active manifest changed while waiting for lock "
+                f"({_format_manifest_identity(pre_lock_active_identity)} -> "
+                f"{_format_manifest_identity(post_lock_active_identity)})"
             )
             print(json.dumps({"status": "error", "message": message}))
             return 1
@@ -2008,6 +2025,7 @@ def cmd_rollback(args: argparse.Namespace) -> int:
             raise FileNotFoundError(f"Active manifest not found: {active_path}")
         active_manifest = load_manifest(active_path)
         active_version = version_of(active_manifest)
+        active_manifest_sha256_before = _sha256_path(active_path)
 
         target_version = args.to_version or state.get("previous_active_version")
         target_path: Path | None = None
@@ -2032,6 +2050,7 @@ def cmd_rollback(args: argparse.Namespace) -> int:
 
         target_manifest = load_manifest(target_path)
         target_version = version_of(target_manifest)
+        target_manifest_sha256 = _sha256_path(target_path)
         hardened_break_horizons: list[int] = []
         write_manifest = target_manifest
         if args.harden_break_fallbacks:
@@ -2060,6 +2079,14 @@ def cmd_rollback(args: argparse.Namespace) -> int:
             atomic_write_json(active_path, write_manifest)
         else:
             atomic_copy(target_path, active_path)
+        active_manifest_after = load_manifest(active_path)
+        active_manifest_sha256_after = _sha256_path(active_path)
+        active_evidence = _candidate_history_evidence(
+            candidate_path=active_path,
+            candidate=active_manifest_after,
+            models_dir=models_dir,
+            gates=None,
+        )
 
         action = "rollback"
         reason = f"rolled back from {active_version} to {target_version}"
@@ -2099,6 +2126,11 @@ def cmd_rollback(args: argparse.Namespace) -> int:
                 candidate_version=state.get("candidate_version"),
                 hardened_break_horizons=hardened_break_horizons,
                 no_trade_threshold=float(args.no_trade_threshold),
+                active_manifest_sha256_before=active_manifest_sha256_before,
+                active_manifest_sha256_after=active_manifest_sha256_after,
+                target_manifest_sha256=target_manifest_sha256,
+                target_manifest_version=target_version,
+                **active_evidence,
             ),
         )
         result = {

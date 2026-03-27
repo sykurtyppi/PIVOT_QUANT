@@ -9390,7 +9390,14 @@ class OpsSmokeTests(unittest.TestCase):
         )
         self.assertEqual(state["active_version"], "v211")
         self.assertEqual(state["last_action"], "hardened_active")
-        self.assertEqual(state["history"][-1]["hardened_break_horizons"], [5, 60])
+        history_entry = state["history"][-1]
+        self.assertEqual(history_entry["hardened_break_horizons"], [5, 60])
+        self.assertEqual(history_entry["active_manifest_sha256_before"], module._sha256_path(models_dir / "manifest_active_prev.json"))
+        self.assertEqual(history_entry["active_manifest_sha256_after"], module._sha256_path(models_dir / "manifest_active.json"))
+        self.assertEqual(history_entry["target_manifest_sha256"], module._sha256_path(models_dir / "manifest_active_prev.json"))
+        self.assertEqual(history_entry["target_manifest_version"], "v211")
+        self.assertEqual(history_entry["manifest_sha256"], module._sha256_path(models_dir / "manifest_active.json"))
+        self.assertEqual(history_entry["trained_end_ts"], 1774552516000)
 
     def test_model_governance_lock_times_out(self) -> None:
         module = load_module(
@@ -9495,7 +9502,11 @@ class OpsSmokeTests(unittest.TestCase):
         )
 
         with patch.object(module, "governance_lock", side_effect=lambda *a, **k: contextlib.nullcontext()):
-            with patch.object(module, "active_manifest_version", side_effect=["v212", "v213"]):
+            with patch.object(
+                module,
+                "active_manifest_identity",
+                side_effect=[("v212", "a" * 64), ("v213", "b" * 64)],
+            ):
                 with patch("sys.stdout", new=io.StringIO()) as stdout:
                     rc = module.cmd_evaluate(args)
 
@@ -9503,6 +9514,95 @@ class OpsSmokeTests(unittest.TestCase):
         payload = json.loads(stdout.getvalue().strip())
         self.assertEqual(payload["status"], "error")
         self.assertIn("compare-and-swap failed", payload["message"])
+        self.assertIn("version=v212", payload["message"])
+        self.assertIn("version=v213", payload["message"])
+
+    def test_model_governance_compare_and_swap_blocks_same_version_manifest_rewrite(self) -> None:
+        module = load_module(
+            "model_governance_compare_and_swap_same_version",
+            REPO_ROOT / "scripts" / "model_governance.py",
+        )
+        models_dir = self.tmp / "models"
+        metadata_dir = models_dir / "metadata_runtime"
+        models_dir.mkdir(parents=True, exist_ok=True)
+        metadata_dir.mkdir(parents=True, exist_ok=True)
+
+        (models_dir / "rf_reject_15m_active.pkl").write_text("stub", encoding="utf-8")
+        (models_dir / "rf_reject_15m_candidate.pkl").write_text("stub", encoding="utf-8")
+        manifest = {
+            "version": "v212",
+            "feature_version": "v3",
+            "models": {"reject": {"15": "rf_reject_15m_active.pkl"}},
+            "thresholds": {"reject": {"15": 0.91}},
+            "thresholds_meta": {
+                "reject": {"15": {"objective": "utility_bps", "score": 10.0, "guard_applied": False}}
+            },
+            "stats": {
+                "15": {
+                    "reject": {
+                        "sample_size": 120,
+                        "reject_count": 30,
+                        "mfe_bps_reject": 8.0,
+                        "mae_bps_reject": -10.0,
+                    }
+                }
+            },
+            "trained_end_ts": 1774544400000,
+        }
+        (models_dir / "manifest_active.json").write_text(json.dumps(manifest), encoding="utf-8")
+        candidate_manifest = dict(manifest)
+        candidate_manifest["version"] = "v213"
+        candidate_manifest["models"] = {"reject": {"15": "rf_reject_15m_candidate.pkl"}}
+        candidate_manifest["thresholds"] = {"reject": {"15": 0.92}}
+        (models_dir / "manifest_runtime_latest.json").write_text(
+            json.dumps(candidate_manifest),
+            encoding="utf-8",
+        )
+        (models_dir / "model_registry.json").write_text(
+            json.dumps({"schema_version": 1, "active_version": "v212", "history": []}),
+            encoding="utf-8",
+        )
+
+        args = module.build_parser().parse_args(
+            [
+                "--models-dir",
+                str(models_dir),
+                "--metadata-dir",
+                "metadata_runtime",
+                "--candidate-manifest",
+                "manifest_runtime_latest.json",
+                "--active-manifest",
+                "manifest_active.json",
+                "--prev-active-manifest",
+                "manifest_active_prev.json",
+                "--state-file",
+                "model_registry.json",
+                "--ops-db",
+                str(self.tmp / "ops.sqlite"),
+                "evaluate",
+                "--required-targets",
+                "reject",
+                "--required-horizons",
+                "15",
+            ]
+        )
+
+        with patch.object(module, "governance_lock", side_effect=lambda *a, **k: contextlib.nullcontext()):
+            with patch.object(
+                module,
+                "active_manifest_identity",
+                side_effect=[("v212", "a" * 64), ("v212", "b" * 64)],
+            ):
+                with patch("sys.stdout", new=io.StringIO()) as stdout:
+                    rc = module.cmd_evaluate(args)
+
+        self.assertEqual(rc, 1)
+        payload = json.loads(stdout.getvalue().strip())
+        self.assertEqual(payload["status"], "error")
+        self.assertIn("compare-and-swap failed", payload["message"])
+        self.assertIn("version=v212", payload["message"])
+        self.assertIn("sha=aaaaaaaaaaaa", payload["message"])
+        self.assertIn("sha=bbbbbbbbbbbb", payload["message"])
 
     def test_model_governance_history_records_gate_config_on_rejection(self) -> None:
         module = load_module(
