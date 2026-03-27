@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import importlib.util
 import io
@@ -9368,6 +9369,118 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(state["active_version"], "v211")
         self.assertEqual(state["last_action"], "hardened_active")
         self.assertEqual(state["history"][-1]["hardened_break_horizons"], [5, 60])
+
+    def test_model_governance_lock_times_out(self) -> None:
+        module = load_module(
+            "model_governance_lock_timeout",
+            REPO_ROOT / "scripts" / "model_governance.py",
+        )
+        lock_path = self.tmp / ".governance.lock"
+        with patch.object(module.fcntl, "flock", side_effect=BlockingIOError):
+            with self.assertRaises(TimeoutError):
+                with module.governance_lock(lock_path, timeout_sec=0.1):
+                    pass
+
+    def test_model_governance_compare_and_swap_blocks_active_version_changes(self) -> None:
+        module = load_module(
+            "model_governance_compare_and_swap",
+            REPO_ROOT / "scripts" / "model_governance.py",
+        )
+        models_dir = self.tmp / "models"
+        metadata_dir = models_dir / "metadata_runtime"
+        models_dir.mkdir(parents=True, exist_ok=True)
+        metadata_dir.mkdir(parents=True, exist_ok=True)
+
+        (models_dir / "rf_reject_15m_active.pkl").write_text("stub", encoding="utf-8")
+        (models_dir / "rf_reject_15m_candidate.pkl").write_text("stub", encoding="utf-8")
+        (models_dir / "manifest_active.json").write_text(
+            json.dumps(
+                {
+                    "version": "v212",
+                    "feature_version": "v3",
+                    "models": {"reject": {"15": "rf_reject_15m_active.pkl"}},
+                    "thresholds": {"reject": {"15": 0.91}},
+                    "thresholds_meta": {
+                        "reject": {"15": {"objective": "utility_bps", "score": 10.0, "guard_applied": False}}
+                    },
+                    "stats": {
+                        "15": {
+                            "reject": {
+                                "sample_size": 120,
+                                "reject_count": 30,
+                                "mfe_bps_reject": 8.0,
+                                "mae_bps_reject": -10.0,
+                            }
+                        }
+                    },
+                    "trained_end_ts": 1774544400000,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (models_dir / "manifest_runtime_latest.json").write_text(
+            json.dumps(
+                {
+                    "version": "v213",
+                    "feature_version": "v3",
+                    "models": {"reject": {"15": "rf_reject_15m_candidate.pkl"}},
+                    "thresholds": {"reject": {"15": 0.92}},
+                    "thresholds_meta": {
+                        "reject": {"15": {"objective": "utility_bps", "score": 11.0, "guard_applied": False}}
+                    },
+                    "stats": {
+                        "15": {
+                            "reject": {
+                                "sample_size": 130,
+                                "reject_count": 33,
+                                "mfe_bps_reject": 8.4,
+                                "mae_bps_reject": -9.7,
+                            }
+                        }
+                    },
+                    "trained_end_ts": 1774552516000,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (models_dir / "model_registry.json").write_text(
+            json.dumps({"schema_version": 1, "active_version": "v212", "history": []}),
+            encoding="utf-8",
+        )
+
+        args = module.build_parser().parse_args(
+            [
+                "--models-dir",
+                str(models_dir),
+                "--metadata-dir",
+                "metadata_runtime",
+                "--candidate-manifest",
+                "manifest_runtime_latest.json",
+                "--active-manifest",
+                "manifest_active.json",
+                "--prev-active-manifest",
+                "manifest_active_prev.json",
+                "--state-file",
+                "model_registry.json",
+                "--ops-db",
+                str(self.tmp / "ops.sqlite"),
+                "evaluate",
+                "--required-targets",
+                "reject",
+                "--required-horizons",
+                "15",
+            ]
+        )
+
+        with patch.object(module, "governance_lock", side_effect=lambda *a, **k: contextlib.nullcontext()):
+            with patch.object(module, "active_manifest_version", side_effect=["v212", "v213"]):
+                with patch("sys.stdout", new=io.StringIO()) as stdout:
+                    rc = module.cmd_evaluate(args)
+
+        self.assertEqual(rc, 1)
+        payload = json.loads(stdout.getvalue().strip())
+        self.assertEqual(payload["status"], "error")
+        self.assertIn("compare-and-swap failed", payload["message"])
 
     def test_model_governance_history_records_gate_config_on_rejection(self) -> None:
         module = load_module(

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import fcntl
 import hashlib
 import json
 import os
@@ -21,6 +22,7 @@ import shutil
 import sqlite3
 import sys
 import time
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -164,6 +166,39 @@ def now_ms() -> int:
 
 def _tmp_path(path: Path) -> Path:
     return path.with_name(f".{path.name}.tmp-{os.getpid()}-{now_ms()}")
+
+
+@contextmanager
+def governance_lock(lock_path: Path, timeout_sec: float = 30.0):
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + max(0.1, float(timeout_sec))
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        while True:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                handle.seek(0)
+                handle.truncate()
+                handle.write(f"{os.getpid()}\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"unable to acquire governance lock within {int(timeout_sec)}s ({lock_path})"
+                    )
+                time.sleep(0.1)
+        try:
+            yield
+        finally:
+            try:
+                handle.seek(0)
+                handle.truncate()
+                handle.flush()
+                os.fsync(handle.fileno())
+            except OSError:
+                pass
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -443,6 +478,12 @@ def load_manifest(path: Path) -> dict[str, Any]:
 def version_of(manifest: dict[str, Any]) -> str:
     value = manifest.get("version")
     return str(value) if value is not None else "unknown"
+
+
+def active_manifest_version(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    return version_of(load_manifest(path))
 
 
 def empty_state() -> dict[str, Any]:
@@ -1463,123 +1504,20 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_evaluate(args: argparse.Namespace) -> int:
-    models_dir = Path(args.models_dir)
-    metadata_dir = _resolve_metadata_dir(models_dir, args.metadata_dir)
-    candidate_path = resolve_candidate_manifest_path(models_dir, args.candidate_manifest)
-    active_path = models_dir / args.active_manifest
-    prev_path = models_dir / args.prev_active_manifest
-    state_path = models_dir / args.state_file
-
-    allow_gate_loosening = bool(getattr(args, "allow_gate_loosening", False))
-    gate_loosening_reason = str(getattr(args, "gate_loosening_reason", "") or "").strip()
-    if allow_gate_loosening and not gate_loosening_reason:
-        raise ValueError("--gate-loosening-reason is required with --allow-gate-loosening")
-
-    gates = GateConfig(
-        required_targets=parse_csv_list(args.required_targets),
-        required_horizons=parse_horizons(args.required_horizons),
-        min_trained_end_delta_ms=args.min_trained_end_delta_ms,
-        max_mfe_regression_bps=args.max_mfe_regression_bps,
-        max_mae_worsening_bps=args.max_mae_worsening_bps,
-        min_total_samples=args.min_total_samples,
-        min_positive_samples_reject=max(
-            int(args.min_positive_samples), int(args.min_positive_samples_reject)
-        ),
-        min_positive_samples_break=max(
-            int(args.min_positive_samples), int(args.min_positive_samples_break)
-        ),
-        allow_feature_version_change=args.allow_feature_version_change,
-        allow_bootstrap_metric_skips=bool(
-            getattr(args, "allow_bootstrap_metric_skips", False)
-        ),
-        regime_aware=bool(args.regime_aware),
-        regime_buckets=parse_csv_list(args.regime_buckets) or [
-            "compression",
-            "expansion",
-            "neutral",
-        ],
-        regime_min_total_samples=int(args.regime_min_total_samples),
-        regime_min_positive_samples_reject=max(
-            int(args.regime_min_positive_samples),
-            int(args.regime_min_positive_samples_reject),
-        ),
-        regime_min_positive_samples_break=max(
-            int(args.regime_min_positive_samples),
-            int(args.regime_min_positive_samples_break),
-        ),
-        regime_min_compared_buckets=max(1, int(args.regime_min_compared_buckets)),
-        enforce_threshold_utility_guard=bool(args.enforce_threshold_utility_guard),
-        threshold_utility_targets=parse_csv_list(args.threshold_utility_targets) or ["reject"],
-        threshold_utility_min_score=float(args.threshold_utility_min_score),
-        min_corr_pos=float(getattr(args, "min_corr_pos", DEFAULT_MIN_CORR_POS)),
-        min_tune_signals=max(0, int(getattr(args, "min_tune_signals", DEFAULT_MIN_TUNE_SIGNALS))),
-        enforce_live_emission_gate=bool(
-            getattr(args, "enforce_live_emission_gate", DEFAULT_ENFORCE_LIVE_EMISSION_GATE)
-        ),
-        emission_lookback_days=max(
-            0, int(getattr(args, "emission_lookback_days", DEFAULT_EMISSION_LOOKBACK_DAYS))
-        ),
-        emission_max_pred_lag_hours=max(
-            0.0,
-            float(
-                getattr(
-                    args,
-                    "emission_max_pred_lag_hours",
-                    DEFAULT_EMISSION_MAX_PRED_LAG_HOURS,
-                )
-            ),
-        ),
-        emission_prediction_basis=(
-            str(
-                getattr(
-                    args,
-                    "emission_prediction_basis",
-                    DEFAULT_EMISSION_PREDICTION_BASIS,
-                )
-            ).strip().lower()
-            or "first"
-        ),
-        emission_source=(
-            str(getattr(args, "emission_source", DEFAULT_EMISSION_SOURCE)).strip().lower()
-            or "preview"
-        ),
-        emission_min_rows=max(
-            0, int(getattr(args, "emission_min_rows", DEFAULT_EMISSION_MIN_ROWS))
-        ),
-        emission_min_coverage=max(
-            0.0,
-            min(
-                1.0,
-                float(getattr(args, "emission_min_coverage", DEFAULT_EMISSION_MIN_COVERAGE)),
-            ),
-        ),
-        emission_min_signals=max(
-            0, int(getattr(args, "emission_min_signals", DEFAULT_EMISSION_MIN_SIGNALS))
-        ),
-        emission_max_abstain_rate=max(
-            0.0,
-            min(
-                1.0,
-                float(
-                    getattr(
-                        args,
-                        "emission_max_abstain_rate",
-                        DEFAULT_EMISSION_MAX_ABSTAIN_RATE,
-                    )
-                ),
-            ),
-        ),
-        emission_symbols=[
-            token.strip().upper()
-            for token in parse_csv_list(
-                str(getattr(args, "emission_symbols", DEFAULT_EMISSION_SYMBOLS))
-            )
-            if token.strip()
-        ],
-    )
-    state = load_state(state_path)
-
+def _cmd_evaluate_locked(
+    *,
+    args: argparse.Namespace,
+    models_dir: Path,
+    metadata_dir: Path,
+    candidate_path: Path,
+    active_path: Path,
+    prev_path: Path,
+    state_path: Path,
+    state: dict[str, Any],
+    gates: GateConfig,
+    allow_gate_loosening: bool,
+    gate_loosening_reason: str,
+) -> int:
     candidate = load_manifest(candidate_path)
     candidate_version = version_of(candidate)
     candidate_evidence = _candidate_history_evidence(
@@ -1710,7 +1648,6 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
         )
     result["emission_gate"] = emission_gate_summary
 
-    # Bootstrap: first accepted candidate becomes active.
     if not active_path.exists():
         if emission_gate_failures and not args.force_promote:
             reason = "candidate rejected by governance gates"
@@ -1915,123 +1852,267 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_evaluate(args: argparse.Namespace) -> int:
+    models_dir = Path(args.models_dir)
+    metadata_dir = _resolve_metadata_dir(models_dir, args.metadata_dir)
+    candidate_path = resolve_candidate_manifest_path(models_dir, args.candidate_manifest)
+    active_path = models_dir / args.active_manifest
+    prev_path = models_dir / args.prev_active_manifest
+    state_path = models_dir / args.state_file
+
+    allow_gate_loosening = bool(getattr(args, "allow_gate_loosening", False))
+    gate_loosening_reason = str(getattr(args, "gate_loosening_reason", "") or "").strip()
+    if allow_gate_loosening and not gate_loosening_reason:
+        raise ValueError("--gate-loosening-reason is required with --allow-gate-loosening")
+
+    gates = GateConfig(
+        required_targets=parse_csv_list(args.required_targets),
+        required_horizons=parse_horizons(args.required_horizons),
+        min_trained_end_delta_ms=args.min_trained_end_delta_ms,
+        max_mfe_regression_bps=args.max_mfe_regression_bps,
+        max_mae_worsening_bps=args.max_mae_worsening_bps,
+        min_total_samples=args.min_total_samples,
+        min_positive_samples_reject=max(
+            int(args.min_positive_samples), int(args.min_positive_samples_reject)
+        ),
+        min_positive_samples_break=max(
+            int(args.min_positive_samples), int(args.min_positive_samples_break)
+        ),
+        allow_feature_version_change=args.allow_feature_version_change,
+        allow_bootstrap_metric_skips=bool(
+            getattr(args, "allow_bootstrap_metric_skips", False)
+        ),
+        regime_aware=bool(args.regime_aware),
+        regime_buckets=parse_csv_list(args.regime_buckets) or [
+            "compression",
+            "expansion",
+            "neutral",
+        ],
+        regime_min_total_samples=int(args.regime_min_total_samples),
+        regime_min_positive_samples_reject=max(
+            int(args.regime_min_positive_samples),
+            int(args.regime_min_positive_samples_reject),
+        ),
+        regime_min_positive_samples_break=max(
+            int(args.regime_min_positive_samples),
+            int(args.regime_min_positive_samples_break),
+        ),
+        regime_min_compared_buckets=max(1, int(args.regime_min_compared_buckets)),
+        enforce_threshold_utility_guard=bool(args.enforce_threshold_utility_guard),
+        threshold_utility_targets=parse_csv_list(args.threshold_utility_targets) or ["reject"],
+        threshold_utility_min_score=float(args.threshold_utility_min_score),
+        min_corr_pos=float(getattr(args, "min_corr_pos", DEFAULT_MIN_CORR_POS)),
+        min_tune_signals=max(0, int(getattr(args, "min_tune_signals", DEFAULT_MIN_TUNE_SIGNALS))),
+        enforce_live_emission_gate=bool(
+            getattr(args, "enforce_live_emission_gate", DEFAULT_ENFORCE_LIVE_EMISSION_GATE)
+        ),
+        emission_lookback_days=max(
+            0, int(getattr(args, "emission_lookback_days", DEFAULT_EMISSION_LOOKBACK_DAYS))
+        ),
+        emission_max_pred_lag_hours=max(
+            0.0,
+            float(
+                getattr(
+                    args,
+                    "emission_max_pred_lag_hours",
+                    DEFAULT_EMISSION_MAX_PRED_LAG_HOURS,
+                )
+            ),
+        ),
+        emission_prediction_basis=(
+            str(
+                getattr(
+                    args,
+                    "emission_prediction_basis",
+                    DEFAULT_EMISSION_PREDICTION_BASIS,
+                )
+            ).strip().lower()
+            or "first"
+        ),
+        emission_source=(
+            str(getattr(args, "emission_source", DEFAULT_EMISSION_SOURCE)).strip().lower()
+            or "preview"
+        ),
+        emission_min_rows=max(
+            0, int(getattr(args, "emission_min_rows", DEFAULT_EMISSION_MIN_ROWS))
+        ),
+        emission_min_coverage=max(
+            0.0,
+            min(
+                1.0,
+                float(getattr(args, "emission_min_coverage", DEFAULT_EMISSION_MIN_COVERAGE)),
+            ),
+        ),
+        emission_min_signals=max(
+            0, int(getattr(args, "emission_min_signals", DEFAULT_EMISSION_MIN_SIGNALS))
+        ),
+        emission_max_abstain_rate=max(
+            0.0,
+            min(
+                1.0,
+                float(
+                    getattr(
+                        args,
+                        "emission_max_abstain_rate",
+                        DEFAULT_EMISSION_MAX_ABSTAIN_RATE,
+                    )
+                ),
+            ),
+        ),
+        emission_symbols=[
+            token.strip().upper()
+            for token in parse_csv_list(
+                str(getattr(args, "emission_symbols", DEFAULT_EMISSION_SYMBOLS))
+            )
+            if token.strip()
+        ],
+    )
+    pre_lock_active_version = active_manifest_version(active_path)
+    lock_path = models_dir / ".governance.lock"
+    with governance_lock(lock_path, timeout_sec=30.0):
+        state = load_state(state_path)
+        post_lock_active_version = active_manifest_version(active_path)
+        if pre_lock_active_version != post_lock_active_version:
+            message = (
+                "governance compare-and-swap failed: active version changed while waiting for lock "
+                f"({pre_lock_active_version or 'none'} -> {post_lock_active_version or 'none'})"
+            )
+            print(json.dumps({"status": "error", "message": message}))
+            return 1
+        return _cmd_evaluate_locked(
+            args=args,
+            models_dir=models_dir,
+            metadata_dir=metadata_dir,
+            candidate_path=candidate_path,
+            active_path=active_path,
+            prev_path=prev_path,
+            state_path=state_path,
+            state=state,
+            gates=gates,
+            allow_gate_loosening=allow_gate_loosening,
+            gate_loosening_reason=gate_loosening_reason,
+        )
+
+
 def cmd_rollback(args: argparse.Namespace) -> int:
     models_dir = Path(args.models_dir)
     metadata_dir = _resolve_metadata_dir(models_dir, args.metadata_dir)
     active_path = models_dir / args.active_manifest
     prev_path = models_dir / args.prev_active_manifest
     state_path = models_dir / args.state_file
-    state = load_state(state_path)
+    lock_path = models_dir / ".governance.lock"
+    with governance_lock(lock_path, timeout_sec=30.0):
+        state = load_state(state_path)
 
-    if not active_path.exists():
-        raise FileNotFoundError(f"Active manifest not found: {active_path}")
-    active_manifest = load_manifest(active_path)
-    active_version = version_of(active_manifest)
+        if not active_path.exists():
+            raise FileNotFoundError(f"Active manifest not found: {active_path}")
+        active_manifest = load_manifest(active_path)
+        active_version = version_of(active_manifest)
 
-    target_version = args.to_version or state.get("previous_active_version")
-    target_path: Path | None = None
-    if target_version:
-        for explicit in _metadata_manifest_candidates(models_dir, metadata_dir, str(target_version)):
-            if explicit.exists():
-                target_path = explicit
-                break
-    if (
-        target_path is None
-        and args.harden_break_fallbacks
-        and target_version is not None
-        and str(target_version) == active_version
-    ):
-        target_path = active_path
-    if target_path is None and prev_path.exists():
-        target_path = prev_path
-    if target_path is None:
-        raise FileNotFoundError(
-            "No rollback candidate found. Provide --to-version or ensure manifest_active_prev.json exists."
+        target_version = args.to_version or state.get("previous_active_version")
+        target_path: Path | None = None
+        if target_version:
+            for explicit in _metadata_manifest_candidates(models_dir, metadata_dir, str(target_version)):
+                if explicit.exists():
+                    target_path = explicit
+                    break
+        if (
+            target_path is None
+            and args.harden_break_fallbacks
+            and target_version is not None
+            and str(target_version) == active_version
+        ):
+            target_path = active_path
+        if target_path is None and prev_path.exists():
+            target_path = prev_path
+        if target_path is None:
+            raise FileNotFoundError(
+                "No rollback candidate found. Provide --to-version or ensure manifest_active_prev.json exists."
+            )
+
+        target_manifest = load_manifest(target_path)
+        target_version = version_of(target_manifest)
+        hardened_break_horizons: list[int] = []
+        write_manifest = target_manifest
+        if args.harden_break_fallbacks:
+            source_manifest = target_manifest
+            if target_version == active_version:
+                source_manifest = active_manifest
+            write_manifest, hardened_break_horizons = harden_break_fallback_thresholds(
+                source_manifest,
+                no_trade_threshold=args.no_trade_threshold,
+                applied_at_ms=now_ms(),
+            )
+
+        if target_version == active_version and not hardened_break_horizons:
+            out = {
+                "status": "ok",
+                "action": "no_change",
+                "reason": "rollback target is already active",
+                "active_version": active_version,
+                "target_version": target_version,
+            }
+            print(json.dumps(out))
+            return 0
+
+        atomic_copy(active_path, prev_path)
+        if hardened_break_horizons:
+            atomic_write_json(active_path, write_manifest)
+        else:
+            atomic_copy(target_path, active_path)
+
+        action = "rollback"
+        reason = f"rolled back from {active_version} to {target_version}"
+        if target_version == active_version and hardened_break_horizons:
+            action = "hardened_active"
+            reason = (
+                f"hardened active {active_version} break fallback horizons "
+                f"({_format_horizon_labels(hardened_break_horizons)})"
+            )
+        elif hardened_break_horizons:
+            reason += (
+                f"; hardened break fallback horizons "
+                f"({_format_horizon_labels(hardened_break_horizons)})"
+            )
+
+        state.update(
+            {
+                "previous_active_version": (
+                    active_version
+                    if target_version != active_version
+                    else state.get("previous_active_version")
+                ),
+                "active_version": target_version,
+                "last_action": action,
+                "last_reason": reason,
+                "last_checked_at_ms": now_ms(),
+                "last_promoted_at_ms": now_ms(),
+            }
         )
-
-    target_manifest = load_manifest(target_path)
-    target_version = version_of(target_manifest)
-    hardened_break_horizons: list[int] = []
-    write_manifest = target_manifest
-    if args.harden_break_fallbacks:
-        source_manifest = target_manifest
-        if target_version == active_version:
-            source_manifest = active_manifest
-        write_manifest, hardened_break_horizons = harden_break_fallback_thresholds(
-            source_manifest,
-            no_trade_threshold=args.no_trade_threshold,
-            applied_at_ms=now_ms(),
-        )
-
-    if target_version == active_version and not hardened_break_horizons:
-        out = {
-            "status": "ok",
-            "action": "no_change",
-            "reason": "rollback target is already active",
-            "active_version": active_version,
-            "target_version": target_version,
-        }
-        print(json.dumps(out))
-        return 0
-
-    atomic_copy(active_path, prev_path)
-    if hardened_break_horizons:
-        atomic_write_json(active_path, write_manifest)
-    else:
-        atomic_copy(target_path, active_path)
-
-    action = "rollback"
-    reason = f"rolled back from {active_version} to {target_version}"
-    if target_version == active_version and hardened_break_horizons:
-        action = "hardened_active"
-        reason = (
-            f"hardened active {active_version} break fallback horizons "
-            f"({_format_horizon_labels(hardened_break_horizons)})"
-        )
-    elif hardened_break_horizons:
-        reason += (
-            f"; hardened break fallback horizons "
-            f"({_format_horizon_labels(hardened_break_horizons)})"
-        )
-
-    state.update(
-        {
-            "previous_active_version": (
-                active_version
-                if target_version != active_version
-                else state.get("previous_active_version")
+        push_history(
+            state,
+            _history_entry(
+                action=action,
+                reason=state["last_reason"],
+                active_version=target_version,
+                previous_active_version=active_version,
+                candidate_version=state.get("candidate_version"),
+                hardened_break_horizons=hardened_break_horizons,
+                no_trade_threshold=float(args.no_trade_threshold),
             ),
+        )
+        result = {
+            "status": "ok",
+            "action": action,
             "active_version": target_version,
-            "last_action": action,
-            "last_reason": reason,
-            "last_checked_at_ms": now_ms(),
-            "last_promoted_at_ms": now_ms(),
+            "candidate_version": state.get("candidate_version"),
+            "reason": state["last_reason"],
+            "hardened_break_horizons": hardened_break_horizons,
+            "no_trade_threshold": float(args.no_trade_threshold),
         }
-    )
-    push_history(
-        state,
-        _history_entry(
-            action=action,
-            reason=state["last_reason"],
-            active_version=target_version,
-            previous_active_version=active_version,
-            candidate_version=state.get("candidate_version"),
-            hardened_break_horizons=hardened_break_horizons,
-            no_trade_threshold=float(args.no_trade_threshold),
-        ),
-    )
-    result = {
-        "status": "ok",
-        "action": action,
-        "active_version": target_version,
-        "candidate_version": state.get("candidate_version"),
-        "reason": state["last_reason"],
-        "hardened_break_horizons": hardened_break_horizons,
-        "no_trade_threshold": float(args.no_trade_threshold),
-    }
-    _persist_state_and_ops(state_path, state, args.ops_db, result)
-    print(json.dumps(result))
-    return 0
+        _persist_state_and_ops(state_path, state, args.ops_db, result)
+        print(json.dumps(result))
+        return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
