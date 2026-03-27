@@ -87,6 +87,8 @@ DEFAULT_THRESHOLD_UTILITY_TARGETS = os.getenv(
 DEFAULT_THRESHOLD_UTILITY_MIN_SCORE = float(
     os.getenv("MODEL_GOV_THRESHOLD_UTILITY_MIN_SCORE", "0.0")
 )
+DEFAULT_MIN_CORR_POS = float(os.getenv("MODEL_GOV_MIN_CORR_POS", "0.0"))
+DEFAULT_MIN_TUNE_SIGNALS = int(os.getenv("MODEL_GOV_MIN_TUNE_SIGNALS", "50"))
 DEFAULT_ENFORCE_LIVE_EMISSION_GATE = os.getenv(
     "MODEL_GOV_ENFORCE_LIVE_EMISSION_GATE", "false"
 ).strip().lower() in {"1", "true", "yes", "y", "on"}
@@ -140,6 +142,8 @@ class GateConfig:
     enforce_threshold_utility_guard: bool = False
     threshold_utility_targets: list[str] = field(default_factory=lambda: ["reject"])
     threshold_utility_min_score: float = 0.0
+    min_corr_pos: float = 0.0
+    min_tune_signals: int = 50
     enforce_live_emission_gate: bool = False
     emission_lookback_days: int = 5
     emission_max_pred_lag_hours: float = 6.0
@@ -1056,6 +1060,33 @@ def evaluate_gates(
                         f"min_score {float(gates.threshold_utility_min_score):.3f}"
                     )
 
+    candidate_thresholds_meta = candidate.get("thresholds_meta", {})
+    if not isinstance(candidate_thresholds_meta, dict):
+        candidate_thresholds_meta = {}
+    for horizon in gates.required_horizons:
+        horizon_key = str(horizon)
+        for target in gates.threshold_utility_targets:
+            target_meta_map = candidate_thresholds_meta.get(target, {})
+            if not isinstance(target_meta_map, dict):
+                continue
+            target_meta = target_meta_map.get(horizon_key, {})
+            if not isinstance(target_meta, dict):
+                continue
+
+            corr_pos = to_float(target_meta.get("tune_prob_utility_corr_pos"))
+            if corr_pos is not None and corr_pos < float(gates.min_corr_pos):
+                failures.append(
+                    f"{target}:{horizon}m probability-utility correlation negative ({corr_pos:.3f}) "
+                    "— model confidence anti-aligned with profitability"
+                )
+
+            signals = to_int(target_meta.get("signals"))
+            if signals is not None and signals < int(gates.min_tune_signals):
+                failures.append(
+                    f"{target}:{horizon}m insufficient tune signals ({signals} < "
+                    f"{int(gates.min_tune_signals)}) — statistically unreliable threshold"
+                )
+
     active_stats = active.get("stats", {})
     candidate_stats = candidate.get("stats", {})
     for horizon in gates.required_horizons:
@@ -1312,6 +1343,8 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
         enforce_threshold_utility_guard=bool(args.enforce_threshold_utility_guard),
         threshold_utility_targets=parse_csv_list(args.threshold_utility_targets) or ["reject"],
         threshold_utility_min_score=float(args.threshold_utility_min_score),
+        min_corr_pos=float(getattr(args, "min_corr_pos", DEFAULT_MIN_CORR_POS)),
+        min_tune_signals=max(0, int(getattr(args, "min_tune_signals", DEFAULT_MIN_TUNE_SIGNALS))),
         enforce_live_emission_gate=bool(
             getattr(args, "enforce_live_emission_gate", DEFAULT_ENFORCE_LIVE_EMISSION_GATE)
         ),
@@ -1949,6 +1982,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=DEFAULT_THRESHOLD_UTILITY_MIN_SCORE,
         help="Minimum acceptable threshold utility score for configured targets/horizons.",
+    )
+    eval_cmd.add_argument(
+        "--min-corr-pos",
+        type=float,
+        default=DEFAULT_MIN_CORR_POS,
+        help="Minimum acceptable tune probability-utility correlation on required horizons.",
+    )
+    eval_cmd.add_argument(
+        "--min-tune-signals",
+        type=int,
+        default=DEFAULT_MIN_TUNE_SIGNALS,
+        help="Minimum tune-slice signal count required for required horizons.",
     )
     eval_cmd.add_argument(
         "--enforce-live-emission-gate",

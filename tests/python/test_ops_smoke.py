@@ -8428,6 +8428,146 @@ class OpsSmokeTests(unittest.TestCase):
             any("reject:5m threshold utility score" in item for item in failures)
         )
 
+    def test_model_governance_blocks_negative_probability_utility_correlation(self) -> None:
+        module = load_module(
+            "model_governance_negative_corr_pos",
+            REPO_ROOT / "scripts" / "model_governance.py",
+        )
+        gates = module.GateConfig(
+            required_targets=["reject"],
+            required_horizons=[15],
+            min_trained_end_delta_ms=0,
+            max_mfe_regression_bps=1.5,
+            max_mae_worsening_bps=2.0,
+            min_total_samples=0,
+            min_positive_samples_reject=0,
+            min_positive_samples_break=0,
+            allow_feature_version_change=False,
+            enforce_threshold_utility_guard=True,
+            threshold_utility_targets=["reject"],
+            threshold_utility_min_score=0.0,
+            min_corr_pos=0.0,
+            min_tune_signals=50,
+        )
+        active = {
+            "feature_version": "v3",
+            "trained_end_ts": 1000,
+            "stats": {
+                "15": {
+                    "reject": {
+                        "sample_size": 200,
+                        "reject_count": 80,
+                        "mfe_bps_reject": 8.0,
+                        "mae_bps_reject": -12.0,
+                    }
+                }
+            },
+            "thresholds": {"reject": {"15": 0.5}},
+            "thresholds_meta": {
+                "reject": {"15": {"objective": "utility_bps", "score": 10.0, "guard_applied": False}}
+            },
+        }
+        candidate = {
+            "feature_version": "v3",
+            "trained_end_ts": 2000,
+            "stats": {
+                "15": {
+                    "reject": {
+                        "sample_size": 210,
+                        "reject_count": 84,
+                        "mfe_bps_reject": 8.2,
+                        "mae_bps_reject": -11.5,
+                    }
+                }
+            },
+            "thresholds": {"reject": {"15": 0.62}},
+            "thresholds_meta": {
+                "reject": {
+                    "15": {
+                        "objective": "utility_bps",
+                        "score": 25.0,
+                        "guard_applied": False,
+                        "signals": 60,
+                        "tune_prob_utility_corr_pos": -0.206,
+                    }
+                }
+            },
+        }
+        failures, _ = module.evaluate_gates(active, candidate, gates)
+        self.assertTrue(
+            any("reject:15m probability-utility correlation negative (-0.206)" in item for item in failures)
+        )
+
+    def test_model_governance_blocks_insufficient_tune_signals(self) -> None:
+        module = load_module(
+            "model_governance_min_tune_signals",
+            REPO_ROOT / "scripts" / "model_governance.py",
+        )
+        gates = module.GateConfig(
+            required_targets=["reject"],
+            required_horizons=[15],
+            min_trained_end_delta_ms=0,
+            max_mfe_regression_bps=1.5,
+            max_mae_worsening_bps=2.0,
+            min_total_samples=0,
+            min_positive_samples_reject=0,
+            min_positive_samples_break=0,
+            allow_feature_version_change=False,
+            enforce_threshold_utility_guard=True,
+            threshold_utility_targets=["reject"],
+            threshold_utility_min_score=0.0,
+            min_corr_pos=0.0,
+            min_tune_signals=50,
+        )
+        active = {
+            "feature_version": "v3",
+            "trained_end_ts": 1000,
+            "stats": {
+                "15": {
+                    "reject": {
+                        "sample_size": 200,
+                        "reject_count": 80,
+                        "mfe_bps_reject": 8.0,
+                        "mae_bps_reject": -12.0,
+                    }
+                }
+            },
+            "thresholds": {"reject": {"15": 0.5}},
+            "thresholds_meta": {
+                "reject": {"15": {"objective": "utility_bps", "score": 10.0, "guard_applied": False}}
+            },
+        }
+        candidate = {
+            "feature_version": "v3",
+            "trained_end_ts": 2000,
+            "stats": {
+                "15": {
+                    "reject": {
+                        "sample_size": 210,
+                        "reject_count": 84,
+                        "mfe_bps_reject": 8.2,
+                        "mae_bps_reject": -11.5,
+                    }
+                }
+            },
+            "thresholds": {"reject": {"15": 0.62}},
+            "thresholds_meta": {
+                "reject": {
+                    "15": {
+                        "objective": "utility_bps",
+                        "score": 25.0,
+                        "guard_applied": False,
+                        "signals": 14,
+                        "tune_prob_utility_corr_pos": 0.05,
+                    }
+                }
+            },
+        }
+        failures, _ = module.evaluate_gates(active, candidate, gates)
+        self.assertTrue(
+            any("reject:15m insufficient tune signals (14 < 50)" in item for item in failures)
+        )
+
     def test_model_governance_regime_aware_waives_aggregate_mfe_regression(self) -> None:
         module = load_module("model_governance_regime_waive", REPO_ROOT / "scripts" / "model_governance.py")
         gates = module.GateConfig(
