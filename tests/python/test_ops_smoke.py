@@ -8271,7 +8271,7 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertAlmostEqual(float(diagnostics.get("selected_fp_utility_sum") or 0.0), -8.0, places=9)
         self.assertAlmostEqual(float(diagnostics.get("selected_utility_sum") or 0.0), -6.0, places=9)
 
-    def test_model_governance_skips_regression_gates_when_support_is_low(self) -> None:
+    def test_model_governance_skips_active_support_check_only_with_bootstrap_waiver(self) -> None:
         module = load_module("model_governance", REPO_ROOT / "scripts" / "model_governance.py")
         gates = module.GateConfig(
             required_targets=["break"],
@@ -8283,6 +8283,7 @@ class OpsSmokeTests(unittest.TestCase):
             min_positive_samples_reject=0,
             min_positive_samples_break=25,
             allow_feature_version_change=False,
+            allow_bootstrap_metric_skips=True,
         )
         active = {
             "feature_version": "v3",
@@ -8304,10 +8305,10 @@ class OpsSmokeTests(unittest.TestCase):
             "stats": {
                 "5": {
                     "break": {
-                        "sample_size": 130,
-                        "break_count": 11,
-                        "mfe_bps_break": 6.0,
-                        "mae_bps_break": -35.0,
+                        "sample_size": 230,
+                        "break_count": 31,
+                        "mfe_bps_break": 8.5,
+                        "mae_bps_break": -24.5,
                     }
                 }
             },
@@ -8316,8 +8317,8 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(failures, [])
         self.assertTrue(any("break:5m skipped regression gates" in item for item in skips))
 
-    def test_model_governance_reports_missing_metric_skip(self) -> None:
-        module = load_module("model_governance_missing_metric_skip", REPO_ROOT / "scripts" / "model_governance.py")
+    def test_model_governance_missing_candidate_metric_fails_closed(self) -> None:
+        module = load_module("model_governance_missing_metric_fail_closed", REPO_ROOT / "scripts" / "model_governance.py")
         gates = module.GateConfig(
             required_targets=["break"],
             required_horizons=[5],
@@ -8332,16 +8333,130 @@ class OpsSmokeTests(unittest.TestCase):
         active = {
             "feature_version": "v3",
             "trained_end_ts": 1000,
+            "stats": {
+                "5": {
+                    "break": {
+                        "sample_size": 200,
+                        "break_count": 60,
+                        "mfe_bps_break": 8.0,
+                        "mae_bps_break": -10.0,
+                    }
+                }
+            },
+        }
+        candidate = {
+            "feature_version": "v3",
+            "trained_end_ts": 2000,
+            "stats": {
+                "5": {
+                    "break": {
+                        "sample_size": 220,
+                        "break_count": 62,
+                        "mae_bps_break": -9.0,
+                    }
+                }
+            },
+        }
+        failures, skips = module.evaluate_gates(active, candidate, gates)
+        self.assertTrue(
+            any(
+                item == "break:5m missing required candidate metric mfe_bps_break — fail closed"
+                for item in failures
+            )
+        )
+        self.assertEqual(skips, [])
+
+    def test_model_governance_missing_candidate_support_fails_closed(self) -> None:
+        module = load_module("model_governance_missing_support_fail_closed", REPO_ROOT / "scripts" / "model_governance.py")
+        gates = module.GateConfig(
+            required_targets=["break"],
+            required_horizons=[5],
+            min_trained_end_delta_ms=0,
+            max_mfe_regression_bps=1.5,
+            max_mae_worsening_bps=2.0,
+            min_total_samples=200,
+            min_positive_samples_reject=0,
+            min_positive_samples_break=25,
+            allow_feature_version_change=False,
+        )
+        active = {
+            "feature_version": "v3",
+            "trained_end_ts": 1000,
+            "stats": {
+                "5": {
+                    "break": {
+                        "sample_size": 220,
+                        "break_count": 30,
+                        "mfe_bps_break": 8.0,
+                        "mae_bps_break": -25.0,
+                    }
+                }
+            },
+        }
+        candidate = {
+            "feature_version": "v3",
+            "trained_end_ts": 2000,
+            "stats": {
+                "5": {
+                    "break": {
+                        "sample_size": 130,
+                        "break_count": 11,
+                        "mfe_bps_break": 6.0,
+                        "mae_bps_break": -35.0,
+                    }
+                }
+            },
+        }
+        failures, skips = module.evaluate_gates(active, candidate, gates)
+        self.assertTrue(
+            any(
+                item == "break:5m candidate sample_size 130 < min_total=200 — fail closed"
+                for item in failures
+            )
+        )
+        self.assertEqual(skips, [])
+
+    def test_model_governance_allows_active_missing_metric_with_bootstrap_waiver(self) -> None:
+        module = load_module("model_governance_active_metric_bootstrap", REPO_ROOT / "scripts" / "model_governance.py")
+        gates = module.GateConfig(
+            required_targets=["break"],
+            required_horizons=[5],
+            min_trained_end_delta_ms=0,
+            max_mfe_regression_bps=1.5,
+            max_mae_worsening_bps=2.0,
+            min_total_samples=0,
+            min_positive_samples_reject=0,
+            min_positive_samples_break=0,
+            allow_feature_version_change=False,
+            allow_bootstrap_metric_skips=True,
+        )
+        active = {
+            "feature_version": "v3",
+            "trained_end_ts": 1000,
             "stats": {"5": {"break": {"sample_size": 200, "break_count": 60, "mae_bps_break": -10.0}}},
         }
         candidate = {
             "feature_version": "v3",
             "trained_end_ts": 2000,
-            "stats": {"5": {"break": {"sample_size": 220, "break_count": 62, "mfe_bps_break": 7.0, "mae_bps_break": -9.0}}},
+            "stats": {
+                "5": {
+                    "break": {
+                        "sample_size": 220,
+                        "break_count": 62,
+                        "mfe_bps_break": 7.0,
+                        "mae_bps_break": -9.0,
+                    }
+                }
+            },
         }
         failures, skips = module.evaluate_gates(active, candidate, gates)
         self.assertEqual(failures, [])
-        self.assertTrue(any("skipped mfe_bps_break regression gate" in item for item in skips))
+        self.assertTrue(
+            any(
+                item == "break:5m skipped mfe_bps_break regression gate (missing active metric; bootstrap waiver)"
+                for item in skips
+            )
+        )
 
     def test_model_governance_threshold_utility_guard_blocks_promotion(self) -> None:
         module = load_module(

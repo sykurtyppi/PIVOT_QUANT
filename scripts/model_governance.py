@@ -131,6 +131,7 @@ class GateConfig:
     min_positive_samples_reject: int
     min_positive_samples_break: int
     allow_feature_version_change: bool
+    allow_bootstrap_metric_skips: bool = False
     regime_aware: bool = False
     regime_buckets: list[str] = field(
         default_factory=lambda: ["compression", "expansion", "neutral"]
@@ -297,19 +298,26 @@ def _evaluate_regime_metric(
     """
     active_metric = to_float(active_block.get(metric_key))
     candidate_metric = to_float(candidate_block.get(metric_key))
-    if active_metric is None or candidate_metric is None:
-        missing: list[str] = []
-        if active_metric is None:
-            missing.append("active")
-        if candidate_metric is None:
-            missing.append("candidate")
+    if candidate_metric is None:
         return (
-            False,
-            None,
-            [
-                f"{target}:{horizon}m skipped {metric_key} regression gate "
-                f"(missing {'/'.join(missing)} metric)"
-            ],
+            True,
+            f"{target}:{horizon}m missing required candidate metric {metric_key} — fail closed",
+            [],
+        )
+    if active_metric is None:
+        if gates.allow_bootstrap_metric_skips:
+            return (
+                False,
+                None,
+                [
+                    f"{target}:{horizon}m skipped {metric_key} regression gate "
+                    "(missing active metric; bootstrap waiver)"
+                ],
+            )
+        return (
+            True,
+            f"{target}:{horizon}m missing required active metric {metric_key} — bootstrap waiver required",
+            [],
         )
 
     aggregate_failed = _is_metric_regression(
@@ -1107,17 +1115,38 @@ def evaluate_gates(
             if cand_sample is None:
                 cand_sample = to_int(cand_h.get("sample_size")) if isinstance(cand_h, dict) else None
             if gates.min_total_samples > 0:
-                if active_sample is None or cand_sample is None:
-                    skips.append(
-                        f"{target}:{horizon}m skipped regression gates "
-                        f"(missing sample_size; min_total={gates.min_total_samples})"
+                if cand_sample is None:
+                    failures.append(
+                        f"{target}:{horizon}m missing required candidate metric sample_size — fail closed"
                     )
                     continue
-                if active_sample < gates.min_total_samples or cand_sample < gates.min_total_samples:
-                    skips.append(
-                        f"{target}:{horizon}m skipped regression gates "
-                        f"(sample_size active={active_sample} candidate={cand_sample} "
-                        f"< min_total={gates.min_total_samples})"
+                if cand_sample < gates.min_total_samples:
+                    failures.append(
+                        f"{target}:{horizon}m candidate sample_size {cand_sample} < "
+                        f"min_total={gates.min_total_samples} — fail closed"
+                    )
+                    continue
+                if active_sample is None:
+                    if gates.allow_bootstrap_metric_skips:
+                        skips.append(
+                            f"{target}:{horizon}m skipped regression gates "
+                            f"(missing active sample_size; min_total={gates.min_total_samples}; bootstrap waiver)"
+                        )
+                        continue
+                    failures.append(
+                        f"{target}:{horizon}m missing required active metric sample_size — bootstrap waiver required"
+                    )
+                    continue
+                if active_sample < gates.min_total_samples:
+                    if gates.allow_bootstrap_metric_skips:
+                        skips.append(
+                            f"{target}:{horizon}m skipped regression gates "
+                            f"(active sample_size={active_sample} < min_total={gates.min_total_samples}; bootstrap waiver)"
+                        )
+                        continue
+                    failures.append(
+                        f"{target}:{horizon}m active sample_size {active_sample} < "
+                        f"min_total={gates.min_total_samples} — bootstrap waiver required"
                     )
                     continue
 
@@ -1130,17 +1159,38 @@ def evaluate_gates(
                 pos_key = f"{target}_count"
                 active_pos = to_int(active_block.get(pos_key))
                 cand_pos = to_int(cand_block.get(pos_key))
-                if active_pos is None or cand_pos is None:
-                    skips.append(
-                        f"{target}:{horizon}m skipped regression gates "
-                        f"(missing {pos_key}; min_positive={required_positive})"
+                if cand_pos is None:
+                    failures.append(
+                        f"{target}:{horizon}m missing required candidate metric {pos_key} — fail closed"
                     )
                     continue
-                if active_pos < required_positive or cand_pos < required_positive:
-                    skips.append(
-                        f"{target}:{horizon}m skipped regression gates "
-                        f"({pos_key} active={active_pos} candidate={cand_pos} "
-                        f"< min_positive={required_positive})"
+                if cand_pos < required_positive:
+                    failures.append(
+                        f"{target}:{horizon}m candidate {pos_key} {cand_pos} < "
+                        f"min_positive={required_positive} — fail closed"
+                    )
+                    continue
+                if active_pos is None:
+                    if gates.allow_bootstrap_metric_skips:
+                        skips.append(
+                            f"{target}:{horizon}m skipped regression gates "
+                            f"(missing active {pos_key}; min_positive={required_positive}; bootstrap waiver)"
+                        )
+                        continue
+                    failures.append(
+                        f"{target}:{horizon}m missing required active metric {pos_key} — bootstrap waiver required"
+                    )
+                    continue
+                if active_pos < required_positive:
+                    if gates.allow_bootstrap_metric_skips:
+                        skips.append(
+                            f"{target}:{horizon}m skipped regression gates "
+                            f"(active {pos_key}={active_pos} < min_positive={required_positive}; bootstrap waiver)"
+                        )
+                        continue
+                    failures.append(
+                        f"{target}:{horizon}m active {pos_key} {active_pos} < "
+                        f"min_positive={required_positive} — bootstrap waiver required"
                     )
                     continue
 
@@ -1324,6 +1374,9 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
             int(args.min_positive_samples), int(args.min_positive_samples_break)
         ),
         allow_feature_version_change=args.allow_feature_version_change,
+        allow_bootstrap_metric_skips=bool(
+            getattr(args, "allow_bootstrap_metric_skips", False)
+        ),
         regime_aware=bool(args.regime_aware),
         regime_buckets=parse_csv_list(args.regime_buckets) or [
             "compression",
@@ -1914,6 +1967,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-feature-version-change",
         action="store_true",
         default=DEFAULT_ALLOW_FEATURE_VERSION_CHANGE,
+    )
+    eval_cmd.add_argument(
+        "--allow-bootstrap-metric-skips",
+        action="store_true",
+        default=False,
+        help=(
+            "Allow regression-gate skips when the active manifest predates required "
+            "metrics/support. Candidate-side missing evidence still fails closed."
+        ),
     )
     eval_cmd.add_argument(
         "--regime-aware",
