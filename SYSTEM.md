@@ -44,6 +44,8 @@ flowchart LR
 - Retrain LaunchAgent install: `bash scripts/install_retrain_launch_agent.sh`
 - Daily report LaunchAgent install: `bash scripts/install_daily_report_launch_agent.sh [close|morning|both]`
 - Ops resilience LaunchAgents install: `bash scripts/install_ops_resilience_launch_agents.sh`
+- Air -> Mini research sync export: `python3 scripts/export_research_sync_bundle.py`
+- Mini import of Air research bundle: `python3 scripts/import_research_sync_bundle.py --bundle-dir /path/to/bundle`
 
 ## Schedules
 - Live collection:
@@ -65,6 +67,23 @@ flowchart LR
   - Nightly snapshot: SQLite + models + reports
   - Weekly restore drill validates latest snapshot
   - Host health checks run on interval
+
+## Air/Mini Topology
+- MacBook Air:
+  - production truth
+  - live collection
+  - live scoring
+  - governance
+  - active manifests
+- Mac mini:
+  - research compute
+  - imported Air bundle
+  - historical DB expansion
+  - replay / Monte Carlo / Markov experiments
+- Sync discipline:
+  - one-way Air -> Mini research bundle
+  - Mini runs against imported working DBs, not the Air production DB
+  - see `docs/air_mini_research_sync.md`
 
 ## Data and Model Contracts
 - Event identity:
