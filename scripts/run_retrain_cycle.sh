@@ -393,6 +393,8 @@ import sys
 
 src = pathlib.Path(sys.argv[1])
 dst = pathlib.Path(sys.argv[2])
+if not src.exists():
+    raise FileNotFoundError(f"SQLite source DB not found: {src}")
 dst.parent.mkdir(parents=True, exist_ok=True)
 if dst.exists():
     dst.unlink()

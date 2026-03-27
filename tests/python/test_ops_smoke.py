@@ -8765,7 +8765,9 @@ class OpsSmokeTests(unittest.TestCase):
                 touch_rows.append((event_id, symbol, ts_event))
                 best_horizon = 15 if idx < 4 else None
                 abstain = 0 if idx < 4 else 1
-                prediction_rows.append((event_id, ts_event + 60_000, "v215", best_horizon, abstain, 1))
+                # Preview/shadow rows are scored retrospectively, so the
+                # prediction timestamp can be well after the touch event.
+                prediction_rows.append((event_id, ts_event + (8 * 3600 * 1000), "v215", best_horizon, abstain, 1))
             conn.executemany(
                 "INSERT INTO touch_events(event_id, symbol, ts_event) VALUES (?, ?, ?)",
                 touch_rows,
@@ -8791,6 +8793,7 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(failures, [])
         self.assertEqual(summary.get("status"), "ok")
         self.assertFalse(bool(summary.get("has_event_labels")))
+        self.assertFalse(bool(summary.get("max_pred_lag_applied")))
         self.assertEqual(summary.get("symbols"), ["SPY"])
         self.assertEqual(int(summary.get("touch_rows") or 0), 20)
         self.assertEqual(int(summary.get("selected_rows") or 0), 20)

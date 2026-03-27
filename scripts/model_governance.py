@@ -683,11 +683,26 @@ def evaluate_live_emission_gate(
             symbol_filter_sql = f"AND UPPER(COALESCE(te.symbol, '')) IN ({symbol_placeholders})"
             symbol_params.extend(emission_symbols)
 
+        lag_filter_sql = """
+                      AND (pl.ts_prediction - st.ts_event) >= 0
+                      AND (pl.ts_prediction - st.ts_event) <= ?
+        """
+        lag_filter_params: list[Any] = [max_pred_lag_ms]
+        max_pred_lag_applied = True
+        if gates.emission_source == "preview":
+            # Preview/shadow scoring is retrospective by design: rows are
+            # written "now" for recent historical touch events, so applying a
+            # live lag filter would incorrectly discard every candidate row.
+            lag_filter_sql = ""
+            lag_filter_params = []
+            max_pred_lag_applied = False
+
         summary.update(
             {
                 "anchor_ts_ms": anchor_ts_ms,
                 "window_start_ts_ms": window_start_ms,
                 "window_end_ts_ms": window_end_ms,
+                "max_pred_lag_applied": max_pred_lag_applied,
             }
         )
 
@@ -695,7 +710,7 @@ def evaluate_live_emission_gate(
         params.extend(symbol_params)
         params.append(candidate_version)
         params.extend(source_params)
-        params.append(max_pred_lag_ms)
+        params.extend(lag_filter_params)
         row = conn.execute(
             f"""
             WITH scoped_touch AS (
@@ -721,8 +736,7 @@ def evaluate_live_emission_gate(
                     JOIN prediction_log pl ON pl.event_id = st.event_id
                     WHERE COALESCE(pl.model_version, '') = ?
                       {source_filter_sql}
-                      AND (pl.ts_prediction - st.ts_event) >= 0
-                      AND (pl.ts_prediction - st.ts_event) <= ?
+                      {lag_filter_sql}
                 )
                 WHERE rn = 1
             )
