@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import importlib.util
+import io
 import asyncio
 import os
 import re
@@ -4165,6 +4166,12 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("RETRAIN_SCORE_UNSCORED_TIMEOUT_SEC", retrain_script)
         self.assertIn("RETRAIN_SCORE_UNSCORED_MAX_ATTEMPTS", retrain_script)
         self.assertIn("RETRAIN_SCORE_UNSCORED_FAIL_ON_PARTIAL", retrain_script)
+        self.assertIn("MODEL_GOV_EMISSION_SHADOW_ON_RETRAIN", retrain_script)
+        self.assertIn("MODEL_GOV_EMISSION_SCORE_LIMIT", retrain_script)
+        self.assertIn("governance_emission_shadow", retrain_script)
+        self.assertIn("--local-manifest-path", retrain_script)
+        self.assertIn("--emission-db", retrain_script)
+        self.assertIn("--emission-symbols", retrain_script)
         self.assertIn("RETRAIN_REFRESH_ML_METRICS_ON_RETRAIN", retrain_script)
         self.assertIn("RETRAIN_METRICS_TARGET", retrain_script)
         self.assertIn("RETRAIN_METRICS_HORIZON_MIN", retrain_script)
@@ -4202,6 +4209,13 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("MODEL_GOV_ENFORCE_THRESHOLD_UTILITY_GUARD=", env_example)
         self.assertIn("MODEL_GOV_THRESHOLD_UTILITY_TARGETS=", env_example)
         self.assertIn("MODEL_GOV_THRESHOLD_UTILITY_MIN_SCORE=", env_example)
+        self.assertIn("MODEL_GOV_ENFORCE_LIVE_EMISSION_GATE=", env_example)
+        self.assertIn("MODEL_GOV_EMISSION_LOOKBACK_DAYS=", env_example)
+        self.assertIn("MODEL_GOV_EMISSION_MIN_SIGNALS=", env_example)
+        self.assertIn("MODEL_GOV_EMISSION_MAX_ABSTAIN_RATE=", env_example)
+        self.assertIn("MODEL_GOV_EMISSION_SYMBOLS=", env_example)
+        self.assertIn("MODEL_GOV_EMISSION_SHADOW_ON_RETRAIN=", env_example)
+        self.assertIn("MODEL_GOV_EMISSION_SCORE_LIMIT=", env_example)
         self.assertIn("ML_REJECT_OR_BREAKOUT_FILTER_MODE=off", env_example)
         self.assertIn("ML_REJECT_OR_BREAKOUT_FILTER_HORIZONS=", env_example)
         self.assertIn("ML_REJECT_OR_BREAKOUT_FILTER_BLOCK_VALUES=", env_example)
@@ -4511,6 +4525,114 @@ class OpsSmokeTests(unittest.TestCase):
         posted_ids = {str(event.get("event_id")) for event in posted_events}
         self.assertEqual(posted_ids, {"evt_live_scored", "evt_missing"})
         self.assertTrue(all(bool(event.get("preview")) for event in posted_events))
+
+    def test_score_unscored_touch_events_local_manifest_mode_uses_local_batcher(self) -> None:
+        scorer = load_module(
+            "pq_score_unscored_touch_events_local_manifest_test",
+            REPO_ROOT / "scripts" / "score_unscored_touch_events.py",
+        )
+
+        db = self.tmp / "score_unscored_local_manifest.sqlite"
+        conn = sqlite3.connect(str(db))
+        try:
+            conn.execute(
+                """
+                CREATE TABLE touch_events(
+                    event_id TEXT PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    ts_event INTEGER NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE prediction_log(
+                    event_id TEXT NOT NULL,
+                    ts_prediction INTEGER NOT NULL,
+                    is_preview INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+            now_ms = int(time.time() * 1000)
+            rows = [
+                ("evt_local_a", "SPY", now_ms - 60_000),
+                ("evt_local_b", "SPY", now_ms - 120_000),
+            ]
+            conn.executemany(
+                "INSERT INTO touch_events(event_id, symbol, ts_event) VALUES (?, ?, ?)",
+                rows,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        local_batches: list[list[str]] = []
+        cleanup_called: list[bool] = []
+        original_build_local_manifest_batcher = scorer._build_local_manifest_batcher
+        original_post_score_batch = scorer._post_score_batch
+        try:
+
+            def _fake_build_local_manifest_batcher(*, manifest_path: str, db_path: str):
+                self.assertTrue(manifest_path.endswith("manifest_runtime_latest.json"))
+                self.assertEqual(Path(db_path), db)
+
+                def _submit(events: list[dict[str, Any]]) -> tuple[int, str | None]:
+                    local_batches.append([str(event.get("event_id")) for event in events])
+                    conn_local = sqlite3.connect(str(db))
+                    try:
+                        for event in events:
+                            conn_local.execute(
+                                "INSERT INTO prediction_log(event_id, ts_prediction, is_preview) VALUES (?, ?, ?)",
+                                (str(event.get("event_id")), int(time.time() * 1000), 1),
+                            )
+                        conn_local.commit()
+                    finally:
+                        conn_local.close()
+                    return len(events), None
+
+                def _cleanup() -> None:
+                    cleanup_called.append(True)
+
+                return _submit, _cleanup
+
+            def _unexpected_http_batch(**_: Any) -> tuple[int, str | None]:
+                raise AssertionError("HTTP score path should not be used in local manifest mode")
+
+            scorer._build_local_manifest_batcher = _fake_build_local_manifest_batcher
+            scorer._post_score_batch = _unexpected_http_batch
+            args = scorer.parse_args(
+                [
+                    "--db",
+                    str(db),
+                    "--symbols",
+                    "SPY",
+                    "--lookback-days",
+                    "30",
+                    "--limit",
+                    "10",
+                    "--batch-size",
+                    "2",
+                    "--preview",
+                    "--local-manifest-path",
+                    "data/models/manifest_runtime_latest.json",
+                ]
+            )
+            result = scorer.run(args)
+        finally:
+            scorer._build_local_manifest_batcher = original_build_local_manifest_batcher
+            scorer._post_score_batch = original_post_score_batch
+
+        self.assertEqual(result.get("status"), "ok")
+        self.assertEqual(result.get("attempted"), 2)
+        self.assertEqual(result.get("scored_ok"), 2)
+        self.assertEqual(result.get("failed"), 0)
+        self.assertTrue(bool(result.get("preview")))
+        self.assertEqual(
+            result.get("local_manifest_path"),
+            "data/models/manifest_runtime_latest.json",
+        )
+        self.assertEqual(local_batches, [["evt_local_a", "evt_local_b"]])
+        self.assertTrue(cleanup_called)
 
     def test_score_unscored_touch_events_single_fallback_and_verify(self) -> None:
         scorer = load_module(
@@ -8581,6 +8703,296 @@ class OpsSmokeTests(unittest.TestCase):
         failures, skips = module.evaluate_gates(active, candidate, gates)
         self.assertTrue(any("break:5m mae_bps_break worsened" in item for item in failures))
         self.assertEqual(skips, [])
+
+    def test_model_governance_live_emission_gate_passes_recent_preview_candidate(self) -> None:
+        module = load_module(
+            "model_governance_live_emission_pass",
+            REPO_ROOT / "scripts" / "model_governance.py",
+        )
+        gates = module.GateConfig(
+            required_targets=["reject"],
+            required_horizons=[15],
+            min_trained_end_delta_ms=0,
+            max_mfe_regression_bps=1.5,
+            max_mae_worsening_bps=2.0,
+            min_total_samples=0,
+            min_positive_samples_reject=0,
+            min_positive_samples_break=0,
+            allow_feature_version_change=False,
+            enforce_live_emission_gate=True,
+            emission_lookback_days=5,
+            emission_max_pred_lag_hours=6.0,
+            emission_prediction_basis="first",
+            emission_source="preview",
+            emission_min_rows=20,
+            emission_min_coverage=0.9,
+            emission_min_signals=1,
+            emission_max_abstain_rate=0.95,
+            emission_symbols=["SPY"],
+        )
+
+        db = self.tmp / "emission_gate_pass.sqlite"
+        conn = sqlite3.connect(str(db))
+        try:
+            conn.execute(
+                """
+                CREATE TABLE touch_events(
+                    event_id TEXT PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    ts_event INTEGER NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE prediction_log(
+                    event_id TEXT NOT NULL,
+                    ts_prediction INTEGER NOT NULL,
+                    model_version TEXT,
+                    best_horizon INTEGER,
+                    abstain INTEGER NOT NULL DEFAULT 0,
+                    is_preview INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+            now_ms = int(time.time() * 1000)
+            touch_rows = []
+            prediction_rows = []
+            for idx in range(40):
+                event_id = f"evt_pass_{idx:02d}"
+                ts_event = now_ms - (idx + 1) * 60_000
+                symbol = "SPY" if idx < 20 else "QQQ"
+                touch_rows.append((event_id, symbol, ts_event))
+                best_horizon = 15 if idx < 4 else None
+                abstain = 0 if idx < 4 else 1
+                prediction_rows.append((event_id, ts_event + 60_000, "v215", best_horizon, abstain, 1))
+            conn.executemany(
+                "INSERT INTO touch_events(event_id, symbol, ts_event) VALUES (?, ?, ?)",
+                touch_rows,
+            )
+            conn.executemany(
+                """
+                INSERT INTO prediction_log(
+                    event_id, ts_prediction, model_version, best_horizon, abstain, is_preview
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                prediction_rows,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        failures, summary = module.evaluate_live_emission_gate(
+            str(db),
+            candidate_version="v215",
+            gates=gates,
+        )
+
+        self.assertEqual(failures, [])
+        self.assertEqual(summary.get("status"), "ok")
+        self.assertFalse(bool(summary.get("has_event_labels")))
+        self.assertEqual(summary.get("symbols"), ["SPY"])
+        self.assertEqual(int(summary.get("touch_rows") or 0), 20)
+        self.assertEqual(int(summary.get("selected_rows") or 0), 20)
+        self.assertEqual(int(summary.get("signal_rows") or 0), 4)
+        self.assertAlmostEqual(float(summary.get("coverage") or 0.0), 1.0, places=6)
+        self.assertAlmostEqual(float(summary.get("abstain_rate") or 0.0), 0.8, places=6)
+        self.assertEqual(summary.get("signal_horizon_counts", {}).get("15"), 4)
+
+    def test_model_governance_live_emission_gate_blocks_inert_candidate(self) -> None:
+        module = load_module(
+            "model_governance_live_emission_reject",
+            REPO_ROOT / "scripts" / "model_governance.py",
+        )
+        models_dir = self.tmp / "models"
+        metadata_dir = models_dir / "metadata_runtime"
+        models_dir.mkdir(parents=True, exist_ok=True)
+        metadata_dir.mkdir(parents=True, exist_ok=True)
+
+        for name in ["rf_reject_15m_active.pkl", "rf_reject_15m_candidate.pkl"]:
+            (models_dir / name).write_text("stub", encoding="utf-8")
+
+        active_manifest = {
+            "version": "v212",
+            "feature_version": "v3",
+            "models": {"reject": {"15": "rf_reject_15m_active.pkl"}},
+            "thresholds": {"reject": {"15": 0.91}},
+            "thresholds_meta": {
+                "reject": {
+                    "15": {
+                        "objective": "utility_bps",
+                        "score": 177.11,
+                        "guard_applied": False,
+                    }
+                }
+            },
+            "stats": {
+                "15": {
+                    "reject": {
+                        "sample_size": 100,
+                        "reject_count": 20,
+                        "mfe_bps_reject": 8.0,
+                        "mae_bps_reject": -10.0,
+                    }
+                }
+            },
+            "trained_end_ts": 1774544400000,
+        }
+        candidate_manifest = {
+            "version": "v213",
+            "feature_version": "v3",
+            "models": {"reject": {"15": "rf_reject_15m_candidate.pkl"}},
+            "thresholds": {"reject": {"15": 0.92}},
+            "thresholds_meta": {
+                "reject": {
+                    "15": {
+                        "objective": "utility_bps",
+                        "score": 190.0,
+                        "guard_applied": False,
+                    }
+                }
+            },
+            "stats": {
+                "15": {
+                    "reject": {
+                        "sample_size": 120,
+                        "reject_count": 24,
+                        "mfe_bps_reject": 8.2,
+                        "mae_bps_reject": -9.8,
+                    }
+                }
+            },
+            "trained_end_ts": 1774552516000,
+        }
+        (models_dir / "manifest_active.json").write_text(
+            json.dumps(active_manifest),
+            encoding="utf-8",
+        )
+        (models_dir / "manifest_runtime_latest.json").write_text(
+            json.dumps(candidate_manifest),
+            encoding="utf-8",
+        )
+        (models_dir / "model_registry.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "active_version": "v212",
+                    "previous_active_version": "v211",
+                    "candidate_version": "v213",
+                    "history": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        emission_db = self.tmp / "emission_gate_reject.sqlite"
+        conn = sqlite3.connect(str(emission_db))
+        try:
+            conn.execute(
+                """
+                CREATE TABLE touch_events(
+                    event_id TEXT PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    ts_event INTEGER NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE prediction_log(
+                    event_id TEXT NOT NULL,
+                    ts_prediction INTEGER NOT NULL,
+                    model_version TEXT,
+                    best_horizon INTEGER,
+                    abstain INTEGER NOT NULL DEFAULT 0,
+                    is_preview INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+            now_ms = int(time.time() * 1000)
+            touch_rows = []
+            prediction_rows = []
+            for idx in range(40):
+                event_id = f"evt_inert_{idx:02d}"
+                ts_event = now_ms - (idx + 1) * 60_000
+                touch_rows.append((event_id, "SPY", ts_event))
+                prediction_rows.append((event_id, ts_event + 60_000, "v213", None, 1, 1))
+            conn.executemany(
+                "INSERT INTO touch_events(event_id, symbol, ts_event) VALUES (?, ?, ?)",
+                touch_rows,
+            )
+            conn.executemany(
+                """
+                INSERT INTO prediction_log(
+                    event_id, ts_prediction, model_version, best_horizon, abstain, is_preview
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                prediction_rows,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        args = module.build_parser().parse_args(
+            [
+                "--models-dir",
+                str(models_dir),
+                "--metadata-dir",
+                "metadata_runtime",
+                "--candidate-manifest",
+                "manifest_runtime_latest.json",
+                "--active-manifest",
+                "manifest_active.json",
+                "--prev-active-manifest",
+                "manifest_active_prev.json",
+                "--state-file",
+                "model_registry.json",
+                "--ops-db",
+                str(self.tmp / "ops.sqlite"),
+                "evaluate",
+                "--required-targets",
+                "reject",
+                "--required-horizons",
+                "15",
+                "--min-trained-end-delta-ms",
+                "0",
+                "--enforce-live-emission-gate",
+                "--emission-db",
+                str(emission_db),
+                "--emission-source",
+                "preview",
+                "--emission-lookback-days",
+                "5",
+                "--emission-min-rows",
+                "25",
+                "--emission-min-coverage",
+                "0.9",
+                "--emission-min-signals",
+                "1",
+                "--emission-max-abstain-rate",
+                "0.95",
+                "--emission-symbols",
+                "SPY",
+            ]
+        )
+
+        with patch("sys.stdout", new=io.StringIO()):
+            rc = module.cmd_evaluate(args)
+
+        self.assertEqual(rc, 0)
+        state = json.loads((models_dir / "model_registry.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["active_version"], "v212")
+        self.assertEqual(state["last_action"], "rejected")
+        self.assertIn("candidate emission gate signal_rows 0 < min_signals 1", state["last_reason"])
+        self.assertTrue(
+            any(
+                "candidate emission gate abstain_rate 1.000 > max_abstain_rate 0.950"
+                in item
+                for item in state["history"][-1]["gate_failures"]
+            )
+        )
+        self.assertTrue(bool(state["history"][-1]["gate_config"]["enforce_live_emission_gate"]))
+        self.assertEqual(state["history"][-1]["emission_gate"]["signal_rows"], 0)
 
     def test_model_governance_rollback_can_harden_active_break_fallbacks(self) -> None:
         module = load_module(

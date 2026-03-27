@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import sqlite3
@@ -90,6 +91,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument("--dry-run", action="store_true", help="Only list how many events are eligible")
+    parser.add_argument(
+        "--local-manifest-path",
+        default="",
+        help=(
+            "Score locally against an explicit manifest instead of calling --score-url. "
+            "Useful for candidate shadow scoring before promotion."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -113,6 +122,13 @@ def connect(db_path: str) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA busy_timeout=30000;")
     return conn
+
+
+def _resolve_repo_path(raw_path: str) -> Path:
+    path = Path(raw_path).expanduser()
+    if not path.is_absolute():
+        path = ROOT / path
+    return path
 
 
 def _has_table(conn: sqlite3.Connection, table_name: str) -> bool:
@@ -320,6 +336,101 @@ def _post_score_batch(
     return 0, last_error
 
 
+def _build_http_batcher(
+    *,
+    score_url: str,
+    timeout_sec: float,
+    max_attempts: int,
+    retry_base_sec: float,
+    retry_max_sec: float,
+):
+    def _submit(events: list[dict[str, Any]]) -> tuple[int, str | None]:
+        return _post_score_batch(
+            score_url=score_url,
+            events=events,
+            timeout_sec=timeout_sec,
+            max_attempts=max_attempts,
+            retry_base_sec=retry_base_sec,
+            retry_max_sec=retry_max_sec,
+        )
+
+    return _submit
+
+
+def _build_local_manifest_batcher(
+    *,
+    manifest_path: str,
+    db_path: str,
+):
+    manifest = _resolve_repo_path(manifest_path)
+    if not manifest.exists():
+        raise FileNotFoundError(f"Local manifest not found: {manifest}")
+
+    db = Path(db_path).expanduser()
+    if not db.is_absolute():
+        db = ROOT / db
+
+    module_path = ROOT / "server" / "ml_server.py"
+    module_name = f"pq_ml_server_local_{os.getpid()}_{int(time.time() * 1000)}"
+    env_updates = {
+        "RF_MODEL_DIR": str(manifest.parent),
+        "RF_MANIFEST_PATH": str(manifest),
+        "PIVOT_DB": str(db),
+        "PREDICTION_LOG_DB": str(db),
+        "ML_ANALOG_DB": str(db),
+    }
+    previous_env = {key: os.environ.get(key) for key in env_updates}
+    for key, value in env_updates.items():
+        os.environ[key] = value
+
+    try:
+        spec = importlib.util.spec_from_file_location(module_name, module_path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"Failed to load local ml_server module from {module_path}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+        module.registry.load(force=True)
+        try:
+            module.analog_engine.refresh()
+        except Exception:
+            # Analog shadow context is optional for candidate preview scoring.
+            pass
+    except Exception:
+        sys.modules.pop(module_name, None)
+        for key, value in previous_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        raise
+
+    def _submit(events: list[dict[str, Any]]) -> tuple[int, str | None]:
+        try:
+            for event in events:
+                result = module._score_event(event)
+                status, error = module._write_prediction_record(event, result)
+                if status != "ok":
+                    raise RuntimeError(error or f"local scorer returned status={status}")
+            return len(events), None
+        except Exception as exc:
+            return 0, str(exc)
+
+    def _cleanup() -> None:
+        try:
+            module._close_prediction_log_conn()
+        except Exception:
+            pass
+        sys.modules.pop(module_name, None)
+        for key, value in previous_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    return _submit, _cleanup
+
+
 def _is_transport_outage_error(error_text: str | None) -> bool:
     if not error_text:
         return False
@@ -411,6 +522,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "start_date": start_date or None,
             "end_date": end_date or None,
             "preview": preview_mode,
+            "local_manifest_path": str(args.local_manifest_path or "").strip() or None,
         }
 
     scored_ok = 0
@@ -430,98 +542,100 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     progress_every = max(0, int(args.progress_every))
     next_progress = progress_every if progress_every > 0 else None
     max_consecutive_transport_failures = max(0, int(args.max_consecutive_transport_failures))
+    local_manifest_path = str(args.local_manifest_path or "").strip()
+    batch_submitter = _build_http_batcher(
+        score_url=args.score_url,
+        timeout_sec=float(args.timeout_sec),
+        max_attempts=max(1, int(args.max_attempts)),
+        retry_base_sec=max(0.0, float(args.retry_base_sec)),
+        retry_max_sec=max(0.0, float(args.retry_max_sec)),
+    )
+    batch_cleanup = lambda: None
+    if local_manifest_path:
+        batch_submitter, batch_cleanup = _build_local_manifest_batcher(
+            manifest_path=local_manifest_path,
+            db_path=args.db,
+        )
 
-    if attempted > 0:
-        print(
-            (
+    try:
+        if attempted > 0:
+            start_message = (
                 "[score_unscored] start "
                 f"eligible_total={eligible_total} attempted={attempted} batch_size={batch_size} "
                 f"timeout_sec={float(args.timeout_sec):.3f} max_attempts={max(1, int(args.max_attempts))}"
-            ),
-            file=sys.stderr,
-            flush=True,
-        )
-
-    for offset in range(0, attempted, batch_size):
-        batch = events[offset : offset + batch_size]
-        processed_events += len(batch)
-        ok_count, error = _post_score_batch(
-            score_url=args.score_url,
-            events=batch,
-            timeout_sec=float(args.timeout_sec),
-            max_attempts=max(1, int(args.max_attempts)),
-            retry_base_sec=max(0.0, float(args.retry_base_sec)),
-            retry_max_sec=max(0.0, float(args.retry_max_sec)),
-        )
-        scored_ok += ok_count
-        batch_failed = max(0, len(batch) - ok_count)
-        failed += batch_failed
-        saw_transport_outage = False
-        if error and batch_failed > 0:
-            last_error = error
-            if _is_transport_outage_error(error):
-                # During transport outages, per-event fallback multiplies wait time
-                # without improving success rate. Keep this batch as failed and move on.
-                saw_transport_outage = True
-                single_fallback_skipped_transport += len(batch)
-            elif bool(args.single_fallback_on_failure) and len(batch) > 0:
-                # Retry individual events so partial outages do not strand large
-                # backlogs in prediction_log.
-                failed -= batch_failed
-                for event in batch:
-                    single_fallback_attempted += 1
-                    one_ok, one_error = _post_score_batch(
-                        score_url=args.score_url,
-                        events=[event],
-                        timeout_sec=float(args.timeout_sec),
-                        max_attempts=max(1, int(args.max_attempts)),
-                        retry_base_sec=max(0.0, float(args.retry_base_sec)),
-                        retry_max_sec=max(0.0, float(args.retry_max_sec)),
-                    )
-                    if one_ok >= 1:
-                        scored_ok += 1
-                        single_fallback_scored += 1
-                    else:
-                        failed += 1
-                        single_fallback_failed += 1
-                        if one_error:
-                            last_error = one_error
-
-        if saw_transport_outage:
-            consecutive_transport_failures += 1
-            if _is_rate_limited_error(error):
-                # Prevent retry storms when the ML server is actively
-                # rate-limiting this worker.
-                cooldown = min(
-                    max(0.25, float(args.retry_max_sec)),
-                    max(0.25, float(args.retry_base_sec)) * 4.0,
-                )
-                time.sleep(cooldown)
-            if max_consecutive_transport_failures > 0 and (
-                consecutive_transport_failures >= max_consecutive_transport_failures
-            ):
-                aborted_early = True
-                aborted_reason = (
-                    "aborted after "
-                    f"{consecutive_transport_failures} consecutive transport failures"
-                )
-                remaining_events = max(0, attempted - processed_events)
-                if remaining_events > 0:
-                    failed += remaining_events
-                break
-        else:
-            consecutive_transport_failures = 0
-
-        if progress_every > 0 and next_progress is not None and processed_events >= next_progress:
-            _emit_progress(
-                processed=processed_events,
-                attempted=attempted,
-                scored_ok=scored_ok,
-                failed=failed,
-                last_error=last_error,
             )
-            while next_progress <= processed_events:
-                next_progress += progress_every
+            if local_manifest_path:
+                start_message += f" local_manifest_path={local_manifest_path}"
+            print(start_message, file=sys.stderr, flush=True)
+
+        for offset in range(0, attempted, batch_size):
+            batch = events[offset : offset + batch_size]
+            processed_events += len(batch)
+            ok_count, error = batch_submitter(batch)
+            scored_ok += ok_count
+            batch_failed = max(0, len(batch) - ok_count)
+            failed += batch_failed
+            saw_transport_outage = False
+            if error and batch_failed > 0:
+                last_error = error
+                if _is_transport_outage_error(error):
+                    # During transport outages, per-event fallback multiplies wait time
+                    # without improving success rate. Keep this batch as failed and move on.
+                    saw_transport_outage = True
+                    single_fallback_skipped_transport += len(batch)
+                elif bool(args.single_fallback_on_failure) and len(batch) > 0:
+                    # Retry individual events so partial outages do not strand large
+                    # backlogs in prediction_log.
+                    failed -= batch_failed
+                    for event in batch:
+                        single_fallback_attempted += 1
+                        one_ok, one_error = batch_submitter([event])
+                        if one_ok >= 1:
+                            scored_ok += 1
+                            single_fallback_scored += 1
+                        else:
+                            failed += 1
+                            single_fallback_failed += 1
+                            if one_error:
+                                last_error = one_error
+
+            if saw_transport_outage:
+                consecutive_transport_failures += 1
+                if _is_rate_limited_error(error):
+                    # Prevent retry storms when the ML server is actively
+                    # rate-limiting this worker.
+                    cooldown = min(
+                        max(0.25, float(args.retry_max_sec)),
+                        max(0.25, float(args.retry_base_sec)) * 4.0,
+                    )
+                    time.sleep(cooldown)
+                if max_consecutive_transport_failures > 0 and (
+                    consecutive_transport_failures >= max_consecutive_transport_failures
+                ):
+                    aborted_early = True
+                    aborted_reason = (
+                        "aborted after "
+                        f"{consecutive_transport_failures} consecutive transport failures"
+                    )
+                    remaining_events = max(0, attempted - processed_events)
+                    if remaining_events > 0:
+                        failed += remaining_events
+                    break
+            else:
+                consecutive_transport_failures = 0
+
+            if progress_every > 0 and next_progress is not None and processed_events >= next_progress:
+                _emit_progress(
+                    processed=processed_events,
+                    attempted=attempted,
+                    scored_ok=scored_ok,
+                    failed=failed,
+                    last_error=last_error,
+                )
+                while next_progress <= processed_events:
+                    next_progress += progress_every
+    finally:
+        batch_cleanup()
 
     remaining_unscored: int | None = None
     if bool(args.verify_after) or int(args.max_remaining) >= 0:
@@ -599,6 +713,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "start_date": start_date or None,
         "end_date": end_date or None,
         "preview": preview_mode,
+        "local_manifest_path": local_manifest_path or None,
         "last_error": last_error,
     }
 

@@ -87,6 +87,31 @@ DEFAULT_THRESHOLD_UTILITY_TARGETS = os.getenv(
 DEFAULT_THRESHOLD_UTILITY_MIN_SCORE = float(
     os.getenv("MODEL_GOV_THRESHOLD_UTILITY_MIN_SCORE", "0.0")
 )
+DEFAULT_ENFORCE_LIVE_EMISSION_GATE = os.getenv(
+    "MODEL_GOV_ENFORCE_LIVE_EMISSION_GATE", "false"
+).strip().lower() in {"1", "true", "yes", "y", "on"}
+DEFAULT_EMISSION_LOOKBACK_DAYS = int(os.getenv("MODEL_GOV_EMISSION_LOOKBACK_DAYS", "5"))
+DEFAULT_EMISSION_MAX_PRED_LAG_HOURS = float(
+    os.getenv("MODEL_GOV_EMISSION_MAX_PRED_LAG_HOURS", "6.0")
+)
+DEFAULT_EMISSION_PREDICTION_BASIS = (
+    os.getenv("MODEL_GOV_EMISSION_PREDICTION_BASIS", "first").strip().lower() or "first"
+)
+if DEFAULT_EMISSION_PREDICTION_BASIS not in {"first", "latest"}:
+    DEFAULT_EMISSION_PREDICTION_BASIS = "first"
+DEFAULT_EMISSION_SOURCE = (
+    os.getenv("MODEL_GOV_EMISSION_SOURCE", "preview").strip().lower() or "preview"
+)
+if DEFAULT_EMISSION_SOURCE not in {"live", "preview", "all"}:
+    DEFAULT_EMISSION_SOURCE = "preview"
+DEFAULT_EMISSION_MIN_ROWS = int(os.getenv("MODEL_GOV_EMISSION_MIN_ROWS", "25"))
+DEFAULT_EMISSION_MIN_COVERAGE = float(os.getenv("MODEL_GOV_EMISSION_MIN_COVERAGE", "0.9"))
+DEFAULT_EMISSION_MIN_SIGNALS = int(os.getenv("MODEL_GOV_EMISSION_MIN_SIGNALS", "1"))
+DEFAULT_EMISSION_MAX_ABSTAIN_RATE = float(
+    os.getenv("MODEL_GOV_EMISSION_MAX_ABSTAIN_RATE", "0.98")
+)
+DEFAULT_EMISSION_SYMBOLS = os.getenv("MODEL_GOV_EMISSION_SYMBOLS", "")
+DEFAULT_EMISSION_DB = os.getenv("MODEL_GOV_EMISSION_DB", "").strip()
 DEFAULT_DB = os.getenv("PIVOT_DB", str(ROOT / "data" / "pivot_events.sqlite"))
 STATE_SCHEMA_VERSION = 1
 MAX_HISTORY = 200
@@ -115,6 +140,16 @@ class GateConfig:
     enforce_threshold_utility_guard: bool = False
     threshold_utility_targets: list[str] = field(default_factory=lambda: ["reject"])
     threshold_utility_min_score: float = 0.0
+    enforce_live_emission_gate: bool = False
+    emission_lookback_days: int = 5
+    emission_max_pred_lag_hours: float = 6.0
+    emission_prediction_basis: str = "first"
+    emission_source: str = "preview"
+    emission_min_rows: int = 25
+    emission_min_coverage: float = 0.9
+    emission_min_signals: int = 1
+    emission_max_abstain_rate: float = 0.98
+    emission_symbols: list[str] = field(default_factory=list)
 
 
 def now_ms() -> int:
@@ -422,6 +457,35 @@ def load_state(path: Path) -> dict[str, Any]:
     return payload
 
 
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    try:
+        rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    except sqlite3.Error:
+        return set()
+    return {str(row[1]) for row in rows}
+
+
+def _prediction_source_filter_sql(pred_cols: set[str], source: str) -> tuple[str, list[Any]]:
+    normalized = (source or "preview").strip().lower()
+    if normalized not in {"live", "preview", "all"}:
+        raise ValueError(f"Unsupported emission source: {source!r}")
+    if normalized == "all":
+        return "", []
+    if "is_preview" not in pred_cols:
+        if normalized == "preview":
+            return "AND 1 = 0", []
+        return "", []
+    return "AND COALESCE(pl.is_preview, 0) = ?", [1 if normalized == "preview" else 0]
+
+
 def push_history(state: dict[str, Any], entry: dict[str, Any]) -> None:
     history = state.setdefault("history", [])
     if not isinstance(history, list):
@@ -525,6 +589,231 @@ def harden_break_fallback_thresholds(
         }
     )
     return hardened, sorted(hardened_horizons)
+
+
+def evaluate_live_emission_gate(
+    db_path: str,
+    *,
+    candidate_version: str,
+    gates: GateConfig,
+) -> tuple[list[str], dict[str, Any]]:
+    db = Path(db_path).expanduser()
+    failures: list[str] = []
+    summary: dict[str, Any] = {
+        "db_path": str(db),
+        "candidate_version": candidate_version,
+        "source": gates.emission_source,
+        "prediction_basis": gates.emission_prediction_basis,
+        "lookback_days": int(gates.emission_lookback_days),
+        "max_pred_lag_hours": float(gates.emission_max_pred_lag_hours),
+        "min_rows": int(gates.emission_min_rows),
+        "min_coverage": float(gates.emission_min_coverage),
+        "min_signals": int(gates.emission_min_signals),
+        "max_abstain_rate": float(gates.emission_max_abstain_rate),
+        "symbols": list(gates.emission_symbols),
+    }
+
+    if not db.exists():
+        failures.append(f"candidate emission gate data source missing ({db})")
+        summary["status"] = "missing_db"
+        return failures, summary
+
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.row_factory = sqlite3.Row
+        if not _table_exists(conn, "touch_events"):
+            failures.append("candidate emission gate requires touch_events table")
+            summary["status"] = "missing_touch_events"
+            return failures, summary
+        if not _table_exists(conn, "prediction_log"):
+            failures.append("candidate emission gate requires prediction_log table")
+            summary["status"] = "missing_prediction_log"
+            return failures, summary
+
+        pred_cols = _table_columns(conn, "prediction_log")
+        required_cols = {"event_id", "ts_prediction", "model_version", "best_horizon", "abstain"}
+        missing_cols = sorted(required_cols - pred_cols)
+        if missing_cols:
+            failures.append(
+                "candidate emission gate requires prediction_log columns: "
+                + ", ".join(missing_cols)
+            )
+            summary["status"] = "missing_prediction_columns"
+            summary["missing_prediction_columns"] = missing_cols
+            return failures, summary
+
+        has_event_labels = _table_exists(conn, "event_labels")
+        labeled_signal_sql = "0 AS labeled_signal_rows"
+        if has_event_labels:
+            labeled_signal_sql = """
+                SUM(
+                    CASE
+                        WHEN sp.best_horizon IS NOT NULL
+                         AND COALESCE(sp.abstain, 0) = 0
+                         AND EXISTS (
+                             SELECT 1
+                             FROM event_labels el
+                             WHERE el.event_id = sp.event_id
+                               AND el.horizon_min = sp.best_horizon
+                         )
+                        THEN 1 ELSE 0
+                    END
+                ) AS labeled_signal_rows
+            """
+
+        anchor_row = conn.execute(
+            "SELECT MAX(ts_event) AS max_ts_event FROM touch_events"
+        ).fetchone()
+        anchor_ts_ms = to_int(anchor_row["max_ts_event"] if anchor_row else None) or now_ms()
+        window_end_ms = anchor_ts_ms + 1
+        window_start_ms = anchor_ts_ms - max(0, int(gates.emission_lookback_days)) * 86_400_000
+        max_pred_lag_ms = int(max(0.0, float(gates.emission_max_pred_lag_hours)) * 3600 * 1000)
+        pred_order = "ASC" if gates.emission_prediction_basis == "first" else "DESC"
+        source_filter_sql, source_params = _prediction_source_filter_sql(pred_cols, gates.emission_source)
+        symbol_filter_sql = ""
+        symbol_params: list[Any] = []
+        emission_symbols = [str(symbol).strip().upper() for symbol in gates.emission_symbols if str(symbol).strip()]
+        touch_cols = _table_columns(conn, "touch_events")
+        if emission_symbols:
+            if "symbol" not in touch_cols:
+                failures.append("candidate emission gate symbol filtering requires touch_events.symbol")
+                summary["status"] = "missing_touch_symbol"
+                return failures, summary
+            symbol_placeholders = ",".join("?" for _ in emission_symbols)
+            symbol_filter_sql = f"AND UPPER(COALESCE(te.symbol, '')) IN ({symbol_placeholders})"
+            symbol_params.extend(emission_symbols)
+
+        summary.update(
+            {
+                "anchor_ts_ms": anchor_ts_ms,
+                "window_start_ts_ms": window_start_ms,
+                "window_end_ts_ms": window_end_ms,
+            }
+        )
+
+        params: list[Any] = [window_start_ms, window_end_ms]
+        params.extend(symbol_params)
+        params.append(candidate_version)
+        params.extend(source_params)
+        params.append(max_pred_lag_ms)
+        row = conn.execute(
+            f"""
+            WITH scoped_touch AS (
+                SELECT te.event_id, te.ts_event
+                FROM touch_events te
+                WHERE te.ts_event >= ?
+                  AND te.ts_event < ?
+                  {symbol_filter_sql}
+            ),
+            selected_pred AS (
+                SELECT *
+                FROM (
+                    SELECT
+                        pl.event_id,
+                        pl.ts_prediction,
+                        pl.best_horizon,
+                        pl.abstain,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY pl.event_id
+                            ORDER BY pl.ts_prediction {pred_order}
+                        ) AS rn
+                    FROM scoped_touch st
+                    JOIN prediction_log pl ON pl.event_id = st.event_id
+                    WHERE COALESCE(pl.model_version, '') = ?
+                      {source_filter_sql}
+                      AND (pl.ts_prediction - st.ts_event) >= 0
+                      AND (pl.ts_prediction - st.ts_event) <= ?
+                )
+                WHERE rn = 1
+            )
+            SELECT
+                (SELECT COUNT(*) FROM scoped_touch) AS touch_rows,
+                COUNT(*) AS selected_rows,
+                SUM(
+                    CASE
+                        WHEN sp.best_horizon IS NOT NULL AND COALESCE(sp.abstain, 0) = 0
+                        THEN 1 ELSE 0
+                    END
+                ) AS signal_rows,
+                SUM(
+                    CASE
+                        WHEN sp.best_horizon IS NULL OR COALESCE(sp.abstain, 0) = 1
+                        THEN 1 ELSE 0
+                    END
+                ) AS abstain_rows,
+                {labeled_signal_sql},
+                SUM(CASE WHEN sp.best_horizon = 5  AND COALESCE(sp.abstain, 0) = 0 THEN 1 ELSE 0 END) AS signal_5m_rows,
+                SUM(CASE WHEN sp.best_horizon = 15 AND COALESCE(sp.abstain, 0) = 0 THEN 1 ELSE 0 END) AS signal_15m_rows,
+                SUM(CASE WHEN sp.best_horizon = 30 AND COALESCE(sp.abstain, 0) = 0 THEN 1 ELSE 0 END) AS signal_30m_rows,
+                SUM(CASE WHEN sp.best_horizon = 60 AND COALESCE(sp.abstain, 0) = 0 THEN 1 ELSE 0 END) AS signal_60m_rows
+            FROM selected_pred sp
+            """,
+            params,
+        ).fetchone()
+
+        touch_rows = int((row["touch_rows"] if row else 0) or 0)
+        selected_rows = int((row["selected_rows"] if row else 0) or 0)
+        signal_rows = int((row["signal_rows"] if row else 0) or 0)
+        abstain_rows = int((row["abstain_rows"] if row else 0) or 0)
+        labeled_signal_rows = int((row["labeled_signal_rows"] if row else 0) or 0)
+        coverage = (selected_rows / touch_rows) if touch_rows > 0 else None
+        abstain_rate = (abstain_rows / selected_rows) if selected_rows > 0 else 1.0
+        signal_counts = {
+            "5": int((row["signal_5m_rows"] if row else 0) or 0),
+            "15": int((row["signal_15m_rows"] if row else 0) or 0),
+            "30": int((row["signal_30m_rows"] if row else 0) or 0),
+            "60": int((row["signal_60m_rows"] if row else 0) or 0),
+        }
+
+        summary.update(
+            {
+                "status": "ok",
+                "has_event_labels": has_event_labels,
+                "touch_rows": touch_rows,
+                "selected_rows": selected_rows,
+                "coverage": round(coverage, 6) if coverage is not None else None,
+                "signal_rows": signal_rows,
+                "abstain_rows": abstain_rows,
+                "abstain_rate": round(abstain_rate, 6),
+                "labeled_signal_rows": labeled_signal_rows,
+                "signal_horizon_counts": signal_counts,
+            }
+        )
+
+        if touch_rows <= 0:
+            failures.append("candidate emission gate found no touch_events in the evaluation window")
+            summary["status"] = "no_touch_events"
+            return failures, summary
+
+        if selected_rows < int(gates.emission_min_rows):
+            failures.append(
+                f"candidate emission gate selected_rows {selected_rows} < "
+                f"min_rows {int(gates.emission_min_rows)}"
+            )
+
+        min_coverage = max(0.0, min(1.0, float(gates.emission_min_coverage)))
+        if coverage is None or coverage < min_coverage:
+            failures.append(
+                f"candidate emission gate coverage {coverage if coverage is not None else 0.0:.3f} < "
+                f"min_coverage {min_coverage:.3f}"
+            )
+
+        if signal_rows < int(gates.emission_min_signals):
+            failures.append(
+                f"candidate emission gate signal_rows {signal_rows} < "
+                f"min_signals {int(gates.emission_min_signals)}"
+            )
+
+        max_abstain_rate = max(0.0, min(1.0, float(gates.emission_max_abstain_rate)))
+        if abstain_rate > max_abstain_rate:
+            failures.append(
+                f"candidate emission gate abstain_rate {abstain_rate:.3f} > "
+                f"max_abstain_rate {max_abstain_rate:.3f}"
+            )
+
+        return failures, summary
+    finally:
+        conn.close()
 
 
 def validate_manifest(
@@ -906,6 +1195,69 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
         enforce_threshold_utility_guard=bool(args.enforce_threshold_utility_guard),
         threshold_utility_targets=parse_csv_list(args.threshold_utility_targets) or ["reject"],
         threshold_utility_min_score=float(args.threshold_utility_min_score),
+        enforce_live_emission_gate=bool(
+            getattr(args, "enforce_live_emission_gate", DEFAULT_ENFORCE_LIVE_EMISSION_GATE)
+        ),
+        emission_lookback_days=max(
+            0, int(getattr(args, "emission_lookback_days", DEFAULT_EMISSION_LOOKBACK_DAYS))
+        ),
+        emission_max_pred_lag_hours=max(
+            0.0,
+            float(
+                getattr(
+                    args,
+                    "emission_max_pred_lag_hours",
+                    DEFAULT_EMISSION_MAX_PRED_LAG_HOURS,
+                )
+            ),
+        ),
+        emission_prediction_basis=(
+            str(
+                getattr(
+                    args,
+                    "emission_prediction_basis",
+                    DEFAULT_EMISSION_PREDICTION_BASIS,
+                )
+            ).strip().lower()
+            or "first"
+        ),
+        emission_source=(
+            str(getattr(args, "emission_source", DEFAULT_EMISSION_SOURCE)).strip().lower()
+            or "preview"
+        ),
+        emission_min_rows=max(
+            0, int(getattr(args, "emission_min_rows", DEFAULT_EMISSION_MIN_ROWS))
+        ),
+        emission_min_coverage=max(
+            0.0,
+            min(
+                1.0,
+                float(getattr(args, "emission_min_coverage", DEFAULT_EMISSION_MIN_COVERAGE)),
+            ),
+        ),
+        emission_min_signals=max(
+            0, int(getattr(args, "emission_min_signals", DEFAULT_EMISSION_MIN_SIGNALS))
+        ),
+        emission_max_abstain_rate=max(
+            0.0,
+            min(
+                1.0,
+                float(
+                    getattr(
+                        args,
+                        "emission_max_abstain_rate",
+                        DEFAULT_EMISSION_MAX_ABSTAIN_RATE,
+                    )
+                ),
+            ),
+        ),
+        emission_symbols=[
+            token.strip().upper()
+            for token in parse_csv_list(
+                str(getattr(args, "emission_symbols", DEFAULT_EMISSION_SYMBOLS))
+            )
+            if token.strip()
+        ],
     )
     state = load_state(state_path)
 
@@ -930,6 +1282,17 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
             "state_file": str(state_path),
         },
         "gates": asdict(gates),
+    }
+
+    emission_db = (
+        str(getattr(args, "emission_db", "") or args.ops_db or "").strip() or DEFAULT_DB
+    ).strip()
+    result["paths"]["emission_db"] = emission_db
+    emission_gate_failures: list[str] = []
+    emission_gate_summary: dict[str, Any] = {
+        "status": "disabled",
+        "candidate_version": candidate_version,
+        "db_path": emission_db,
     }
 
     manifest_errors = validate_manifest(candidate, models_dir, gates)
@@ -966,8 +1329,49 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
         print(json.dumps(result))
         return 0
 
+    if gates.enforce_live_emission_gate:
+        emission_gate_failures, emission_gate_summary = evaluate_live_emission_gate(
+            emission_db,
+            candidate_version=candidate_version,
+            gates=gates,
+        )
+    result["emission_gate"] = emission_gate_summary
+
     # Bootstrap: first accepted candidate becomes active.
     if not active_path.exists():
+        if emission_gate_failures and not args.force_promote:
+            reason = "candidate rejected by governance gates"
+            result.update(
+                {
+                    "action": "rejected",
+                    "reason": reason,
+                    "gate_failures": emission_gate_failures,
+                    "active_version": state.get("active_version"),
+                }
+            )
+            state.update(
+                {
+                    "candidate_version": candidate_version,
+                    "last_action": "rejected",
+                    "last_reason": reason + ": " + "; ".join(emission_gate_failures),
+                    "last_checked_at_ms": now_ms(),
+                }
+            )
+            push_history(
+                state,
+                _history_entry(
+                    action="rejected",
+                    reason=state["last_reason"],
+                    gates=gates,
+                    gate_failures=emission_gate_failures,
+                    candidate_version=candidate_version,
+                    active_version=state.get("active_version"),
+                    emission_gate=emission_gate_summary,
+                ),
+            )
+            _persist_state_and_ops(state_path, state, args.ops_db, result)
+            print(json.dumps(result))
+            return 0
         atomic_copy(candidate_path, active_path)
         state.update(
             {
@@ -988,6 +1392,7 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
                 gates=gates,
                 candidate_version=candidate_version,
                 active_version=candidate_version,
+                emission_gate=emission_gate_summary,
             ),
         )
         result.update(
@@ -1032,14 +1437,16 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
         return 0
 
     gate_failures, gate_skips = evaluate_gates(active, candidate, gates)
-    if gate_failures and not args.force_promote:
+    combined_gate_failures = list(gate_failures)
+    combined_gate_failures.extend(emission_gate_failures)
+    if combined_gate_failures and not args.force_promote:
         reason = "candidate rejected by governance gates"
         result.update(
             {
                 "action": "rejected",
                 "promoted": False,
                 "reason": reason,
-                "gate_failures": gate_failures,
+                "gate_failures": combined_gate_failures,
                 "gate_skips": gate_skips,
                 "active_version": active_version,
             }
@@ -1049,7 +1456,7 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
                 "candidate_version": candidate_version,
                 "active_version": active_version,
                 "last_action": "rejected",
-                "last_reason": reason + ": " + "; ".join(gate_failures),
+                "last_reason": reason + ": " + "; ".join(combined_gate_failures),
                 "last_checked_at_ms": now_ms(),
             }
         )
@@ -1059,10 +1466,11 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
                 action="rejected",
                 reason=state["last_reason"],
                 gates=gates,
-                gate_failures=gate_failures,
+                gate_failures=combined_gate_failures,
                 gate_skips=gate_skips,
                 candidate_version=candidate_version,
                 active_version=active_version,
+                emission_gate=emission_gate_summary,
             ),
         )
         _persist_state_and_ops(state_path, state, args.ops_db, result)
@@ -1090,12 +1498,13 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
             action="promoted",
             reason=state["last_reason"],
             gates=gates,
-            gate_failures=gate_failures,
+            gate_failures=combined_gate_failures,
             gate_skips=gate_skips,
             candidate_version=candidate_version,
             active_version=candidate_version,
             previous_active_version=active_version,
             forced=bool(args.force_promote),
+            emission_gate=emission_gate_summary,
         ),
     )
     result.update(
@@ -1104,7 +1513,7 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
             "promoted": True,
             "active_version": candidate_version,
             "reason": state["last_reason"],
-            "gate_failures": gate_failures,
+            "gate_failures": combined_gate_failures,
             "gate_skips": gate_skips,
         }
     )
@@ -1362,6 +1771,85 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=DEFAULT_THRESHOLD_UTILITY_MIN_SCORE,
         help="Minimum acceptable threshold utility score for configured targets/horizons.",
+    )
+    eval_cmd.add_argument(
+        "--enforce-live-emission-gate",
+        action="store_true",
+        default=DEFAULT_ENFORCE_LIVE_EMISSION_GATE,
+        help=(
+            "Reject promotion when the candidate does not emit enough recent "
+            "signals in live-like prediction rows."
+        ),
+    )
+    eval_cmd.add_argument(
+        "--no-enforce-live-emission-gate",
+        dest="enforce_live_emission_gate",
+        action="store_false",
+        help="Disable recent live-emission gate checks during governance evaluation.",
+    )
+    eval_cmd.add_argument(
+        "--emission-db",
+        default=DEFAULT_EMISSION_DB,
+        help=(
+            "SQLite data source used for candidate emission checks. "
+            "Defaults to MODEL_GOV_EMISSION_DB or --ops-db."
+        ),
+    )
+    eval_cmd.add_argument(
+        "--emission-lookback-days",
+        type=int,
+        default=DEFAULT_EMISSION_LOOKBACK_DAYS,
+        help="Lookback window used for candidate emission checks.",
+    )
+    eval_cmd.add_argument(
+        "--emission-max-pred-lag-hours",
+        type=float,
+        default=DEFAULT_EMISSION_MAX_PRED_LAG_HOURS,
+        help="Maximum prediction lag allowed between ts_event and ts_prediction.",
+    )
+    eval_cmd.add_argument(
+        "--emission-prediction-basis",
+        default=DEFAULT_EMISSION_PREDICTION_BASIS,
+        choices=["first", "latest"],
+        help="Whether to evaluate first or latest prediction row per event.",
+    )
+    eval_cmd.add_argument(
+        "--emission-source",
+        default=DEFAULT_EMISSION_SOURCE,
+        choices=["live", "preview", "all"],
+        help="Prediction source used for candidate emission checks.",
+    )
+    eval_cmd.add_argument(
+        "--emission-min-rows",
+        type=int,
+        default=DEFAULT_EMISSION_MIN_ROWS,
+        help="Minimum recent prediction rows required before emission checks can pass.",
+    )
+    eval_cmd.add_argument(
+        "--emission-min-coverage",
+        type=float,
+        default=DEFAULT_EMISSION_MIN_COVERAGE,
+        help="Minimum selected_rows / touch_rows coverage required for emission checks.",
+    )
+    eval_cmd.add_argument(
+        "--emission-min-signals",
+        type=int,
+        default=DEFAULT_EMISSION_MIN_SIGNALS,
+        help="Minimum recent non-abstaining signal rows required for candidate promotion.",
+    )
+    eval_cmd.add_argument(
+        "--emission-max-abstain-rate",
+        type=float,
+        default=DEFAULT_EMISSION_MAX_ABSTAIN_RATE,
+        help="Maximum acceptable abstain rate in the candidate emission window.",
+    )
+    eval_cmd.add_argument(
+        "--emission-symbols",
+        default=DEFAULT_EMISSION_SYMBOLS,
+        help=(
+            "Optional comma-separated symbol universe for candidate emission checks. "
+            "Use this to align governance with the candidate shadow-scoring universe."
+        ),
     )
     eval_cmd.add_argument("--force-promote", action="store_true", default=False)
     eval_cmd.set_defaults(func=cmd_evaluate)
