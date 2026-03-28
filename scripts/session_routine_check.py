@@ -25,6 +25,7 @@ DEFAULT_LOG_FILE = ROOT / "logs" / "session_routine.log"
 DEFAULT_DB = ROOT / "data" / "pivot_events.sqlite"
 DEFAULT_OPS_STATUS_URL = "http://127.0.0.1:3000/api/ops/status"
 DEFAULT_GAMMA_URL = "http://127.0.0.1:5001/gamma?symbol=SPY&expiry=90dte&limit=10"
+DEFAULT_HEALTH_MAX_AGE_MIN = float(os.getenv("ML_SESSION_ROUTINE_HEALTH_MAX_AGE_MIN", "120"))
 
 
 def parse_args() -> argparse.Namespace:
@@ -237,9 +238,29 @@ def build_preopen_result(now_et: datetime, timeout_sec: float) -> dict[str, str]
 
     backup_status = str(((ops_payload or {}).get("backup") or {}).get("status") or "unknown")
     drill_status = str(((ops_payload or {}).get("restore_drill") or {}).get("status") or "unknown")
-    host_status = str(((ops_payload or {}).get("host_health") or {}).get("status") or "unknown")
+    host_payload = (ops_payload or {}).get("host_health") or {}
+    host_status = str(host_payload.get("status") or "unknown")
+    host_age_min_raw = host_payload.get("age_min")
+    host_age_min: float | None = None
+    try:
+        if host_age_min_raw is not None:
+            host_age_min = float(host_age_min_raw)
+    except (TypeError, ValueError):
+        host_age_min = None
+    health_max_age_min = float(
+        os.getenv("ML_SESSION_ROUTINE_HEALTH_MAX_AGE_MIN", str(DEFAULT_HEALTH_MAX_AGE_MIN))
+    )
+    host_status_display = host_status
+    host_status_for_level = host_status.lower()
+    if (
+        host_status_for_level in {"critical", "failed", "down", "error"}
+        and host_age_min is not None
+        and host_age_min > health_max_age_min
+    ):
+        host_status_display = f"unknown/stale (age_min={host_age_min:.1f})"
+        host_status_for_level = "unknown"
 
-    ops_statuses = [backup_status.lower(), drill_status.lower(), host_status.lower()]
+    ops_statuses = [backup_status.lower(), drill_status.lower(), host_status_for_level]
     blocking_ops = any(x in {"critical", "failed", "down", "error"} for x in ops_statuses)
     warning_ops = any(x in {"warning", "unknown"} for x in ops_statuses)
 
@@ -264,7 +285,7 @@ def build_preopen_result(now_et: datetime, timeout_sec: float) -> dict[str, str]
         f"ML: {ml_status} (http={ml_http or 0}, reason={ml_reason or 'status'})",
         f"Collector: {collector_status} (http={collector_http or 0}, reason={collector_reason or 'status'})",
         (
-            f"Ops: backup={backup_status}, drill={drill_status}, host={host_status} "
+            f"Ops: backup={backup_status}, drill={drill_status}, host={host_status_display} "
             f"(ops_http={ops_http or 0}, reason={ops_reason or 'status'})"
         ),
         f"Gamma bridge: {gamma_state} (non-blocking)",

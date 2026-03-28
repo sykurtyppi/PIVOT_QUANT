@@ -107,7 +107,28 @@ else
   exit 1
 fi
 
-if ! PYTHON_INFO="$("${PYTHON}" -c "import sys; assert sys.version_info >= (3, 10), f'Python {sys.version.split()[0]} too old; require >=3.10'; print(f'{sys.executable} {sys.version.split()[0]}')" 2>&1)"; then
+PYTHON_MIN_VERSION="${PIVOT_PYTHON_MIN_VERSION:-3.9}"
+if ! PYTHON_INFO="$("${PYTHON}" - "${PYTHON_MIN_VERSION}" <<'PY' 2>&1
+import sys
+
+raw = sys.argv[1].strip() or "3.9"
+parts = raw.split(".")
+if len(parts) < 2:
+    raise SystemExit(f"Invalid PIVOT_PYTHON_MIN_VERSION={raw!r}; expected major.minor")
+try:
+    major = int(parts[0])
+    minor = int(parts[1])
+except ValueError as exc:
+    raise SystemExit(f"Invalid PIVOT_PYTHON_MIN_VERSION={raw!r}; expected major.minor") from exc
+
+if sys.version_info < (major, minor):
+    raise SystemExit(
+        f"Python {sys.version.split()[0]} too old; require >={major}.{minor}"
+    )
+
+print(f"{sys.executable} {sys.version.split()[0]}")
+PY
+)"; then
   echo "[$(timestamp)] ERROR daily_report_send: ${PYTHON_INFO}" >> "${LOG_DIR}/report_delivery.log"
   exit 1
 fi

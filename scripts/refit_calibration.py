@@ -13,6 +13,8 @@ No new model version is created and no governance promotion is performed.
 
 from __future__ import annotations
 
+from __future__ import annotations
+
 import argparse
 import json
 import os

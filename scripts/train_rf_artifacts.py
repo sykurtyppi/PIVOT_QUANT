@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -324,6 +326,31 @@ def atomic_copy_file(src: Path, dst: Path) -> None:
     finally:
         if tmp_path.exists():
             tmp_path.unlink()
+
+
+def _merge_tune_date_range(current: dict[str, str] | None, event_dates) -> dict[str, str] | None:
+    values: list[str] = []
+    for value in list(event_dates):
+        if value is None:
+            continue
+        iso_value = value.isoformat() if hasattr(value, "isoformat") else str(value)
+        iso_value = str(iso_value).strip()
+        if iso_value:
+            values.append(iso_value)
+    if not values:
+        return current
+
+    next_min = min(values)
+    next_max = max(values)
+    if not current:
+        return {
+            "min_event_date_et": next_min,
+            "max_event_date_et": next_max,
+        }
+    return {
+        "min_event_date_et": min(str(current.get("min_event_date_et") or next_min), next_min),
+        "max_event_date_et": max(str(current.get("max_event_date_et") or next_max), next_max),
+    }
 
 
 def _regime_bucket(regime_type_value) -> str:
@@ -686,6 +713,7 @@ def main() -> None:
         "stats": {},
         "gamma_context": _gamma_context_metadata(),
         "trained_end_ts": None,
+        "tune_date_range": None,
     }
     trained_end_ts_max = None
     latest_aliases: list[tuple[Path, Path]] = []
@@ -854,6 +882,10 @@ def main() -> None:
             model_obj = calibrator if calibrator is not None else pipeline
             X_calib_set = X_calib_tune if X_calib_tune is not None else X.loc[calib_mask_sub]
             y_calib_for_thresh = y_calib_tune if y_calib_tune is not None else y.loc[X_calib_set.index]
+            manifest["tune_date_range"] = _merge_tune_date_range(
+                manifest.get("tune_date_range"),
+                sub.loc[X_calib_set.index, "event_date_et"].tolist(),
+            )
             y_prob_calib = None
             utility_values_for_diag = None
             if calibrator is not None and calibration_shared_slice:

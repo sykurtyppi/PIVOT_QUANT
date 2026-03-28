@@ -3,8 +3,11 @@
 
 from __future__ import annotations
 
+import argparse
+import contextlib
 import json
 import importlib.util
+import io
 import asyncio
 import os
 import re
@@ -558,6 +561,108 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("Tradeable matured signals: 0", joined)
         self.assertIn("no reject/break signals emitted on matured rows", joined)
 
+    def test_daily_report_impact_scopes_to_model_version(self) -> None:
+        db = self.tmp / "daily_report_model_scope.sqlite"
+        conn = sqlite3.connect(str(db))
+        try:
+            conn.execute(
+                """
+                CREATE TABLE touch_events(
+                    event_id TEXT,
+                    ts_event INTEGER,
+                    touch_side INTEGER
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE event_labels(
+                    event_id TEXT,
+                    horizon_min INTEGER,
+                    return_bps REAL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE prediction_log(
+                    event_id TEXT,
+                    ts_prediction INTEGER,
+                    model_version TEXT,
+                    signal_5m TEXT,
+                    is_preview INTEGER
+                )
+                """
+            )
+
+            send_daily_report = load_module(
+                "pq_send_daily_report_model_scope_test",
+                REPO_ROOT / "scripts" / "send_daily_report.py",
+            )
+            report_day = date(2026, 3, 26)
+            start_ms, _ = send_daily_report.et_day_bounds_ms(report_day)
+
+            conn.execute(
+                "INSERT INTO touch_events(event_id, ts_event, touch_side) VALUES (?, ?, ?)",
+                ("evt_v211", start_ms + 60_000, -1),
+            )
+            conn.execute(
+                "INSERT INTO event_labels(event_id, horizon_min, return_bps) VALUES (?, ?, ?)",
+                ("evt_v211", 5, -10.0),
+            )
+            conn.execute(
+                """
+                INSERT INTO prediction_log(event_id, ts_prediction, model_version, signal_5m, is_preview)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                ("evt_v211", start_ms + 61_000, "v211", "reject", 0),
+            )
+
+            conn.execute(
+                "INSERT INTO touch_events(event_id, ts_event, touch_side) VALUES (?, ?, ?)",
+                ("evt_v212", start_ms + 120_000, -1),
+            )
+            conn.execute(
+                "INSERT INTO event_labels(event_id, horizon_min, return_bps) VALUES (?, ?, ?)",
+                ("evt_v212", 5, -10.0),
+            )
+            conn.execute(
+                """
+                INSERT INTO prediction_log(event_id, ts_prediction, model_version, signal_5m, is_preview)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                ("evt_v212", start_ms + 121_000, "v212", "no_edge", 0),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        impact_all = send_daily_report.compute_impact_stats(
+            str(db),
+            report_day,
+            include_preview=False,
+            prediction_basis="first",
+        )
+        impact_v211 = send_daily_report.compute_impact_stats(
+            str(db),
+            report_day,
+            include_preview=False,
+            prediction_basis="first",
+            model_version="v211",
+        )
+        impact_v212 = send_daily_report.compute_impact_stats(
+            str(db),
+            report_day,
+            include_preview=False,
+            prediction_basis="first",
+            model_version="v212",
+        )
+
+        self.assertEqual(int(impact_all["signals"]), 1)
+        self.assertEqual(int(impact_v211["signals"]), 1)
+        self.assertEqual(int(impact_v212["signals"]), 0)
+        self.assertAlmostEqual(float(impact_v211["avg_net"]), 8.7, places=6)
+
     def test_daily_report_context_parses_prediction_basis_and_scored_line(self) -> None:
         send_daily_report = load_module(
             "pq_send_daily_report_basis_parse_test",
@@ -570,7 +675,11 @@ class OpsSmokeTests(unittest.TestCase):
                 "- Model Readiness: **STALE**",
                 "- Trading Utility: **STAND ASIDE**",
                 "- Operator Note: No matured tradeable signals in this window.",
+                "- Model: `v212` (feature `v3`)",
                 "- Prediction basis for scored rows: first prediction per event",
+                "- Prediction Row Scope: current manifest model only (`v212`)",
+                "- Window Model-Version Mix: v211=47, v212=41",
+                "- Excluded Other-Model Events: 47",
                 "- Scored predictions (first prediction per event): 42",
             ]
         )
@@ -580,6 +689,10 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(ctx.get("model_readiness"), "STALE")
         self.assertEqual(ctx.get("trading_utility"), "STAND ASIDE")
         self.assertEqual(ctx.get("operator_note"), "No matured tradeable signals in this window.")
+        self.assertEqual(ctx.get("prediction_row_scope"), "current manifest model only (v212)")
+        self.assertEqual(ctx.get("window_model_mix"), "v211=47, v212=41")
+        self.assertEqual(ctx.get("excluded_other_model_events"), "47")
+        self.assertEqual(send_daily_report.extract_model_version(ctx.get("prediction_row_scope")), "v212")
 
     def test_daily_report_retrain_status_uses_completed_cycle_over_stale_running_flag(self) -> None:
         send_daily_report = load_module(
@@ -4031,10 +4144,38 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("ML_SESSION_PREOPEN_HOUR", checker)
         self.assertIn("ML_SESSION_POSTOPEN_HOUR", checker)
         self.assertIn("ML_SESSION_OPS_STATUS_URL", checker)
+        self.assertIn("ML_SESSION_ROUTINE_HEALTH_MAX_AGE_MIN", checker)
         self.assertIn("expiry=90dte", checker)
 
         proc = run_cmd([PYTHON, "-m", "py_compile", "scripts/session_routine_check.py"], cwd=REPO_ROOT)
         self.assertEqual(proc.returncode, 0, msg=f"{proc.stdout}\n{proc.stderr}")
+
+    def test_session_routine_downgrades_stale_host_health_to_warning(self) -> None:
+        module = load_module(
+            "session_routine_check_stale_host_health",
+            REPO_ROOT / "scripts" / "session_routine_check.py",
+        )
+        now_et = datetime(2026, 3, 27, 9, 20, 0, tzinfo=module.ZoneInfo("America/New_York"))
+
+        def fake_fetch_json(url: str, timeout_sec: float) -> tuple[int, dict[str, object] | None, str]:
+            if "5003" in url:
+                return 200, {"status": "ok"}, ""
+            if "5004" in url:
+                return 200, {"status": "ok"}, ""
+            if "3000" in url:
+                return 200, {
+                    "backup": {"status": "ok"},
+                    "restore_drill": {"status": "ok"},
+                    "host_health": {"status": "critical", "age_min": 180},
+                }, ""
+            return 0, None, "Remote end closed connection without response"
+
+        with patch.object(module, "fetch_json", side_effect=fake_fetch_json):
+            with patch.dict(os.environ, {"ML_SESSION_ROUTINE_HEALTH_MAX_AGE_MIN": "120"}, clear=False):
+                result = module.build_preopen_result(now_et=now_et, timeout_sec=4.0)
+
+        self.assertEqual(result["level"], "warn")
+        self.assertIn("host=unknown/stale (age_min=180.0)", result["body"])
 
     def test_retrain_cycle_sources_dotenv(self) -> None:
         retrain_script = (REPO_ROOT / "scripts" / "run_retrain_cycle.sh").read_text(encoding="utf-8")
@@ -4054,6 +4195,12 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("RETRAIN_SCORE_UNSCORED_TIMEOUT_SEC", retrain_script)
         self.assertIn("RETRAIN_SCORE_UNSCORED_MAX_ATTEMPTS", retrain_script)
         self.assertIn("RETRAIN_SCORE_UNSCORED_FAIL_ON_PARTIAL", retrain_script)
+        self.assertIn("MODEL_GOV_EMISSION_SHADOW_ON_RETRAIN", retrain_script)
+        self.assertIn("MODEL_GOV_EMISSION_SCORE_LIMIT", retrain_script)
+        self.assertIn("governance_emission_shadow", retrain_script)
+        self.assertIn("--local-manifest-path", retrain_script)
+        self.assertIn("--emission-db", retrain_script)
+        self.assertIn("--emission-symbols", retrain_script)
         self.assertIn("RETRAIN_REFRESH_ML_METRICS_ON_RETRAIN", retrain_script)
         self.assertIn("RETRAIN_METRICS_TARGET", retrain_script)
         self.assertIn("RETRAIN_METRICS_HORIZON_MIN", retrain_script)
@@ -4082,6 +4229,7 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("build_ops_smoke_alert_body", retrain_script)
         self.assertIn("summary=", retrain_script)
         self.assertIn("hint=", retrain_script)
+        self.assertIn("ops_smoke.log", retrain_script)
 
         env_example = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
         self.assertIn("RF_THRESHOLD_MIN_SIGNALS_OVERRIDES=", env_example)
@@ -4090,7 +4238,15 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("MODEL_GOV_MIN_TRAINED_END_DELTA_MS=21600000", env_example)
         self.assertIn("MODEL_GOV_ENFORCE_THRESHOLD_UTILITY_GUARD=", env_example)
         self.assertIn("MODEL_GOV_THRESHOLD_UTILITY_TARGETS=", env_example)
+        self.assertIn("ML_SESSION_ROUTINE_HEALTH_MAX_AGE_MIN=120", env_example)
         self.assertIn("MODEL_GOV_THRESHOLD_UTILITY_MIN_SCORE=", env_example)
+        self.assertIn("MODEL_GOV_ENFORCE_LIVE_EMISSION_GATE=", env_example)
+        self.assertIn("MODEL_GOV_EMISSION_LOOKBACK_DAYS=", env_example)
+        self.assertIn("MODEL_GOV_EMISSION_MIN_SIGNALS=", env_example)
+        self.assertIn("MODEL_GOV_EMISSION_MAX_ABSTAIN_RATE=", env_example)
+        self.assertIn("MODEL_GOV_EMISSION_SYMBOLS=", env_example)
+        self.assertIn("MODEL_GOV_EMISSION_SHADOW_ON_RETRAIN=", env_example)
+        self.assertIn("MODEL_GOV_EMISSION_SCORE_LIMIT=", env_example)
         self.assertIn("ML_REJECT_OR_BREAKOUT_FILTER_MODE=off", env_example)
         self.assertIn("ML_REJECT_OR_BREAKOUT_FILTER_HORIZONS=", env_example)
         self.assertIn("ML_REJECT_OR_BREAKOUT_FILTER_BLOCK_VALUES=", env_example)
@@ -4400,6 +4556,114 @@ class OpsSmokeTests(unittest.TestCase):
         posted_ids = {str(event.get("event_id")) for event in posted_events}
         self.assertEqual(posted_ids, {"evt_live_scored", "evt_missing"})
         self.assertTrue(all(bool(event.get("preview")) for event in posted_events))
+
+    def test_score_unscored_touch_events_local_manifest_mode_uses_local_batcher(self) -> None:
+        scorer = load_module(
+            "pq_score_unscored_touch_events_local_manifest_test",
+            REPO_ROOT / "scripts" / "score_unscored_touch_events.py",
+        )
+
+        db = self.tmp / "score_unscored_local_manifest.sqlite"
+        conn = sqlite3.connect(str(db))
+        try:
+            conn.execute(
+                """
+                CREATE TABLE touch_events(
+                    event_id TEXT PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    ts_event INTEGER NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE prediction_log(
+                    event_id TEXT NOT NULL,
+                    ts_prediction INTEGER NOT NULL,
+                    is_preview INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+            now_ms = int(time.time() * 1000)
+            rows = [
+                ("evt_local_a", "SPY", now_ms - 60_000),
+                ("evt_local_b", "SPY", now_ms - 120_000),
+            ]
+            conn.executemany(
+                "INSERT INTO touch_events(event_id, symbol, ts_event) VALUES (?, ?, ?)",
+                rows,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        local_batches: list[list[str]] = []
+        cleanup_called: list[bool] = []
+        original_build_local_manifest_batcher = scorer._build_local_manifest_batcher
+        original_post_score_batch = scorer._post_score_batch
+        try:
+
+            def _fake_build_local_manifest_batcher(*, manifest_path: str, db_path: str):
+                self.assertTrue(manifest_path.endswith("manifest_runtime_latest.json"))
+                self.assertEqual(Path(db_path), db)
+
+                def _submit(events: list[dict[str, Any]]) -> tuple[int, str | None]:
+                    local_batches.append([str(event.get("event_id")) for event in events])
+                    conn_local = sqlite3.connect(str(db))
+                    try:
+                        for event in events:
+                            conn_local.execute(
+                                "INSERT INTO prediction_log(event_id, ts_prediction, is_preview) VALUES (?, ?, ?)",
+                                (str(event.get("event_id")), int(time.time() * 1000), 1),
+                            )
+                        conn_local.commit()
+                    finally:
+                        conn_local.close()
+                    return len(events), None
+
+                def _cleanup() -> None:
+                    cleanup_called.append(True)
+
+                return _submit, _cleanup
+
+            def _unexpected_http_batch(**_: Any) -> tuple[int, str | None]:
+                raise AssertionError("HTTP score path should not be used in local manifest mode")
+
+            scorer._build_local_manifest_batcher = _fake_build_local_manifest_batcher
+            scorer._post_score_batch = _unexpected_http_batch
+            args = scorer.parse_args(
+                [
+                    "--db",
+                    str(db),
+                    "--symbols",
+                    "SPY",
+                    "--lookback-days",
+                    "30",
+                    "--limit",
+                    "10",
+                    "--batch-size",
+                    "2",
+                    "--preview",
+                    "--local-manifest-path",
+                    "data/models/manifest_runtime_latest.json",
+                ]
+            )
+            result = scorer.run(args)
+        finally:
+            scorer._build_local_manifest_batcher = original_build_local_manifest_batcher
+            scorer._post_score_batch = original_post_score_batch
+
+        self.assertEqual(result.get("status"), "ok")
+        self.assertEqual(result.get("attempted"), 2)
+        self.assertEqual(result.get("scored_ok"), 2)
+        self.assertEqual(result.get("failed"), 0)
+        self.assertTrue(bool(result.get("preview")))
+        self.assertEqual(
+            result.get("local_manifest_path"),
+            "data/models/manifest_runtime_latest.json",
+        )
+        self.assertEqual(local_batches, [["evt_local_a", "evt_local_b"]])
+        self.assertTrue(cleanup_called)
 
     def test_score_unscored_touch_events_single_fallback_and_verify(self) -> None:
         scorer = load_module(
@@ -6440,6 +6704,195 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(int(filter_summary["candidate_signals"]), 3)
         self.assertEqual(int(filter_summary["applied_signals"]), 1)
 
+    def test_generate_daily_report_scopes_to_manifest_model_on_mixed_rollout_day(self) -> None:
+        report = load_module(
+            "pq_daily_report_model_scope_test",
+            REPO_ROOT / "scripts" / "generate_daily_ml_report.py",
+        )
+        db = self.tmp / "daily_report_mixed_models.sqlite"
+        conn = sqlite3.connect(str(db))
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.execute(
+                """
+                CREATE TABLE touch_events(
+                    event_id TEXT,
+                    ts_event INTEGER,
+                    symbol TEXT,
+                    level_type TEXT,
+                    touch_side INTEGER,
+                    regime_type TEXT,
+                    rv_regime TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE event_labels(
+                    event_id TEXT,
+                    horizon_min INTEGER,
+                    reject INTEGER,
+                    break INTEGER,
+                    return_bps REAL,
+                    mfe_bps REAL,
+                    mae_bps REAL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE prediction_log(
+                    event_id TEXT,
+                    ts_prediction INTEGER,
+                    model_version TEXT,
+                    feature_version TEXT,
+                    abstain INTEGER,
+                    signal_5m TEXT,
+                    signal_15m TEXT,
+                    signal_30m TEXT,
+                    signal_60m TEXT,
+                    prob_reject_5m REAL,
+                    prob_reject_15m REAL,
+                    prob_reject_30m REAL,
+                    prob_reject_60m REAL,
+                    prob_break_5m REAL,
+                    prob_break_15m REAL,
+                    prob_break_30m REAL,
+                    prob_break_60m REAL,
+                    is_preview INTEGER
+                )
+                """
+            )
+
+            report_day = date(2026, 3, 26)
+            start_ms, end_ms = report.day_bounds_ms(report_day)
+
+            conn.execute(
+                """
+                INSERT INTO touch_events(event_id, ts_event, symbol, level_type, touch_side, regime_type, rv_regime)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("evt_v211", start_ms + 60_000, "SPY", "resistance", -1, "range", "normal"),
+            )
+            conn.execute(
+                """
+                INSERT INTO event_labels(event_id, horizon_min, reject, break, return_bps, mfe_bps, mae_bps)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("evt_v211", 15, 1, 0, -8.0, 12.0, -5.0),
+            )
+            conn.execute(
+                """
+                INSERT INTO prediction_log(
+                    event_id, ts_prediction, model_version, feature_version, abstain,
+                    signal_5m, signal_15m, signal_30m, signal_60m,
+                    prob_reject_5m, prob_reject_15m, prob_reject_30m, prob_reject_60m,
+                    prob_break_5m, prob_break_15m, prob_break_30m, prob_break_60m, is_preview
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "evt_v211",
+                    start_ms + 61_000,
+                    "v211",
+                    "v3",
+                    0,
+                    "no_edge",
+                    "reject",
+                    "no_edge",
+                    "no_edge",
+                    0.10,
+                    0.91,
+                    0.10,
+                    0.10,
+                    0.05,
+                    0.05,
+                    0.05,
+                    0.05,
+                    0,
+                ),
+            )
+
+            conn.execute(
+                """
+                INSERT INTO touch_events(event_id, ts_event, symbol, level_type, touch_side, regime_type, rv_regime)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("evt_v212", start_ms + 120_000, "SPY", "support", 1, "range", "normal"),
+            )
+            conn.execute(
+                """
+                INSERT INTO event_labels(event_id, horizon_min, reject, break, return_bps, mfe_bps, mae_bps)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("evt_v212", 15, 0, 1, 9.0, 14.0, -4.0),
+            )
+            conn.execute(
+                """
+                INSERT INTO prediction_log(
+                    event_id, ts_prediction, model_version, feature_version, abstain,
+                    signal_5m, signal_15m, signal_30m, signal_60m,
+                    prob_reject_5m, prob_reject_15m, prob_reject_30m, prob_reject_60m,
+                    prob_break_5m, prob_break_15m, prob_break_30m, prob_break_60m, is_preview
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "evt_v212",
+                    start_ms + 121_000,
+                    "v212",
+                    "v3",
+                    0,
+                    "no_edge",
+                    "reject",
+                    "no_edge",
+                    "no_edge",
+                    0.11,
+                    0.93,
+                    0.11,
+                    0.11,
+                    0.06,
+                    0.06,
+                    0.06,
+                    0.06,
+                    0,
+                ),
+            )
+            conn.commit()
+
+            model_mix = report.fetch_prediction_model_mix(
+                conn,
+                start_ms,
+                end_ms,
+                include_preview=False,
+                prediction_basis="first",
+            )
+            latest_predictions = report.fetch_latest_predictions(
+                conn,
+                start_ms,
+                end_ms,
+                include_preview=False,
+                prediction_basis="first",
+                model_version="v212",
+            )
+            labeled_records = report.fetch_labeled_records(
+                conn,
+                start_ms,
+                end_ms,
+                include_preview=False,
+                prediction_basis="first",
+                model_version="v212",
+            )
+        finally:
+            conn.close()
+
+        self.assertEqual(model_mix, [("v211", 1), ("v212", 1)])
+        self.assertEqual(report._format_model_version_mix(model_mix), "v211=1, v212=1")
+        self.assertEqual([row["event_id"] for row in latest_predictions], ["evt_v212"])
+        self.assertEqual([row["model_version"] for row in latest_predictions], ["v212"])
+        self.assertEqual([row["event_id"] for row in labeled_records], ["evt_v212"])
+        self.assertEqual([row["model_version"] for row in labeled_records], ["v212"])
+
     def test_report_analog_shadow_summary_and_deltas(self) -> None:
         report = load_module(
             "pq_daily_report_analog_summary_test",
@@ -7561,6 +8014,9 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("Trading Utility", source)
         self.assertIn("Operator Note", source)
         self.assertIn("Prediction basis for scored rows", source)
+        self.assertIn("Prediction Row Scope", source)
+        self.assertIn("Window Model-Version Mix", source)
+        self.assertIn("Excluded Other-Model Events", source)
         self.assertIn("--prediction-basis", source)
 
     def test_train_artifacts_horizon_stats_use_target_specific_other_bucket(self) -> None:
@@ -7846,7 +8302,29 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertAlmostEqual(float(diagnostics.get("selected_fp_utility_sum") or 0.0), -8.0, places=9)
         self.assertAlmostEqual(float(diagnostics.get("selected_utility_sum") or 0.0), -6.0, places=9)
 
-    def test_model_governance_skips_regression_gates_when_support_is_low(self) -> None:
+    def test_train_artifacts_merge_tune_date_range_tracks_min_and_max(self) -> None:
+        module = load_module(
+            "train_rf_artifacts_tune_date_range",
+            REPO_ROOT / "scripts" / "train_rf_artifacts.py",
+        )
+        merged = module._merge_tune_date_range(
+            None,
+            ["2026-03-25", "2026-03-23", "2026-03-24"],
+        )
+        self.assertEqual(
+            merged,
+            {"min_event_date_et": "2026-03-23", "max_event_date_et": "2026-03-25"},
+        )
+        merged = module._merge_tune_date_range(
+            merged,
+            ["2026-03-22", "2026-03-27"],
+        )
+        self.assertEqual(
+            merged,
+            {"min_event_date_et": "2026-03-22", "max_event_date_et": "2026-03-27"},
+        )
+
+    def test_model_governance_skips_active_support_check_only_with_bootstrap_waiver(self) -> None:
         module = load_module("model_governance", REPO_ROOT / "scripts" / "model_governance.py")
         gates = module.GateConfig(
             required_targets=["break"],
@@ -7858,6 +8336,7 @@ class OpsSmokeTests(unittest.TestCase):
             min_positive_samples_reject=0,
             min_positive_samples_break=25,
             allow_feature_version_change=False,
+            allow_bootstrap_metric_skips=True,
         )
         active = {
             "feature_version": "v3",
@@ -7879,10 +8358,10 @@ class OpsSmokeTests(unittest.TestCase):
             "stats": {
                 "5": {
                     "break": {
-                        "sample_size": 130,
-                        "break_count": 11,
-                        "mfe_bps_break": 6.0,
-                        "mae_bps_break": -35.0,
+                        "sample_size": 230,
+                        "break_count": 31,
+                        "mfe_bps_break": 8.5,
+                        "mae_bps_break": -24.5,
                     }
                 }
             },
@@ -7891,8 +8370,8 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(failures, [])
         self.assertTrue(any("break:5m skipped regression gates" in item for item in skips))
 
-    def test_model_governance_reports_missing_metric_skip(self) -> None:
-        module = load_module("model_governance_missing_metric_skip", REPO_ROOT / "scripts" / "model_governance.py")
+    def test_model_governance_missing_candidate_metric_fails_closed(self) -> None:
+        module = load_module("model_governance_missing_metric_fail_closed", REPO_ROOT / "scripts" / "model_governance.py")
         gates = module.GateConfig(
             required_targets=["break"],
             required_horizons=[5],
@@ -7907,16 +8386,130 @@ class OpsSmokeTests(unittest.TestCase):
         active = {
             "feature_version": "v3",
             "trained_end_ts": 1000,
+            "stats": {
+                "5": {
+                    "break": {
+                        "sample_size": 200,
+                        "break_count": 60,
+                        "mfe_bps_break": 8.0,
+                        "mae_bps_break": -10.0,
+                    }
+                }
+            },
+        }
+        candidate = {
+            "feature_version": "v3",
+            "trained_end_ts": 2000,
+            "stats": {
+                "5": {
+                    "break": {
+                        "sample_size": 220,
+                        "break_count": 62,
+                        "mae_bps_break": -9.0,
+                    }
+                }
+            },
+        }
+        failures, skips = module.evaluate_gates(active, candidate, gates)
+        self.assertTrue(
+            any(
+                item == "break:5m missing required candidate metric mfe_bps_break — fail closed"
+                for item in failures
+            )
+        )
+        self.assertEqual(skips, [])
+
+    def test_model_governance_missing_candidate_support_fails_closed(self) -> None:
+        module = load_module("model_governance_missing_support_fail_closed", REPO_ROOT / "scripts" / "model_governance.py")
+        gates = module.GateConfig(
+            required_targets=["break"],
+            required_horizons=[5],
+            min_trained_end_delta_ms=0,
+            max_mfe_regression_bps=1.5,
+            max_mae_worsening_bps=2.0,
+            min_total_samples=200,
+            min_positive_samples_reject=0,
+            min_positive_samples_break=25,
+            allow_feature_version_change=False,
+        )
+        active = {
+            "feature_version": "v3",
+            "trained_end_ts": 1000,
+            "stats": {
+                "5": {
+                    "break": {
+                        "sample_size": 220,
+                        "break_count": 30,
+                        "mfe_bps_break": 8.0,
+                        "mae_bps_break": -25.0,
+                    }
+                }
+            },
+        }
+        candidate = {
+            "feature_version": "v3",
+            "trained_end_ts": 2000,
+            "stats": {
+                "5": {
+                    "break": {
+                        "sample_size": 130,
+                        "break_count": 11,
+                        "mfe_bps_break": 6.0,
+                        "mae_bps_break": -35.0,
+                    }
+                }
+            },
+        }
+        failures, skips = module.evaluate_gates(active, candidate, gates)
+        self.assertTrue(
+            any(
+                item == "break:5m candidate sample_size 130 < min_total=200 — fail closed"
+                for item in failures
+            )
+        )
+        self.assertEqual(skips, [])
+
+    def test_model_governance_allows_active_missing_metric_with_bootstrap_waiver(self) -> None:
+        module = load_module("model_governance_active_metric_bootstrap", REPO_ROOT / "scripts" / "model_governance.py")
+        gates = module.GateConfig(
+            required_targets=["break"],
+            required_horizons=[5],
+            min_trained_end_delta_ms=0,
+            max_mfe_regression_bps=1.5,
+            max_mae_worsening_bps=2.0,
+            min_total_samples=0,
+            min_positive_samples_reject=0,
+            min_positive_samples_break=0,
+            allow_feature_version_change=False,
+            allow_bootstrap_metric_skips=True,
+        )
+        active = {
+            "feature_version": "v3",
+            "trained_end_ts": 1000,
             "stats": {"5": {"break": {"sample_size": 200, "break_count": 60, "mae_bps_break": -10.0}}},
         }
         candidate = {
             "feature_version": "v3",
             "trained_end_ts": 2000,
-            "stats": {"5": {"break": {"sample_size": 220, "break_count": 62, "mfe_bps_break": 7.0, "mae_bps_break": -9.0}}},
+            "stats": {
+                "5": {
+                    "break": {
+                        "sample_size": 220,
+                        "break_count": 62,
+                        "mfe_bps_break": 7.0,
+                        "mae_bps_break": -9.0,
+                    }
+                }
+            },
         }
         failures, skips = module.evaluate_gates(active, candidate, gates)
         self.assertEqual(failures, [])
-        self.assertTrue(any("skipped mfe_bps_break regression gate" in item for item in skips))
+        self.assertTrue(
+            any(
+                item == "break:5m skipped mfe_bps_break regression gate (missing active metric; bootstrap waiver)"
+                for item in skips
+            )
+        )
 
     def test_model_governance_threshold_utility_guard_blocks_promotion(self) -> None:
         module = load_module(
@@ -8001,6 +8594,146 @@ class OpsSmokeTests(unittest.TestCase):
         failures, _ = module.evaluate_gates(active, candidate, gates)
         self.assertTrue(
             any("reject:5m threshold utility score" in item for item in failures)
+        )
+
+    def test_model_governance_blocks_negative_probability_utility_correlation(self) -> None:
+        module = load_module(
+            "model_governance_negative_corr_pos",
+            REPO_ROOT / "scripts" / "model_governance.py",
+        )
+        gates = module.GateConfig(
+            required_targets=["reject"],
+            required_horizons=[15],
+            min_trained_end_delta_ms=0,
+            max_mfe_regression_bps=1.5,
+            max_mae_worsening_bps=2.0,
+            min_total_samples=0,
+            min_positive_samples_reject=0,
+            min_positive_samples_break=0,
+            allow_feature_version_change=False,
+            enforce_threshold_utility_guard=True,
+            threshold_utility_targets=["reject"],
+            threshold_utility_min_score=0.0,
+            min_corr_pos=0.0,
+            min_tune_signals=50,
+        )
+        active = {
+            "feature_version": "v3",
+            "trained_end_ts": 1000,
+            "stats": {
+                "15": {
+                    "reject": {
+                        "sample_size": 200,
+                        "reject_count": 80,
+                        "mfe_bps_reject": 8.0,
+                        "mae_bps_reject": -12.0,
+                    }
+                }
+            },
+            "thresholds": {"reject": {"15": 0.5}},
+            "thresholds_meta": {
+                "reject": {"15": {"objective": "utility_bps", "score": 10.0, "guard_applied": False}}
+            },
+        }
+        candidate = {
+            "feature_version": "v3",
+            "trained_end_ts": 2000,
+            "stats": {
+                "15": {
+                    "reject": {
+                        "sample_size": 210,
+                        "reject_count": 84,
+                        "mfe_bps_reject": 8.2,
+                        "mae_bps_reject": -11.5,
+                    }
+                }
+            },
+            "thresholds": {"reject": {"15": 0.62}},
+            "thresholds_meta": {
+                "reject": {
+                    "15": {
+                        "objective": "utility_bps",
+                        "score": 25.0,
+                        "guard_applied": False,
+                        "signals": 60,
+                        "tune_prob_utility_corr_pos": -0.206,
+                    }
+                }
+            },
+        }
+        failures, _ = module.evaluate_gates(active, candidate, gates)
+        self.assertTrue(
+            any("reject:15m probability-utility correlation negative (-0.206)" in item for item in failures)
+        )
+
+    def test_model_governance_blocks_insufficient_tune_signals(self) -> None:
+        module = load_module(
+            "model_governance_min_tune_signals",
+            REPO_ROOT / "scripts" / "model_governance.py",
+        )
+        gates = module.GateConfig(
+            required_targets=["reject"],
+            required_horizons=[15],
+            min_trained_end_delta_ms=0,
+            max_mfe_regression_bps=1.5,
+            max_mae_worsening_bps=2.0,
+            min_total_samples=0,
+            min_positive_samples_reject=0,
+            min_positive_samples_break=0,
+            allow_feature_version_change=False,
+            enforce_threshold_utility_guard=True,
+            threshold_utility_targets=["reject"],
+            threshold_utility_min_score=0.0,
+            min_corr_pos=0.0,
+            min_tune_signals=50,
+        )
+        active = {
+            "feature_version": "v3",
+            "trained_end_ts": 1000,
+            "stats": {
+                "15": {
+                    "reject": {
+                        "sample_size": 200,
+                        "reject_count": 80,
+                        "mfe_bps_reject": 8.0,
+                        "mae_bps_reject": -12.0,
+                    }
+                }
+            },
+            "thresholds": {"reject": {"15": 0.5}},
+            "thresholds_meta": {
+                "reject": {"15": {"objective": "utility_bps", "score": 10.0, "guard_applied": False}}
+            },
+        }
+        candidate = {
+            "feature_version": "v3",
+            "trained_end_ts": 2000,
+            "stats": {
+                "15": {
+                    "reject": {
+                        "sample_size": 210,
+                        "reject_count": 84,
+                        "mfe_bps_reject": 8.2,
+                        "mae_bps_reject": -11.5,
+                    }
+                }
+            },
+            "thresholds": {"reject": {"15": 0.62}},
+            "thresholds_meta": {
+                "reject": {
+                    "15": {
+                        "objective": "utility_bps",
+                        "score": 25.0,
+                        "guard_applied": False,
+                        "signals": 14,
+                        "tune_prob_utility_corr_pos": 0.05,
+                    }
+                }
+            },
+        }
+        failures, _ = module.evaluate_gates(active, candidate, gates)
+        self.assertTrue(
+            any("reject:15m insufficient tune signals (14 < 50)" in item for item in failures)
         )
 
     def test_model_governance_regime_aware_waives_aggregate_mfe_regression(self) -> None:
@@ -8278,6 +9011,1119 @@ class OpsSmokeTests(unittest.TestCase):
         failures, skips = module.evaluate_gates(active, candidate, gates)
         self.assertTrue(any("break:5m mae_bps_break worsened" in item for item in failures))
         self.assertEqual(skips, [])
+
+    def test_model_governance_live_emission_gate_passes_recent_preview_candidate(self) -> None:
+        module = load_module(
+            "model_governance_live_emission_pass",
+            REPO_ROOT / "scripts" / "model_governance.py",
+        )
+        gates = module.GateConfig(
+            required_targets=["reject"],
+            required_horizons=[15],
+            min_trained_end_delta_ms=0,
+            max_mfe_regression_bps=1.5,
+            max_mae_worsening_bps=2.0,
+            min_total_samples=0,
+            min_positive_samples_reject=0,
+            min_positive_samples_break=0,
+            allow_feature_version_change=False,
+            enforce_live_emission_gate=True,
+            emission_lookback_days=5,
+            emission_max_pred_lag_hours=6.0,
+            emission_prediction_basis="first",
+            emission_source="preview",
+            emission_min_rows=20,
+            emission_min_coverage=0.9,
+            emission_min_signals=1,
+            emission_max_abstain_rate=0.95,
+            emission_symbols=["SPY"],
+        )
+
+        db = self.tmp / "emission_gate_pass.sqlite"
+        conn = sqlite3.connect(str(db))
+        try:
+            conn.execute(
+                """
+                CREATE TABLE touch_events(
+                    event_id TEXT PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    ts_event INTEGER NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE prediction_log(
+                    event_id TEXT NOT NULL,
+                    ts_prediction INTEGER NOT NULL,
+                    model_version TEXT,
+                    best_horizon INTEGER,
+                    abstain INTEGER NOT NULL DEFAULT 0,
+                    is_preview INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+            now_ms = int(time.time() * 1000)
+            touch_rows = []
+            prediction_rows = []
+            for idx in range(40):
+                event_id = f"evt_pass_{idx:02d}"
+                ts_event = now_ms - (idx + 1) * 60_000
+                symbol = "SPY" if idx < 20 else "QQQ"
+                touch_rows.append((event_id, symbol, ts_event))
+                best_horizon = 15 if idx < 4 else None
+                abstain = 0 if idx < 4 else 1
+                # Preview/shadow rows are scored retrospectively, so the
+                # prediction timestamp can be well after the touch event.
+                prediction_rows.append((event_id, ts_event + (8 * 3600 * 1000), "v215", best_horizon, abstain, 1))
+            conn.executemany(
+                "INSERT INTO touch_events(event_id, symbol, ts_event) VALUES (?, ?, ?)",
+                touch_rows,
+            )
+            conn.executemany(
+                """
+                INSERT INTO prediction_log(
+                    event_id, ts_prediction, model_version, best_horizon, abstain, is_preview
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                prediction_rows,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        failures, summary = module.evaluate_live_emission_gate(
+            str(db),
+            candidate_version="v215",
+            gates=gates,
+        )
+
+        self.assertEqual(failures, [])
+        self.assertEqual(summary.get("status"), "ok")
+        self.assertFalse(bool(summary.get("has_event_labels")))
+        self.assertFalse(bool(summary.get("max_pred_lag_applied")))
+        self.assertEqual(summary.get("symbols"), ["SPY"])
+        self.assertEqual(int(summary.get("touch_rows") or 0), 20)
+        self.assertEqual(int(summary.get("selected_rows") or 0), 20)
+        self.assertEqual(int(summary.get("signal_rows") or 0), 4)
+        self.assertAlmostEqual(float(summary.get("coverage") or 0.0), 1.0, places=6)
+        self.assertAlmostEqual(float(summary.get("abstain_rate") or 0.0), 0.8, places=6)
+        self.assertEqual(summary.get("signal_horizon_counts", {}).get("15"), 4)
+
+    def test_model_governance_live_emission_gate_blocks_inert_candidate(self) -> None:
+        module = load_module(
+            "model_governance_live_emission_reject",
+            REPO_ROOT / "scripts" / "model_governance.py",
+        )
+        models_dir = self.tmp / "models"
+        metadata_dir = models_dir / "metadata_runtime"
+        models_dir.mkdir(parents=True, exist_ok=True)
+        metadata_dir.mkdir(parents=True, exist_ok=True)
+
+        for name in ["rf_reject_15m_active.pkl", "rf_reject_15m_candidate.pkl"]:
+            (models_dir / name).write_text("stub", encoding="utf-8")
+
+        active_manifest = {
+            "version": "v212",
+            "feature_version": "v3",
+            "models": {"reject": {"15": "rf_reject_15m_active.pkl"}},
+            "thresholds": {"reject": {"15": 0.91}},
+            "thresholds_meta": {
+                "reject": {
+                    "15": {
+                        "objective": "utility_bps",
+                        "score": 177.11,
+                        "guard_applied": False,
+                    }
+                }
+            },
+            "stats": {
+                "15": {
+                    "reject": {
+                        "sample_size": 100,
+                        "reject_count": 20,
+                        "mfe_bps_reject": 8.0,
+                        "mae_bps_reject": -10.0,
+                    }
+                }
+            },
+            "trained_end_ts": 1774544400000,
+        }
+        candidate_manifest = {
+            "version": "v213",
+            "feature_version": "v3",
+            "models": {"reject": {"15": "rf_reject_15m_candidate.pkl"}},
+            "thresholds": {"reject": {"15": 0.92}},
+            "thresholds_meta": {
+                "reject": {
+                    "15": {
+                        "objective": "utility_bps",
+                        "score": 190.0,
+                        "guard_applied": False,
+                    }
+                }
+            },
+            "stats": {
+                "15": {
+                    "reject": {
+                        "sample_size": 120,
+                        "reject_count": 24,
+                        "mfe_bps_reject": 8.2,
+                        "mae_bps_reject": -9.8,
+                    }
+                }
+            },
+            "trained_end_ts": 1774552516000,
+        }
+        (models_dir / "manifest_active.json").write_text(
+            json.dumps(active_manifest),
+            encoding="utf-8",
+        )
+        (models_dir / "manifest_runtime_latest.json").write_text(
+            json.dumps(candidate_manifest),
+            encoding="utf-8",
+        )
+        (models_dir / "model_registry.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "active_version": "v212",
+                    "previous_active_version": "v211",
+                    "candidate_version": "v213",
+                    "history": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        emission_db = self.tmp / "emission_gate_reject.sqlite"
+        conn = sqlite3.connect(str(emission_db))
+        try:
+            conn.execute(
+                """
+                CREATE TABLE touch_events(
+                    event_id TEXT PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    ts_event INTEGER NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE prediction_log(
+                    event_id TEXT NOT NULL,
+                    ts_prediction INTEGER NOT NULL,
+                    model_version TEXT,
+                    best_horizon INTEGER,
+                    abstain INTEGER NOT NULL DEFAULT 0,
+                    is_preview INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+            now_ms = int(time.time() * 1000)
+            touch_rows = []
+            prediction_rows = []
+            for idx in range(40):
+                event_id = f"evt_inert_{idx:02d}"
+                ts_event = now_ms - (idx + 1) * 60_000
+                touch_rows.append((event_id, "SPY", ts_event))
+                prediction_rows.append((event_id, ts_event + 60_000, "v213", None, 1, 1))
+            conn.executemany(
+                "INSERT INTO touch_events(event_id, symbol, ts_event) VALUES (?, ?, ?)",
+                touch_rows,
+            )
+            conn.executemany(
+                """
+                INSERT INTO prediction_log(
+                    event_id, ts_prediction, model_version, best_horizon, abstain, is_preview
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                prediction_rows,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        args = module.build_parser().parse_args(
+            [
+                "--models-dir",
+                str(models_dir),
+                "--metadata-dir",
+                "metadata_runtime",
+                "--candidate-manifest",
+                "manifest_runtime_latest.json",
+                "--active-manifest",
+                "manifest_active.json",
+                "--prev-active-manifest",
+                "manifest_active_prev.json",
+                "--state-file",
+                "model_registry.json",
+                "--ops-db",
+                str(self.tmp / "ops.sqlite"),
+                "evaluate",
+                "--required-targets",
+                "reject",
+                "--required-horizons",
+                "15",
+                "--min-trained-end-delta-ms",
+                "0",
+                "--enforce-live-emission-gate",
+                "--emission-db",
+                str(emission_db),
+                "--emission-source",
+                "preview",
+                "--emission-lookback-days",
+                "5",
+                "--emission-min-rows",
+                "25",
+                "--emission-min-coverage",
+                "0.9",
+                "--emission-min-signals",
+                "1",
+                "--emission-max-abstain-rate",
+                "0.95",
+                "--emission-symbols",
+                "SPY",
+            ]
+        )
+
+        with patch("sys.stdout", new=io.StringIO()):
+            rc = module.cmd_evaluate(args)
+
+        self.assertEqual(rc, 0)
+        state = json.loads((models_dir / "model_registry.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["active_version"], "v212")
+        self.assertEqual(state["last_action"], "rejected")
+        self.assertIn("candidate emission gate signal_rows 0 < min_signals 1", state["last_reason"])
+        self.assertTrue(
+            any(
+                "candidate emission gate abstain_rate 1.000 > max_abstain_rate 0.950"
+                in item
+                for item in state["history"][-1]["gate_failures"]
+            )
+        )
+        self.assertTrue(bool(state["history"][-1]["gate_config"]["enforce_live_emission_gate"]))
+        self.assertEqual(state["history"][-1]["emission_gate"]["signal_rows"], 0)
+
+    def test_model_governance_rollback_can_harden_active_break_fallbacks(self) -> None:
+        module = load_module(
+            "model_governance_rollback_hardening",
+            REPO_ROOT / "scripts" / "model_governance.py",
+        )
+        models_dir = self.tmp / "models"
+        metadata_dir = models_dir / "metadata_runtime"
+        models_dir.mkdir(parents=True, exist_ok=True)
+        metadata_dir.mkdir(parents=True, exist_ok=True)
+
+        active_manifest = {
+            "version": "v211",
+            "feature_version": "v3",
+            "models": {
+                "reject": {"15": "rf_reject_15m_v211.pkl"},
+                "break": {
+                    "5": "rf_break_5m_v211.pkl",
+                    "15": "rf_break_15m_v211.pkl",
+                    "60": "rf_break_60m_v211.pkl",
+                },
+            },
+            "thresholds": {
+                "reject": {"15": 0.8693},
+                "break": {"5": 0.5, "15": 0.62, "60": 0.5},
+            },
+            "thresholds_meta": {
+                "break": {
+                    "5": {"fallback": True},
+                    "15": {"fallback": False},
+                    "60": {"fallback": True},
+                }
+            },
+            "trained_end_ts": 1774552516000,
+        }
+        (models_dir / "manifest_active.json").write_text(
+            json.dumps(active_manifest),
+            encoding="utf-8",
+        )
+        (models_dir / "manifest_active_prev.json").write_text(
+            json.dumps({"version": "v212"}),
+            encoding="utf-8",
+        )
+        (models_dir / "model_registry.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "active_version": "v211",
+                    "previous_active_version": "v212",
+                    "candidate_version": "v214",
+                    "history": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        args = argparse.Namespace(
+            models_dir=str(models_dir),
+            metadata_dir="metadata_runtime",
+            active_manifest="manifest_active.json",
+            prev_active_manifest="manifest_active_prev.json",
+            state_file="model_registry.json",
+            ops_db=str(self.tmp / "ops.sqlite"),
+            to_version="v211",
+            harden_break_fallbacks=True,
+            no_trade_threshold=1.0,
+        )
+
+        rc = module.cmd_rollback(args)
+        self.assertEqual(rc, 0)
+
+        hardened_active = json.loads((models_dir / "manifest_active.json").read_text(encoding="utf-8"))
+        previous_manifest = json.loads((models_dir / "manifest_active_prev.json").read_text(encoding="utf-8"))
+        state = json.loads((models_dir / "model_registry.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(hardened_active["thresholds"]["break"]["5"], 1.0)
+        self.assertEqual(hardened_active["thresholds"]["break"]["60"], 1.0)
+        self.assertEqual(hardened_active["thresholds"]["break"]["15"], 0.62)
+        self.assertEqual(previous_manifest["thresholds"]["break"]["5"], 0.5)
+        self.assertEqual(previous_manifest["thresholds"]["break"]["60"], 0.5)
+        self.assertEqual(
+            hardened_active["runtime_overrides"]["rollback"]["break_fallbacks_hardened"],
+            [5, 60],
+        )
+        self.assertEqual(state["active_version"], "v211")
+        self.assertEqual(state["last_action"], "hardened_active")
+        history_entry = state["history"][-1]
+        self.assertEqual(history_entry["hardened_break_horizons"], [5, 60])
+        self.assertEqual(history_entry["active_manifest_sha256_before"], module._sha256_path(models_dir / "manifest_active_prev.json"))
+        self.assertEqual(history_entry["active_manifest_sha256_after"], module._sha256_path(models_dir / "manifest_active.json"))
+        self.assertEqual(history_entry["target_manifest_sha256"], module._sha256_path(models_dir / "manifest_active_prev.json"))
+        self.assertEqual(history_entry["target_manifest_version"], "v211")
+        self.assertEqual(history_entry["manifest_sha256"], module._sha256_path(models_dir / "manifest_active.json"))
+        self.assertEqual(history_entry["trained_end_ts"], 1774552516000)
+
+    def test_model_governance_lock_times_out(self) -> None:
+        module = load_module(
+            "model_governance_lock_timeout",
+            REPO_ROOT / "scripts" / "model_governance.py",
+        )
+        lock_path = self.tmp / ".governance.lock"
+        with patch.object(module.fcntl, "flock", side_effect=BlockingIOError):
+            with self.assertRaises(TimeoutError):
+                with module.governance_lock(lock_path, timeout_sec=0.1):
+                    pass
+
+    def test_model_governance_compare_and_swap_blocks_active_version_changes(self) -> None:
+        module = load_module(
+            "model_governance_compare_and_swap",
+            REPO_ROOT / "scripts" / "model_governance.py",
+        )
+        models_dir = self.tmp / "models"
+        metadata_dir = models_dir / "metadata_runtime"
+        models_dir.mkdir(parents=True, exist_ok=True)
+        metadata_dir.mkdir(parents=True, exist_ok=True)
+
+        (models_dir / "rf_reject_15m_active.pkl").write_text("stub", encoding="utf-8")
+        (models_dir / "rf_reject_15m_candidate.pkl").write_text("stub", encoding="utf-8")
+        (models_dir / "manifest_active.json").write_text(
+            json.dumps(
+                {
+                    "version": "v212",
+                    "feature_version": "v3",
+                    "models": {"reject": {"15": "rf_reject_15m_active.pkl"}},
+                    "thresholds": {"reject": {"15": 0.91}},
+                    "thresholds_meta": {
+                        "reject": {"15": {"objective": "utility_bps", "score": 10.0, "guard_applied": False}}
+                    },
+                    "stats": {
+                        "15": {
+                            "reject": {
+                                "sample_size": 120,
+                                "reject_count": 30,
+                                "mfe_bps_reject": 8.0,
+                                "mae_bps_reject": -10.0,
+                            }
+                        }
+                    },
+                    "trained_end_ts": 1774544400000,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (models_dir / "manifest_runtime_latest.json").write_text(
+            json.dumps(
+                {
+                    "version": "v213",
+                    "feature_version": "v3",
+                    "models": {"reject": {"15": "rf_reject_15m_candidate.pkl"}},
+                    "thresholds": {"reject": {"15": 0.92}},
+                    "thresholds_meta": {
+                        "reject": {"15": {"objective": "utility_bps", "score": 11.0, "guard_applied": False}}
+                    },
+                    "stats": {
+                        "15": {
+                            "reject": {
+                                "sample_size": 130,
+                                "reject_count": 33,
+                                "mfe_bps_reject": 8.4,
+                                "mae_bps_reject": -9.7,
+                            }
+                        }
+                    },
+                    "trained_end_ts": 1774552516000,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (models_dir / "model_registry.json").write_text(
+            json.dumps({"schema_version": 1, "active_version": "v212", "history": []}),
+            encoding="utf-8",
+        )
+
+        args = module.build_parser().parse_args(
+            [
+                "--models-dir",
+                str(models_dir),
+                "--metadata-dir",
+                "metadata_runtime",
+                "--candidate-manifest",
+                "manifest_runtime_latest.json",
+                "--active-manifest",
+                "manifest_active.json",
+                "--prev-active-manifest",
+                "manifest_active_prev.json",
+                "--state-file",
+                "model_registry.json",
+                "--ops-db",
+                str(self.tmp / "ops.sqlite"),
+                "evaluate",
+                "--required-targets",
+                "reject",
+                "--required-horizons",
+                "15",
+            ]
+        )
+
+        with patch.object(module, "governance_lock", side_effect=lambda *a, **k: contextlib.nullcontext()):
+            with patch.object(
+                module,
+                "active_manifest_identity",
+                side_effect=[("v212", "a" * 64), ("v213", "b" * 64)],
+            ):
+                with patch("sys.stdout", new=io.StringIO()) as stdout:
+                    rc = module.cmd_evaluate(args)
+
+        self.assertEqual(rc, 1)
+        payload = json.loads(stdout.getvalue().strip())
+        self.assertEqual(payload["status"], "error")
+        self.assertIn("compare-and-swap failed", payload["message"])
+        self.assertIn("version=v212", payload["message"])
+        self.assertIn("version=v213", payload["message"])
+
+    def test_model_governance_compare_and_swap_blocks_same_version_manifest_rewrite(self) -> None:
+        module = load_module(
+            "model_governance_compare_and_swap_same_version",
+            REPO_ROOT / "scripts" / "model_governance.py",
+        )
+        models_dir = self.tmp / "models"
+        metadata_dir = models_dir / "metadata_runtime"
+        models_dir.mkdir(parents=True, exist_ok=True)
+        metadata_dir.mkdir(parents=True, exist_ok=True)
+
+        (models_dir / "rf_reject_15m_active.pkl").write_text("stub", encoding="utf-8")
+        (models_dir / "rf_reject_15m_candidate.pkl").write_text("stub", encoding="utf-8")
+        manifest = {
+            "version": "v212",
+            "feature_version": "v3",
+            "models": {"reject": {"15": "rf_reject_15m_active.pkl"}},
+            "thresholds": {"reject": {"15": 0.91}},
+            "thresholds_meta": {
+                "reject": {"15": {"objective": "utility_bps", "score": 10.0, "guard_applied": False}}
+            },
+            "stats": {
+                "15": {
+                    "reject": {
+                        "sample_size": 120,
+                        "reject_count": 30,
+                        "mfe_bps_reject": 8.0,
+                        "mae_bps_reject": -10.0,
+                    }
+                }
+            },
+            "trained_end_ts": 1774544400000,
+        }
+        (models_dir / "manifest_active.json").write_text(json.dumps(manifest), encoding="utf-8")
+        candidate_manifest = dict(manifest)
+        candidate_manifest["version"] = "v213"
+        candidate_manifest["models"] = {"reject": {"15": "rf_reject_15m_candidate.pkl"}}
+        candidate_manifest["thresholds"] = {"reject": {"15": 0.92}}
+        (models_dir / "manifest_runtime_latest.json").write_text(
+            json.dumps(candidate_manifest),
+            encoding="utf-8",
+        )
+        (models_dir / "model_registry.json").write_text(
+            json.dumps({"schema_version": 1, "active_version": "v212", "history": []}),
+            encoding="utf-8",
+        )
+
+        args = module.build_parser().parse_args(
+            [
+                "--models-dir",
+                str(models_dir),
+                "--metadata-dir",
+                "metadata_runtime",
+                "--candidate-manifest",
+                "manifest_runtime_latest.json",
+                "--active-manifest",
+                "manifest_active.json",
+                "--prev-active-manifest",
+                "manifest_active_prev.json",
+                "--state-file",
+                "model_registry.json",
+                "--ops-db",
+                str(self.tmp / "ops.sqlite"),
+                "evaluate",
+                "--required-targets",
+                "reject",
+                "--required-horizons",
+                "15",
+            ]
+        )
+
+        with patch.object(module, "governance_lock", side_effect=lambda *a, **k: contextlib.nullcontext()):
+            with patch.object(
+                module,
+                "active_manifest_identity",
+                side_effect=[("v212", "a" * 64), ("v212", "b" * 64)],
+            ):
+                with patch("sys.stdout", new=io.StringIO()) as stdout:
+                    rc = module.cmd_evaluate(args)
+
+        self.assertEqual(rc, 1)
+        payload = json.loads(stdout.getvalue().strip())
+        self.assertEqual(payload["status"], "error")
+        self.assertIn("compare-and-swap failed", payload["message"])
+        self.assertIn("version=v212", payload["message"])
+        self.assertIn("sha=aaaaaaaaaaaa", payload["message"])
+        self.assertIn("sha=bbbbbbbbbbbb", payload["message"])
+
+    def test_model_governance_history_records_gate_config_on_rejection(self) -> None:
+        module = load_module(
+            "model_governance_history_gate_config",
+            REPO_ROOT / "scripts" / "model_governance.py",
+        )
+        models_dir = self.tmp / "models"
+        metadata_dir = models_dir / "metadata_runtime"
+        models_dir.mkdir(parents=True, exist_ok=True)
+        metadata_dir.mkdir(parents=True, exist_ok=True)
+
+        for name in ["rf_reject_15m_active.pkl", "rf_reject_15m_candidate.pkl"]:
+            (models_dir / name).write_text("stub", encoding="utf-8")
+
+        active_manifest = {
+            "version": "v212",
+            "feature_version": "v3",
+            "models": {"reject": {"15": "rf_reject_15m_active.pkl"}},
+            "thresholds": {"reject": {"15": 0.91}},
+            "thresholds_meta": {
+                "reject": {
+                    "15": {
+                        "objective": "utility_bps",
+                        "score": 177.11,
+                        "guard_applied": False,
+                    }
+                }
+            },
+            "stats": {
+                "15": {
+                    "reject": {
+                        "sample_size": 100,
+                        "reject_count": 20,
+                        "mfe_bps_reject": 8.0,
+                        "mae_bps_reject": -10.0,
+                    }
+                }
+            },
+            "trained_end_ts": 1774544400000,
+        }
+        candidate_manifest = {
+            "version": "v213",
+            "feature_version": "v3",
+            "models": {"reject": {"15": "rf_reject_15m_candidate.pkl"}},
+            "thresholds": {"reject": {"15": 0.86}},
+            "thresholds_meta": {
+                "reject": {
+                    "15": {
+                        "objective": "utility_bps",
+                        "score": -5.0,
+                        "guard_applied": False,
+                    }
+                }
+            },
+            "stats": {
+                "15": {
+                    "reject": {
+                        "sample_size": 100,
+                        "reject_count": 20,
+                        "mfe_bps_reject": 8.1,
+                        "mae_bps_reject": -9.9,
+                    }
+                }
+            },
+            "trained_end_ts": 1774552516000,
+        }
+
+        (models_dir / "manifest_active.json").write_text(json.dumps(active_manifest), encoding="utf-8")
+        (models_dir / "manifest_runtime_latest.json").write_text(
+            json.dumps(candidate_manifest),
+            encoding="utf-8",
+        )
+
+        args = argparse.Namespace(
+            models_dir=str(models_dir),
+            metadata_dir="metadata_runtime",
+            candidate_manifest="manifest_runtime_latest.json",
+            active_manifest="manifest_active.json",
+            prev_active_manifest="manifest_active_prev.json",
+            state_file="model_registry.json",
+            ops_db=str(self.tmp / "ops.sqlite"),
+            required_targets="reject",
+            required_horizons="15",
+            min_trained_end_delta_ms=0,
+            max_mfe_regression_bps=1.5,
+            max_mae_worsening_bps=2.0,
+            min_total_samples=0,
+            min_positive_samples=0,
+            min_positive_samples_reject=0,
+            min_positive_samples_break=0,
+            allow_feature_version_change=False,
+            regime_aware=False,
+            regime_buckets="compression,expansion,neutral",
+            regime_min_total_samples=0,
+            regime_min_positive_samples=0,
+            regime_min_positive_samples_reject=0,
+            regime_min_positive_samples_break=0,
+            regime_min_compared_buckets=1,
+            enforce_threshold_utility_guard=True,
+            threshold_utility_targets="reject",
+            threshold_utility_min_score=0.0,
+            force_promote=False,
+        )
+
+        rc = module.cmd_evaluate(args)
+        self.assertEqual(rc, 0)
+
+        state = json.loads((models_dir / "model_registry.json").read_text(encoding="utf-8"))
+        history_entry = state["history"][-1]
+
+        self.assertEqual(history_entry["action"], "rejected")
+        self.assertIn("gate_config", history_entry)
+        self.assertIn("gate_config_frozen", history_entry)
+        self.assertEqual(history_entry["gate_config"]["required_horizons"], [15])
+        self.assertEqual(history_entry["gate_config"]["threshold_utility_min_score"], 0.0)
+        self.assertEqual(history_entry["gate_config_frozen"]["required_horizons"], [15])
+        self.assertIsInstance(history_entry.get("manifest_sha256"), str)
+        self.assertEqual(len(history_entry["manifest_sha256"]), 64)
+        self.assertIn("rf_reject_15m_candidate.pkl", history_entry.get("pkl_sha256s", {}))
+        self.assertEqual(history_entry.get("trained_end_ts"), 1774552516000)
+        self.assertEqual(history_entry.get("threshold_summary", {}).get("reject", {}).keys(), {"15"})
+        self.assertTrue(
+            any(
+                "reject:15m threshold utility score" in item
+                for item in history_entry.get("gate_failures", [])
+            )
+        )
+
+    def test_model_governance_defaults_match_documented_policy(self) -> None:
+        module = load_module(
+            "model_governance_documented_defaults",
+            REPO_ROOT / "scripts" / "model_governance.py",
+        )
+        documented = {}
+        for raw_line in (REPO_ROOT / ".env.example").read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            documented[key] = value
+
+        self.assertEqual(module.DEFAULT_REQUIRED_HORIZONS, documented["MODEL_GOV_REQUIRED_HORIZONS"])
+        self.assertEqual(
+            module.DEFAULT_MIN_TRAINED_END_DELTA_MS,
+            int(documented["MODEL_GOV_MIN_TRAINED_END_DELTA_MS"]),
+        )
+        self.assertEqual(
+            module.DEFAULT_MIN_TOTAL_SAMPLES,
+            int(documented["MODEL_GOV_MIN_TOTAL_SAMPLES"]),
+        )
+        self.assertEqual(
+            module.DEFAULT_MIN_POSITIVE_SAMPLES,
+            int(documented["MODEL_GOV_MIN_POSITIVE_SAMPLES"]),
+        )
+        self.assertAlmostEqual(
+            module.DEFAULT_THRESHOLD_UTILITY_MIN_SCORE,
+            float(documented["MODEL_GOV_THRESHOLD_UTILITY_MIN_SCORE"]),
+            places=9,
+        )
+        self.assertAlmostEqual(
+            module.DEFAULT_EMISSION_MAX_ABSTAIN_RATE,
+            float(documented["MODEL_GOV_EMISSION_MAX_ABSTAIN_RATE"]),
+            places=9,
+        )
+
+    def test_model_governance_load_state_marks_legacy_history_entries(self) -> None:
+        module = load_module(
+            "model_governance_legacy_history_migration",
+            REPO_ROOT / "scripts" / "model_governance.py",
+        )
+        state_path = self.tmp / "legacy_model_registry.json"
+        state_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "active_version": "v212",
+                    "history": [
+                        {
+                            "ts_ms": 1774600000000,
+                            "action": "promoted",
+                            "reason": "legacy entry",
+                            "gate_config": {"required_horizons": [15]},
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        state = module.load_state(state_path)
+        self.assertTrue(bool(state["history"][0]["pre_audit_legacy"]))
+
+    def test_model_governance_rejects_gate_loosening_without_override(self) -> None:
+        module = load_module(
+            "model_governance_gate_loosening_reject",
+            REPO_ROOT / "scripts" / "model_governance.py",
+        )
+        models_dir = self.tmp / "models"
+        metadata_dir = models_dir / "metadata_runtime"
+        models_dir.mkdir(parents=True, exist_ok=True)
+        metadata_dir.mkdir(parents=True, exist_ok=True)
+
+        for name in ["rf_reject_15m_active.pkl", "rf_reject_15m_candidate.pkl"]:
+            (models_dir / name).write_text("stub", encoding="utf-8")
+
+        active_manifest = {
+            "version": "v212",
+            "feature_version": "v3",
+            "models": {"reject": {"15": "rf_reject_15m_active.pkl"}},
+            "thresholds": {"reject": {"15": 0.91}},
+            "thresholds_meta": {
+                "reject": {"15": {"objective": "utility_bps", "score": 10.0, "guard_applied": False}}
+            },
+            "stats": {
+                "15": {
+                    "reject": {
+                        "sample_size": 120,
+                        "reject_count": 30,
+                        "mfe_bps_reject": 8.0,
+                        "mae_bps_reject": -10.0,
+                    }
+                }
+            },
+            "trained_end_ts": 1774544400000,
+        }
+        candidate_manifest = {
+            "version": "v213",
+            "feature_version": "v3",
+            "models": {"reject": {"15": "rf_reject_15m_candidate.pkl"}},
+            "thresholds": {"reject": {"15": 0.92}},
+            "thresholds_meta": {
+                "reject": {"15": {"objective": "utility_bps", "score": 11.0, "guard_applied": False}}
+            },
+            "stats": {
+                "15": {
+                    "reject": {
+                        "sample_size": 130,
+                        "reject_count": 33,
+                        "mfe_bps_reject": 8.4,
+                        "mae_bps_reject": -9.7,
+                    }
+                }
+            },
+            "trained_end_ts": 1774552516000,
+        }
+
+        (models_dir / "manifest_active.json").write_text(json.dumps(active_manifest), encoding="utf-8")
+        (models_dir / "manifest_runtime_latest.json").write_text(
+            json.dumps(candidate_manifest),
+            encoding="utf-8",
+        )
+        (models_dir / "model_registry.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "active_version": "v212",
+                    "previous_active_version": "v211",
+                    "candidate_version": "v212",
+                    "history": [
+                        {
+                            "ts_ms": 1774600000000,
+                            "action": "rejected",
+                            "reason": "prior strict policy",
+                            "gate_config": {
+                                "required_targets": ["reject"],
+                                "required_horizons": [5, 15, 60],
+                                "min_trained_end_delta_ms": 21600000,
+                                "max_mfe_regression_bps": 1.5,
+                                "max_mae_worsening_bps": 2.0,
+                                "min_total_samples": 0,
+                                "min_positive_samples_reject": 0,
+                                "min_positive_samples_break": 0,
+                                "allow_feature_version_change": False,
+                                "regime_aware": False,
+                                "regime_buckets": ["compression", "expansion", "neutral"],
+                                "regime_min_total_samples": 0,
+                                "regime_min_positive_samples_reject": 0,
+                                "regime_min_positive_samples_break": 0,
+                                "regime_min_compared_buckets": 1,
+                                "enforce_threshold_utility_guard": True,
+                                "threshold_utility_targets": ["reject"],
+                                "threshold_utility_min_score": 0.0,
+                                "enforce_live_emission_gate": True,
+                                "emission_lookback_days": 5,
+                                "emission_max_pred_lag_hours": 6.0,
+                                "emission_prediction_basis": "first",
+                                "emission_source": "preview",
+                                "emission_min_rows": 25,
+                                "emission_min_coverage": 0.9,
+                                "emission_min_signals": 1,
+                                "emission_max_abstain_rate": 0.95,
+                                "emission_symbols": ["SPY"],
+                            },
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        args = argparse.Namespace(
+            models_dir=str(models_dir),
+            metadata_dir="metadata_runtime",
+            candidate_manifest="manifest_runtime_latest.json",
+            active_manifest="manifest_active.json",
+            prev_active_manifest="manifest_active_prev.json",
+            state_file="model_registry.json",
+            ops_db=str(self.tmp / "ops.sqlite"),
+            required_targets="reject",
+            required_horizons="15",
+            min_trained_end_delta_ms=0,
+            max_mfe_regression_bps=1.5,
+            max_mae_worsening_bps=2.0,
+            min_total_samples=0,
+            min_positive_samples=0,
+            min_positive_samples_reject=0,
+            min_positive_samples_break=0,
+            allow_feature_version_change=False,
+            regime_aware=False,
+            regime_buckets="compression,expansion,neutral",
+            regime_min_total_samples=0,
+            regime_min_positive_samples=0,
+            regime_min_positive_samples_reject=0,
+            regime_min_positive_samples_break=0,
+            regime_min_compared_buckets=1,
+            enforce_threshold_utility_guard=True,
+            threshold_utility_targets="reject",
+            threshold_utility_min_score=-20.0,
+            enforce_live_emission_gate=True,
+            emission_db="",
+            emission_lookback_days=5,
+            emission_max_pred_lag_hours=6.0,
+            emission_prediction_basis="first",
+            emission_source="preview",
+            emission_min_rows=25,
+            emission_min_coverage=0.9,
+            emission_min_signals=1,
+            emission_max_abstain_rate=0.98,
+            emission_symbols="SPY",
+            allow_gate_loosening=False,
+            gate_loosening_reason="",
+            force_promote=False,
+        )
+
+        with patch("sys.stdout", new=io.StringIO()):
+            rc = module.cmd_evaluate(args)
+
+        self.assertEqual(rc, 0)
+        state = json.loads((models_dir / "model_registry.json").read_text(encoding="utf-8"))
+        history_entry = state["history"][-1]
+        self.assertEqual(history_entry["action"], "rejected")
+        self.assertTrue(
+            any(item.startswith("GATE_LOOSENED ") for item in history_entry.get("gate_failures", []))
+        )
+        self.assertIn("threshold_utility_min_score decreased", state["last_reason"])
+
+    def test_model_governance_records_gate_loosening_override_reason(self) -> None:
+        module = load_module(
+            "model_governance_gate_loosening_allowed",
+            REPO_ROOT / "scripts" / "model_governance.py",
+        )
+        models_dir = self.tmp / "models"
+        metadata_dir = models_dir / "metadata_runtime"
+        models_dir.mkdir(parents=True, exist_ok=True)
+        metadata_dir.mkdir(parents=True, exist_ok=True)
+
+        for name in ["rf_reject_15m_active.pkl", "rf_reject_15m_candidate.pkl"]:
+            (models_dir / name).write_text("stub", encoding="utf-8")
+
+        active_manifest = {
+            "version": "v212",
+            "feature_version": "v3",
+            "models": {"reject": {"15": "rf_reject_15m_active.pkl"}},
+            "thresholds": {"reject": {"15": 0.91}},
+            "thresholds_meta": {
+                "reject": {"15": {"objective": "utility_bps", "score": 10.0, "guard_applied": False}}
+            },
+            "stats": {
+                "15": {
+                    "reject": {
+                        "sample_size": 120,
+                        "reject_count": 30,
+                        "mfe_bps_reject": 8.0,
+                        "mae_bps_reject": -10.0,
+                    }
+                }
+            },
+            "trained_end_ts": 1774544400000,
+        }
+        candidate_manifest = {
+            "version": "v213",
+            "feature_version": "v3",
+            "models": {"reject": {"15": "rf_reject_15m_candidate.pkl"}},
+            "thresholds": {"reject": {"15": 0.92}},
+            "thresholds_meta": {
+                "reject": {"15": {"objective": "utility_bps", "score": 11.0, "guard_applied": False}}
+            },
+            "stats": {
+                "15": {
+                    "reject": {
+                        "sample_size": 130,
+                        "reject_count": 33,
+                        "mfe_bps_reject": 8.4,
+                        "mae_bps_reject": -9.7,
+                    }
+                }
+            },
+            "trained_end_ts": 1774552516000,
+        }
+
+        (models_dir / "manifest_active.json").write_text(json.dumps(active_manifest), encoding="utf-8")
+        (models_dir / "manifest_runtime_latest.json").write_text(
+            json.dumps(candidate_manifest),
+            encoding="utf-8",
+        )
+        (models_dir / "model_registry.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "active_version": "v212",
+                    "previous_active_version": "v211",
+                    "candidate_version": "v212",
+                    "history": [
+                        {
+                            "ts_ms": 1774600000000,
+                            "action": "rejected",
+                            "reason": "prior strict policy",
+                            "gate_config": {
+                                "required_targets": ["reject"],
+                                "required_horizons": [5, 15, 60],
+                                "min_trained_end_delta_ms": 21600000,
+                                "max_mfe_regression_bps": 1.5,
+                                "max_mae_worsening_bps": 2.0,
+                                "min_total_samples": 0,
+                                "min_positive_samples_reject": 0,
+                                "min_positive_samples_break": 0,
+                                "allow_feature_version_change": False,
+                                "regime_aware": False,
+                                "regime_buckets": ["compression", "expansion", "neutral"],
+                                "regime_min_total_samples": 0,
+                                "regime_min_positive_samples_reject": 0,
+                                "regime_min_positive_samples_break": 0,
+                                "regime_min_compared_buckets": 1,
+                                "enforce_threshold_utility_guard": True,
+                                "threshold_utility_targets": ["reject"],
+                                "threshold_utility_min_score": 0.0,
+                                "enforce_live_emission_gate": False,
+                                "emission_lookback_days": 5,
+                                "emission_max_pred_lag_hours": 6.0,
+                                "emission_prediction_basis": "first",
+                                "emission_source": "preview",
+                                "emission_min_rows": 25,
+                                "emission_min_coverage": 0.9,
+                                "emission_min_signals": 1,
+                                "emission_max_abstain_rate": 0.98,
+                                "emission_symbols": ["SPY"],
+                            },
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        args = argparse.Namespace(
+            models_dir=str(models_dir),
+            metadata_dir="metadata_runtime",
+            candidate_manifest="manifest_runtime_latest.json",
+            active_manifest="manifest_active.json",
+            prev_active_manifest="manifest_active_prev.json",
+            state_file="model_registry.json",
+            ops_db=str(self.tmp / "ops.sqlite"),
+            required_targets="reject",
+            required_horizons="15",
+            min_trained_end_delta_ms=0,
+            max_mfe_regression_bps=1.5,
+            max_mae_worsening_bps=2.0,
+            min_total_samples=0,
+            min_positive_samples=0,
+            min_positive_samples_reject=0,
+            min_positive_samples_break=0,
+            allow_feature_version_change=False,
+            regime_aware=False,
+            regime_buckets="compression,expansion,neutral",
+            regime_min_total_samples=0,
+            regime_min_positive_samples=0,
+            regime_min_positive_samples_reject=0,
+            regime_min_positive_samples_break=0,
+            regime_min_compared_buckets=1,
+            enforce_threshold_utility_guard=True,
+            threshold_utility_targets="reject",
+            threshold_utility_min_score=0.0,
+            enforce_live_emission_gate=False,
+            emission_db="",
+            emission_lookback_days=5,
+            emission_max_pred_lag_hours=6.0,
+            emission_prediction_basis="first",
+            emission_source="preview",
+            emission_min_rows=25,
+            emission_min_coverage=0.9,
+            emission_min_signals=1,
+            emission_max_abstain_rate=0.98,
+            emission_symbols="SPY",
+            allow_gate_loosening=True,
+            gate_loosening_reason="Intentional interim freeze to single-horizon specialist policy",
+            force_promote=False,
+        )
+
+        with patch("sys.stdout", new=io.StringIO()):
+            rc = module.cmd_evaluate(args)
+
+        self.assertEqual(rc, 0)
+        state = json.loads((models_dir / "model_registry.json").read_text(encoding="utf-8"))
+        history_entry = state["history"][-1]
+        self.assertEqual(history_entry["action"], "promoted")
+        self.assertTrue(bool(history_entry["allow_gate_loosening"]))
+        self.assertEqual(
+            history_entry["gate_loosening_reason"],
+            "Intentional interim freeze to single-horizon specialist policy",
+        )
+        self.assertTrue(any("required_horizons removed" in item for item in history_entry["gate_loosening_diffs"]))
 
 
 if __name__ == "__main__":

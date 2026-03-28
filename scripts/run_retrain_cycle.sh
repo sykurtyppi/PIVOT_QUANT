@@ -4,6 +4,7 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOG_DIR="${ROOT_DIR}/logs"
 mkdir -p "${LOG_DIR}"
+OPS_SMOKE_LOG="${LOG_DIR}/ops_smoke.log"
 LOCK_DIR="${LOG_DIR}/run_retrain_cycle.lock"
 LOCK_OWNED=0
 ENV_FILE="${ROOT_DIR}/.env"
@@ -83,12 +84,22 @@ run_step() {
 }
 
 run_ops_smoke() {
-  local attempt
-  echo "[$(timestamp)] INFO ops_smoke running direct unittest runner" | tee -a "${LOG_DIR}/retrain.log"
+  local attempt summary
+  : > "${OPS_SMOKE_LOG}"
+  echo "[$(timestamp)] INFO ops_smoke running direct unittest runner (details: ${OPS_SMOKE_LOG})" | tee -a "${LOG_DIR}/retrain.log"
   for attempt in 1 2; do
-    if "${PYTHON}" -m unittest discover -s tests/python -p "test_*.py" -v >> "${LOG_DIR}/retrain.log" 2>&1; then
+    if {
+      echo "[$(timestamp)] START ops_smoke attempt=${attempt}"
+      "${PYTHON}" -m unittest discover -s tests/python -p "test_*.py" -v
+      echo "[$(timestamp)] END   ops_smoke attempt=${attempt}"
+    } >> "${OPS_SMOKE_LOG}" 2>&1; then
+      summary="$(grep -E '^Ran [0-9]+ tests? in ' "${OPS_SMOKE_LOG}" | tail -n 1 || true)"
+      summary="$(sanitize_single_line "${summary}")"
+      [[ -n "${summary}" ]] || summary="ops_smoke passed"
       if (( attempt > 1 )); then
-        echo "[$(timestamp)] WARN ops_smoke passed on retry ${attempt}" | tee -a "${LOG_DIR}/retrain.log"
+        echo "[$(timestamp)] INFO ops_smoke summary: ${summary}; passed on retry ${attempt} (details: ${OPS_SMOKE_LOG})" | tee -a "${LOG_DIR}/retrain.log"
+      else
+        echo "[$(timestamp)] INFO ops_smoke summary: ${summary} (details: ${OPS_SMOKE_LOG})" | tee -a "${LOG_DIR}/retrain.log"
       fi
       return 0
     fi
@@ -110,9 +121,9 @@ sanitize_single_line() {
 
 capture_ops_smoke_failure_details() {
   local window summary hint
-  window="$(tail -n 800 "${LOG_DIR}/retrain.log" 2>/dev/null || true)"
+  window="$(tail -n 800 "${OPS_SMOKE_LOG}" 2>/dev/null || true)"
   summary=""
-  hint="Check retrain.log for the latest traceback."
+  hint="Check ${OPS_SMOKE_LOG} for the latest traceback."
 
   if [[ -n "${window}" ]]; then
     summary="$(printf '%s\n' "${window}" | grep -E "AssertionError: " | tail -n 1 || true)"
@@ -149,7 +160,7 @@ build_ops_smoke_alert_body() {
     "$(hostname)" \
     "${OPS_SMOKE_FAILURE_SUMMARY}" \
     "${OPS_SMOKE_FAILURE_HINT}" \
-    "${LOG_DIR}/retrain.log"
+    "${OPS_SMOKE_LOG}"
 }
 
 is_truthy() {
@@ -190,6 +201,8 @@ SCORE_UNSCORED_FAIL_ON_PARTIAL="${RETRAIN_SCORE_UNSCORED_FAIL_ON_PARTIAL:-false}
 SCORE_UNSCORED_BACKLOG_SWEEP_ON_RETRAIN="${RETRAIN_SCORE_UNSCORED_BACKLOG_SWEEP_ON_RETRAIN:-true}"
 SCORE_UNSCORED_BACKLOG_SWEEP_LIMIT="${RETRAIN_SCORE_UNSCORED_BACKLOG_SWEEP_LIMIT:-10000}"
 SCORE_UNSCORED_BACKLOG_SWEEP_MIN_BACKLOG="${RETRAIN_SCORE_UNSCORED_BACKLOG_SWEEP_MIN_BACKLOG:-1}"
+MODEL_GOV_EMISSION_SHADOW_ON_RETRAIN="${MODEL_GOV_EMISSION_SHADOW_ON_RETRAIN:-${MODEL_GOV_ENFORCE_LIVE_EMISSION_GATE:-false}}"
+MODEL_GOV_EMISSION_SCORE_LIMIT="${MODEL_GOV_EMISSION_SCORE_LIMIT:-20000}"
 REFRESH_ML_METRICS_ON_RETRAIN="${RETRAIN_REFRESH_ML_METRICS_ON_RETRAIN:-true}"
 RETRAIN_METRICS_DUCKDB_PATH="${RETRAIN_METRICS_DUCKDB_PATH:-${DUCKDB_PATH:-data/pivot_training.duckdb}}"
 RETRAIN_METRICS_DUCKDB_VIEW="${RETRAIN_METRICS_DUCKDB_VIEW:-${DUCKDB_VIEW:-training_events_v1}}"
@@ -212,6 +225,7 @@ OPS_SMOKE_FAILURE_HINT=""
 RELOAD_STATUS="not_attempted"
 RETRAIN_LAST_STATUS="ok"
 RETRAIN_LAST_ERROR=""
+MODEL_GOV_EMISSION_PREVIEW_DB=""
 
 ops_set() {
   if [[ -z "${PYTHON}" ]]; then
@@ -299,7 +313,10 @@ PY
 }
 
 log_threshold_guard_summary() {
-  local manifest_path="${MODEL_DIR%/}/manifest_runtime_latest.json"
+  local manifest_path="${RF_CANDIDATE_MANIFEST:-manifest_runtime_latest.json}"
+  if [[ "${manifest_path}" != /* ]]; then
+    manifest_path="${MODEL_DIR%/}/${manifest_path}"
+  fi
   if [[ "${manifest_path}" != /* ]]; then
     manifest_path="${ROOT_DIR}/${manifest_path}"
   fi
@@ -373,6 +390,46 @@ for target in targets:
                 fit_rows=str(meta.get("calibration_fit_size") if meta.get("calibration_fit_size") is not None else "na"),
             )
         )
+PY
+}
+
+clone_sqlite_db() {
+  local src_db="${1:-}"
+  local dst_db="${2:-}"
+  [[ -n "${src_db}" && -n "${dst_db}" ]] || return 1
+  "${PYTHON}" - "${src_db}" "${dst_db}" <<'PY'
+import pathlib
+import sqlite3
+import sys
+
+src = pathlib.Path(sys.argv[1])
+dst = pathlib.Path(sys.argv[2])
+if not src.exists():
+    raise FileNotFoundError(f"SQLite source DB not found: {src}")
+dst.parent.mkdir(parents=True, exist_ok=True)
+if dst.exists():
+    dst.unlink()
+src_conn = sqlite3.connect(str(src))
+dst_conn = sqlite3.connect(str(dst))
+try:
+    src_conn.backup(dst_conn)
+finally:
+    dst_conn.close()
+    src_conn.close()
+PY
+}
+
+manifest_version() {
+  local manifest_path="${1:-}"
+  [[ -n "${manifest_path}" ]] || return 1
+  "${PYTHON}" - "${manifest_path}" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+payload = json.loads(path.read_text(encoding="utf-8"))
+print(str(payload.get("version") or "unknown"))
 PY
 }
 
@@ -519,20 +576,60 @@ else
     --set "metrics_refresh_last_status=skipped" \
     --set "metrics_refresh_last_at_ms=$(now_ms)"
 fi
-if is_truthy "${MODEL_GOV_FORCE_PROMOTE:-false}"; then
-  run_step "governance_evaluate" \
-    "${PYTHON}" scripts/model_governance.py \
-    --models-dir "${MODEL_DIR}" \
-    --ops-db "${PIVOT_DB_PATH}" \
-    evaluate \
-    --force-promote
-else
-  run_step "governance_evaluate" \
-    "${PYTHON}" scripts/model_governance.py \
-    --models-dir "${MODEL_DIR}" \
-    --ops-db "${PIVOT_DB_PATH}" \
-    evaluate
+
+if is_truthy "${MODEL_GOV_ENFORCE_LIVE_EMISSION_GATE:-false}" && is_truthy "${MODEL_GOV_EMISSION_SHADOW_ON_RETRAIN}"; then
+  candidate_manifest_path="${RF_CANDIDATE_MANIFEST:-manifest_runtime_latest.json}"
+  if [[ "${candidate_manifest_path}" != /* ]]; then
+    candidate_manifest_path="${MODEL_DIR%/}/${candidate_manifest_path}"
+  fi
+  if [[ "${candidate_manifest_path}" != /* ]]; then
+    candidate_manifest_path="${ROOT_DIR}/${candidate_manifest_path}"
+  fi
+  candidate_version="$(manifest_version "${candidate_manifest_path}" 2>/dev/null || echo unknown)"
+  MODEL_GOV_EMISSION_PREVIEW_DB="/tmp/pivot_events_${candidate_version}_emission_preview.sqlite"
+  echo "[$(timestamp)] START governance_emission_shadow" | tee -a "${LOG_DIR}/retrain.log"
+  echo "[$(timestamp)] INFO governance_emission_shadow config preview_db=${MODEL_GOV_EMISSION_PREVIEW_DB} lookback_days=${MODEL_GOV_EMISSION_LOOKBACK_DAYS:-5} limit=${MODEL_GOV_EMISSION_SCORE_LIMIT} candidate_version=${candidate_version}" | tee -a "${LOG_DIR}/retrain.log"
+  if clone_sqlite_db "${PIVOT_DB_PATH}" "${MODEL_GOV_EMISSION_PREVIEW_DB}" \
+    && "${PYTHON}" scripts/score_unscored_touch_events.py \
+      --db "${MODEL_GOV_EMISSION_PREVIEW_DB}" \
+      --symbols "${RETRAIN_SYMBOLS}" \
+      --lookback-days "${MODEL_GOV_EMISSION_LOOKBACK_DAYS:-5}" \
+      --limit "${MODEL_GOV_EMISSION_SCORE_LIMIT}" \
+      --batch-size "${SCORE_UNSCORED_BATCH_SIZE}" \
+      --timeout-sec "${SCORE_UNSCORED_TIMEOUT_SEC}" \
+      --max-attempts "${SCORE_UNSCORED_MAX_ATTEMPTS}" \
+      --retry-base-sec "${SCORE_UNSCORED_RETRY_BASE_SEC}" \
+      --retry-max-sec "${SCORE_UNSCORED_RETRY_MAX_SEC}" \
+      --preview \
+      --rescore-existing \
+      --verify-after \
+      --max-remaining 0 \
+      --fail-on-partial \
+      --local-manifest-path "${candidate_manifest_path}" \
+      >> "${LOG_DIR}/retrain.log" 2>&1; then
+    echo "[$(timestamp)] DONE  governance_emission_shadow" | tee -a "${LOG_DIR}/retrain.log"
+  else
+    echo "[$(timestamp)] WARN: governance_emission_shadow failed (candidate emission gate may reject promotion)" | tee -a "${LOG_DIR}/retrain.log"
+    mark_soft_failure "governance_emission_shadow_failed"
+  fi
 fi
+
+governance_args=(
+  "${PYTHON}" scripts/model_governance.py
+  --models-dir "${MODEL_DIR}"
+  --ops-db "${PIVOT_DB_PATH}"
+  evaluate
+)
+if [[ -n "${MODEL_GOV_EMISSION_PREVIEW_DB}" ]]; then
+  governance_args+=(--emission-db "${MODEL_GOV_EMISSION_PREVIEW_DB}")
+fi
+if [[ -n "${RETRAIN_SYMBOLS}" ]]; then
+  governance_args+=(--emission-symbols "${RETRAIN_SYMBOLS}")
+fi
+if is_truthy "${MODEL_GOV_FORCE_PROMOTE:-false}"; then
+  governance_args+=(--force-promote)
+fi
+run_step "governance_evaluate" "${governance_args[@]}"
 
 # Tell the running ML server to hot-reload the new model artifacts.
 echo "[$(timestamp)] Reloading ML server models..." | tee -a "${LOG_DIR}/retrain.log"

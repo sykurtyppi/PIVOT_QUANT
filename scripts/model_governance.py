@@ -13,12 +13,16 @@ Also supports rollback to previous/explicit model versions.
 from __future__ import annotations
 
 import argparse
+import copy
+import fcntl
+import hashlib
 import json
 import os
 import shutil
 import sqlite3
 import sys
 import time
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -35,12 +39,12 @@ DEFAULT_ACTIVE_MANIFEST = os.getenv("RF_ACTIVE_MANIFEST", "manifest_active.json"
 DEFAULT_PREV_ACTIVE_MANIFEST = os.getenv("RF_PREV_ACTIVE_MANIFEST", "manifest_active_prev.json")
 DEFAULT_STATE_FILE = os.getenv("RF_GOVERNANCE_STATE", "model_registry.json")
 DEFAULT_REQUIRED_TARGETS = os.getenv("MODEL_GOV_REQUIRED_TARGETS", "reject,break")
-DEFAULT_REQUIRED_HORIZONS = os.getenv("MODEL_GOV_REQUIRED_HORIZONS", "5,15,60")
-DEFAULT_MIN_TRAINED_END_DELTA_MS = int(os.getenv("MODEL_GOV_MIN_TRAINED_END_DELTA_MS", "0"))
+DEFAULT_REQUIRED_HORIZONS = os.getenv("MODEL_GOV_REQUIRED_HORIZONS", "15")
+DEFAULT_MIN_TRAINED_END_DELTA_MS = int(os.getenv("MODEL_GOV_MIN_TRAINED_END_DELTA_MS", "21600000"))
 DEFAULT_MAX_MFE_REGRESSION_BPS = float(os.getenv("MODEL_GOV_MAX_MFE_REGRESSION_BPS", "1.5"))
 DEFAULT_MAX_MAE_WORSENING_BPS = float(os.getenv("MODEL_GOV_MAX_MAE_WORSENING_BPS", "2.0"))
-DEFAULT_MIN_TOTAL_SAMPLES = int(os.getenv("MODEL_GOV_MIN_TOTAL_SAMPLES", "0"))
-DEFAULT_MIN_POSITIVE_SAMPLES = int(os.getenv("MODEL_GOV_MIN_POSITIVE_SAMPLES", "0"))
+DEFAULT_MIN_TOTAL_SAMPLES = int(os.getenv("MODEL_GOV_MIN_TOTAL_SAMPLES", "50"))
+DEFAULT_MIN_POSITIVE_SAMPLES = int(os.getenv("MODEL_GOV_MIN_POSITIVE_SAMPLES", "20"))
 DEFAULT_MIN_POSITIVE_SAMPLES_REJECT = int(
     os.getenv("MODEL_GOV_MIN_POSITIVE_SAMPLES_REJECT", str(DEFAULT_MIN_POSITIVE_SAMPLES))
 )
@@ -86,6 +90,33 @@ DEFAULT_THRESHOLD_UTILITY_TARGETS = os.getenv(
 DEFAULT_THRESHOLD_UTILITY_MIN_SCORE = float(
     os.getenv("MODEL_GOV_THRESHOLD_UTILITY_MIN_SCORE", "0.0")
 )
+DEFAULT_MIN_CORR_POS = float(os.getenv("MODEL_GOV_MIN_CORR_POS", "0.0"))
+DEFAULT_MIN_TUNE_SIGNALS = int(os.getenv("MODEL_GOV_MIN_TUNE_SIGNALS", "50"))
+DEFAULT_ENFORCE_LIVE_EMISSION_GATE = os.getenv(
+    "MODEL_GOV_ENFORCE_LIVE_EMISSION_GATE", "false"
+).strip().lower() in {"1", "true", "yes", "y", "on"}
+DEFAULT_EMISSION_LOOKBACK_DAYS = int(os.getenv("MODEL_GOV_EMISSION_LOOKBACK_DAYS", "5"))
+DEFAULT_EMISSION_MAX_PRED_LAG_HOURS = float(
+    os.getenv("MODEL_GOV_EMISSION_MAX_PRED_LAG_HOURS", "6.0")
+)
+DEFAULT_EMISSION_PREDICTION_BASIS = (
+    os.getenv("MODEL_GOV_EMISSION_PREDICTION_BASIS", "first").strip().lower() or "first"
+)
+if DEFAULT_EMISSION_PREDICTION_BASIS not in {"first", "latest"}:
+    DEFAULT_EMISSION_PREDICTION_BASIS = "first"
+DEFAULT_EMISSION_SOURCE = (
+    os.getenv("MODEL_GOV_EMISSION_SOURCE", "preview").strip().lower() or "preview"
+)
+if DEFAULT_EMISSION_SOURCE not in {"live", "preview", "all"}:
+    DEFAULT_EMISSION_SOURCE = "preview"
+DEFAULT_EMISSION_MIN_ROWS = int(os.getenv("MODEL_GOV_EMISSION_MIN_ROWS", "25"))
+DEFAULT_EMISSION_MIN_COVERAGE = float(os.getenv("MODEL_GOV_EMISSION_MIN_COVERAGE", "0.9"))
+DEFAULT_EMISSION_MIN_SIGNALS = int(os.getenv("MODEL_GOV_EMISSION_MIN_SIGNALS", "1"))
+DEFAULT_EMISSION_MAX_ABSTAIN_RATE = float(
+    os.getenv("MODEL_GOV_EMISSION_MAX_ABSTAIN_RATE", "0.98")
+)
+DEFAULT_EMISSION_SYMBOLS = os.getenv("MODEL_GOV_EMISSION_SYMBOLS", "")
+DEFAULT_EMISSION_DB = os.getenv("MODEL_GOV_EMISSION_DB", "").strip()
 DEFAULT_DB = os.getenv("PIVOT_DB", str(ROOT / "data" / "pivot_events.sqlite"))
 STATE_SCHEMA_VERSION = 1
 MAX_HISTORY = 200
@@ -103,6 +134,7 @@ class GateConfig:
     min_positive_samples_reject: int
     min_positive_samples_break: int
     allow_feature_version_change: bool
+    allow_bootstrap_metric_skips: bool = False
     regime_aware: bool = False
     regime_buckets: list[str] = field(
         default_factory=lambda: ["compression", "expansion", "neutral"]
@@ -114,6 +146,18 @@ class GateConfig:
     enforce_threshold_utility_guard: bool = False
     threshold_utility_targets: list[str] = field(default_factory=lambda: ["reject"])
     threshold_utility_min_score: float = 0.0
+    min_corr_pos: float = 0.0
+    min_tune_signals: int = 50
+    enforce_live_emission_gate: bool = False
+    emission_lookback_days: int = 5
+    emission_max_pred_lag_hours: float = 6.0
+    emission_prediction_basis: str = "first"
+    emission_source: str = "preview"
+    emission_min_rows: int = 25
+    emission_min_coverage: float = 0.9
+    emission_min_signals: int = 1
+    emission_max_abstain_rate: float = 0.98
+    emission_symbols: list[str] = field(default_factory=list)
 
 
 def now_ms() -> int:
@@ -122,6 +166,39 @@ def now_ms() -> int:
 
 def _tmp_path(path: Path) -> Path:
     return path.with_name(f".{path.name}.tmp-{os.getpid()}-{now_ms()}")
+
+
+@contextmanager
+def governance_lock(lock_path: Path, timeout_sec: float = 30.0):
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + max(0.1, float(timeout_sec))
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        while True:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                handle.seek(0)
+                handle.truncate()
+                handle.write(f"{os.getpid()}\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"unable to acquire governance lock within {int(timeout_sec)}s ({lock_path})"
+                    )
+                time.sleep(0.1)
+        try:
+            yield
+        finally:
+            try:
+                handle.seek(0)
+                handle.truncate()
+                handle.flush()
+                os.fsync(handle.fileno())
+            except OSError:
+                pass
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -257,19 +334,26 @@ def _evaluate_regime_metric(
     """
     active_metric = to_float(active_block.get(metric_key))
     candidate_metric = to_float(candidate_block.get(metric_key))
-    if active_metric is None or candidate_metric is None:
-        missing: list[str] = []
-        if active_metric is None:
-            missing.append("active")
-        if candidate_metric is None:
-            missing.append("candidate")
+    if candidate_metric is None:
         return (
-            False,
-            None,
-            [
-                f"{target}:{horizon}m skipped {metric_key} regression gate "
-                f"(missing {'/'.join(missing)} metric)"
-            ],
+            True,
+            f"{target}:{horizon}m missing required candidate metric {metric_key} — fail closed",
+            [],
+        )
+    if active_metric is None:
+        if gates.allow_bootstrap_metric_skips:
+            return (
+                False,
+                None,
+                [
+                    f"{target}:{horizon}m skipped {metric_key} regression gate "
+                    "(missing active metric; bootstrap waiver)"
+                ],
+            )
+        return (
+            True,
+            f"{target}:{horizon}m missing required active metric {metric_key} — bootstrap waiver required",
+            [],
         )
 
     aggregate_failed = _is_metric_regression(
@@ -396,6 +480,28 @@ def version_of(manifest: dict[str, Any]) -> str:
     return str(value) if value is not None else "unknown"
 
 
+def active_manifest_version(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    return version_of(load_manifest(path))
+
+
+def active_manifest_identity(path: Path) -> tuple[str | None, str | None]:
+    if not path.exists():
+        return None, None
+    manifest = load_manifest(path)
+    version = version_of(manifest)
+    sha256 = _sha256_path(path)
+    return version, sha256
+
+
+def _format_manifest_identity(identity: tuple[str | None, str | None]) -> str:
+    version, sha256 = identity
+    version_label = version or "none"
+    hash_label = sha256[:12] if sha256 else "none"
+    return f"version={version_label},sha={hash_label}"
+
+
 def empty_state() -> dict[str, Any]:
     return {
         "schema_version": STATE_SCHEMA_VERSION,
@@ -417,8 +523,242 @@ def load_state(path: Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return empty_state()
     payload.setdefault("schema_version", STATE_SCHEMA_VERSION)
-    payload.setdefault("history", [])
+    history = payload.setdefault("history", [])
+    if not isinstance(history, list):
+        history = []
+        payload["history"] = history
+    for entry in history:
+        if not isinstance(entry, dict):
+            continue
+        has_audit_bundle = all(
+            key in entry
+            for key in (
+                "manifest_sha256",
+                "pkl_sha256s",
+                "gate_config_frozen",
+                "threshold_summary",
+                "trained_end_ts",
+                "calibration_refit_ts",
+                "tune_date_range",
+            )
+        )
+        if not has_audit_bundle:
+            entry["pre_audit_legacy"] = True
     return payload
+
+
+def _sha256_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _candidate_pkl_sha256s(manifest: dict[str, Any], models_dir: Path) -> dict[str, str]:
+    model_map = manifest.get("models")
+    if not isinstance(model_map, dict):
+        return {}
+    filenames: set[str] = set()
+    for target_payload in model_map.values():
+        if not isinstance(target_payload, dict):
+            continue
+        for filename in target_payload.values():
+            if isinstance(filename, str) and filename.strip():
+                filenames.add(filename.strip())
+    hashes: dict[str, str] = {}
+    for filename in sorted(filenames):
+        path = models_dir / filename
+        if path.exists() and path.is_file():
+            hashes[filename] = _sha256_path(path)
+    return hashes
+
+
+def _threshold_summary_for_required_horizons(
+    manifest: dict[str, Any],
+    gates: GateConfig | None,
+) -> dict[str, dict[str, Any]]:
+    threshold_meta = manifest.get("thresholds_meta")
+    if not isinstance(threshold_meta, dict):
+        return {}
+    if gates is None:
+        return copy.deepcopy(threshold_meta)
+    summary: dict[str, dict[str, Any]] = {}
+    required_targets = set(gates.required_targets)
+    required_horizons = {str(horizon) for horizon in gates.required_horizons}
+    for target, horizon_map in threshold_meta.items():
+        if target not in required_targets or not isinstance(horizon_map, dict):
+            continue
+        filtered = {
+            horizon: copy.deepcopy(meta)
+            for horizon, meta in horizon_map.items()
+            if horizon in required_horizons and isinstance(meta, dict)
+        }
+        if filtered:
+            summary[target] = filtered
+    return summary
+
+
+def _extract_tune_date_range(manifest: dict[str, Any]) -> dict[str, Any] | None:
+    direct = manifest.get("tune_date_range")
+    if isinstance(direct, dict):
+        return copy.deepcopy(direct)
+    for key in ("training_slices", "calibration_refit", "training_metadata"):
+        payload = manifest.get(key)
+        if isinstance(payload, dict):
+            tune_range = payload.get("tune_date_range")
+            if isinstance(tune_range, dict):
+                return copy.deepcopy(tune_range)
+    return None
+
+
+def _candidate_history_evidence(
+    *,
+    candidate_path: Path | None,
+    candidate: dict[str, Any] | None,
+    models_dir: Path,
+    gates: GateConfig | None,
+) -> dict[str, Any]:
+    manifest_payload = candidate if isinstance(candidate, dict) else {}
+    manifest_sha256 = None
+    if candidate_path is not None and candidate_path.exists():
+        manifest_sha256 = _sha256_path(candidate_path)
+    return {
+        "manifest_sha256": manifest_sha256,
+        "pkl_sha256s": _candidate_pkl_sha256s(manifest_payload, models_dir),
+        "gate_config_frozen": asdict(gates) if gates is not None else None,
+        "threshold_summary": _threshold_summary_for_required_horizons(manifest_payload, gates),
+        "trained_end_ts": to_int(manifest_payload.get("trained_end_ts")),
+        "calibration_refit_ts": to_int(manifest_payload.get("calibration_refit_ts")),
+        "tune_date_range": _extract_tune_date_range(manifest_payload),
+    }
+
+
+def _latest_gate_config_from_history(state: dict[str, Any]) -> dict[str, Any] | None:
+    history = state.get("history")
+    if not isinstance(history, list):
+        return None
+    for entry in reversed(history):
+        if not isinstance(entry, dict):
+            continue
+        gate_config = entry.get("gate_config_frozen")
+        if not isinstance(gate_config, dict):
+            gate_config = entry.get("gate_config")
+        if isinstance(gate_config, dict):
+            return copy.deepcopy(gate_config)
+    return None
+
+
+def _coerce_config_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str):
+        return parse_csv_list(value)
+    return []
+
+
+def _collect_gate_loosening(
+    previous: dict[str, Any] | None,
+    current: GateConfig,
+) -> list[str]:
+    if not isinstance(previous, dict):
+        return []
+
+    current_cfg = asdict(current)
+    loosenings: list[str] = []
+
+    previous_targets = {item for item in _coerce_config_list(previous.get("required_targets"))}
+    current_targets = {item for item in _coerce_config_list(current_cfg.get("required_targets"))}
+    removed_targets = sorted(previous_targets - current_targets)
+    if removed_targets:
+        loosenings.append(
+            "required_targets removed "
+            f"({','.join(removed_targets)}; previous={sorted(previous_targets)} current={sorted(current_targets)})"
+        )
+
+    previous_horizons = {to_int(item) for item in _coerce_config_list(previous.get("required_horizons"))}
+    current_horizons = {to_int(item) for item in _coerce_config_list(current_cfg.get("required_horizons"))}
+    previous_horizon_values = {item for item in previous_horizons if item is not None}
+    current_horizon_values = {item for item in current_horizons if item is not None}
+    removed_horizons = sorted(previous_horizon_values - current_horizon_values)
+    if removed_horizons:
+        loosenings.append(
+            "required_horizons removed "
+            f"({removed_horizons}; previous={sorted(previous_horizon_values)} current={sorted(current_horizon_values)})"
+        )
+
+    previous_min_score = to_float(previous.get("threshold_utility_min_score"))
+    current_min_score = to_float(current_cfg.get("threshold_utility_min_score"))
+    if (
+        previous_min_score is not None
+        and current_min_score is not None
+        and current_min_score < previous_min_score
+    ):
+        loosenings.append(
+            "threshold_utility_min_score decreased "
+            f"({previous_min_score:.3f} -> {current_min_score:.3f})"
+        )
+
+    previous_delta = to_int(previous.get("min_trained_end_delta_ms"))
+    current_delta = to_int(current_cfg.get("min_trained_end_delta_ms"))
+    if previous_delta is not None and current_delta is not None and current_delta < previous_delta:
+        loosenings.append(
+            "min_trained_end_delta_ms decreased "
+            f"({previous_delta} -> {current_delta})"
+        )
+
+    previous_emission_enabled = bool(previous.get("enforce_live_emission_gate"))
+    current_emission_enabled = bool(current_cfg.get("enforce_live_emission_gate"))
+    if previous_emission_enabled and not current_emission_enabled:
+        loosenings.append("enforce_live_emission_gate disabled (true -> false)")
+
+    if previous_emission_enabled and current_emission_enabled:
+        comparisons: list[tuple[str, Any, Any, bool]] = [
+            ("emission_lookback_days", to_int(previous.get("emission_lookback_days")), to_int(current_cfg.get("emission_lookback_days")), False),
+            ("emission_max_pred_lag_hours", to_float(previous.get("emission_max_pred_lag_hours")), to_float(current_cfg.get("emission_max_pred_lag_hours")), True),
+            ("emission_min_rows", to_int(previous.get("emission_min_rows")), to_int(current_cfg.get("emission_min_rows")), False),
+            ("emission_min_coverage", to_float(previous.get("emission_min_coverage")), to_float(current_cfg.get("emission_min_coverage")), False),
+            ("emission_min_signals", to_int(previous.get("emission_min_signals")), to_int(current_cfg.get("emission_min_signals")), False),
+            ("emission_max_abstain_rate", to_float(previous.get("emission_max_abstain_rate")), to_float(current_cfg.get("emission_max_abstain_rate")), True),
+        ]
+        for key, previous_value, current_value, higher_is_looser in comparisons:
+            if previous_value is None or current_value is None:
+                continue
+            if higher_is_looser and current_value > previous_value:
+                loosenings.append(f"{key} loosened ({previous_value} -> {current_value})")
+            if not higher_is_looser and current_value < previous_value:
+                loosenings.append(f"{key} loosened ({previous_value} -> {current_value})")
+
+    return loosenings
+
+
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    try:
+        rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    except sqlite3.Error:
+        return set()
+    return {str(row[1]) for row in rows}
+
+
+def _prediction_source_filter_sql(pred_cols: set[str], source: str) -> tuple[str, list[Any]]:
+    normalized = (source or "preview").strip().lower()
+    if normalized not in {"live", "preview", "all"}:
+        raise ValueError(f"Unsupported emission source: {source!r}")
+    if normalized == "all":
+        return "", []
+    if "is_preview" not in pred_cols:
+        if normalized == "preview":
+            return "AND 1 = 0", []
+        return "", []
+    return "AND COALESCE(pl.is_preview, 0) = ?", [1 if normalized == "preview" else 0]
 
 
 def push_history(state: dict[str, Any], entry: dict[str, Any]) -> None:
@@ -429,6 +769,348 @@ def push_history(state: dict[str, Any], entry: dict[str, Any]) -> None:
     history.append(entry)
     if len(history) > MAX_HISTORY:
         del history[: len(history) - MAX_HISTORY]
+
+
+def _history_entry(
+    *,
+    action: str,
+    reason: str,
+    gates: GateConfig | None = None,
+    gate_failures: list[str] | None = None,
+    gate_skips: list[str] | None = None,
+    **extra: Any,
+) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "ts_ms": now_ms(),
+        "action": action,
+        "reason": reason,
+    }
+    if gates is not None:
+        entry["gate_config"] = asdict(gates)
+        entry["gate_config_frozen"] = asdict(gates)
+    if gate_failures is not None:
+        entry["gate_failures"] = [str(item) for item in gate_failures]
+    if gate_skips is not None:
+        entry["gate_skips"] = [str(item) for item in gate_skips]
+    entry.update(extra)
+    entry.setdefault("manifest_sha256", None)
+    entry.setdefault("pkl_sha256s", {})
+    entry.setdefault("gate_config_frozen", asdict(gates) if gates is not None else None)
+    entry.setdefault("threshold_summary", {})
+    entry.setdefault("trained_end_ts", None)
+    entry.setdefault("calibration_refit_ts", None)
+    entry.setdefault("tune_date_range", None)
+    return entry
+
+
+def _format_horizon_labels(horizons: list[int]) -> str:
+    return ",".join(f"{horizon}m" for horizon in horizons)
+
+
+def harden_break_fallback_thresholds(
+    manifest: dict[str, Any],
+    *,
+    no_trade_threshold: float = 1.0,
+    applied_at_ms: int | None = None,
+) -> tuple[dict[str, Any], list[int]]:
+    threshold_value = float(no_trade_threshold)
+    if threshold_value < 0.0 or threshold_value > 1.0:
+        raise ValueError(f"no_trade_threshold must be within [0.0, 1.0], got {threshold_value}")
+
+    hardened = copy.deepcopy(manifest)
+    thresholds = hardened.get("thresholds")
+    if not isinstance(thresholds, dict):
+        return hardened, []
+
+    break_thresholds = thresholds.get("break")
+    if not isinstance(break_thresholds, dict):
+        return hardened, []
+
+    thresholds_meta = hardened.get("thresholds_meta")
+    break_meta = thresholds_meta.get("break", {}) if isinstance(thresholds_meta, dict) else {}
+    if not isinstance(break_meta, dict):
+        break_meta = {}
+
+    hardened_horizons: list[int] = []
+    override_details: dict[str, dict[str, Any]] = {}
+    for horizon_key, raw_threshold in list(break_thresholds.items()):
+        threshold = to_float(raw_threshold)
+        if threshold is None or threshold >= threshold_value:
+            continue
+        meta = break_meta.get(horizon_key, {})
+        if not isinstance(meta, dict) or not bool(meta.get("fallback")):
+            continue
+        break_thresholds[horizon_key] = threshold_value
+        horizon = to_int(horizon_key)
+        if horizon is not None:
+            hardened_horizons.append(horizon)
+        override_details[str(horizon_key)] = {
+            "from": threshold,
+            "to": threshold_value,
+            "reason": "fallback_threshold",
+        }
+
+    if not override_details:
+        return hardened, []
+
+    runtime_overrides = hardened.get("runtime_overrides")
+    if not isinstance(runtime_overrides, dict):
+        runtime_overrides = {}
+        hardened["runtime_overrides"] = runtime_overrides
+
+    rollback_overrides = runtime_overrides.get("rollback")
+    if not isinstance(rollback_overrides, dict):
+        rollback_overrides = {}
+        runtime_overrides["rollback"] = rollback_overrides
+
+    rollback_overrides.update(
+        {
+            "source_version": version_of(manifest),
+            "applied_at_ms": int(applied_at_ms or now_ms()),
+            "break_threshold_overrides": override_details,
+            "break_fallbacks_hardened": sorted(hardened_horizons),
+        }
+    )
+    return hardened, sorted(hardened_horizons)
+
+
+def evaluate_live_emission_gate(
+    db_path: str,
+    *,
+    candidate_version: str,
+    gates: GateConfig,
+) -> tuple[list[str], dict[str, Any]]:
+    db = Path(db_path).expanduser()
+    failures: list[str] = []
+    summary: dict[str, Any] = {
+        "db_path": str(db),
+        "candidate_version": candidate_version,
+        "source": gates.emission_source,
+        "prediction_basis": gates.emission_prediction_basis,
+        "lookback_days": int(gates.emission_lookback_days),
+        "max_pred_lag_hours": float(gates.emission_max_pred_lag_hours),
+        "min_rows": int(gates.emission_min_rows),
+        "min_coverage": float(gates.emission_min_coverage),
+        "min_signals": int(gates.emission_min_signals),
+        "max_abstain_rate": float(gates.emission_max_abstain_rate),
+        "symbols": list(gates.emission_symbols),
+    }
+
+    if not db.exists():
+        failures.append(f"candidate emission gate data source missing ({db})")
+        summary["status"] = "missing_db"
+        return failures, summary
+
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.row_factory = sqlite3.Row
+        if not _table_exists(conn, "touch_events"):
+            failures.append("candidate emission gate requires touch_events table")
+            summary["status"] = "missing_touch_events"
+            return failures, summary
+        if not _table_exists(conn, "prediction_log"):
+            failures.append("candidate emission gate requires prediction_log table")
+            summary["status"] = "missing_prediction_log"
+            return failures, summary
+
+        pred_cols = _table_columns(conn, "prediction_log")
+        required_cols = {"event_id", "ts_prediction", "model_version", "best_horizon", "abstain"}
+        missing_cols = sorted(required_cols - pred_cols)
+        if missing_cols:
+            failures.append(
+                "candidate emission gate requires prediction_log columns: "
+                + ", ".join(missing_cols)
+            )
+            summary["status"] = "missing_prediction_columns"
+            summary["missing_prediction_columns"] = missing_cols
+            return failures, summary
+
+        has_event_labels = _table_exists(conn, "event_labels")
+        labeled_signal_sql = "0 AS labeled_signal_rows"
+        if has_event_labels:
+            labeled_signal_sql = """
+                SUM(
+                    CASE
+                        WHEN sp.best_horizon IS NOT NULL
+                         AND COALESCE(sp.abstain, 0) = 0
+                         AND EXISTS (
+                             SELECT 1
+                             FROM event_labels el
+                             WHERE el.event_id = sp.event_id
+                               AND el.horizon_min = sp.best_horizon
+                         )
+                        THEN 1 ELSE 0
+                    END
+                ) AS labeled_signal_rows
+            """
+
+        anchor_row = conn.execute(
+            "SELECT MAX(ts_event) AS max_ts_event FROM touch_events"
+        ).fetchone()
+        anchor_ts_ms = to_int(anchor_row["max_ts_event"] if anchor_row else None) or now_ms()
+        window_end_ms = anchor_ts_ms + 1
+        window_start_ms = anchor_ts_ms - max(0, int(gates.emission_lookback_days)) * 86_400_000
+        max_pred_lag_ms = int(max(0.0, float(gates.emission_max_pred_lag_hours)) * 3600 * 1000)
+        pred_order = "ASC" if gates.emission_prediction_basis == "first" else "DESC"
+        source_filter_sql, source_params = _prediction_source_filter_sql(pred_cols, gates.emission_source)
+        symbol_filter_sql = ""
+        symbol_params: list[Any] = []
+        emission_symbols = [str(symbol).strip().upper() for symbol in gates.emission_symbols if str(symbol).strip()]
+        touch_cols = _table_columns(conn, "touch_events")
+        if emission_symbols:
+            if "symbol" not in touch_cols:
+                failures.append("candidate emission gate symbol filtering requires touch_events.symbol")
+                summary["status"] = "missing_touch_symbol"
+                return failures, summary
+            symbol_placeholders = ",".join("?" for _ in emission_symbols)
+            symbol_filter_sql = f"AND UPPER(COALESCE(te.symbol, '')) IN ({symbol_placeholders})"
+            symbol_params.extend(emission_symbols)
+
+        lag_filter_sql = """
+                      AND (pl.ts_prediction - st.ts_event) >= 0
+                      AND (pl.ts_prediction - st.ts_event) <= ?
+        """
+        lag_filter_params: list[Any] = [max_pred_lag_ms]
+        max_pred_lag_applied = True
+        if gates.emission_source == "preview":
+            # Preview/shadow scoring is retrospective by design: rows are
+            # written "now" for recent historical touch events, so applying a
+            # live lag filter would incorrectly discard every candidate row.
+            lag_filter_sql = ""
+            lag_filter_params = []
+            max_pred_lag_applied = False
+
+        summary.update(
+            {
+                "anchor_ts_ms": anchor_ts_ms,
+                "window_start_ts_ms": window_start_ms,
+                "window_end_ts_ms": window_end_ms,
+                "max_pred_lag_applied": max_pred_lag_applied,
+            }
+        )
+
+        params: list[Any] = [window_start_ms, window_end_ms]
+        params.extend(symbol_params)
+        params.append(candidate_version)
+        params.extend(source_params)
+        params.extend(lag_filter_params)
+        row = conn.execute(
+            f"""
+            WITH scoped_touch AS (
+                SELECT te.event_id, te.ts_event
+                FROM touch_events te
+                WHERE te.ts_event >= ?
+                  AND te.ts_event < ?
+                  {symbol_filter_sql}
+            ),
+            selected_pred AS (
+                SELECT *
+                FROM (
+                    SELECT
+                        pl.event_id,
+                        pl.ts_prediction,
+                        pl.best_horizon,
+                        pl.abstain,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY pl.event_id
+                            ORDER BY pl.ts_prediction {pred_order}
+                        ) AS rn
+                    FROM scoped_touch st
+                    JOIN prediction_log pl ON pl.event_id = st.event_id
+                    WHERE COALESCE(pl.model_version, '') = ?
+                      {source_filter_sql}
+                      {lag_filter_sql}
+                )
+                WHERE rn = 1
+            )
+            SELECT
+                (SELECT COUNT(*) FROM scoped_touch) AS touch_rows,
+                COUNT(*) AS selected_rows,
+                SUM(
+                    CASE
+                        WHEN sp.best_horizon IS NOT NULL AND COALESCE(sp.abstain, 0) = 0
+                        THEN 1 ELSE 0
+                    END
+                ) AS signal_rows,
+                SUM(
+                    CASE
+                        WHEN sp.best_horizon IS NULL OR COALESCE(sp.abstain, 0) = 1
+                        THEN 1 ELSE 0
+                    END
+                ) AS abstain_rows,
+                {labeled_signal_sql},
+                SUM(CASE WHEN sp.best_horizon = 5  AND COALESCE(sp.abstain, 0) = 0 THEN 1 ELSE 0 END) AS signal_5m_rows,
+                SUM(CASE WHEN sp.best_horizon = 15 AND COALESCE(sp.abstain, 0) = 0 THEN 1 ELSE 0 END) AS signal_15m_rows,
+                SUM(CASE WHEN sp.best_horizon = 30 AND COALESCE(sp.abstain, 0) = 0 THEN 1 ELSE 0 END) AS signal_30m_rows,
+                SUM(CASE WHEN sp.best_horizon = 60 AND COALESCE(sp.abstain, 0) = 0 THEN 1 ELSE 0 END) AS signal_60m_rows
+            FROM selected_pred sp
+            """,
+            params,
+        ).fetchone()
+
+        touch_rows = int((row["touch_rows"] if row else 0) or 0)
+        selected_rows = int((row["selected_rows"] if row else 0) or 0)
+        signal_rows = int((row["signal_rows"] if row else 0) or 0)
+        abstain_rows = int((row["abstain_rows"] if row else 0) or 0)
+        labeled_signal_rows = int((row["labeled_signal_rows"] if row else 0) or 0)
+        coverage = (selected_rows / touch_rows) if touch_rows > 0 else None
+        abstain_rate = (abstain_rows / selected_rows) if selected_rows > 0 else 1.0
+        signal_counts = {
+            "5": int((row["signal_5m_rows"] if row else 0) or 0),
+            "15": int((row["signal_15m_rows"] if row else 0) or 0),
+            "30": int((row["signal_30m_rows"] if row else 0) or 0),
+            "60": int((row["signal_60m_rows"] if row else 0) or 0),
+        }
+
+        summary.update(
+            {
+                "status": "ok",
+                "has_event_labels": has_event_labels,
+                "touch_rows": touch_rows,
+                "selected_rows": selected_rows,
+                "coverage": round(coverage, 6) if coverage is not None else None,
+                "signal_rows": signal_rows,
+                "abstain_rows": abstain_rows,
+                "abstain_rate": round(abstain_rate, 6),
+                "labeled_signal_rows": labeled_signal_rows,
+                "signal_horizon_counts": signal_counts,
+            }
+        )
+
+        if touch_rows <= 0:
+            failures.append("candidate emission gate found no touch_events in the evaluation window")
+            summary["status"] = "no_touch_events"
+            return failures, summary
+
+        if selected_rows < int(gates.emission_min_rows):
+            failures.append(
+                f"candidate emission gate selected_rows {selected_rows} < "
+                f"min_rows {int(gates.emission_min_rows)}"
+            )
+
+        min_coverage = max(0.0, min(1.0, float(gates.emission_min_coverage)))
+        if coverage is None or coverage < min_coverage:
+            failures.append(
+                f"candidate emission gate coverage {coverage if coverage is not None else 0.0:.3f} < "
+                f"min_coverage {min_coverage:.3f}"
+            )
+
+        if signal_rows < int(gates.emission_min_signals):
+            failures.append(
+                f"candidate emission gate signal_rows {signal_rows} < "
+                f"min_signals {int(gates.emission_min_signals)}"
+            )
+
+        max_abstain_rate = max(0.0, min(1.0, float(gates.emission_max_abstain_rate)))
+        if abstain_rate > max_abstain_rate:
+            failures.append(
+                f"candidate emission gate abstain_rate {abstain_rate:.3f} > "
+                f"max_abstain_rate {max_abstain_rate:.3f}"
+            )
+
+        return failures, summary
+    finally:
+        conn.close()
 
 
 def validate_manifest(
@@ -559,6 +1241,33 @@ def evaluate_gates(
                         f"min_score {float(gates.threshold_utility_min_score):.3f}"
                     )
 
+    candidate_thresholds_meta = candidate.get("thresholds_meta", {})
+    if not isinstance(candidate_thresholds_meta, dict):
+        candidate_thresholds_meta = {}
+    for horizon in gates.required_horizons:
+        horizon_key = str(horizon)
+        for target in gates.threshold_utility_targets:
+            target_meta_map = candidate_thresholds_meta.get(target, {})
+            if not isinstance(target_meta_map, dict):
+                continue
+            target_meta = target_meta_map.get(horizon_key, {})
+            if not isinstance(target_meta, dict):
+                continue
+
+            corr_pos = to_float(target_meta.get("tune_prob_utility_corr_pos"))
+            if corr_pos is not None and corr_pos < float(gates.min_corr_pos):
+                failures.append(
+                    f"{target}:{horizon}m probability-utility correlation negative ({corr_pos:.3f}) "
+                    "— model confidence anti-aligned with profitability"
+                )
+
+            signals = to_int(target_meta.get("signals"))
+            if signals is not None and signals < int(gates.min_tune_signals):
+                failures.append(
+                    f"{target}:{horizon}m insufficient tune signals ({signals} < "
+                    f"{int(gates.min_tune_signals)}) — statistically unreliable threshold"
+                )
+
     active_stats = active.get("stats", {})
     candidate_stats = candidate.get("stats", {})
     for horizon in gates.required_horizons:
@@ -579,17 +1288,38 @@ def evaluate_gates(
             if cand_sample is None:
                 cand_sample = to_int(cand_h.get("sample_size")) if isinstance(cand_h, dict) else None
             if gates.min_total_samples > 0:
-                if active_sample is None or cand_sample is None:
-                    skips.append(
-                        f"{target}:{horizon}m skipped regression gates "
-                        f"(missing sample_size; min_total={gates.min_total_samples})"
+                if cand_sample is None:
+                    failures.append(
+                        f"{target}:{horizon}m missing required candidate metric sample_size — fail closed"
                     )
                     continue
-                if active_sample < gates.min_total_samples or cand_sample < gates.min_total_samples:
-                    skips.append(
-                        f"{target}:{horizon}m skipped regression gates "
-                        f"(sample_size active={active_sample} candidate={cand_sample} "
-                        f"< min_total={gates.min_total_samples})"
+                if cand_sample < gates.min_total_samples:
+                    failures.append(
+                        f"{target}:{horizon}m candidate sample_size {cand_sample} < "
+                        f"min_total={gates.min_total_samples} — fail closed"
+                    )
+                    continue
+                if active_sample is None:
+                    if gates.allow_bootstrap_metric_skips:
+                        skips.append(
+                            f"{target}:{horizon}m skipped regression gates "
+                            f"(missing active sample_size; min_total={gates.min_total_samples}; bootstrap waiver)"
+                        )
+                        continue
+                    failures.append(
+                        f"{target}:{horizon}m missing required active metric sample_size — bootstrap waiver required"
+                    )
+                    continue
+                if active_sample < gates.min_total_samples:
+                    if gates.allow_bootstrap_metric_skips:
+                        skips.append(
+                            f"{target}:{horizon}m skipped regression gates "
+                            f"(active sample_size={active_sample} < min_total={gates.min_total_samples}; bootstrap waiver)"
+                        )
+                        continue
+                    failures.append(
+                        f"{target}:{horizon}m active sample_size {active_sample} < "
+                        f"min_total={gates.min_total_samples} — bootstrap waiver required"
                     )
                     continue
 
@@ -602,17 +1332,38 @@ def evaluate_gates(
                 pos_key = f"{target}_count"
                 active_pos = to_int(active_block.get(pos_key))
                 cand_pos = to_int(cand_block.get(pos_key))
-                if active_pos is None or cand_pos is None:
-                    skips.append(
-                        f"{target}:{horizon}m skipped regression gates "
-                        f"(missing {pos_key}; min_positive={required_positive})"
+                if cand_pos is None:
+                    failures.append(
+                        f"{target}:{horizon}m missing required candidate metric {pos_key} — fail closed"
                     )
                     continue
-                if active_pos < required_positive or cand_pos < required_positive:
-                    skips.append(
-                        f"{target}:{horizon}m skipped regression gates "
-                        f"({pos_key} active={active_pos} candidate={cand_pos} "
-                        f"< min_positive={required_positive})"
+                if cand_pos < required_positive:
+                    failures.append(
+                        f"{target}:{horizon}m candidate {pos_key} {cand_pos} < "
+                        f"min_positive={required_positive} — fail closed"
+                    )
+                    continue
+                if active_pos is None:
+                    if gates.allow_bootstrap_metric_skips:
+                        skips.append(
+                            f"{target}:{horizon}m skipped regression gates "
+                            f"(missing active {pos_key}; min_positive={required_positive}; bootstrap waiver)"
+                        )
+                        continue
+                    failures.append(
+                        f"{target}:{horizon}m missing required active metric {pos_key} — bootstrap waiver required"
+                    )
+                    continue
+                if active_pos < required_positive:
+                    if gates.allow_bootstrap_metric_skips:
+                        skips.append(
+                            f"{target}:{horizon}m skipped regression gates "
+                            f"(active {pos_key}={active_pos} < min_positive={required_positive}; bootstrap waiver)"
+                        )
+                        continue
+                    failures.append(
+                        f"{target}:{horizon}m active {pos_key} {active_pos} < "
+                        f"min_positive={required_positive} — bootstrap waiver required"
                     )
                     continue
 
@@ -769,52 +1520,30 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_evaluate(args: argparse.Namespace) -> int:
-    models_dir = Path(args.models_dir)
-    metadata_dir = _resolve_metadata_dir(models_dir, args.metadata_dir)
-    candidate_path = resolve_candidate_manifest_path(models_dir, args.candidate_manifest)
-    active_path = models_dir / args.active_manifest
-    prev_path = models_dir / args.prev_active_manifest
-    state_path = models_dir / args.state_file
-
-    gates = GateConfig(
-        required_targets=parse_csv_list(args.required_targets),
-        required_horizons=parse_horizons(args.required_horizons),
-        min_trained_end_delta_ms=args.min_trained_end_delta_ms,
-        max_mfe_regression_bps=args.max_mfe_regression_bps,
-        max_mae_worsening_bps=args.max_mae_worsening_bps,
-        min_total_samples=args.min_total_samples,
-        min_positive_samples_reject=max(
-            int(args.min_positive_samples), int(args.min_positive_samples_reject)
-        ),
-        min_positive_samples_break=max(
-            int(args.min_positive_samples), int(args.min_positive_samples_break)
-        ),
-        allow_feature_version_change=args.allow_feature_version_change,
-        regime_aware=bool(args.regime_aware),
-        regime_buckets=parse_csv_list(args.regime_buckets) or [
-            "compression",
-            "expansion",
-            "neutral",
-        ],
-        regime_min_total_samples=int(args.regime_min_total_samples),
-        regime_min_positive_samples_reject=max(
-            int(args.regime_min_positive_samples),
-            int(args.regime_min_positive_samples_reject),
-        ),
-        regime_min_positive_samples_break=max(
-            int(args.regime_min_positive_samples),
-            int(args.regime_min_positive_samples_break),
-        ),
-        regime_min_compared_buckets=max(1, int(args.regime_min_compared_buckets)),
-        enforce_threshold_utility_guard=bool(args.enforce_threshold_utility_guard),
-        threshold_utility_targets=parse_csv_list(args.threshold_utility_targets) or ["reject"],
-        threshold_utility_min_score=float(args.threshold_utility_min_score),
-    )
-    state = load_state(state_path)
-
+def _cmd_evaluate_locked(
+    *,
+    args: argparse.Namespace,
+    models_dir: Path,
+    metadata_dir: Path,
+    candidate_path: Path,
+    active_path: Path,
+    prev_path: Path,
+    state_path: Path,
+    state: dict[str, Any],
+    gates: GateConfig,
+    allow_gate_loosening: bool,
+    gate_loosening_reason: str,
+) -> int:
     candidate = load_manifest(candidate_path)
     candidate_version = version_of(candidate)
+    candidate_evidence = _candidate_history_evidence(
+        candidate_path=candidate_path,
+        candidate=candidate,
+        models_dir=models_dir,
+        gates=gates,
+    )
+    previous_gate_config = _latest_gate_config_from_history(state)
+    gate_loosening_diffs = _collect_gate_loosening(previous_gate_config, gates)
 
     result: dict[str, Any] = {
         "status": "ok",
@@ -835,6 +1564,59 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
         },
         "gates": asdict(gates),
     }
+    if allow_gate_loosening:
+        result["allow_gate_loosening"] = True
+        result["gate_loosening_reason"] = gate_loosening_reason
+    if gate_loosening_diffs:
+        result["gate_loosening_diffs"] = list(gate_loosening_diffs)
+
+    emission_db = (
+        str(getattr(args, "emission_db", "") or args.ops_db or "").strip() or DEFAULT_DB
+    ).strip()
+    result["paths"]["emission_db"] = emission_db
+    emission_gate_failures: list[str] = []
+    emission_gate_summary: dict[str, Any] = {
+        "status": "disabled",
+        "candidate_version": candidate_version,
+        "db_path": emission_db,
+    }
+
+    if gate_loosening_diffs and not allow_gate_loosening:
+        reason = "GATE_LOOSENED: governance policy loosened without explicit override"
+        gate_failures = [f"GATE_LOOSENED {item}" for item in gate_loosening_diffs]
+        result.update(
+            {
+                "action": "rejected",
+                "reason": reason,
+                "gate_failures": gate_failures,
+                "active_version": state.get("active_version"),
+            }
+        )
+        state.update(
+            {
+                "candidate_version": candidate_version,
+                "last_action": "rejected",
+                "last_reason": reason + ": " + "; ".join(gate_failures),
+                "last_checked_at_ms": now_ms(),
+            }
+        )
+        push_history(
+            state,
+            _history_entry(
+                action="rejected",
+                reason=state["last_reason"],
+                gates=gates,
+                gate_failures=gate_failures,
+                candidate_version=candidate_version,
+                active_version=state.get("active_version"),
+                gate_loosening_diffs=gate_loosening_diffs,
+                allow_gate_loosening=False,
+                **candidate_evidence,
+            ),
+        )
+        _persist_state_and_ops(state_path, state, args.ops_db, result)
+        print(json.dumps(result))
+        return 0
 
     manifest_errors = validate_manifest(candidate, models_dir, gates)
     if manifest_errors:
@@ -857,20 +1639,69 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
         )
         push_history(
             state,
-            {
-                "ts_ms": now_ms(),
-                "action": "rejected",
-                "candidate_version": candidate_version,
-                "active_version": state.get("active_version"),
-                "reason": state["last_reason"],
-            },
+            _history_entry(
+                action="rejected",
+                reason=state["last_reason"],
+                gates=gates,
+                gate_failures=manifest_errors,
+                candidate_version=candidate_version,
+                active_version=state.get("active_version"),
+                allow_gate_loosening=allow_gate_loosening,
+                gate_loosening_reason=gate_loosening_reason if allow_gate_loosening else "",
+                gate_loosening_diffs=gate_loosening_diffs,
+                **candidate_evidence,
+            ),
         )
         _persist_state_and_ops(state_path, state, args.ops_db, result)
         print(json.dumps(result))
         return 0
 
-    # Bootstrap: first accepted candidate becomes active.
+    if gates.enforce_live_emission_gate:
+        emission_gate_failures, emission_gate_summary = evaluate_live_emission_gate(
+            emission_db,
+            candidate_version=candidate_version,
+            gates=gates,
+        )
+    result["emission_gate"] = emission_gate_summary
+
     if not active_path.exists():
+        if emission_gate_failures and not args.force_promote:
+            reason = "candidate rejected by governance gates"
+            result.update(
+                {
+                    "action": "rejected",
+                    "reason": reason,
+                    "gate_failures": emission_gate_failures,
+                    "active_version": state.get("active_version"),
+                }
+            )
+            state.update(
+                {
+                    "candidate_version": candidate_version,
+                    "last_action": "rejected",
+                    "last_reason": reason + ": " + "; ".join(emission_gate_failures),
+                    "last_checked_at_ms": now_ms(),
+                }
+            )
+            push_history(
+                state,
+                _history_entry(
+                    action="rejected",
+                    reason=state["last_reason"],
+                    gates=gates,
+                    gate_failures=emission_gate_failures,
+                    candidate_version=candidate_version,
+                    active_version=state.get("active_version"),
+                    emission_gate=emission_gate_summary,
+                    allow_gate_loosening=allow_gate_loosening,
+                    gate_loosening_reason=gate_loosening_reason if allow_gate_loosening else "",
+                    gate_loosening_diffs=gate_loosening_diffs,
+                    **candidate_evidence,
+                ),
+            )
+            _persist_state_and_ops(state_path, state, args.ops_db, result)
+            print(json.dumps(result))
+            return 0
         atomic_copy(candidate_path, active_path)
         state.update(
             {
@@ -885,13 +1716,18 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
         )
         push_history(
             state,
-            {
-                "ts_ms": now_ms(),
-                "action": "bootstrap",
-                "candidate_version": candidate_version,
-                "active_version": candidate_version,
-                "reason": state["last_reason"],
-            },
+            _history_entry(
+                action="bootstrap",
+                reason=state["last_reason"],
+                gates=gates,
+                candidate_version=candidate_version,
+                active_version=candidate_version,
+                emission_gate=emission_gate_summary,
+                allow_gate_loosening=allow_gate_loosening,
+                gate_loosening_reason=gate_loosening_reason if allow_gate_loosening else "",
+                gate_loosening_diffs=gate_loosening_diffs,
+                **candidate_evidence,
+            ),
         )
         result.update(
             {
@@ -921,13 +1757,17 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
         )
         push_history(
             state,
-            {
-                "ts_ms": now_ms(),
-                "action": "no_change",
-                "candidate_version": candidate_version,
-                "active_version": active_version,
-                "reason": state["last_reason"],
-            },
+            _history_entry(
+                action="no_change",
+                reason=state["last_reason"],
+                gates=gates,
+                candidate_version=candidate_version,
+                active_version=active_version,
+                allow_gate_loosening=allow_gate_loosening,
+                gate_loosening_reason=gate_loosening_reason if allow_gate_loosening else "",
+                gate_loosening_diffs=gate_loosening_diffs,
+                **candidate_evidence,
+            ),
         )
         result["reason"] = state["last_reason"]
         _persist_state_and_ops(state_path, state, args.ops_db, result)
@@ -935,14 +1775,16 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
         return 0
 
     gate_failures, gate_skips = evaluate_gates(active, candidate, gates)
-    if gate_failures and not args.force_promote:
+    combined_gate_failures = list(gate_failures)
+    combined_gate_failures.extend(emission_gate_failures)
+    if combined_gate_failures and not args.force_promote:
         reason = "candidate rejected by governance gates"
         result.update(
             {
                 "action": "rejected",
                 "promoted": False,
                 "reason": reason,
-                "gate_failures": gate_failures,
+                "gate_failures": combined_gate_failures,
                 "gate_skips": gate_skips,
                 "active_version": active_version,
             }
@@ -952,19 +1794,26 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
                 "candidate_version": candidate_version,
                 "active_version": active_version,
                 "last_action": "rejected",
-                "last_reason": reason + ": " + "; ".join(gate_failures),
+                "last_reason": reason + ": " + "; ".join(combined_gate_failures),
                 "last_checked_at_ms": now_ms(),
             }
         )
         push_history(
             state,
-            {
-                "ts_ms": now_ms(),
-                "action": "rejected",
-                "candidate_version": candidate_version,
-                "active_version": active_version,
-                "reason": state["last_reason"],
-            },
+            _history_entry(
+                action="rejected",
+                reason=state["last_reason"],
+                gates=gates,
+                gate_failures=combined_gate_failures,
+                gate_skips=gate_skips,
+                candidate_version=candidate_version,
+                active_version=active_version,
+                emission_gate=emission_gate_summary,
+                allow_gate_loosening=allow_gate_loosening,
+                gate_loosening_reason=gate_loosening_reason if allow_gate_loosening else "",
+                gate_loosening_diffs=gate_loosening_diffs,
+                **candidate_evidence,
+            ),
         )
         _persist_state_and_ops(state_path, state, args.ops_db, result)
         print(json.dumps(result))
@@ -987,15 +1836,22 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
     )
     push_history(
         state,
-        {
-            "ts_ms": now_ms(),
-            "action": "promoted",
-            "candidate_version": candidate_version,
-            "active_version": candidate_version,
-            "previous_active_version": active_version,
-            "reason": state["last_reason"],
-            "forced": bool(args.force_promote),
-        },
+        _history_entry(
+            action="promoted",
+            reason=state["last_reason"],
+            gates=gates,
+            gate_failures=combined_gate_failures,
+            gate_skips=gate_skips,
+            candidate_version=candidate_version,
+            active_version=candidate_version,
+            previous_active_version=active_version,
+            forced=bool(args.force_promote),
+            emission_gate=emission_gate_summary,
+            allow_gate_loosening=allow_gate_loosening,
+            gate_loosening_reason=gate_loosening_reason if allow_gate_loosening else "",
+            gate_loosening_diffs=gate_loosening_diffs,
+            **candidate_evidence,
+        ),
     )
     result.update(
         {
@@ -1003,7 +1859,7 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
             "promoted": True,
             "active_version": candidate_version,
             "reason": state["last_reason"],
-            "gate_failures": gate_failures,
+            "gate_failures": combined_gate_failures,
             "gate_skips": gate_skips,
         }
     )
@@ -1012,79 +1868,283 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_evaluate(args: argparse.Namespace) -> int:
+    models_dir = Path(args.models_dir)
+    metadata_dir = _resolve_metadata_dir(models_dir, args.metadata_dir)
+    candidate_path = resolve_candidate_manifest_path(models_dir, args.candidate_manifest)
+    active_path = models_dir / args.active_manifest
+    prev_path = models_dir / args.prev_active_manifest
+    state_path = models_dir / args.state_file
+
+    allow_gate_loosening = bool(getattr(args, "allow_gate_loosening", False))
+    gate_loosening_reason = str(getattr(args, "gate_loosening_reason", "") or "").strip()
+    if allow_gate_loosening and not gate_loosening_reason:
+        raise ValueError("--gate-loosening-reason is required with --allow-gate-loosening")
+
+    gates = GateConfig(
+        required_targets=parse_csv_list(args.required_targets),
+        required_horizons=parse_horizons(args.required_horizons),
+        min_trained_end_delta_ms=args.min_trained_end_delta_ms,
+        max_mfe_regression_bps=args.max_mfe_regression_bps,
+        max_mae_worsening_bps=args.max_mae_worsening_bps,
+        min_total_samples=args.min_total_samples,
+        min_positive_samples_reject=max(
+            int(args.min_positive_samples), int(args.min_positive_samples_reject)
+        ),
+        min_positive_samples_break=max(
+            int(args.min_positive_samples), int(args.min_positive_samples_break)
+        ),
+        allow_feature_version_change=args.allow_feature_version_change,
+        allow_bootstrap_metric_skips=bool(
+            getattr(args, "allow_bootstrap_metric_skips", False)
+        ),
+        regime_aware=bool(args.regime_aware),
+        regime_buckets=parse_csv_list(args.regime_buckets) or [
+            "compression",
+            "expansion",
+            "neutral",
+        ],
+        regime_min_total_samples=int(args.regime_min_total_samples),
+        regime_min_positive_samples_reject=max(
+            int(args.regime_min_positive_samples),
+            int(args.regime_min_positive_samples_reject),
+        ),
+        regime_min_positive_samples_break=max(
+            int(args.regime_min_positive_samples),
+            int(args.regime_min_positive_samples_break),
+        ),
+        regime_min_compared_buckets=max(1, int(args.regime_min_compared_buckets)),
+        enforce_threshold_utility_guard=bool(args.enforce_threshold_utility_guard),
+        threshold_utility_targets=parse_csv_list(args.threshold_utility_targets) or ["reject"],
+        threshold_utility_min_score=float(args.threshold_utility_min_score),
+        min_corr_pos=float(getattr(args, "min_corr_pos", DEFAULT_MIN_CORR_POS)),
+        min_tune_signals=max(0, int(getattr(args, "min_tune_signals", DEFAULT_MIN_TUNE_SIGNALS))),
+        enforce_live_emission_gate=bool(
+            getattr(args, "enforce_live_emission_gate", DEFAULT_ENFORCE_LIVE_EMISSION_GATE)
+        ),
+        emission_lookback_days=max(
+            0, int(getattr(args, "emission_lookback_days", DEFAULT_EMISSION_LOOKBACK_DAYS))
+        ),
+        emission_max_pred_lag_hours=max(
+            0.0,
+            float(
+                getattr(
+                    args,
+                    "emission_max_pred_lag_hours",
+                    DEFAULT_EMISSION_MAX_PRED_LAG_HOURS,
+                )
+            ),
+        ),
+        emission_prediction_basis=(
+            str(
+                getattr(
+                    args,
+                    "emission_prediction_basis",
+                    DEFAULT_EMISSION_PREDICTION_BASIS,
+                )
+            ).strip().lower()
+            or "first"
+        ),
+        emission_source=(
+            str(getattr(args, "emission_source", DEFAULT_EMISSION_SOURCE)).strip().lower()
+            or "preview"
+        ),
+        emission_min_rows=max(
+            0, int(getattr(args, "emission_min_rows", DEFAULT_EMISSION_MIN_ROWS))
+        ),
+        emission_min_coverage=max(
+            0.0,
+            min(
+                1.0,
+                float(getattr(args, "emission_min_coverage", DEFAULT_EMISSION_MIN_COVERAGE)),
+            ),
+        ),
+        emission_min_signals=max(
+            0, int(getattr(args, "emission_min_signals", DEFAULT_EMISSION_MIN_SIGNALS))
+        ),
+        emission_max_abstain_rate=max(
+            0.0,
+            min(
+                1.0,
+                float(
+                    getattr(
+                        args,
+                        "emission_max_abstain_rate",
+                        DEFAULT_EMISSION_MAX_ABSTAIN_RATE,
+                    )
+                ),
+            ),
+        ),
+        emission_symbols=[
+            token.strip().upper()
+            for token in parse_csv_list(
+                str(getattr(args, "emission_symbols", DEFAULT_EMISSION_SYMBOLS))
+            )
+            if token.strip()
+        ],
+    )
+    pre_lock_active_identity = active_manifest_identity(active_path)
+    lock_path = models_dir / ".governance.lock"
+    with governance_lock(lock_path, timeout_sec=30.0):
+        state = load_state(state_path)
+        post_lock_active_identity = active_manifest_identity(active_path)
+        if pre_lock_active_identity != post_lock_active_identity:
+            message = (
+                "governance compare-and-swap failed: active manifest changed while waiting for lock "
+                f"({_format_manifest_identity(pre_lock_active_identity)} -> "
+                f"{_format_manifest_identity(post_lock_active_identity)})"
+            )
+            print(json.dumps({"status": "error", "message": message}))
+            return 1
+        return _cmd_evaluate_locked(
+            args=args,
+            models_dir=models_dir,
+            metadata_dir=metadata_dir,
+            candidate_path=candidate_path,
+            active_path=active_path,
+            prev_path=prev_path,
+            state_path=state_path,
+            state=state,
+            gates=gates,
+            allow_gate_loosening=allow_gate_loosening,
+            gate_loosening_reason=gate_loosening_reason,
+        )
+
+
 def cmd_rollback(args: argparse.Namespace) -> int:
     models_dir = Path(args.models_dir)
     metadata_dir = _resolve_metadata_dir(models_dir, args.metadata_dir)
     active_path = models_dir / args.active_manifest
     prev_path = models_dir / args.prev_active_manifest
     state_path = models_dir / args.state_file
-    state = load_state(state_path)
+    lock_path = models_dir / ".governance.lock"
+    with governance_lock(lock_path, timeout_sec=30.0):
+        state = load_state(state_path)
 
-    if not active_path.exists():
-        raise FileNotFoundError(f"Active manifest not found: {active_path}")
-    active_manifest = load_manifest(active_path)
-    active_version = version_of(active_manifest)
+        if not active_path.exists():
+            raise FileNotFoundError(f"Active manifest not found: {active_path}")
+        active_manifest = load_manifest(active_path)
+        active_version = version_of(active_manifest)
+        active_manifest_sha256_before = _sha256_path(active_path)
 
-    target_version = args.to_version or state.get("previous_active_version")
-    target_path: Path | None = None
-    if target_version:
-        for explicit in _metadata_manifest_candidates(models_dir, metadata_dir, str(target_version)):
-            if explicit.exists():
-                target_path = explicit
-                break
-    if target_path is None and prev_path.exists():
-        target_path = prev_path
-    if target_path is None:
-        raise FileNotFoundError(
-            "No rollback candidate found. Provide --to-version or ensure manifest_active_prev.json exists."
+        target_version = args.to_version or state.get("previous_active_version")
+        target_path: Path | None = None
+        if target_version:
+            for explicit in _metadata_manifest_candidates(models_dir, metadata_dir, str(target_version)):
+                if explicit.exists():
+                    target_path = explicit
+                    break
+        if (
+            target_path is None
+            and args.harden_break_fallbacks
+            and target_version is not None
+            and str(target_version) == active_version
+        ):
+            target_path = active_path
+        if target_path is None and prev_path.exists():
+            target_path = prev_path
+        if target_path is None:
+            raise FileNotFoundError(
+                "No rollback candidate found. Provide --to-version or ensure manifest_active_prev.json exists."
+            )
+
+        target_manifest = load_manifest(target_path)
+        target_version = version_of(target_manifest)
+        target_manifest_sha256 = _sha256_path(target_path)
+        hardened_break_horizons: list[int] = []
+        write_manifest = target_manifest
+        if args.harden_break_fallbacks:
+            source_manifest = target_manifest
+            if target_version == active_version:
+                source_manifest = active_manifest
+            write_manifest, hardened_break_horizons = harden_break_fallback_thresholds(
+                source_manifest,
+                no_trade_threshold=args.no_trade_threshold,
+                applied_at_ms=now_ms(),
+            )
+
+        if target_version == active_version and not hardened_break_horizons:
+            out = {
+                "status": "ok",
+                "action": "no_change",
+                "reason": "rollback target is already active",
+                "active_version": active_version,
+                "target_version": target_version,
+            }
+            print(json.dumps(out))
+            return 0
+
+        atomic_copy(active_path, prev_path)
+        if hardened_break_horizons:
+            atomic_write_json(active_path, write_manifest)
+        else:
+            atomic_copy(target_path, active_path)
+        active_manifest_after = load_manifest(active_path)
+        active_manifest_sha256_after = _sha256_path(active_path)
+        active_evidence = _candidate_history_evidence(
+            candidate_path=active_path,
+            candidate=active_manifest_after,
+            models_dir=models_dir,
+            gates=None,
         )
 
-    target_manifest = load_manifest(target_path)
-    target_version = version_of(target_manifest)
-    if target_version == active_version:
-        out = {
+        action = "rollback"
+        reason = f"rolled back from {active_version} to {target_version}"
+        if target_version == active_version and hardened_break_horizons:
+            action = "hardened_active"
+            reason = (
+                f"hardened active {active_version} break fallback horizons "
+                f"({_format_horizon_labels(hardened_break_horizons)})"
+            )
+        elif hardened_break_horizons:
+            reason += (
+                f"; hardened break fallback horizons "
+                f"({_format_horizon_labels(hardened_break_horizons)})"
+            )
+
+        state.update(
+            {
+                "previous_active_version": (
+                    active_version
+                    if target_version != active_version
+                    else state.get("previous_active_version")
+                ),
+                "active_version": target_version,
+                "last_action": action,
+                "last_reason": reason,
+                "last_checked_at_ms": now_ms(),
+                "last_promoted_at_ms": now_ms(),
+            }
+        )
+        push_history(
+            state,
+            _history_entry(
+                action=action,
+                reason=state["last_reason"],
+                active_version=target_version,
+                previous_active_version=active_version,
+                candidate_version=state.get("candidate_version"),
+                hardened_break_horizons=hardened_break_horizons,
+                no_trade_threshold=float(args.no_trade_threshold),
+                active_manifest_sha256_before=active_manifest_sha256_before,
+                active_manifest_sha256_after=active_manifest_sha256_after,
+                target_manifest_sha256=target_manifest_sha256,
+                target_manifest_version=target_version,
+                **active_evidence,
+            ),
+        )
+        result = {
             "status": "ok",
-            "action": "no_change",
-            "reason": "rollback target is already active",
-            "active_version": active_version,
-            "target_version": target_version,
-        }
-        print(json.dumps(out))
-        return 0
-
-    atomic_copy(active_path, prev_path)
-    atomic_copy(target_path, active_path)
-
-    state.update(
-        {
-            "previous_active_version": active_version,
+            "action": action,
             "active_version": target_version,
-            "last_action": "rollback",
-            "last_reason": f"rolled back from {active_version} to {target_version}",
-            "last_checked_at_ms": now_ms(),
-            "last_promoted_at_ms": now_ms(),
-        }
-    )
-    push_history(
-        state,
-        {
-            "ts_ms": now_ms(),
-            "action": "rollback",
-            "active_version": target_version,
-            "previous_active_version": active_version,
+            "candidate_version": state.get("candidate_version"),
             "reason": state["last_reason"],
-        },
-    )
-    result = {
-        "status": "ok",
-        "action": "rollback",
-        "active_version": target_version,
-        "candidate_version": state.get("candidate_version"),
-        "reason": state["last_reason"],
-    }
-    _persist_state_and_ops(state_path, state, args.ops_db, result)
-    print(json.dumps(result))
-    return 0
+            "hardened_break_horizons": hardened_break_horizons,
+            "no_trade_threshold": float(args.no_trade_threshold),
+        }
+        _persist_state_and_ops(state_path, state, args.ops_db, result)
+        print(json.dumps(result))
+        return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1149,6 +2209,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-feature-version-change",
         action="store_true",
         default=DEFAULT_ALLOW_FEATURE_VERSION_CHANGE,
+    )
+    eval_cmd.add_argument(
+        "--allow-bootstrap-metric-skips",
+        action="store_true",
+        default=False,
+        help=(
+            "Allow regression-gate skips when the active manifest predates required "
+            "metrics/support. Candidate-side missing evidence still fails closed."
+        ),
     )
     eval_cmd.add_argument(
         "--regime-aware",
@@ -1218,11 +2287,128 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_THRESHOLD_UTILITY_MIN_SCORE,
         help="Minimum acceptable threshold utility score for configured targets/horizons.",
     )
+    eval_cmd.add_argument(
+        "--min-corr-pos",
+        type=float,
+        default=DEFAULT_MIN_CORR_POS,
+        help="Minimum acceptable tune probability-utility correlation on required horizons.",
+    )
+    eval_cmd.add_argument(
+        "--min-tune-signals",
+        type=int,
+        default=DEFAULT_MIN_TUNE_SIGNALS,
+        help="Minimum tune-slice signal count required for required horizons.",
+    )
+    eval_cmd.add_argument(
+        "--enforce-live-emission-gate",
+        action="store_true",
+        default=DEFAULT_ENFORCE_LIVE_EMISSION_GATE,
+        help=(
+            "Reject promotion when the candidate does not emit enough recent "
+            "signals in live-like prediction rows."
+        ),
+    )
+    eval_cmd.add_argument(
+        "--no-enforce-live-emission-gate",
+        dest="enforce_live_emission_gate",
+        action="store_false",
+        help="Disable recent live-emission gate checks during governance evaluation.",
+    )
+    eval_cmd.add_argument(
+        "--emission-db",
+        default=DEFAULT_EMISSION_DB,
+        help=(
+            "SQLite data source used for candidate emission checks. "
+            "Defaults to MODEL_GOV_EMISSION_DB or --ops-db."
+        ),
+    )
+    eval_cmd.add_argument(
+        "--emission-lookback-days",
+        type=int,
+        default=DEFAULT_EMISSION_LOOKBACK_DAYS,
+        help="Lookback window used for candidate emission checks.",
+    )
+    eval_cmd.add_argument(
+        "--emission-max-pred-lag-hours",
+        type=float,
+        default=DEFAULT_EMISSION_MAX_PRED_LAG_HOURS,
+        help="Maximum prediction lag allowed between ts_event and ts_prediction.",
+    )
+    eval_cmd.add_argument(
+        "--emission-prediction-basis",
+        default=DEFAULT_EMISSION_PREDICTION_BASIS,
+        choices=["first", "latest"],
+        help="Whether to evaluate first or latest prediction row per event.",
+    )
+    eval_cmd.add_argument(
+        "--emission-source",
+        default=DEFAULT_EMISSION_SOURCE,
+        choices=["live", "preview", "all"],
+        help="Prediction source used for candidate emission checks.",
+    )
+    eval_cmd.add_argument(
+        "--emission-min-rows",
+        type=int,
+        default=DEFAULT_EMISSION_MIN_ROWS,
+        help="Minimum recent prediction rows required before emission checks can pass.",
+    )
+    eval_cmd.add_argument(
+        "--emission-min-coverage",
+        type=float,
+        default=DEFAULT_EMISSION_MIN_COVERAGE,
+        help="Minimum selected_rows / touch_rows coverage required for emission checks.",
+    )
+    eval_cmd.add_argument(
+        "--emission-min-signals",
+        type=int,
+        default=DEFAULT_EMISSION_MIN_SIGNALS,
+        help="Minimum recent non-abstaining signal rows required for candidate promotion.",
+    )
+    eval_cmd.add_argument(
+        "--emission-max-abstain-rate",
+        type=float,
+        default=DEFAULT_EMISSION_MAX_ABSTAIN_RATE,
+        help="Maximum acceptable abstain rate in the candidate emission window.",
+    )
+    eval_cmd.add_argument(
+        "--emission-symbols",
+        default=DEFAULT_EMISSION_SYMBOLS,
+        help=(
+            "Optional comma-separated symbol universe for candidate emission checks. "
+            "Use this to align governance with the candidate shadow-scoring universe."
+        ),
+    )
+    eval_cmd.add_argument(
+        "--allow-gate-loosening",
+        action="store_true",
+        default=False,
+        help="Allow governance evaluation to proceed even if the current gate policy is looser than the last recorded policy.",
+    )
+    eval_cmd.add_argument(
+        "--gate-loosening-reason",
+        default="",
+        help="Required reason recorded in history when --allow-gate-loosening is used.",
+    )
     eval_cmd.add_argument("--force-promote", action="store_true", default=False)
     eval_cmd.set_defaults(func=cmd_evaluate)
 
     rollback_cmd = sub.add_parser("rollback", help="Rollback active manifest")
     rollback_cmd.add_argument("--to-version", default=None, help="Version label like v010")
+    rollback_cmd.add_argument(
+        "--harden-break-fallbacks",
+        action="store_true",
+        default=False,
+        help=(
+            "Clamp fallback-derived break thresholds to --no-trade-threshold while "
+            "rolling back or hardening the currently active version."
+        ),
+    )
+    rollback_cmd.add_argument(
+        "--no-trade-threshold",
+        type=float,
+        default=1.0,
+        help="Threshold used when hardening fallback-derived break horizons.",
+    )
     rollback_cmd.set_defaults(func=cmd_rollback)
 
     return parser
