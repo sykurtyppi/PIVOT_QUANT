@@ -158,6 +158,33 @@ def source_filter_sql(source: str) -> tuple[str, tuple[Any, ...]]:
     return "AND COALESCE(pl.is_preview, 0) = 1", ()
 
 
+def validate_db_path(db_path: Path) -> None:
+    if not db_path.exists():
+        raise FileNotFoundError(
+            f"SQLite DB not found: {db_path}. Copy the real DB to this path before running the backtest."
+        )
+    if not db_path.is_file():
+        raise FileNotFoundError(f"SQLite DB path is not a file: {db_path}")
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+
+    required = {"prediction_log", "touch_events", "event_labels"}
+    missing = sorted(required - tables)
+    if missing:
+        raise RuntimeError(
+            f"SQLite DB at {db_path} is missing required tables: {', '.join(missing)}"
+        )
+
+
 def load_rows(
     conn: sqlite3.Connection,
     *,
@@ -227,12 +254,14 @@ def load_rows(
 
     max_lag_ms = int(max_pred_lag_hours * 3600 * 1000)
     rows: list[RankedRow] = []
+    apply_lag_filter = source != "preview"
     meta = {
         "prediction_rows_joined": len(fetched),
         "prediction_basis": prediction_basis,
         "source": source,
         "model_version_filter": model_version or None,
         "max_pred_lag_hours": max_pred_lag_hours,
+        "max_pred_lag_applied": apply_lag_filter,
         "dropped_for_lag": 0,
         "dropped_for_abstain": 0,
     }
@@ -261,7 +290,7 @@ def load_rows(
         ts_event = int(ts_event)
         ts_prediction = int(ts_prediction)
         lag_ms = ts_prediction - ts_event
-        if lag_ms < 0 or lag_ms > max_lag_ms:
+        if apply_lag_filter and (lag_ms < 0 or lag_ms > max_lag_ms):
             meta["dropped_for_lag"] += 1
             continue
 
@@ -425,6 +454,8 @@ def main() -> int:
     db_path = Path(args.db).expanduser().resolve()
     out_dir = Path(args.out_dir).expanduser().resolve()
     percentiles = [float(token.strip()) for token in args.percentiles.split(",") if token.strip()]
+
+    validate_db_path(db_path)
 
     conn = sqlite3.connect(str(db_path))
     try:
