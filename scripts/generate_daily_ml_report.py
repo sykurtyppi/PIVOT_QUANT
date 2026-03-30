@@ -31,6 +31,15 @@ if DEFAULT_PREDICTION_BASIS not in {"first", "latest"}:
     DEFAULT_PREDICTION_BASIS = "first"
 ROOT = Path(__file__).resolve().parents[1]
 MODEL_DIR = Path(os.getenv("RF_MODEL_DIR", str(ROOT / "data" / "models")))
+DEFAULT_TRADE_COST_BPS = (
+    float(os.getenv("ML_COST_SPREAD_BPS", "0.8"))
+    + float(os.getenv("ML_COST_SLIPPAGE_BPS", "0.4"))
+    + float(os.getenv("ML_COST_COMMISSION_BPS", "0.1"))
+)
+DEFAULT_SHADOW_POLICY_NAME = (
+    os.getenv("ML_MODEL_SIDE_MARGIN_SHADOW_POLICY_NAME", "model_side_margin_v1").strip()
+    or "model_side_margin_v1"
+)
 DEFAULT_GAMMA_LOG = ROOT / "logs" / "gamma_bridge.log"
 RF_MANIFEST_PATH = os.getenv("RF_MANIFEST_PATH", "").strip()
 RF_ACTIVE_MANIFEST = os.getenv("RF_ACTIVE_MANIFEST", "manifest_active.json").strip() or "manifest_active.json"
@@ -689,6 +698,187 @@ def fetch_latest_predictions(
     """
     rows = conn.execute(sql, params).fetchall()
     return [dict(r) for r in rows]
+
+
+def fetch_shadow_emission_records(
+    conn: sqlite3.Connection,
+    start_ms: int,
+    end_ms: int,
+    include_preview: bool,
+    prediction_basis: str,
+    model_version: str | None = None,
+    policy_name: str = DEFAULT_SHADOW_POLICY_NAME,
+) -> list[dict[str, Any]]:
+    if not table_exists(conn, "shadow_emission_log"):
+        return []
+
+    pred_order = _prediction_order_sql(prediction_basis)
+    pred_cols = {r[1] for r in conn.execute("PRAGMA table_info(prediction_log)").fetchall()}
+    has_preview = "is_preview" in pred_cols
+    preview_source_expr = "CASE WHEN COALESCE(lp.is_preview, 0) = 1 THEN 'preview' ELSE 'live' END" if has_preview else "'live'"
+    preview_filter = ""
+    if has_preview and not include_preview:
+        preview_filter = "AND COALESCE(lp.is_preview, 0) = 0"
+    model_filter = ""
+    scoped_model_version = _normalize_model_version(model_version)
+    if scoped_model_version is not None:
+        model_filter = "AND COALESCE(lp.model_version, '') = ?"
+
+    sql = f"""
+        WITH selected_pred AS (
+            SELECT *
+            FROM (
+                SELECT
+                    pl.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY pl.event_id
+                        ORDER BY pl.ts_prediction {pred_order}
+                    ) AS rn
+                FROM prediction_log pl
+            )
+            WHERE rn = 1
+        )
+        SELECT
+            lp.event_id,
+            lp.model_version,
+            lp.feature_version,
+            lp.best_horizon,
+            lp.abstain,
+            lp.signal_5m,
+            lp.signal_15m,
+            lp.signal_30m,
+            lp.signal_60m,
+            te.ts_event,
+            sl.policy_name,
+            sl.source,
+            sl.shadow_horizon,
+            sl.shadow_side,
+            sl.eligible,
+            sl.shadow_emit,
+            sl.ineligibility_reason,
+            sl.selected_policy,
+            sl.trade_regime,
+            sl.side_prob,
+            sl.reference_threshold,
+            sl.runtime_threshold,
+            sl.model_side_margin,
+            sl.margin_cutoff,
+            sl.percentile_cutoff,
+            el.return_bps,
+            el.mfe_bps,
+            el.mae_bps
+        FROM selected_pred lp
+        JOIN touch_events te ON te.event_id = lp.event_id
+        LEFT JOIN shadow_emission_log sl
+          ON sl.event_id = lp.event_id
+         AND COALESCE(sl.model_version, '') = COALESCE(lp.model_version, '')
+         AND sl.policy_name = ?
+         AND sl.source = {preview_source_expr}
+        LEFT JOIN event_labels el
+          ON el.event_id = lp.event_id
+         AND el.horizon_min = sl.shadow_horizon
+        WHERE te.ts_event >= ? AND te.ts_event < ?
+        {preview_filter}
+        {model_filter}
+        ORDER BY te.ts_event ASC
+    """
+    # reorder params to match the SQL placeholder order
+    sql_params: list[Any] = [str(policy_name), start_ms, end_ms]
+    if scoped_model_version is not None:
+        sql_params.append(scoped_model_version)
+    rows = conn.execute(sql, sql_params).fetchall()
+    return [dict(r) for r in rows]
+
+
+def compute_shadow_emission_summary(
+    rows: list[dict[str, Any]],
+    *,
+    policy_name: str = DEFAULT_SHADOW_POLICY_NAME,
+    trade_cost_bps: float = DEFAULT_TRADE_COST_BPS,
+) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "policy_name": policy_name,
+        "status": "missing_rows",
+        "rows_total": len(rows),
+        "logged_rows": 0,
+        "eligible_rows": 0,
+        "emit_rows": 0,
+        "overlap_live_rows": 0,
+        "matured_emit_rows": 0,
+        "matured_utility_sum": None,
+        "matured_utility_avg": None,
+        "matured_win_rate": None,
+        "side_counts": {"reject": 0, "break": 0, "unknown": 0},
+        "regime_counts": {"compression": 0, "expansion": 0, "neutral": 0, "unknown": 0},
+        "selected_policy_counts": {"baseline": 0, "regime_active": 0, "other": 0, "unknown": 0},
+        "horizon_counts": {},
+    }
+    if not rows:
+        return summary
+
+    summary["status"] = "ok"
+    matured_utils: list[float] = []
+    for row in rows:
+        if row.get("policy_name") is None:
+            continue
+        summary["logged_rows"] += 1
+        eligible = bool(row.get("eligible"))
+        shadow_emit = bool(row.get("shadow_emit"))
+        trade_regime = str(row.get("trade_regime") or "unknown").strip().lower()
+        selected_policy = str(row.get("selected_policy") or "unknown").strip().lower()
+        shadow_side = str(row.get("shadow_side") or "unknown").strip().lower()
+        shadow_horizon = row.get("shadow_horizon")
+
+        if trade_regime not in summary["regime_counts"]:
+            trade_regime = "unknown"
+        if selected_policy == "baseline":
+            summary["selected_policy_counts"]["baseline"] += 1
+        elif selected_policy == "regime_active":
+            summary["selected_policy_counts"]["regime_active"] += 1
+        elif selected_policy == "unknown":
+            summary["selected_policy_counts"]["unknown"] += 1
+        else:
+            summary["selected_policy_counts"]["other"] += 1
+
+        if eligible:
+            summary["eligible_rows"] += 1
+            summary["regime_counts"][trade_regime] += 1
+        if shadow_emit:
+            summary["emit_rows"] += 1
+            if shadow_side in {"reject", "break"}:
+                summary["side_counts"][shadow_side] += 1
+            else:
+                summary["side_counts"]["unknown"] += 1
+            horizon_key = str(shadow_horizon) if shadow_horizon is not None else "unknown"
+            summary["horizon_counts"][horizon_key] = int(summary["horizon_counts"].get(horizon_key, 0)) + 1
+
+            live_signal = None
+            best_horizon = row.get("best_horizon")
+            if best_horizon is not None and int(row.get("abstain") or 0) == 0:
+                live_signal = row.get(f"signal_{int(best_horizon)}m")
+            if (
+                best_horizon is not None
+                and shadow_horizon is not None
+                and int(best_horizon) == int(shadow_horizon)
+                and str(live_signal or "").strip().lower() == shadow_side
+            ):
+                summary["overlap_live_rows"] += 1
+
+            return_bps = row.get("return_bps")
+            if return_bps is not None and shadow_side in {"reject", "break"}:
+                ret = float(return_bps)
+                util = (ret - float(trade_cost_bps)) if shadow_side == "reject" else (-ret - float(trade_cost_bps))
+                matured_utils.append(util)
+
+    if summary["logged_rows"] <= 0:
+        summary["status"] = "missing_rows"
+        return summary
+    if matured_utils:
+        summary["matured_emit_rows"] = len(matured_utils)
+        summary["matured_utility_sum"] = float(sum(matured_utils))
+        summary["matured_utility_avg"] = float(sum(matured_utils) / len(matured_utils))
+        summary["matured_win_rate"] = float(sum(1 for x in matured_utils if x > 0) / len(matured_utils))
+    return summary
 
 
 def compute_regime_summary(predictions: list[dict[str, Any]]) -> dict[str, int]:
@@ -1829,6 +2019,7 @@ def render_report(
     analog_gate_end_ms: int,
     regime_summary: dict[str, int],
     regime_policy_summary: dict[str, Any],
+    shadow_emission_summary: dict[str, Any],
     manifest: dict[str, Any],
     conn: sqlite3.Connection,
 ) -> str:
@@ -2014,6 +2205,63 @@ def render_report(
         f"candidate_signals={or_breakout_filter_summary.get('candidate_signals', 0)}, "
         f"applied_signals={or_breakout_filter_summary.get('applied_signals', 0)}"
     )
+    lines.append("")
+
+    lines.append("## Shadow Margin Policy")
+    lines.append("")
+    shadow_policy_cfg = manifest.get("shadow_policies", {}).get(DEFAULT_SHADOW_POLICY_NAME, {})
+    if not isinstance(shadow_policy_cfg, dict):
+        shadow_policy_cfg = {}
+    if shadow_emission_summary.get("status") != "ok":
+        lines.append(
+            f"- Policy `{DEFAULT_SHADOW_POLICY_NAME}`: no shadow rows observed in this window yet."
+        )
+    else:
+        lines.append(
+            f"- Policy: `{DEFAULT_SHADOW_POLICY_NAME}` "
+            f"(horizon={shadow_policy_cfg.get('horizon', '--')}m, "
+            f"scope={shadow_policy_cfg.get('scope', '--')}, "
+            f"cutoff={format_metric(shadow_policy_cfg.get('percentile_cutoff'), 2)})"
+        )
+        lines.append(
+            f"- Shadow rows logged: {shadow_emission_summary.get('logged_rows', 0)} / "
+            f"{shadow_emission_summary.get('rows_total', 0)} current-model predictions"
+        )
+        eligible_rows = int(shadow_emission_summary.get("eligible_rows", 0) or 0)
+        logged_rows = max(1, int(shadow_emission_summary.get("logged_rows", 0) or 0))
+        emit_rows = int(shadow_emission_summary.get("emit_rows", 0) or 0)
+        lines.append(
+            f"- Eligible rows: {eligible_rows} ({pct(eligible_rows, logged_rows):.1f}% of logged rows)"
+        )
+        lines.append(
+            f"- Shadow emits: {emit_rows} "
+            f"({pct(emit_rows, eligible_rows):.1f}% of eligible rows)"
+        )
+        lines.append(
+            f"- Emits by side: "
+            f"reject={shadow_emission_summary.get('side_counts', {}).get('reject', 0)}, "
+            f"break={shadow_emission_summary.get('side_counts', {}).get('break', 0)}"
+        )
+        lines.append(
+            f"- Eligible trade regimes: "
+            f"compression={shadow_emission_summary.get('regime_counts', {}).get('compression', 0)}, "
+            f"expansion={shadow_emission_summary.get('regime_counts', {}).get('expansion', 0)}, "
+            f"neutral={shadow_emission_summary.get('regime_counts', {}).get('neutral', 0)}"
+        )
+        lines.append(
+            f"- Overlap with live emitted signal/horizon: "
+            f"{shadow_emission_summary.get('overlap_live_rows', 0)}"
+        )
+        matured_emit_rows = int(shadow_emission_summary.get("matured_emit_rows", 0) or 0)
+        if matured_emit_rows > 0:
+            lines.append(
+                f"- Matured shadow emits: {matured_emit_rows} "
+                f"(utility total={format_metric(shadow_emission_summary.get('matured_utility_sum'), 2)}, "
+                f"avg={format_metric(shadow_emission_summary.get('matured_utility_avg'), 2)}, "
+                f"win_rate={format_metric(shadow_emission_summary.get('matured_win_rate'), 3)})"
+            )
+        else:
+            lines.append("- Matured shadow emits: 0")
     lines.append("")
 
     lines.append("## Analog Shadow Evaluation")
@@ -2334,6 +2582,15 @@ def main() -> None:
             args.prediction_basis,
             scoped_model_version,
         )
+        shadow_emission_rows = fetch_shadow_emission_records(
+            conn,
+            start_ms,
+            end_ms,
+            args.include_preview,
+            args.prediction_basis,
+            scoped_model_version,
+            DEFAULT_SHADOW_POLICY_NAME,
+        )
         labeled_records = fetch_labeled_records(
             conn,
             start_ms,
@@ -2366,6 +2623,10 @@ def main() -> None:
         )
         regime_summary = compute_regime_summary(predictions)
         regime_policy_summary = compute_regime_policy_summary(predictions)
+        shadow_emission_summary = compute_shadow_emission_summary(
+            shadow_emission_rows,
+            policy_name=DEFAULT_SHADOW_POLICY_NAME,
+        )
 
         persist_daily_metrics(conn, report_day.strftime("%Y-%m-%d"), regime_summary, bundles)
         content = render_report(
@@ -2386,6 +2647,7 @@ def main() -> None:
             analog_gate_end_ms=end_ms,
             regime_summary=regime_summary,
             regime_policy_summary=regime_policy_summary,
+            shadow_emission_summary=shadow_emission_summary,
             manifest=manifest,
             conn=conn,
         )

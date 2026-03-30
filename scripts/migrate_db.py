@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Callable
 
 DEFAULT_DB = os.getenv("PIVOT_DB", "data/pivot_events.sqlite")
-LATEST_SCHEMA_VERSION = 8
+LATEST_SCHEMA_VERSION = 9
 
 
 TOUCH_EVENT_SQL = """
@@ -381,6 +381,50 @@ def migration_8_prediction_log_analog(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE prediction_log ADD COLUMN {col_name} {col_type}")
 
 
+def migration_9_shadow_emission_log(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS shadow_emission_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT NOT NULL,
+            ts_prediction INTEGER NOT NULL,
+            model_version TEXT,
+            feature_version TEXT,
+            policy_name TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'live',
+            shadow_horizon INTEGER,
+            shadow_side TEXT,
+            eligible INTEGER NOT NULL DEFAULT 0,
+            shadow_emit INTEGER NOT NULL DEFAULT 0,
+            ineligibility_reason TEXT,
+            selected_policy TEXT,
+            trade_regime TEXT,
+            side_prob REAL,
+            reference_threshold REAL,
+            runtime_threshold REAL,
+            model_side_margin REAL,
+            margin_cutoff REAL,
+            percentile_cutoff REAL,
+            fit_rows INTEGER,
+            eligible_rows INTEGER,
+            metadata_json TEXT,
+            created_at_ms INTEGER NOT NULL,
+            UNIQUE(event_id, model_version, policy_name, source)
+        );"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_shadow_emit_event "
+        "ON shadow_emission_log(event_id);"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_shadow_emit_ts "
+        "ON shadow_emission_log(ts_prediction);"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_shadow_emit_policy "
+        "ON shadow_emission_log(policy_name, source, ts_prediction);"
+    )
+
+
 MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (1, "base_schema_tables", migration_1_base_tables),
     (2, "columns_and_indexes", migration_2_columns_and_indexes),
@@ -390,6 +434,7 @@ MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (6, "gamma_snapshots", migration_6_gamma_snapshots),
     (7, "prediction_log_regime_policy", migration_7_prediction_log_regime_policy),
     (8, "prediction_log_analog", migration_8_prediction_log_analog),
+    (9, "shadow_emission_log", migration_9_shadow_emission_log),
 ]
 
 

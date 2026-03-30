@@ -334,6 +334,15 @@ ML_ANALOG_PROMOTION_GATE_PATH = Path(
 ML_ANALOG_BLEND_MODE = (os.getenv("ML_ANALOG_BLEND_MODE", "shadow") or "shadow").strip().lower()
 if ML_ANALOG_BLEND_MODE not in {"off", "shadow", "active"}:
     ML_ANALOG_BLEND_MODE = "shadow"
+ML_MODEL_SIDE_MARGIN_SHADOW_MODE = (
+    os.getenv("ML_MODEL_SIDE_MARGIN_SHADOW_MODE", "log") or "log"
+).strip().lower()
+if ML_MODEL_SIDE_MARGIN_SHADOW_MODE not in {"off", "log"}:
+    ML_MODEL_SIDE_MARGIN_SHADOW_MODE = "log"
+ML_MODEL_SIDE_MARGIN_SHADOW_POLICY_NAME = (
+    os.getenv("ML_MODEL_SIDE_MARGIN_SHADOW_POLICY_NAME", "model_side_margin_v1").strip()
+    or "model_side_margin_v1"
+)
 ML_ANALOG_BLEND_PARTIAL_MODE = (
     os.getenv("ML_ANALOG_BLEND_PARTIAL_MODE", "off") or "off"
 ).strip().lower()
@@ -1615,8 +1624,147 @@ def _ensure_prediction_log_schema(conn: sqlite3.Connection) -> None:
         for col_name, col_type in compat_cols.items():
             if col_name not in pred_cols:
                 conn.execute(f"ALTER TABLE prediction_log ADD COLUMN {col_name} {col_type}")
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS shadow_emission_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id TEXT NOT NULL,
+                ts_prediction INTEGER NOT NULL,
+                model_version TEXT,
+                feature_version TEXT,
+                policy_name TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT 'live',
+                shadow_horizon INTEGER,
+                shadow_side TEXT,
+                eligible INTEGER NOT NULL DEFAULT 0,
+                shadow_emit INTEGER NOT NULL DEFAULT 0,
+                ineligibility_reason TEXT,
+                selected_policy TEXT,
+                trade_regime TEXT,
+                side_prob REAL,
+                reference_threshold REAL,
+                runtime_threshold REAL,
+                model_side_margin REAL,
+                margin_cutoff REAL,
+                percentile_cutoff REAL,
+                fit_rows INTEGER,
+                eligible_rows INTEGER,
+                metadata_json TEXT,
+                created_at_ms INTEGER NOT NULL,
+                UNIQUE(event_id, model_version, policy_name, source)
+            );"""
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_shadow_emit_event "
+            "ON shadow_emission_log(event_id);"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_shadow_emit_ts "
+            "ON shadow_emission_log(ts_prediction);"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_shadow_emit_policy "
+            "ON shadow_emission_log(policy_name, source, ts_prediction);"
+        )
+        shadow_cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(shadow_emission_log)").fetchall()
+        }
+        shadow_compat_cols = {
+            "feature_version": "TEXT",
+            "shadow_horizon": "INTEGER",
+            "shadow_side": "TEXT",
+            "eligible": "INTEGER NOT NULL DEFAULT 0",
+            "shadow_emit": "INTEGER NOT NULL DEFAULT 0",
+            "ineligibility_reason": "TEXT",
+            "selected_policy": "TEXT",
+            "trade_regime": "TEXT",
+            "side_prob": "REAL",
+            "reference_threshold": "REAL",
+            "runtime_threshold": "REAL",
+            "model_side_margin": "REAL",
+            "margin_cutoff": "REAL",
+            "percentile_cutoff": "REAL",
+            "fit_rows": "INTEGER",
+            "eligible_rows": "INTEGER",
+            "metadata_json": "TEXT",
+            "created_at_ms": "INTEGER",
+        }
+        for col_name, col_type in shadow_compat_cols.items():
+            if col_name not in shadow_cols:
+                conn.execute(f"ALTER TABLE shadow_emission_log ADD COLUMN {col_name} {col_type}")
         conn.commit()
         _PREDICTION_LOG_SCHEMA_READY = True
+
+
+def _write_shadow_emission_records(
+    *,
+    conn: sqlite3.Connection,
+    event: dict,
+    result: dict,
+    source: str,
+    ts_prediction_ms: int,
+) -> None:
+    shadow_emissions = result.get("shadow_emissions", {})
+    if not isinstance(shadow_emissions, dict):
+        return
+
+    event_id = event.get("event_id")
+    model_version = result.get("model_version")
+    feature_version = result.get("feature_version")
+    for policy_name, payload in shadow_emissions.items():
+        if not isinstance(payload, dict):
+            continue
+        conn.execute(
+            """INSERT INTO shadow_emission_log (
+                event_id, ts_prediction, model_version, feature_version,
+                policy_name, source, shadow_horizon, shadow_side,
+                eligible, shadow_emit, ineligibility_reason,
+                selected_policy, trade_regime, side_prob, reference_threshold,
+                runtime_threshold, model_side_margin, margin_cutoff,
+                percentile_cutoff, fit_rows, eligible_rows,
+                metadata_json, created_at_ms
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(event_id, model_version, policy_name, source) DO UPDATE SET
+                selected_policy = excluded.selected_policy,
+                trade_regime = excluded.trade_regime,
+                eligible = excluded.eligible,
+                shadow_emit = excluded.shadow_emit,
+                ineligibility_reason = excluded.ineligibility_reason,
+                side_prob = excluded.side_prob,
+                reference_threshold = excluded.reference_threshold,
+                runtime_threshold = excluded.runtime_threshold,
+                model_side_margin = excluded.model_side_margin,
+                margin_cutoff = excluded.margin_cutoff,
+                percentile_cutoff = excluded.percentile_cutoff,
+                fit_rows = excluded.fit_rows,
+                eligible_rows = excluded.eligible_rows,
+                metadata_json = excluded.metadata_json,
+                created_at_ms = excluded.created_at_ms""",
+            (
+                event_id,
+                ts_prediction_ms,
+                model_version,
+                feature_version,
+                str(policy_name),
+                source,
+                _to_int(payload.get("shadow_horizon")),
+                payload.get("shadow_side"),
+                1 if _to_bool(payload.get("eligible")) else 0,
+                1 if _to_bool(payload.get("shadow_emit")) else 0,
+                payload.get("ineligibility_reason"),
+                payload.get("selected_policy_runtime"),
+                payload.get("trade_regime"),
+                _to_float(payload.get("side_prob")),
+                _to_float(payload.get("reference_threshold")),
+                _to_float(payload.get("runtime_threshold")),
+                _to_float(payload.get("model_side_margin")),
+                _to_float(payload.get("margin_cutoff")),
+                _to_float(payload.get("percentile_cutoff")),
+                _to_int(payload.get("fit_rows")),
+                _to_int(payload.get("eligible_rows")),
+                json.dumps(payload, separators=(",", ":")),
+                ts_prediction_ms,
+            ),
+        )
 
 
 def _write_prediction_record(event: dict, result: dict) -> tuple[str, str | None]:
@@ -1651,6 +1799,8 @@ def _write_prediction_record(event: dict, result: dict) -> tuple[str, str | None
             else:
                 analog_best_ci_width = reject_w if reject_w is not None else break_w
         is_preview = 1 if event.get("preview") else 0
+        source = "preview" if is_preview else "live"
+        ts_prediction_ms = int(time.time() * 1000)
 
         # Preserve original signal/probability/threshold payload for each
         # (event_id, model_version) row and only refresh runtime metadata on
@@ -1686,7 +1836,7 @@ def _write_prediction_record(event: dict, result: dict) -> tuple[str, str | None
                 is_preview = excluded.is_preview""",
             (
                 event_id,
-                int(time.time() * 1000),
+                ts_prediction_ms,
                 result.get("model_version"),
                 result.get("feature_version"),
                 result.get("best_horizon"),
@@ -1724,6 +1874,13 @@ def _write_prediction_record(event: dict, result: dict) -> tuple[str, str | None
                 json.dumps(result.get("quality_flags", [])),
                 is_preview,
             ),
+        )
+        _write_shadow_emission_records(
+            conn=conn,
+            event=event,
+            result=result,
+            source=source,
+            ts_prediction_ms=ts_prediction_ms,
         )
         conn.commit()
         return "ok", None
@@ -2547,6 +2704,100 @@ def _pick_best_horizon(
     return best_horizon, True
 
 
+def _compute_model_side_margin_shadow_emission(
+    *,
+    manifest: dict | None,
+    scores: dict[str, float | None],
+    selected_policy: str,
+    trade_regime: str,
+    selected_threshold_map: dict[str, dict[int, float]],
+) -> dict[str, dict[str, object]]:
+    policy_name = ML_MODEL_SIDE_MARGIN_SHADOW_POLICY_NAME
+    base_payload: dict[str, object] = {
+        "policy_name": policy_name,
+        "mode": ML_MODEL_SIDE_MARGIN_SHADOW_MODE,
+        "eligible": False,
+        "shadow_emit": False,
+        "selected_policy_runtime": selected_policy,
+        "trade_regime": trade_regime,
+        "shadow_horizon": None,
+        "shadow_side": None,
+        "ineligibility_reason": "",
+        "side_prob": None,
+        "reference_threshold": None,
+        "runtime_threshold": None,
+        "model_side_margin": None,
+        "margin_cutoff": None,
+        "percentile_cutoff": None,
+        "fit_rows": None,
+        "eligible_rows": None,
+        "reference_threshold_source": None,
+    }
+    if ML_MODEL_SIDE_MARGIN_SHADOW_MODE == "off":
+        payload = dict(base_payload)
+        payload["ineligibility_reason"] = "mode_off"
+        return {policy_name: payload}
+
+    manifest_shadow = manifest.get("shadow_policies") if isinstance(manifest, dict) else None
+    policy = manifest_shadow.get(policy_name) if isinstance(manifest_shadow, dict) else None
+    if not isinstance(policy, dict):
+        payload = dict(base_payload)
+        payload["ineligibility_reason"] = "missing_policy_config"
+        return {policy_name: payload}
+
+    horizon = _to_int(policy.get("horizon"))
+    if horizon not in {5, 15, 30, 60}:
+        payload = dict(base_payload)
+        payload["shadow_horizon"] = horizon
+        payload["ineligibility_reason"] = "invalid_policy_horizon"
+        return {policy_name: payload}
+
+    payload = dict(base_payload)
+    payload["shadow_horizon"] = horizon
+    payload["percentile_cutoff"] = _to_float(policy.get("percentile_cutoff"))
+    payload["reference_threshold_source"] = policy.get("reference_threshold_source")
+
+    if selected_policy != "regime_active":
+        payload["ineligibility_reason"] = f"selected_policy={selected_policy or 'unknown'}"
+        return {policy_name: payload}
+    if trade_regime not in {"expansion", "compression"}:
+        payload["ineligibility_reason"] = f"trade_regime={trade_regime or 'unknown'}"
+        return {policy_name: payload}
+
+    shadow_side = "reject" if trade_regime == "expansion" else "break"
+    payload["shadow_side"] = shadow_side
+    side_policy = policy.get(shadow_side)
+    if not isinstance(side_policy, dict):
+        payload["ineligibility_reason"] = f"missing_side_config={shadow_side}"
+        return {policy_name: payload}
+
+    reference_threshold = _to_float(side_policy.get("reference_threshold"))
+    margin_cutoff = _to_float(side_policy.get("margin_cutoff"))
+    side_prob = _to_float(scores.get(f"prob_{shadow_side}_{horizon}m"))
+    runtime_threshold = _to_float(
+        _threshold_from_map(selected_threshold_map, shadow_side, horizon, context="shadow_margin_runtime")
+    )
+    payload["reference_threshold"] = reference_threshold
+    payload["margin_cutoff"] = margin_cutoff
+    payload["side_prob"] = side_prob
+    payload["runtime_threshold"] = runtime_threshold
+    payload["fit_rows"] = _to_int(side_policy.get("fit_rows"))
+    payload["eligible_rows"] = _to_int(side_policy.get("eligible_rows"))
+
+    if reference_threshold is None or margin_cutoff is None:
+        payload["ineligibility_reason"] = "incomplete_side_config"
+        return {policy_name: payload}
+    if side_prob is None:
+        payload["ineligibility_reason"] = "missing_side_probability"
+        return {policy_name: payload}
+
+    margin = float(side_prob) - float(reference_threshold)
+    payload["eligible"] = True
+    payload["model_side_margin"] = margin
+    payload["shadow_emit"] = bool(margin >= float(margin_cutoff))
+    return {policy_name: payload}
+
+
 def _score_event(event: dict):
     load_shed_analogs = bool(getattr(_SCORE_LOAD_SHED_LOCAL, "disable_analogs", False))
     missing = collect_missing(event)
@@ -3252,6 +3503,14 @@ def _score_event(event: dict):
             selected_threshold_map, "break", horizon, context="response_payload"
         )
 
+    shadow_emissions = _compute_model_side_margin_shadow_emission(
+        manifest=manifest,
+        scores=scores,
+        selected_policy=selected_policy,
+        trade_regime=regime_state["bucket"],
+        selected_threshold_map=selected_threshold_map,
+    )
+
     return {
         "status": "degraded" if missing else "ok",
         "scores": scores,
@@ -3267,6 +3526,7 @@ def _score_event(event: dict):
         "analogs": analog_summary,
         "analog_blend": blend_info,
         "analog_disagreement_guard": disagreement_guard_info,
+        "shadow_emissions": shadow_emissions,
         "regime_policy": {
             "mode": ML_REGIME_POLICY_MODE,
             "selected_policy": selected_policy,
