@@ -146,7 +146,7 @@ CALIB_DAYS="${CALIB_REFIT_CALIB_DAYS:-5}"
 CALIB_MIN_EVENTS="${CALIB_REFIT_MIN_CALIB_EVENTS:-40}"
 CALIB_MIN_THRESHOLD_EVENTS="${CALIB_REFIT_MIN_THRESHOLD_EVENTS:-20}"
 CALIB_PRECISION_FLOOR="${CALIB_REFIT_PRECISION_FLOOR:-0.40}"
-CALIB_RETUNE_THRESHOLDS="${CALIB_REFIT_RETUNE_THRESHOLDS:-false}"
+CALIB_RETUNE_THRESHOLDS="${CALIB_REFIT_RETUNE_THRESHOLDS:-true}"
 CALIB_THRESHOLD_OBJECTIVE="${CALIB_REFIT_THRESHOLD_OBJECTIVE:-${RF_THRESHOLD_OBJECTIVE:-utility_bps}}"
 CALIB_THRESHOLD_MIN_SIGNALS="${CALIB_REFIT_THRESHOLD_MIN_SIGNALS:-10}"
 CALIB_THRESHOLD_TRADE_COST_BPS="${CALIB_REFIT_THRESHOLD_TRADE_COST_BPS:-${RF_THRESHOLD_TRADE_COST_BPS:-${ML_COST_TOTAL_BPS:-1.3}}}"
@@ -217,6 +217,26 @@ CALIB_ARGS=(
 )
 if is_truthy "${CALIB_RETUNE_THRESHOLDS}"; then
   CALIB_ARGS+=(--retune-thresholds)
+else
+  # Explicitly pass --no-retune-thresholds so the Python default (True) cannot
+  # silently override an operator's intent to disable retune.  Without this
+  # else-branch, setting CALIB_REFIT_RETUNE_THRESHOLDS=false in .env would be
+  # silently ignored after the Python default was flipped to True in the
+  # hardening pass (c1919de) — the root-cause fix for the v215 incident.
+  CALIB_ARGS+=(--no-retune-thresholds)
+  _RETUNE_DISABLED_MSG="$(cat <<'WARN'
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+[run_calibration_refit] WARNING: threshold retune is DISABLED.
+  CALIB_REFIT_RETUNE_THRESHOLDS is falsy — passing --no-retune-thresholds.
+  Live decision thresholds will NOT be updated by this refit run.
+  Calibration curves will refresh but optimal_threshold values will
+  remain frozen at their last-trained values.
+  Reminder: disabled retune was the root cause of the v215 inactivity
+  incident.  Set CALIB_REFIT_RETUNE_THRESHOLDS=true to re-enable.
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+WARN
+)"
+  echo "[$(timestamp)] ${_RETUNE_DISABLED_MSG}" | tee -a "${LOG_DIR}/calibration_refit.log"
 fi
 if [[ -n "${CALIB_TARGETS}" ]]; then
   CALIB_ARGS+=(--targets "${CALIB_TARGETS}")
@@ -245,6 +265,27 @@ else:
 PY
 )"
 
+# Re-read the summary JSON to surface any retune-disabled warning that the
+# Python script recorded.  This ensures the warning appears on the terminal
+# (tee'd) even when run_step redirects Python's stderr to the log only.
+_REFIT_RETUNE_WARN="$("${PYTHON}" - <<'PY'
+import json
+from pathlib import Path
+p = Path("logs/calibration_refit_last.json")
+if p.exists():
+    try:
+        payload = json.loads(p.read_text(encoding="utf-8"))
+        w = payload.get("retune_thresholds_warning")
+        if w:
+            print(w)
+    except Exception:
+        pass
+PY
+)"
+if [[ -n "${_REFIT_RETUNE_WARN}" ]]; then
+  echo "[$(timestamp)] WARNING (refit summary): ${_REFIT_RETUNE_WARN}" | tee -a "${LOG_DIR}/calibration_refit.log"
+fi
+
 if is_truthy "${CALIB_RELOAD}" && [[ "${UPDATED_PAIRS}" -gt 0 ]]; then
   run_step "ml_reload" curl -sf -X POST http://127.0.0.1:5003/reload
 else
@@ -258,6 +299,7 @@ ops_set \
   --set "calibration_refit_last_updated_pairs=${UPDATED_PAIRS}"
 audit_event "calibration_refit_completed" "calibration refit cycle completed" \
   --detail "updated_pairs=${UPDATED_PAIRS}" \
-  --detail "reload_enabled=${CALIB_RELOAD}"
+  --detail "reload_enabled=${CALIB_RELOAD}" \
+  --detail "retune_thresholds=${CALIB_RETUNE_THRESHOLDS}"
 
 echo "[$(timestamp)] Calibration refit cycle complete (updated_pairs=${UPDATED_PAIRS})." | tee -a "${LOG_DIR}/calibration_refit.log"
