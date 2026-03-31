@@ -1896,37 +1896,54 @@ def format_metric(v: float | None, digits: int = 3) -> str:
 
 
 def summarize_tradeability_blockers(manifest: dict[str, Any]) -> str | None:
+    """Return a concise operator note describing active threshold suppressions.
+
+    Checks both reject and break for two independent suppression conditions:
+    - guard_applied: utility guard pushed the threshold to no-trade value
+    - fallback:      threshold search did not run / fell back to 0.5
+
+    Either condition on either target is a meaningful operational signal.
+    The previous implementation only checked reject-guard and break-fallback,
+    leaving reject-fallback and break-guard as silent blind spots.
+    """
     thresholds_meta = manifest.get("thresholds_meta")
     if not isinstance(thresholds_meta, dict):
         return None
-    reject_meta = thresholds_meta.get("reject")
-    break_meta = thresholds_meta.get("break")
+
     reject_guarded: list[int] = []
+    reject_fallback: list[int] = []
+    break_guarded: list[int] = []
     break_fallback: list[int] = []
 
-    if isinstance(reject_meta, dict):
-        for horizon_raw, payload in reject_meta.items():
+    for target, bucket_guarded, bucket_fallback in (
+        ("reject", reject_guarded, reject_fallback),
+        ("break", break_guarded, break_fallback),
+    ):
+        target_meta = thresholds_meta.get(target)
+        if not isinstance(target_meta, dict):
+            continue
+        for horizon_raw, payload in target_meta.items():
             if not isinstance(payload, dict):
+                continue
+            try:
+                h = int(horizon_raw)
+            except Exception:
                 continue
             if bool(payload.get("guard_applied")):
-                try:
-                    reject_guarded.append(int(horizon_raw))
-                except Exception:
-                    continue
-    if isinstance(break_meta, dict):
-        for horizon_raw, payload in break_meta.items():
-            if not isinstance(payload, dict):
-                continue
+                bucket_guarded.append(h)
             if bool(payload.get("fallback")):
-                try:
-                    break_fallback.append(int(horizon_raw))
-                except Exception:
-                    continue
+                bucket_fallback.append(h)
 
     notes: list[str] = []
     if reject_guarded:
         ordered = ", ".join(f"{h}m" for h in sorted(set(reject_guarded)))
         notes.append(f"reject utility guard active ({ordered})")
+    if reject_fallback:
+        ordered = ", ".join(f"{h}m" for h in sorted(set(reject_fallback)))
+        notes.append(f"reject thresholds on fallback ({ordered})")
+    if break_guarded:
+        ordered = ", ".join(f"{h}m" for h in sorted(set(break_guarded)))
+        notes.append(f"break utility guard active ({ordered})")
     if break_fallback:
         ordered = ", ".join(f"{h}m" for h in sorted(set(break_fallback)))
         notes.append(f"break thresholds on fallback ({ordered})")

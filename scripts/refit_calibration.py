@@ -13,14 +13,13 @@ No new model version is created and no governance promotion is performed.
 
 from __future__ import annotations
 
-from __future__ import annotations
-
 import argparse
 import json
 import os
 import shutil
 import sys
 import time
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -470,9 +469,14 @@ def main() -> None:
     )
     parser.add_argument(
         "--retune-thresholds",
-        action="store_true",
-        default=_env_bool("CALIB_REFIT_RETUNE_THRESHOLDS", False),
-        help="Enable threshold retuning during calibration refit.",
+        action=argparse.BooleanOptionalAction,
+        default=_env_bool("CALIB_REFIT_RETUNE_THRESHOLDS", True),
+        help=(
+            "Enable threshold retuning during calibration refit (default: True). "
+            "Pass --no-retune-thresholds or set CALIB_REFIT_RETUNE_THRESHOLDS=false to disable. "
+            "WARNING: disabling retune means live thresholds will NOT be updated — "
+            "this was the root cause of the v215 inactivity incident."
+        ),
     )
     parser.add_argument(
         "--calib-fit-fraction",
@@ -506,6 +510,29 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--summary-out", default=DEFAULT_SUMMARY_OUT)
     args = parser.parse_args()
+
+    # -----------------------------------------------------------------------
+    # Operational safety gate: make disabled-retune impossible to miss.
+    # Rationale: the previous production inactivity incident (v215) was caused
+    # by threshold retune being silently disabled in this path.  Emitting a
+    # prominent warning to BOTH stderr and stdout ensures it appears in any
+    # log capture regardless of stream routing.
+    # -----------------------------------------------------------------------
+    if not args.retune_thresholds:
+        _retune_warn = (
+            "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+            "[refit_calibration] WARNING: threshold retune is DISABLED.\n"
+            "  Live decision thresholds will NOT be updated by this refit run.\n"
+            "  Calibration curves will be refreshed but optimal_threshold values\n"
+            "  will remain frozen at their last-trained values.\n"
+            "  To enable: set CALIB_REFIT_RETUNE_THRESHOLDS=true in .env,\n"
+            "  or pass --retune-thresholds on the command line.\n"
+            "  Reminder: disabled retune was the root cause of the v215\n"
+            "  inactivity incident.  Confirm this is intentional.\n"
+            "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+        )
+        print(_retune_warn, file=sys.stderr)
+        print(_retune_warn)
 
     require("numpy", "python3 -m pip install numpy")
     joblib = require("joblib", "python3 -m pip install joblib")
@@ -806,16 +833,36 @@ def main() -> None:
                 else:
                     threshold_meta["search_enabled"] = False
                     threshold_meta["search_skip_reason"] = "invalid_probability_shape"
-            except Exception:
+            except Exception as _exc:
+                _exc_tb = traceback.format_exc()
+                _exc_msg = (
+                    f"[refit_calibration] ERROR: threshold selection raised "
+                    f"{type(_exc).__name__} for target={target} horizon={horizon}m. "
+                    f"Refit continues with fallback threshold={optimal_threshold:.6f}. "
+                    f"This threshold will NOT be updated. Traceback:\n{_exc_tb}"
+                )
+                print(_exc_msg, file=sys.stderr)
+                print(_exc_msg)
                 threshold_meta["search_enabled"] = False
-                threshold_meta["search_skip_reason"] = "threshold_selection_exception"
+                threshold_meta["search_skip_reason"] = (
+                    f"threshold_selection_exception: {type(_exc).__name__}: {_exc}"
+                )
 
         if y_prob_tune is None and hasattr(model_obj, "predict_proba") and len(X_calib_tune) > 0:
             try:
                 probs = model_obj.predict_proba(X_calib_tune)
                 if probs.shape[1] == 2:
                     y_prob_tune = probs[:, 1]
-            except Exception:
+            except Exception as _exc:
+                _exc_tb = traceback.format_exc()
+                _exc_msg = (
+                    f"[refit_calibration] WARNING: fallback predict_proba raised "
+                    f"{type(_exc).__name__} for target={target} horizon={horizon}m. "
+                    f"Shadow policy for this target/horizon will be fit without "
+                    f"probabilities (margin_cutoff will not be updated). Traceback:\n{_exc_tb}"
+                )
+                print(_exc_msg, file=sys.stderr)
+                print(_exc_msg)
                 y_prob_tune = None
 
         threshold_meta["selected_threshold_for_utility_diagnostics"] = float(optimal_threshold)
@@ -897,6 +944,10 @@ def main() -> None:
         "view": args.view,
         "calib_days": int(args.calib_days),
         "retune_thresholds": bool(args.retune_thresholds),
+        "retune_thresholds_warning": (
+            "THRESHOLD RETUNE DISABLED: live thresholds were NOT updated by this run"
+            if not args.retune_thresholds else None
+        ),
         "calib_fit_fraction": float(args.calib_fit_fraction),
         "calib_min_fit_events": int(args.calib_min_fit_events),
         "threshold_objective": args.threshold_objective,

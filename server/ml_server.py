@@ -1560,6 +1560,38 @@ def _close_prediction_log_conn() -> None:
 atexit.register(_close_prediction_log_conn)
 
 
+def _apply_migrations(conn: sqlite3.Connection) -> bool:
+    """Run all pending schema migrations via scripts/migrate_db.py.
+
+    This is the authoritative schema evolution path.  The inline DDL below is
+    kept only as a belt-and-suspenders fallback for environments where the
+    scripts directory is unavailable.  Any new tables or indexes should be
+    added to migrate_db.py first; this function ensures the server picks them
+    up automatically without requiring a separate migration step.
+
+    Returns True on success, False if migrate_db.py could not be loaded or the
+    migration itself raised.
+    """
+    try:
+        import importlib.util as _iutil
+        _spec = _iutil.spec_from_file_location(
+            "pivot_quant_migrate_db",
+            ROOT / "scripts" / "migrate_db.py",
+        )
+        _mod = _iutil.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)  # type: ignore[union-attr]
+        _mod.migrate_connection(conn, verbose=False)
+        return True
+    except Exception as _exc:
+        log.warning(
+            "schema migration via migrate_db.py failed (%s: %s); "
+            "falling back to inline DDL — new migrations may not have been applied",
+            type(_exc).__name__,
+            _exc,
+        )
+        return False
+
+
 def _ensure_prediction_log_schema(conn: sqlite3.Connection) -> None:
     global _PREDICTION_LOG_SCHEMA_READY
     if _PREDICTION_LOG_SCHEMA_READY:
@@ -1568,6 +1600,10 @@ def _ensure_prediction_log_schema(conn: sqlite3.Connection) -> None:
     with _PREDICTION_LOG_SCHEMA_LOCK:
         if _PREDICTION_LOG_SCHEMA_READY:
             return
+        # Primary path: delegate to migrate_db.py so the server always tracks
+        # the canonical migration chain.  If this succeeds the inline DDL below
+        # is entirely redundant but harmless (all statements use IF NOT EXISTS).
+        _apply_migrations(conn)
         conn.execute(
             """CREATE TABLE IF NOT EXISTS prediction_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1664,6 +1700,13 @@ def _ensure_prediction_log_schema(conn: sqlite3.Connection) -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_shadow_emit_policy "
             "ON shadow_emission_log(policy_name, source, ts_prediction);"
+        )
+        # idx_shadow_emit_event_model was added in migration_10 to backfill
+        # production DBs that received migration_9 without it.  It is also
+        # created here so that the inline fallback path stays in sync.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_shadow_emit_event_model "
+            "ON shadow_emission_log(event_id, model_version);"
         )
         shadow_cols = {
             row[1] for row in conn.execute("PRAGMA table_info(shadow_emission_log)").fetchall()
