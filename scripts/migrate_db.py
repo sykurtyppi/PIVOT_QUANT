@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Callable
 
 DEFAULT_DB = os.getenv("PIVOT_DB", "data/pivot_events.sqlite")
-LATEST_SCHEMA_VERSION = 9
+LATEST_SCHEMA_VERSION = 10
 
 
 TOUCH_EVENT_SQL = """
@@ -423,6 +423,32 @@ def migration_9_shadow_emission_log(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_shadow_emit_policy "
         "ON shadow_emission_log(policy_name, source, ts_prediction);"
     )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_shadow_emit_event_model "
+        "ON shadow_emission_log(event_id, model_version);"
+    )
+
+
+def migration_10_shadow_emit_event_model_index(conn: sqlite3.Connection) -> None:
+    """Add composite lookup index for shadow_emission_log(event_id, model_version).
+
+    This index was added inside migration_9 for fresh DBs, but production DBs
+    already at schema version 9 never received it. This migration is idempotent
+    via CREATE INDEX IF NOT EXISTS and is safe to run on both fresh and
+    already-upgraded DBs.
+    """
+    tables = {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    if "shadow_emission_log" not in tables:
+        return
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_shadow_emit_event_model "
+        "ON shadow_emission_log(event_id, model_version);"
+    )
 
 
 MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
@@ -435,6 +461,7 @@ MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (7, "prediction_log_regime_policy", migration_7_prediction_log_regime_policy),
     (8, "prediction_log_analog", migration_8_prediction_log_analog),
     (9, "shadow_emission_log", migration_9_shadow_emission_log),
+    (10, "shadow_emit_event_model_index", migration_10_shadow_emit_event_model_index),
 ]
 
 

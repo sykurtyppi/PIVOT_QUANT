@@ -322,7 +322,22 @@ def _fit_model_side_margin_shadow_policy(
             "emitted_rows": 0,
         }
 
-    margin_cutoff = float(np.quantile(eligible_df["_model_side_margin"].to_numpy(dtype=float), percentile_cutoff))
+    margin_arr = eligible_df["_model_side_margin"].to_numpy(dtype=float)
+    if np.isnan(margin_arr).all():
+        return {
+            "policy_name": policy_name,
+            "horizon": int(horizon),
+            "side": target,
+            "status": "disabled",
+            "reason": "all_nan_margin",
+            "reference_threshold": float(reference_threshold),
+            "margin_cutoff": None,
+            "percentile_cutoff": float(percentile_cutoff),
+            "fit_rows": int(len(tune_df)),
+            "eligible_rows": int(len(eligible_df)),
+            "emitted_rows": 0,
+        }
+    margin_cutoff = float(np.quantile(margin_arr[~np.isnan(margin_arr)], percentile_cutoff))
     emitted_df = eligible_df[eligible_df["_model_side_margin"] >= margin_cutoff].copy()
     emitted_utility_avg = None
     emitted_utility_sum = None

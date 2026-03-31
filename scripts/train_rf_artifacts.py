@@ -348,7 +348,8 @@ def _merge_tune_date_range(current: dict[str, str] | None, event_dates) -> dict[
         if value is None:
             continue
         iso_value = value.isoformat() if hasattr(value, "isoformat") else str(value)
-        iso_value = str(iso_value).strip()
+        # Normalize to date-only (YYYY-MM-DD) so lexicographic min/max is safe
+        iso_value = str(iso_value).strip()[:10]
         if iso_value:
             values.append(iso_value)
     if not values:
@@ -361,9 +362,11 @@ def _merge_tune_date_range(current: dict[str, str] | None, event_dates) -> dict[
             "min_event_date_et": next_min,
             "max_event_date_et": next_max,
         }
+    cur_min = (current.get("min_event_date_et") or next_min)[:10]
+    cur_max = (current.get("max_event_date_et") or next_max)[:10]
     return {
-        "min_event_date_et": min(str(current.get("min_event_date_et") or next_min), next_min),
-        "max_event_date_et": max(str(current.get("max_event_date_et") or next_max), next_max),
+        "min_event_date_et": min(cur_min, next_min),
+        "max_event_date_et": max(cur_max, next_max),
     }
 
 
@@ -386,7 +389,7 @@ def _to_int(value) -> int | None:
         if value is None:
             return None
         return int(value)
-    except Exception:
+    except (TypeError, ValueError):
         return None
 
 
@@ -395,7 +398,7 @@ def _to_float(value) -> float | None:
         if value is None:
             return None
         return float(value)
-    except Exception:
+    except (TypeError, ValueError):
         return None
 
 
@@ -526,7 +529,22 @@ def _fit_model_side_margin_shadow_policy(
             "emitted_rows": 0,
         }
 
-    margin_cutoff = float(np.quantile(eligible_df["_model_side_margin"].to_numpy(dtype=float), percentile_cutoff))
+    margin_arr = eligible_df["_model_side_margin"].to_numpy(dtype=float)
+    if np.isnan(margin_arr).all():
+        return {
+            "policy_name": policy_name,
+            "horizon": int(horizon),
+            "side": target,
+            "status": "disabled",
+            "reason": "all_nan_margin",
+            "reference_threshold": float(reference_threshold),
+            "margin_cutoff": None,
+            "percentile_cutoff": float(percentile_cutoff),
+            "fit_rows": int(len(tune_df)),
+            "eligible_rows": int(len(eligible_df)),
+            "emitted_rows": 0,
+        }
+    margin_cutoff = float(np.quantile(margin_arr[~np.isnan(margin_arr)], percentile_cutoff))
     emitted_df = eligible_df[eligible_df["_model_side_margin"] >= margin_cutoff].copy()
     emitted_utility_avg = None
     emitted_utility_sum = None

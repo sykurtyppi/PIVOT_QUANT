@@ -1705,6 +1705,11 @@ def _write_shadow_emission_records(
 ) -> None:
     shadow_emissions = result.get("shadow_emissions", {})
     if not isinstance(shadow_emissions, dict):
+        log.warning(
+            "shadow_emission: discarded non-dict shadow_emissions (type=%s, event=%s)",
+            type(shadow_emissions).__name__,
+            event.get("event_id"),
+        )
         return
 
     event_id = event.get("event_id")
@@ -1712,6 +1717,12 @@ def _write_shadow_emission_records(
     feature_version = result.get("feature_version")
     for policy_name, payload in shadow_emissions.items():
         if not isinstance(payload, dict):
+            log.warning(
+                "shadow_emission: discarded non-dict payload for policy=%s event=%s (type=%s)",
+                policy_name,
+                event_id,
+                type(payload).__name__,
+            )
             continue
         conn.execute(
             """INSERT INTO shadow_emission_log (
