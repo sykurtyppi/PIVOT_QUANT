@@ -1239,7 +1239,8 @@ class AnalogEngine:
 
 registry = ModelRegistry()
 analog_engine = AnalogEngine(ML_ANALOG_DB)
-_startup_error: Optional[str] = None
+_startup_model_error: Optional[str] = None   # set when registry.load() fails
+_startup_analog_error: Optional[str] = None  # set when analog_engine.refresh() fails
 _RELOAD_LOCK = threading.Lock()
 _RELOAD_STATE_LOCK = threading.Lock()
 _reload_state: dict[str, object] = {
@@ -1401,15 +1402,23 @@ def _finish_score_request(*, ok: bool, duration_ms: float, error: str | None = N
 
 @asynccontextmanager
 async def lifespan(_app):
-    global _startup_error
+    global _startup_model_error, _startup_analog_error
     _start_prediction_log_writer()
+    # Model-load and analog-refresh are independent failure channels.
+    # A failure in one must not prevent the other from being attempted or
+    # from having its error state recorded separately.
     try:
         registry.load()
-        analog_engine.refresh()
-        _startup_error = None
+        _startup_model_error = None
     except Exception as exc:
-        _startup_error = str(exc)
-        print(f"ML server startup warning: {exc}")
+        _startup_model_error = str(exc)
+        print(f"ML server startup warning (model load): {exc}")
+    try:
+        analog_engine.refresh()
+        _startup_analog_error = None
+    except Exception as exc:
+        _startup_analog_error = str(exc)
+        print(f"ML server startup warning (analog refresh): {exc}")
     try:
         yield
     finally:
@@ -1793,6 +1802,8 @@ def _write_shadow_emission_records(
                 metadata_json, created_at_ms
             ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(event_id, model_version, policy_name, source) DO UPDATE SET
+                shadow_horizon = excluded.shadow_horizon,
+                shadow_side = excluded.shadow_side,
                 selected_policy = excluded.selected_policy,
                 trade_regime = excluded.trade_regime,
                 eligible = excluded.eligible,
@@ -2114,8 +2125,14 @@ async def health():
     }
     has_models = any(horizons for horizons in models.values())
     stale = _is_model_stale()
-    if not has_models or _startup_error is not None:
+    if not has_models or _startup_model_error is not None:
+        # Models failed to load or were never loaded — scoring is impaired.
         status = "degraded"
+    elif _startup_analog_error is not None:
+        # Models are loaded and scoring is live; only analog refresh failed.
+        # Use a distinct status so the watchdog / operator can distinguish
+        # "cannot score at all" from "scoring OK but analogs unavailable".
+        status = "analog_degraded"
     elif stale:
         status = "stale"
     else:
@@ -2212,8 +2229,10 @@ async def health():
             "feature_weights": ML_ANALOG_FEATURE_WEIGHTS,
         },
     }
-    if _startup_error is not None:
-        result["startup_error"] = _startup_error
+    if _startup_model_error is not None:
+        result["startup_model_error"] = _startup_model_error
+    if _startup_analog_error is not None:
+        result["startup_analog_error"] = _startup_analog_error
     if stale and manifest is not None:
         trained_end_ts = manifest.get("trained_end_ts", 0)
         age_hours = (time.time() * 1000 - trained_end_ts) / (3600 * 1000)
@@ -2224,7 +2243,7 @@ async def health():
 @app.post("/reload")
 async def reload_models(force: bool = False):
     """Hot-reload model artifacts from disk without restarting the server."""
-    global _startup_error
+    global _startup_model_error, _startup_analog_error
     now_ms = int(time.time() * 1000)
 
     state_before = _reload_state_snapshot()
@@ -2266,13 +2285,27 @@ async def reload_models(force: bool = False):
         last_error=None,
     )
     try:
+        # ── Phase 1: model load ──────────────────────────────────────────────
         if not force and registry.is_manifest_unchanged():
             changed = False
         else:
             changed = await asyncio.to_thread(registry.load, force=force)
-        if changed:
-            await asyncio.to_thread(analog_engine.refresh)
-        _startup_error = None
+        _startup_model_error = None  # model load succeeded
+
+        # ── Phase 2: analog refresh ──────────────────────────────────────────
+        # Refresh when: (a) the manifest changed, OR (b) a prior analog error
+        # is recorded so a noop reload can still heal an analog-only failure.
+        # Analog errors are captured independently and do NOT cause a 500 —
+        # models are loaded and scoring is live regardless.
+        should_refresh_analog = changed or (_startup_analog_error is not None)
+        if should_refresh_analog:
+            try:
+                await asyncio.to_thread(analog_engine.refresh)
+                _startup_analog_error = None
+            except Exception as analog_exc:
+                _startup_analog_error = str(analog_exc)
+                log.warning("analog refresh failed during reload: %s", analog_exc)
+
         duration_ms = (time.perf_counter() - started_at) * 1000.0
         complete_ms = int(time.time() * 1000)
         ok_before = _reload_state_snapshot()
@@ -2298,7 +2331,7 @@ async def reload_models(force: bool = False):
             for target, horizons in models_payload.items()
             if isinstance(horizons, dict)
         }
-        return {
+        result = {
             "status": status,
             "changed": changed,
             "models": models,
@@ -2306,8 +2339,11 @@ async def reload_models(force: bool = False):
             "analogs": analog_engine.health(),
             "reload": _reload_state_snapshot(),
         }
+        if _startup_analog_error is not None:
+            result["startup_analog_error"] = _startup_analog_error
+        return result
     except Exception as exc:
-        _startup_error = str(exc)
+        _startup_model_error = str(exc)
         duration_ms = (time.perf_counter() - started_at) * 1000.0
         complete_ms = int(time.time() * 1000)
         err_before = _reload_state_snapshot()

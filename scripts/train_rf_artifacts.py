@@ -475,6 +475,20 @@ def _fit_model_side_margin_shadow_policy(
             "eligible_rows": 0,
             "emitted_rows": 0,
         }
+    if y_prob is None:
+        return {
+            "policy_name": policy_name,
+            "horizon": int(horizon),
+            "side": target,
+            "status": "disabled",
+            "reason": "missing_tune_probabilities",
+            "reference_threshold": float(reference_threshold),
+            "margin_cutoff": None,
+            "percentile_cutoff": float(percentile_cutoff),
+            "fit_rows": 0,
+            "eligible_rows": 0,
+            "emitted_rows": 0,
+        }
 
     pd = require("pandas", "python3 -m pip install pandas")
     np = require("numpy", "python3 -m pip install numpy")
