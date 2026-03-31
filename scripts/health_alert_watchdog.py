@@ -256,6 +256,26 @@ def check_service(
                     f"(success_count={score_success_count})"
                 )
 
+    # ── Prediction log health (ML server only) ──
+    # Extract prediction_log_alerts.ok and prediction_log.writer_alive from
+    # the /health payload.  These are set to None when the field is absent
+    # (older server) so the main loop can distinguish "unknown" from "false".
+    pred_log_alerts_ok: "bool | None" = None
+    pred_log_writer_alive: "bool | None" = None
+    pred_log_alerts_detail: "dict | None" = None
+    if name == "ml":
+        pred_log_alerts = payload.get("prediction_log_alerts")
+        if isinstance(pred_log_alerts, dict):
+            raw_ok = pred_log_alerts.get("ok")
+            if isinstance(raw_ok, bool):
+                pred_log_alerts_ok = raw_ok
+            pred_log_alerts_detail = pred_log_alerts
+        pred_log_payload = payload.get("prediction_log")
+        if isinstance(pred_log_payload, dict):
+            raw_alive = pred_log_payload.get("writer_alive")
+            if isinstance(raw_alive, bool):
+                pred_log_writer_alive = raw_alive
+
     return {
         "service": name,
         "up": up,
@@ -269,6 +289,9 @@ def check_service(
         "score_latency_breached": score_latency_breached,
         "score_latency_reason": score_latency_reason,
         "score_latency_threshold_ms": ml_score_latency_max_ms if ml_score_latency_max_ms > 0 else None,
+        "pred_log_alerts_ok": pred_log_alerts_ok,
+        "pred_log_writer_alive": pred_log_writer_alive,
+        "pred_log_alerts_detail": pred_log_alerts_detail,
     }
 
 
@@ -502,6 +525,25 @@ def build_body(
         )
     if result.get("collector_unscored_query_error"):
         lines.append(f"Collector unscored query error: {result['collector_unscored_query_error']}")
+    if result.get("pred_log_alerts_ok") is False or result.get("pred_log_writer_alive") is False:
+        _pred_parts: list[str] = []
+        if result.get("pred_log_writer_alive") is False:
+            _pred_parts.append("writer_alive=false")
+        _pred_detail = result.get("pred_log_alerts_detail") or {}
+        if _pred_detail.get("dropped_total_exceeded"):
+            _pred_parts.append(f"dropped={_pred_detail.get('dropped_total')}")
+        if _pred_detail.get("write_fail_total_exceeded"):
+            _pred_parts.append(f"write_fails={_pred_detail.get('write_fail_total')}")
+        if _pred_detail.get("queue_depth_exceeded"):
+            _pred_parts.append(
+                f"queue_depth={_pred_detail.get('queue_depth')}"
+                f"/{_pred_detail.get('queue_depth_limit')}"
+            )
+        if not _pred_parts and result.get("pred_log_alerts_ok") is False:
+            _pred_parts.append("alerts.ok=false")
+        lines.append(
+            "Prediction log: " + ("; ".join(_pred_parts) if _pred_parts else "unhealthy")
+        )
     if prior:
         previous_state = prior.get("state")
         previous_reason = prior.get("last_reason")
@@ -635,6 +677,45 @@ def main() -> int:
                     )
             else:
                 previous["ml_score_latency_streak"] = 0
+
+            # ── Prediction log health check ──
+            # Alert immediately (no streak) on a dead writer thread or tripped
+            # prediction_log_alerts.  These are definitive counters/flags that do
+            # not self-heal, unlike transient latency spikes.
+            # None means the field is absent (older server) — treat as unknown/ok.
+            _pred_alerts_ok = result.get("pred_log_alerts_ok")
+            _pred_writer_alive = result.get("pred_log_writer_alive")
+            _pred_unhealthy = _pred_alerts_ok is False or _pred_writer_alive is False
+            if _pred_unhealthy and bool(result.get("up")):
+                _parts: list[str] = []
+                if _pred_writer_alive is False:
+                    _parts.append("writer_alive=false (log writer thread is dead)")
+                if _pred_alerts_ok is False:
+                    _detail = result.get("pred_log_alerts_detail") or {}
+                    if _detail.get("dropped_total_exceeded"):
+                        _parts.append(
+                            f"dropped={_detail.get('dropped_total')} "
+                            f"(limit={_detail.get('dropped_total_limit')})"
+                        )
+                    if _detail.get("write_fail_total_exceeded"):
+                        _parts.append(
+                            f"write_fails={_detail.get('write_fail_total')} "
+                            f"(limit={_detail.get('write_fail_total_limit')})"
+                        )
+                    if _detail.get("queue_depth_exceeded"):
+                        _parts.append(
+                            f"queue_depth={_detail.get('queue_depth')} "
+                            f"(limit={_detail.get('queue_depth_limit')})"
+                        )
+                    if not _parts:
+                        _parts.append("prediction_log_alerts.ok=false")
+                result["up"] = False
+                result["status"] = "prediction_log_unhealthy"
+                result["reason"] = "Prediction log unhealthy: " + "; ".join(_parts)
+                # Skip the normal down_streak accumulation — these failures are
+                # definitive and should alert on the first detection.
+                result["skip_pending_downgrade"] = True
+
         elif name == "collector":
             previous_streak = to_int(previous.get("collector_unscored_streak"), 0)
             guard_window_open = (not collector_unscored_market_hours_only) or is_market_hours_et(now_dt_utc)

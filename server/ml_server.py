@@ -1522,15 +1522,30 @@ def _apply_blend_shift_cap(
 def _get_prediction_log_conn() -> sqlite3.Connection:
     conn = getattr(_PREDICTION_LOG_LOCAL, "conn", None)
     if conn is not None:
-        try:
-            conn.execute("SELECT 1")
-            return conn
-        except sqlite3.Error:
+        # A connection with an open transaction is not clean — it may carry
+        # uncommitted writes left over from a previous SQLITE_BUSY skip that
+        # returned without rolling back.  Close it immediately so the next
+        # write always starts from a known-clean state.
+        if getattr(conn, "in_transaction", False):
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                pass
             try:
                 conn.close()
             except sqlite3.Error:
                 pass
             _PREDICTION_LOG_LOCAL.conn = None
+        else:
+            try:
+                conn.execute("SELECT 1")
+                return conn
+            except sqlite3.Error:
+                try:
+                    conn.close()
+                except sqlite3.Error:
+                    pass
+                _PREDICTION_LOG_LOCAL.conn = None
 
     conn = sqlite3.connect(
         str(PREDICTION_LOG_DB),
@@ -1942,6 +1957,23 @@ def _write_prediction_record(event: dict, result: dict) -> tuple[str, str | None
         if isinstance(exc, sqlite3.OperationalError):
             lowered = str(exc).lower()
             if "database is locked" in lowered or "database is busy" in lowered:
+                # Rollback any partial writes and close the connection so the
+                # next write attempt starts from a clean slate.  Without this,
+                # the implicit transaction from the failed write would remain
+                # open on the thread-local connection and be committed
+                # accidentally as part of the next successful write — producing
+                # prediction_log rows with no shadow_emission_log counterpart.
+                if conn is not None:
+                    try:
+                        conn.rollback()
+                    except sqlite3.Error:
+                        pass
+                    if getattr(_PREDICTION_LOG_LOCAL, "conn", None) is conn:
+                        try:
+                            conn.close()
+                        except sqlite3.Error:
+                            pass
+                        _PREDICTION_LOG_LOCAL.conn = None
                 _warn_prediction_log_contention(exc)
                 return "skip", str(exc)
         if conn is not None and getattr(_PREDICTION_LOG_LOCAL, "conn", None) is conn:
@@ -3720,9 +3752,15 @@ async def score(request: Request):
     request_error: str | None = None
     score_state = _score_state_snapshot()
     current_in_flight = int(score_state.get("in_flight", 0))
+    # Use strict greater-than so the threshold behaves as "disable analogs when
+    # MORE THAN N requests are already in flight."  With the default of 1 this
+    # means analogs are disabled only when a second concurrent request arrives,
+    # not for every request.  (in_flight is incremented by _try_begin_score_request
+    # before this point, so >= 1 is always true for any active request — the old
+    # >= comparison made the default effectively always-disable-analogs.)
     disable_analogs = (
         ML_SCORE_ANALOG_DISABLE_IN_FLIGHT > 0
-        and current_in_flight >= ML_SCORE_ANALOG_DISABLE_IN_FLIGHT
+        and current_in_flight > ML_SCORE_ANALOG_DISABLE_IN_FLIGHT
     )
     try:
         payload = await _read_score_payload(request)
