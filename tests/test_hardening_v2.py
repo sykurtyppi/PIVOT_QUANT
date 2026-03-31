@@ -8,6 +8,7 @@ Covers the 6 required check points:
   4. shadow_horizon and shadow_side are updated on conflict
   5. train_rf_artifacts returns expected disabled payload when y_prob is None
   6. syntax / import sanity for all touched Python files
+  7. health consumers treat analog_degraded as an ML-up status
 
 Run:
     cd /Users/tristanalejandro/PIVOT_QUANT
@@ -16,15 +17,42 @@ Run:
 from __future__ import annotations
 
 import ast
-import importlib.util
 import sqlite3
 import sys
-import types
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def _load_module(rel: str):
+    path = ROOT / rel
+    name = path.stem + "_test_module"
+    if str(ROOT / "scripts") not in sys.path:
+        sys.path.insert(0, str(ROOT / "scripts"))
+    spec = __import__("importlib.util").util.spec_from_file_location(name, path)
+    module = __import__("importlib.util").util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+class _FakeResponse:
+    def __init__(self, payload: dict, status: int = 200):
+        import json
+
+        self.status = status
+        self._body = json.dumps(payload).encode("utf-8")
+
+    def read(self) -> bytes:
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
 
 # ---------------------------------------------------------------------------
 # Check 6 — syntax / import sanity (run first so failures surface early)
@@ -180,6 +208,43 @@ class TestHealthStatusLogic(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Check 7 — health consumers must treat analog_degraded as ML-up
+# ---------------------------------------------------------------------------
+
+class TestHealthConsumerCompatibility(unittest.TestCase):
+    def test_session_routine_accepts_analog_degraded(self):
+        mod = _load_module("scripts/session_routine_check.py")
+        self.assertTrue(mod.service_is_up("ml", "analog_degraded"))
+
+    def test_watchdog_accepts_analog_degraded(self):
+        mod = _load_module("scripts/health_alert_watchdog.py")
+        with patch.object(mod.request, "urlopen", return_value=_FakeResponse({"status": "analog_degraded"})):
+            result = mod.check_service(
+                "ml",
+                "http://127.0.0.1:5003/health",
+                1.0,
+                ml_score_latency_max_ms=0.0,
+                ml_score_min_success_count=0,
+            )
+        self.assertTrue(result["up"])
+        self.assertEqual(result["status"], "analog_degraded")
+
+    def test_slo_monitor_accepts_analog_degraded(self):
+        mod = _load_module("scripts/slo_monitor.py")
+        with patch.object(mod.request, "urlopen", return_value=_FakeResponse({"status": "analog_degraded"})):
+            result = mod.fetch_health("http://127.0.0.1:5003/health", 1.0)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "analog_degraded")
+
+    def test_release_manager_accepts_analog_degraded(self):
+        mod = _load_module("scripts/release_manager.py")
+        with patch.object(mod.request, "urlopen", return_value=_FakeResponse({"status": "analog_degraded"})):
+            result = mod.check_http_health("http://127.0.0.1:5003/health", 1.0)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["reason"], "status=analog_degraded")
+
+
+# ---------------------------------------------------------------------------
 # Check 2 & 3 — noop reload must not clear analog error; successful retry must
 # ---------------------------------------------------------------------------
 
@@ -310,6 +375,11 @@ class TestReloadAnalogErrorLogic(unittest.TestCase):
 class TestShadowEmissionUpsert(unittest.TestCase):
     """Verify the ON CONFLICT DO UPDATE SET clause now includes horizon/side."""
 
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(":memory:")
+        self.addCleanup(conn.close)
+        return conn
+
     def _create_shadow_table(self, conn: sqlite3.Connection) -> None:
         conn.execute(
             """CREATE TABLE shadow_emission_log (
@@ -386,7 +456,7 @@ class TestShadowEmissionUpsert(unittest.TestCase):
 
     def test_shadow_horizon_updated_on_conflict(self):
         """Inserting a second row for the same conflict key must update shadow_horizon."""
-        conn = sqlite3.connect(":memory:")
+        conn = self._connect()
         self._create_shadow_table(conn)
 
         self._upsert(conn, "ev1", "v1", "p1", "live", shadow_horizon=15, shadow_side="reject")
@@ -406,7 +476,7 @@ class TestShadowEmissionUpsert(unittest.TestCase):
 
     def test_shadow_side_updated_on_conflict(self):
         """Inserting a second row must update shadow_side."""
-        conn = sqlite3.connect(":memory:")
+        conn = self._connect()
         self._create_shadow_table(conn)
 
         self._upsert(conn, "ev2", "v1", "p1", "live", shadow_horizon=15, shadow_side="reject")
@@ -418,7 +488,7 @@ class TestShadowEmissionUpsert(unittest.TestCase):
 
     def test_only_one_row_after_multiple_upserts(self):
         """Confirm the upsert path, not insert, was taken."""
-        conn = sqlite3.connect(":memory:")
+        conn = self._connect()
         self._create_shadow_table(conn)
         for horizon in (5, 15, 30, 60):
             self._upsert(conn, "ev3", "v1", "p1", "live", shadow_horizon=horizon, shadow_side="reject")
@@ -429,7 +499,7 @@ class TestShadowEmissionUpsert(unittest.TestCase):
 
     def test_different_source_produces_separate_row(self):
         """Different source must NOT conflict — it's a different observation."""
-        conn = sqlite3.connect(":memory:")
+        conn = self._connect()
         self._create_shadow_table(conn)
         self._upsert(conn, "ev4", "v1", "p1", "live",    shadow_horizon=15, shadow_side="reject")
         self._upsert(conn, "ev4", "v1", "p1", "preview", shadow_horizon=30, shadow_side="break")

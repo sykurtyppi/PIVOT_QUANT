@@ -145,7 +145,7 @@ def fetch_json(url: str, timeout_sec: float) -> tuple[int, dict[str, Any] | None
 def service_is_up(service_name: str, status_value: str) -> bool:
     normalized = (status_value or "").strip().lower()
     if service_name == "ml":
-        return normalized in {"ok", "stale", "degraded", "healthy", "checking"}
+        return normalized in {"ok", "stale", "degraded", "analog_degraded", "healthy", "checking"}
     return normalized in {"ok", "degraded", "starting"}
 
 

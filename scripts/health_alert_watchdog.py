@@ -225,7 +225,7 @@ def check_service(
 
     status_value = str(payload.get("status", "")).strip().lower()
     if name == "ml":
-        up_statuses = {"ok", "stale", "degraded", "healthy", "checking"}
+        up_statuses = {"ok", "stale", "degraded", "analog_degraded", "healthy", "checking"}
     else:
         up_statuses = {"ok", "degraded", "starting"}
 
