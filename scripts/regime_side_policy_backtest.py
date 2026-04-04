@@ -19,6 +19,7 @@ import os
 import random
 import sqlite3
 import statistics
+import sys
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -28,6 +29,11 @@ from zoneinfo import ZoneInfo
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.append(str(ROOT))
+
+from ml.regime_semantics import favored_side_for_trade_regime
+
 DEFAULT_DB = Path(os.getenv("PIVOT_DB", str(ROOT / "data" / "pivot_events.sqlite")))
 DEFAULT_OUT_DIR = ROOT / "logs" / "reports" / "research"
 ET = ZoneInfo("America/New_York")
@@ -119,22 +125,16 @@ def policy_side(policy: str, bucket: str) -> str:
     if policy == "always_break":
         return "break"
     if policy == "regime_side_abstain":
-        if bucket == "compression":
-            return "break"
-        if bucket == "expansion":
-            return "reject"
-        return "abstain"
+        return favored_side_for_trade_regime(bucket)
     if policy == "regime_side_break_neutral":
-        if bucket == "compression":
-            return "break"
-        if bucket == "expansion":
-            return "reject"
+        favored = favored_side_for_trade_regime(bucket)
+        if favored != "abstain":
+            return favored
         return "break"
     if policy == "regime_side_reject_neutral":
-        if bucket == "compression":
-            return "break"
-        if bucket == "expansion":
-            return "reject"
+        favored = favored_side_for_trade_regime(bucket)
+        if favored != "abstain":
+            return favored
         return "reject"
     raise ValueError(f"unsupported policy: {policy}")
 

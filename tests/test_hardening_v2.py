@@ -24,6 +24,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from ml.regime_semantics import favored_bucket_for_target, favored_side_for_trade_regime
 
 
 def _load_module(rel: str):
@@ -697,6 +701,35 @@ class TestTrainYProbNoneGuard(unittest.TestCase):
         )
         self.assertEqual(train_result["status"], refit_result["status"])
         self.assertEqual(train_result["reason"], refit_result["reason"])
+
+    def test_shadow_policy_uses_live_regime_semantics(self):
+        """Shadow fitting should mirror live regime-side intent."""
+        train_src = (ROOT / "scripts" / "train_rf_artifacts.py").read_text(encoding="utf-8")
+        refit_src = (ROOT / "scripts" / "refit_calibration.py").read_text(encoding="utf-8")
+        self.assertIn("favored_bucket_for_target", train_src)
+        self.assertIn("favored_bucket_for_target", refit_src)
+
+    def test_runtime_shadow_emission_uses_break_for_expansion(self):
+        """Expansion buckets should shadow breakout-side emissions."""
+        ml_server_src = (ROOT / "server/ml_server.py").read_text(encoding="utf-8")
+        self.assertIn("favored_side_for_trade_regime", ml_server_src)
+
+    def test_regime_semantics_helper_matches_runtime_intent(self):
+        self.assertEqual(favored_side_for_trade_regime("compression"), "reject")
+        self.assertEqual(favored_side_for_trade_regime("expansion"), "break")
+        self.assertEqual(favored_side_for_trade_regime("neutral"), "abstain")
+        self.assertEqual(favored_bucket_for_target("reject"), "compression")
+        self.assertEqual(favored_bucket_for_target("break"), "expansion")
+
+    def test_analysis_scripts_use_shared_regime_side_semantics(self):
+        for rel_path in (
+            "scripts/regime_side_ranked_backtest.py",
+            "scripts/candidate_version_diff.py",
+            "scripts/candidate_emission_postmortem.py",
+            "scripts/regime_side_policy_backtest.py",
+        ):
+            src = (ROOT / rel_path).read_text(encoding="utf-8")
+            self.assertIn("favored_side_for_trade_regime", src, rel_path)
 
 
 if __name__ == "__main__":

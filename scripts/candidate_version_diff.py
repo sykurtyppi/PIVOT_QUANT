@@ -14,6 +14,7 @@ import json
 import math
 import sqlite3
 import statistics
+import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,6 +23,11 @@ from zoneinfo import ZoneInfo
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.append(str(ROOT))
+
+from ml.regime_semantics import favored_side_for_trade_regime
+
 DEFAULT_DB = ROOT / "data" / "pivot_events.sqlite"
 DEFAULT_OUT_DIR = ROOT / "logs" / "reports" / "research"
 ET = ZoneInfo("America/New_York")
@@ -120,11 +126,7 @@ def regime_bucket_from_event(regime_type_value: Any, trade_regime_value: Any) ->
 
 
 def chosen_side(bucket: str) -> str:
-    if bucket == "compression":
-        return "break"
-    if bucket == "expansion":
-        return "reject"
-    return "abstain"
+    return favored_side_for_trade_regime(bucket)
 
 
 def et_day(ts_ms: int) -> str:

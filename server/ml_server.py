@@ -107,6 +107,7 @@ import pandas as pd
 import joblib
 
 from ml.features import build_feature_row, collect_missing, FEATURE_VERSION
+from ml.regime_semantics import favored_side_for_trade_regime
 
 log = logging.getLogger("ml_server")
 _missing_threshold_warnings: set[tuple[str, int, str]] = set()
@@ -2886,7 +2887,10 @@ def _compute_model_side_margin_shadow_emission(
         payload["ineligibility_reason"] = f"trade_regime={trade_regime or 'unknown'}"
         return {policy_name: payload}
 
-    shadow_side = "reject" if trade_regime == "expansion" else "break"
+    shadow_side = favored_side_for_trade_regime(trade_regime)
+    if shadow_side not in {"reject", "break"}:
+        payload["ineligibility_reason"] = f"unsupported_shadow_side={shadow_side}"
+        return {policy_name: payload}
     payload["shadow_side"] = shadow_side
     side_policy = policy.get(shadow_side)
     if not isinstance(side_policy, dict):

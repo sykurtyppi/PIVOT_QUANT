@@ -17,6 +17,7 @@ import os
 import random
 import sqlite3
 import statistics
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +26,11 @@ from zoneinfo import ZoneInfo
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.append(str(ROOT))
+
+from ml.regime_semantics import favored_side_for_trade_regime
+
 DEFAULT_DB = Path(os.getenv("PIVOT_DB", str(ROOT / "data" / "pivot_events.sqlite")))
 DEFAULT_OUT_DIR = ROOT / "logs" / "reports" / "research"
 ET = ZoneInfo("America/New_York")
@@ -143,11 +149,7 @@ def summarize_utils(utils: list[float]) -> dict[str, float | int | None]:
 
 
 def chosen_side(bucket: str) -> str:
-    if bucket == "compression":
-        return "break"
-    if bucket == "expansion":
-        return "reject"
-    return "abstain"
+    return favored_side_for_trade_regime(bucket)
 
 
 def source_filter_sql(source: str) -> tuple[str, tuple[Any, ...]]:

@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
 
 from ml.calibration import ProbabilityCalibrator
 from ml.features import FEATURE_VERSION, build_feature_row, drop_features
+from ml.regime_semantics import favored_bucket_for_target
 from ml.thresholds import select_threshold, utility_bps_for_target
 
 DEFAULT_DUCKDB = os.getenv("DUCKDB_PATH", "data/pivot_training.duckdb")
@@ -524,7 +525,9 @@ def _fit_model_side_margin_shadow_policy(
         }
 
     tune_df["_shadow_trade_regime"] = tune_df.apply(_shadow_trade_regime_bucket, axis=1)
-    eligible_bucket = "expansion" if target == "reject" else "compression"
+    eligible_bucket = favored_bucket_for_target(target)
+    if eligible_bucket is None:
+        return None
     tune_df["_shadow_side_prob"] = np.asarray(y_prob, dtype=float)
     tune_df["_model_side_margin"] = tune_df["_shadow_side_prob"] - float(reference_threshold)
     eligible_df = tune_df[tune_df["_shadow_trade_regime"] == eligible_bucket].copy()
