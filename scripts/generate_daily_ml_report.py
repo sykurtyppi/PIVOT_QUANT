@@ -30,6 +30,11 @@ DEFAULT_PREDICTION_BASIS = (
 if DEFAULT_PREDICTION_BASIS not in {"first", "latest"}:
     DEFAULT_PREDICTION_BASIS = "first"
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.append(str(ROOT))
+
+from ml.regime_semantics import favored_side_for_trade_regime
+
 MODEL_DIR = Path(os.getenv("RF_MODEL_DIR", str(ROOT / "data" / "models")))
 DEFAULT_TRADE_COST_BPS = (
     float(os.getenv("ML_COST_SPREAD_BPS", "0.8"))
@@ -39,6 +44,10 @@ DEFAULT_TRADE_COST_BPS = (
 DEFAULT_SHADOW_POLICY_NAME = (
     os.getenv("ML_MODEL_SIDE_MARGIN_SHADOW_POLICY_NAME", "model_side_margin_v1").strip()
     or "model_side_margin_v1"
+)
+DEFAULT_RANKED_SHADOW_HORIZON = int(os.getenv("ML_RANKED_SHADOW_HORIZON", "60") or "60")
+DEFAULT_RANKED_SHADOW_RETAIN_PCT = max(
+    0.01, min(1.0, float(os.getenv("ML_RANKED_SHADOW_RETAIN_PCT", "0.10") or "0.10"))
 )
 DEFAULT_GAMMA_LOG = ROOT / "logs" / "gamma_bridge.log"
 RF_MANIFEST_PATH = os.getenv("RF_MANIFEST_PATH", "").strip()
@@ -878,6 +887,81 @@ def compute_shadow_emission_summary(
         summary["matured_utility_sum"] = float(sum(matured_utils))
         summary["matured_utility_avg"] = float(sum(matured_utils) / len(matured_utils))
         summary["matured_win_rate"] = float(sum(1 for x in matured_utils if x > 0) / len(matured_utils))
+    return summary
+
+
+def compute_ranked_shadow_summary(
+    rows: list[dict[str, Any]],
+    *,
+    horizon: int = DEFAULT_RANKED_SHADOW_HORIZON,
+    retain_pct: float = DEFAULT_RANKED_SHADOW_RETAIN_PCT,
+    trade_cost_bps: float = DEFAULT_TRADE_COST_BPS,
+) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "status": "missing_rows",
+        "method": "model_side_prob",
+        "horizon": int(horizon),
+        "retain_pct": float(retain_pct),
+        "rows_total": len(rows),
+        "eligible_rows": 0,
+        "retained_rows": 0,
+        "avg_side_prob": None,
+        "avg_utility": None,
+        "total_utility": None,
+        "win_rate": None,
+        "live_overlap_rows": 0,
+        "side_counts": {"reject": 0, "break": 0},
+        "regime_counts": {"compression": 0, "expansion": 0, "neutral": 0, "unknown": 0},
+    }
+    if not rows:
+        return summary
+
+    eligible: list[dict[str, Any]] = []
+    for row in rows:
+        if int(row.get("horizon_min") or -1) != int(horizon):
+            continue
+        if str(row.get("selected_policy") or "").strip().lower() != "regime_active":
+            continue
+        trade_regime = str(row.get("trade_regime") or "").strip().lower()
+        chosen_side = favored_side_for_trade_regime(trade_regime)
+        if chosen_side not in {"reject", "break"}:
+            continue
+        side_prob = row.get(f"prob_{chosen_side}_{horizon}m")
+        return_bps = row.get("return_bps")
+        if side_prob is None or return_bps is None:
+            continue
+        side_prob_f = float(side_prob)
+        ret = float(return_bps)
+        utility = (ret - float(trade_cost_bps)) if chosen_side == "reject" else (-ret - float(trade_cost_bps))
+        live_signal = str(row.get(f"signal_{horizon}m") or "").strip().lower()
+        eligible.append(
+            {
+                "trade_regime": trade_regime if trade_regime in summary["regime_counts"] else "unknown",
+                "chosen_side": chosen_side,
+                "side_prob": side_prob_f,
+                "utility": utility,
+                "live_overlap": live_signal == chosen_side and not bool(row.get("abstain")),
+            }
+        )
+
+    if not eligible:
+        summary["status"] = "no_eligible_rows"
+        return summary
+
+    ranked = sorted(eligible, key=lambda item: item["side_prob"], reverse=True)
+    retain_n = max(1, math.ceil(len(ranked) * float(retain_pct)))
+    selected = ranked[:retain_n]
+    summary["status"] = "ok"
+    summary["eligible_rows"] = len(ranked)
+    summary["retained_rows"] = len(selected)
+    summary["avg_side_prob"] = float(statistics.fmean(item["side_prob"] for item in selected))
+    summary["avg_utility"] = float(statistics.fmean(item["utility"] for item in selected))
+    summary["total_utility"] = float(sum(item["utility"] for item in selected))
+    summary["win_rate"] = float(sum(1 for item in selected if item["utility"] > 0) / len(selected))
+    summary["live_overlap_rows"] = int(sum(1 for item in selected if item["live_overlap"]))
+    for item in selected:
+        summary["side_counts"][item["chosen_side"]] += 1
+        summary["regime_counts"][item["trade_regime"]] += 1
     return summary
 
 
@@ -2037,6 +2121,7 @@ def render_report(
     regime_summary: dict[str, int],
     regime_policy_summary: dict[str, Any],
     shadow_emission_summary: dict[str, Any],
+    ranked_shadow_summary: dict[str, Any],
     manifest: dict[str, Any],
     conn: sqlite3.Connection,
 ) -> str:
@@ -2279,6 +2364,47 @@ def render_report(
             )
         else:
             lines.append("- Matured shadow emits: 0")
+    lines.append("")
+
+    lines.append("## Ranked Shadow Tracker")
+    lines.append("")
+    if ranked_shadow_summary.get("status") != "ok":
+        lines.append(
+            f"- 60m top-{int(float(ranked_shadow_summary.get('retain_pct', 0.10)) * 100)} tracker: "
+            f"{ranked_shadow_summary.get('status', 'missing_rows')}"
+        )
+    else:
+        lines.append(
+            f"- Method: `{ranked_shadow_summary.get('method', 'model_side_prob')}` "
+            f"(horizon={ranked_shadow_summary.get('horizon', '--')}m, "
+            f"retain={format_metric(100.0 * float(ranked_shadow_summary.get('retain_pct', 0.0)), 1)}%)"
+        )
+        lines.append(
+            f"- Eligible rows: {ranked_shadow_summary.get('eligible_rows', 0)}"
+        )
+        lines.append(
+            f"- Retained rows: {ranked_shadow_summary.get('retained_rows', 0)}"
+        )
+        lines.append(
+            f"- Avg aligned side prob: {format_metric(ranked_shadow_summary.get('avg_side_prob'), 3)}"
+        )
+        lines.append(
+            f"- Retained utility: total={format_metric(ranked_shadow_summary.get('total_utility'), 2)}, "
+            f"avg={format_metric(ranked_shadow_summary.get('avg_utility'), 2)}, "
+            f"win_rate={format_metric(ranked_shadow_summary.get('win_rate'), 3)}"
+        )
+        lines.append(
+            f"- Retained side mix: reject={ranked_shadow_summary.get('side_counts', {}).get('reject', 0)}, "
+            f"break={ranked_shadow_summary.get('side_counts', {}).get('break', 0)}"
+        )
+        lines.append(
+            f"- Retained regime mix: compression={ranked_shadow_summary.get('regime_counts', {}).get('compression', 0)}, "
+            f"expansion={ranked_shadow_summary.get('regime_counts', {}).get('expansion', 0)}, "
+            f"neutral={ranked_shadow_summary.get('regime_counts', {}).get('neutral', 0)}"
+        )
+        lines.append(
+            f"- Overlap with live emitted same-side 60m rows: {ranked_shadow_summary.get('live_overlap_rows', 0)}"
+        )
     lines.append("")
 
     lines.append("## Analog Shadow Evaluation")
@@ -2644,6 +2770,11 @@ def main() -> None:
             shadow_emission_rows,
             policy_name=DEFAULT_SHADOW_POLICY_NAME,
         )
+        ranked_shadow_summary = compute_ranked_shadow_summary(
+            labeled_records,
+            horizon=DEFAULT_RANKED_SHADOW_HORIZON,
+            retain_pct=DEFAULT_RANKED_SHADOW_RETAIN_PCT,
+        )
 
         persist_daily_metrics(conn, report_day.strftime("%Y-%m-%d"), regime_summary, bundles)
         content = render_report(
@@ -2665,6 +2796,7 @@ def main() -> None:
             regime_summary=regime_summary,
             regime_policy_summary=regime_policy_summary,
             shadow_emission_summary=shadow_emission_summary,
+            ranked_shadow_summary=ranked_shadow_summary,
             manifest=manifest,
             conn=conn,
         )

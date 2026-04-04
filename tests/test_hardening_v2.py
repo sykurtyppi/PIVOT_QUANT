@@ -37,6 +37,7 @@ def _load_module(rel: str):
         sys.path.insert(0, str(ROOT / "scripts"))
     spec = __import__("importlib.util").util.spec_from_file_location(name, path)
     module = __import__("importlib.util").util.module_from_spec(spec)
+    sys.modules[name] = module
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
@@ -730,6 +731,54 @@ class TestTrainYProbNoneGuard(unittest.TestCase):
         ):
             src = (ROOT / rel_path).read_text(encoding="utf-8")
             self.assertIn("favored_side_for_trade_regime", src, rel_path)
+
+    def test_daily_report_ranked_shadow_summary_tracks_top_slice(self):
+        report = _load_module("scripts/generate_daily_ml_report.py")
+        rows = [
+            {
+                "horizon_min": 60,
+                "selected_policy": "regime_active",
+                "trade_regime": "expansion",
+                "prob_break_60m": 0.90,
+                "prob_reject_60m": 0.10,
+                "return_bps": -12.0,
+                "signal_60m": "break",
+                "abstain": 0,
+            },
+            {
+                "horizon_min": 60,
+                "selected_policy": "regime_active",
+                "trade_regime": "expansion",
+                "prob_break_60m": 0.50,
+                "prob_reject_60m": 0.40,
+                "return_bps": 5.0,
+                "signal_60m": "no_edge",
+                "abstain": 0,
+            },
+            {
+                "horizon_min": 60,
+                "selected_policy": "regime_active",
+                "trade_regime": "compression",
+                "prob_break_60m": 0.20,
+                "prob_reject_60m": 0.85,
+                "return_bps": 8.0,
+                "signal_60m": "reject",
+                "abstain": 0,
+            },
+        ]
+        summary = report.compute_ranked_shadow_summary(
+            rows,
+            horizon=60,
+            retain_pct=0.34,
+            trade_cost_bps=1.3,
+        )
+        self.assertEqual(summary["status"], "ok")
+        self.assertEqual(int(summary["eligible_rows"]), 3)
+        self.assertEqual(int(summary["retained_rows"]), 2)
+        self.assertEqual(int(summary["side_counts"]["break"]), 1)
+        self.assertEqual(int(summary["side_counts"]["reject"]), 1)
+        self.assertEqual(int(summary["live_overlap_rows"]), 2)
+        self.assertAlmostEqual(float(summary["avg_utility"]), 8.70, places=6)
 
 
 if __name__ == "__main__":
