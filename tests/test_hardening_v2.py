@@ -794,6 +794,16 @@ class TestTrainYProbNoneGuard(unittest.TestCase):
         self.assertIsInstance(end_ms, int)
         self.assertLess(start_ms, end_ms)
 
+    def test_shadow_ranked_compare_accepts_et_date_window(self):
+        mod = _load_module("scripts/shadow_ranked_compare.py")
+        ns = type("Args", (), {"report_date": "", "start_date": "2026-04-02", "end_date": "2026-04-03"})
+        start_ms, end_ms, start_label, end_label = mod.parse_window(ns)
+        self.assertIsInstance(start_ms, int)
+        self.assertIsInstance(end_ms, int)
+        self.assertEqual(start_label, "2026-04-02")
+        self.assertEqual(end_label, "2026-04-03")
+        self.assertLess(start_ms, end_ms)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
