@@ -780,6 +780,20 @@ class TestTrainYProbNoneGuard(unittest.TestCase):
         self.assertEqual(int(summary["live_overlap_rows"]), 2)
         self.assertAlmostEqual(float(summary["avg_utility"]), 8.70, places=6)
 
+    def test_ranked_backtest_accepts_et_date_window(self):
+        mod = _load_module("scripts/regime_side_ranked_backtest.py")
+        start_ms, end_ms = mod.parse_et_date_window("2026-04-02", "2026-04-03")
+        self.assertIsInstance(start_ms, int)
+        self.assertIsInstance(end_ms, int)
+        self.assertLess(start_ms, end_ms)
+
+    def test_postmortem_accepts_et_date_window(self):
+        mod = _load_module("scripts/candidate_emission_postmortem.py")
+        start_ms, end_ms = mod.parse_et_date_window("2026-04-07", "2026-04-08")
+        self.assertIsInstance(start_ms, int)
+        self.assertIsInstance(end_ms, int)
+        self.assertLess(start_ms, end_ms)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

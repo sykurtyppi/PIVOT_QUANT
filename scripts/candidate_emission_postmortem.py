@@ -67,6 +67,16 @@ def parse_args() -> argparse.Namespace:
         help="Which prediction row to use per event.",
     )
     parser.add_argument("--model-version", default="", help="Optional model_version filter.")
+    parser.add_argument(
+        "--start-date",
+        default="",
+        help="Optional ET start date in YYYY-MM-DD (inclusive, based on touch-event time).",
+    )
+    parser.add_argument(
+        "--end-date",
+        default="",
+        help="Optional ET end date in YYYY-MM-DD (exclusive, based on touch-event time).",
+    )
     parser.add_argument("--cost-bps", type=float, default=1.3, help="Per-trade cost in bps.")
     parser.add_argument(
         "--max-pred-lag-hours",
@@ -134,6 +144,21 @@ def et_day(ts_ms: int) -> str:
     return datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).astimezone(ET).strftime("%Y-%m-%d")
 
 
+def parse_et_date_window(start_date: str, end_date: str) -> tuple[int | None, int | None]:
+    def _to_ms(raw: str) -> int | None:
+        raw = raw.strip()
+        if not raw:
+            return None
+        dt_local = datetime.strptime(raw, "%Y-%m-%d").replace(tzinfo=ET)
+        return int(dt_local.astimezone(timezone.utc).timestamp() * 1000)
+
+    start_ms = _to_ms(start_date)
+    end_ms = _to_ms(end_date)
+    if start_ms is not None and end_ms is not None and end_ms <= start_ms:
+        raise ValueError("--end-date must be later than --start-date")
+    return start_ms, end_ms
+
+
 def summarize_utils(utils: list[float]) -> dict[str, float | int | None]:
     if not utils:
         return {
@@ -160,6 +185,8 @@ def load_rows(
     model_version: str,
     cost_bps: float,
     max_pred_lag_hours: float,
+    start_ms: int | None,
+    end_ms: int | None,
 ) -> tuple[list[PostmortemRow], dict[str, Any]]:
     pred_order = "ASC" if prediction_basis == "first" else "DESC"
     source_sql = source_filter_sql(source)
@@ -168,6 +195,13 @@ def load_rows(
     if model_version.strip():
         model_sql = "AND COALESCE(pl.model_version, '') = ?"
         params.append(model_version.strip())
+    date_sql = ""
+    if start_ms is not None:
+        date_sql += " AND te.ts_event >= ?"
+        params.append(start_ms)
+    if end_ms is not None:
+        date_sql += " AND te.ts_event < ?"
+        params.append(end_ms)
     params.append(horizon)
 
     signal_col = f"signal_{horizon}m"
@@ -194,6 +228,7 @@ def load_rows(
                 WHERE te.symbol = ?
                   {source_sql}
                   {model_sql}
+                  {date_sql}
             )
             WHERE rn = 1
         )
@@ -231,6 +266,8 @@ def load_rows(
         "prediction_basis": prediction_basis,
         "source": source,
         "model_version_filter": model_version or None,
+        "start_date_filter_et": et_day(start_ms) if start_ms is not None else None,
+        "end_date_filter_et_exclusive": et_day(end_ms) if end_ms is not None else None,
         "max_pred_lag_hours": max_pred_lag_hours,
         "max_pred_lag_applied": apply_lag_filter,
         "dropped_for_lag": 0,
@@ -332,6 +369,11 @@ def build_summary_lines(payload: dict[str, Any]) -> list[str]:
         f"eligible_rows={payload['coverage']['eligible_rows']} "
         f"joined_rows={payload['coverage']['prediction_rows_joined']}"
     )
+    if payload["coverage"].get("start_date_filter_et") or payload["coverage"].get("end_date_filter_et_exclusive"):
+        lines.append(
+            f"filter_window_et={payload['coverage'].get('start_date_filter_et')} -> "
+            f"{payload['coverage'].get('end_date_filter_et_exclusive')}"
+        )
     lines.append(
         f"lag_applied={payload['coverage']['max_pred_lag_applied']} "
         f"dropped_for_lag={payload['coverage']['dropped_for_lag']} "
@@ -361,6 +403,7 @@ def main() -> int:
     args = parse_args()
     db_path = Path(args.db).expanduser().resolve()
     out_dir = Path(args.out_dir).expanduser().resolve()
+    start_ms, end_ms = parse_et_date_window(args.start_date, args.end_date)
 
     validate_db_path(db_path)
 
@@ -375,6 +418,8 @@ def main() -> int:
             model_version=args.model_version,
             cost_bps=args.cost_bps,
             max_pred_lag_hours=args.max_pred_lag_hours,
+            start_ms=start_ms,
+            end_ms=end_ms,
         )
     finally:
         conn.close()
@@ -409,6 +454,10 @@ def main() -> int:
         stem += f"_{args.source}"
     if args.model_version.strip():
         stem += f"_{args.model_version.strip()}"
+    if args.start_date or args.end_date:
+        start_token = args.start_date or "open"
+        end_token = args.end_date or "open"
+        stem += f"_{start_token}_to_{end_token}"
 
     json_path = out_dir / f"{stem}.json"
     txt_path = out_dir / f"{stem}_summary.txt"
