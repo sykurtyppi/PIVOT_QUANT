@@ -780,6 +780,56 @@ class TestTrainYProbNoneGuard(unittest.TestCase):
         self.assertEqual(int(summary["live_overlap_rows"]), 2)
         self.assertAlmostEqual(float(summary["avg_utility"]), 8.70, places=6)
 
+    def test_daily_report_shadow_summary_tracks_matured_regime_breakdown(self):
+        report = _load_module("scripts/generate_daily_ml_report.py")
+        rows = [
+            {
+                "policy_name": "model_side_margin_v1",
+                "ts_event": 1712583000000,
+                "eligible": 1,
+                "shadow_emit": 1,
+                "trade_regime": "compression",
+                "selected_policy": "regime_active",
+                "shadow_side": "reject",
+                "shadow_horizon": 60,
+                "best_horizon": 60,
+                "signal_60m": "reject",
+                "abstain": 0,
+                "return_bps": 9.0,
+            },
+            {
+                "policy_name": "model_side_margin_v1",
+                "ts_event": 1712586600000,
+                "eligible": 1,
+                "shadow_emit": 1,
+                "trade_regime": "expansion",
+                "selected_policy": "regime_active",
+                "shadow_side": "break",
+                "shadow_horizon": 60,
+                "best_horizon": 60,
+                "signal_60m": "no_edge",
+                "abstain": 0,
+                "return_bps": -11.0,
+            },
+        ]
+        summary = report.compute_shadow_emission_summary(rows, policy_name="model_side_margin_v1", trade_cost_bps=1.3)
+        self.assertEqual(summary["status"], "ok")
+        self.assertEqual(int(summary["days_covered"]), 1)
+        self.assertEqual(int(summary["matured_emit_rows"]), 2)
+        self.assertEqual(int(summary["overlap_live_rows"]), 1)
+        self.assertAlmostEqual(float(summary["matured_regime_summary"]["compression"]["avg_utility"]), 7.7, places=6)
+        self.assertAlmostEqual(float(summary["matured_regime_summary"]["expansion"]["avg_utility"]), 9.7, places=6)
+
+    def test_daily_report_postfix_shadow_tracker_window_uses_floor(self):
+        report = _load_module("scripts/generate_daily_ml_report.py")
+        with patch.object(report, "POSTFIX_SHADOW_TRACKER_LOOKBACK_DAYS", 5), patch.object(
+            report, "POSTFIX_SHADOW_TRACKER_START_DATE", "2026-04-07"
+        ):
+            window = report.compute_postfix_shadow_tracker_window(report.parse_report_date("2026-04-08"))
+        self.assertEqual(window["start_label"], "2026-04-07")
+        self.assertEqual(window["end_label_exclusive"], "2026-04-09")
+        self.assertEqual(window["configured_start_label"], "2026-04-07")
+
     def test_ranked_backtest_accepts_et_date_window(self):
         mod = _load_module("scripts/regime_side_ranked_backtest.py")
         start_ms, end_ms = mod.parse_et_date_window("2026-04-02", "2026-04-03")

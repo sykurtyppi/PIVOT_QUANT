@@ -45,6 +45,12 @@ DEFAULT_SHADOW_POLICY_NAME = (
     os.getenv("ML_MODEL_SIDE_MARGIN_SHADOW_POLICY_NAME", "model_side_margin_v1").strip()
     or "model_side_margin_v1"
 )
+POSTFIX_SHADOW_TRACKER_START_DATE = (
+    os.getenv("ML_POSTFIX_SHADOW_TRACKER_START_DATE", "").strip()
+)
+POSTFIX_SHADOW_TRACKER_LOOKBACK_DAYS = max(
+    1, int(os.getenv("ML_POSTFIX_SHADOW_TRACKER_LOOKBACK_DAYS", "5"))
+)
 DEFAULT_RANKED_SHADOW_HORIZON = int(os.getenv("ML_RANKED_SHADOW_HORIZON", "60") or "60")
 DEFAULT_RANKED_SHADOW_RETAIN_PCT = max(
     0.01, min(1.0, float(os.getenv("ML_RANKED_SHADOW_RETAIN_PCT", "0.10") or "0.10"))
@@ -323,6 +329,27 @@ def day_bounds_ms(report_day: date) -> tuple[int, int]:
     start_dt = datetime.combine(report_day, dtime.min, tzinfo=ET_TZ)
     end_dt = start_dt + timedelta(days=1)
     return int(start_dt.timestamp() * 1000), int(end_dt.timestamp() * 1000)
+
+
+def compute_postfix_shadow_tracker_window(report_day: date) -> dict[str, Any]:
+    start_day = report_day - timedelta(days=max(0, POSTFIX_SHADOW_TRACKER_LOOKBACK_DAYS - 1))
+    configured_start = None
+    if POSTFIX_SHADOW_TRACKER_START_DATE:
+        configured_start = parse_report_date(POSTFIX_SHADOW_TRACKER_START_DATE)
+        if configured_start > start_day:
+            start_day = configured_start
+    start_ms, _ = day_bounds_ms(start_day)
+    _, end_ms = day_bounds_ms(report_day)
+    end_label = datetime.fromtimestamp(end_ms / 1000, tz=timezone.utc).astimezone(ET_TZ).strftime("%Y-%m-%d")
+    return {
+        "start_day": start_day,
+        "start_ms": start_ms,
+        "end_ms": end_ms,
+        "start_label": start_day.strftime("%Y-%m-%d"),
+        "end_label_exclusive": end_label,
+        "configured_start_label": configured_start.strftime("%Y-%m-%d") if configured_start else None,
+        "lookback_days": POSTFIX_SHADOW_TRACKER_LOOKBACK_DAYS,
+    }
 
 
 def mean_or_none(values: list[float]) -> float | None:
@@ -809,6 +836,9 @@ def compute_shadow_emission_summary(
         "policy_name": policy_name,
         "status": "missing_rows",
         "rows_total": len(rows),
+        "days_covered": 0,
+        "first_event_day_et": None,
+        "last_event_day_et": None,
         "logged_rows": 0,
         "eligible_rows": 0,
         "emit_rows": 0,
@@ -821,16 +851,24 @@ def compute_shadow_emission_summary(
         "regime_counts": {"compression": 0, "expansion": 0, "neutral": 0, "unknown": 0},
         "selected_policy_counts": {"baseline": 0, "regime_active": 0, "other": 0, "unknown": 0},
         "horizon_counts": {},
+        "matured_regime_summary": {},
     }
     if not rows:
         return summary
 
     summary["status"] = "ok"
     matured_utils: list[float] = []
+    event_days: set[str] = set()
+    matured_by_regime: dict[str, list[float]] = {}
     for row in rows:
         if row.get("policy_name") is None:
             continue
         summary["logged_rows"] += 1
+        ts_event = row.get("ts_event")
+        if ts_event is not None:
+            day_label = ts_day_et(int(ts_event))
+            if day_label:
+                event_days.add(day_label)
         eligible = bool(row.get("eligible"))
         shadow_emit = bool(row.get("shadow_emit"))
         trade_regime = str(row.get("trade_regime") or "unknown").strip().lower()
@@ -878,6 +916,13 @@ def compute_shadow_emission_summary(
                 ret = float(return_bps)
                 util = (ret - float(trade_cost_bps)) if shadow_side == "reject" else (-ret - float(trade_cost_bps))
                 matured_utils.append(util)
+                matured_by_regime.setdefault(trade_regime, []).append(util)
+
+    if event_days:
+        ordered_days = sorted(event_days)
+        summary["days_covered"] = len(ordered_days)
+        summary["first_event_day_et"] = ordered_days[0]
+        summary["last_event_day_et"] = ordered_days[-1]
 
     if summary["logged_rows"] <= 0:
         summary["status"] = "missing_rows"
@@ -887,6 +932,15 @@ def compute_shadow_emission_summary(
         summary["matured_utility_sum"] = float(sum(matured_utils))
         summary["matured_utility_avg"] = float(sum(matured_utils) / len(matured_utils))
         summary["matured_win_rate"] = float(sum(1 for x in matured_utils if x > 0) / len(matured_utils))
+        summary["matured_regime_summary"] = {
+            regime: {
+                "rows": len(utils),
+                "avg_utility": float(sum(utils) / len(utils)),
+                "total_utility": float(sum(utils)),
+                "win_rate": float(sum(1 for x in utils if x > 0) / len(utils)),
+            }
+            for regime, utils in sorted(matured_by_regime.items())
+        }
     return summary
 
 
@@ -1148,6 +1202,13 @@ def ts_to_et(ts_ms: int | None) -> str:
         return "--"
     dt = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).astimezone(ET_TZ)
     return dt.strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+def ts_day_et(ts_ms: int | None) -> str | None:
+    if not ts_ms:
+        return None
+    dt = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).astimezone(ET_TZ)
+    return dt.strftime("%Y-%m-%d")
 
 
 def gamma_permission_missing_detected(log_path: Path = DEFAULT_GAMMA_LOG, tail_lines: int = 400) -> bool:
@@ -2121,6 +2182,8 @@ def render_report(
     regime_summary: dict[str, int],
     regime_policy_summary: dict[str, Any],
     shadow_emission_summary: dict[str, Any],
+    postfix_shadow_window: dict[str, Any],
+    postfix_shadow_summary: dict[str, Any],
     ranked_shadow_summary: dict[str, Any],
     manifest: dict[str, Any],
     conn: sqlite3.Connection,
@@ -2364,6 +2427,55 @@ def render_report(
             )
         else:
             lines.append("- Matured shadow emits: 0")
+    lines.append("")
+
+    lines.append("## Rolling Post-Fix Shadow Margin Tracker")
+    lines.append("")
+    lines.append(
+        f"- Window (ET): {postfix_shadow_window.get('start_label')} -> "
+        f"{postfix_shadow_window.get('end_label_exclusive')}"
+    )
+    lines.append(
+        f"- Start floor: {postfix_shadow_window.get('configured_start_label') or 'none'} "
+        f"(lookback={postfix_shadow_window.get('lookback_days', 0)}d)"
+    )
+    if postfix_shadow_summary.get("status") != "ok":
+        lines.append(
+            f"- Policy `{DEFAULT_SHADOW_POLICY_NAME}` rolling tracker: "
+            f"{postfix_shadow_summary.get('status', 'missing_rows')}"
+        )
+    else:
+        lines.append(
+            f"- Policy: `{DEFAULT_SHADOW_POLICY_NAME}` "
+            f"(days={postfix_shadow_summary.get('days_covered', 0)}, "
+            f"logged={postfix_shadow_summary.get('logged_rows', 0)}, "
+            f"eligible={postfix_shadow_summary.get('eligible_rows', 0)}, "
+            f"emits={postfix_shadow_summary.get('emit_rows', 0)})"
+        )
+        matured_emit_rows = int(postfix_shadow_summary.get("matured_emit_rows", 0) or 0)
+        if matured_emit_rows > 0:
+            lines.append(
+                f"- Matured emits: {matured_emit_rows} "
+                f"(utility total={format_metric(postfix_shadow_summary.get('matured_utility_sum'), 2)}, "
+                f"avg={format_metric(postfix_shadow_summary.get('matured_utility_avg'), 2)}, "
+                f"win_rate={format_metric(postfix_shadow_summary.get('matured_win_rate'), 3)})"
+            )
+            for regime in ("compression", "expansion", "neutral"):
+                regime_summary = postfix_shadow_summary.get("matured_regime_summary", {}).get(regime)
+                if not regime_summary:
+                    continue
+                lines.append(
+                    f"- Matured {regime}: rows={regime_summary.get('rows', 0)}, "
+                    f"avg={format_metric(regime_summary.get('avg_utility'), 2)}, "
+                    f"total={format_metric(regime_summary.get('total_utility'), 2)}, "
+                    f"win_rate={format_metric(regime_summary.get('win_rate'), 3)}"
+                )
+            lines.append(
+                f"- Overlap with live emitted signal/horizon: "
+                f"{postfix_shadow_summary.get('overlap_live_rows', 0)}"
+            )
+        else:
+            lines.append("- Matured emits: 0")
     lines.append("")
 
     lines.append("## Ranked Shadow Tracker")
@@ -2708,6 +2820,7 @@ def main() -> None:
         gate_eval_mode = str(args.analog_gate_eval_mode or ANALOG_PROMOTION_EVAL_MODE).strip().lower()
         if gate_eval_mode not in {"analog", "blend"}:
             gate_eval_mode = ANALOG_PROMOTION_EVAL_MODE
+        postfix_shadow_window = compute_postfix_shadow_tracker_window(report_day)
         manifest = parse_manifest()
         scoped_model_version = _normalize_model_version(manifest.get("version"))
         prediction_model_mix = fetch_prediction_model_mix(
@@ -2770,6 +2883,19 @@ def main() -> None:
             shadow_emission_rows,
             policy_name=DEFAULT_SHADOW_POLICY_NAME,
         )
+        postfix_shadow_rows = fetch_shadow_emission_records(
+            conn,
+            int(postfix_shadow_window["start_ms"]),
+            int(postfix_shadow_window["end_ms"]),
+            args.include_preview,
+            args.prediction_basis,
+            scoped_model_version,
+            DEFAULT_SHADOW_POLICY_NAME,
+        )
+        postfix_shadow_summary = compute_shadow_emission_summary(
+            postfix_shadow_rows,
+            policy_name=DEFAULT_SHADOW_POLICY_NAME,
+        )
         ranked_shadow_summary = compute_ranked_shadow_summary(
             labeled_records,
             horizon=DEFAULT_RANKED_SHADOW_HORIZON,
@@ -2796,6 +2922,8 @@ def main() -> None:
             regime_summary=regime_summary,
             regime_policy_summary=regime_policy_summary,
             shadow_emission_summary=shadow_emission_summary,
+            postfix_shadow_window=postfix_shadow_window,
+            postfix_shadow_summary=postfix_shadow_summary,
             ranked_shadow_summary=ranked_shadow_summary,
             manifest=manifest,
             conn=conn,
