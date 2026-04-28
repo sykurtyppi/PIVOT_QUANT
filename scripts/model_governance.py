@@ -1876,10 +1876,14 @@ def _cmd_evaluate_locked(
     active_version = version_of(active)
     result["active_version"] = active_version
 
+    # Drift query must use the live predictions DB (DEFAULT_DB / ops_db), not the
+    # temp emission-preview SQLite (emission_db) which lacks the ml_predictions table.
+    _drift_db = (str(args.ops_db or "").strip() or DEFAULT_DB).strip()
+    drift_assessment: dict[str, Any] = {}
     try:
         drift_assessment = detect_regime_drift(
             active,
-            db_path=emission_db,
+            db_path=_drift_db,
             window_days=DEFAULT_DRIFT_WINDOW_DAYS,
             warn_delta=DEFAULT_DRIFT_WARN_DELTA,
             critical_delta=DEFAULT_DRIFT_CRITICAL_DELTA,
@@ -1922,6 +1926,7 @@ def _cmd_evaluate_locked(
                 allow_gate_loosening=allow_gate_loosening,
                 gate_loosening_reason=gate_loosening_reason if allow_gate_loosening else "",
                 gate_loosening_diffs=gate_loosening_diffs,
+                drift_assessment=drift_assessment,
                 **candidate_evidence,
             ),
         )
@@ -1968,6 +1973,7 @@ def _cmd_evaluate_locked(
                 allow_gate_loosening=allow_gate_loosening,
                 gate_loosening_reason=gate_loosening_reason if allow_gate_loosening else "",
                 gate_loosening_diffs=gate_loosening_diffs,
+                drift_assessment=drift_assessment,
                 **candidate_evidence,
             ),
         )
@@ -2006,6 +2012,7 @@ def _cmd_evaluate_locked(
             allow_gate_loosening=allow_gate_loosening,
             gate_loosening_reason=gate_loosening_reason if allow_gate_loosening else "",
             gate_loosening_diffs=gate_loosening_diffs,
+            drift_assessment=drift_assessment,
             **candidate_evidence,
         ),
     )
