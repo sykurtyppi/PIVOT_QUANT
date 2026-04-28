@@ -118,6 +118,11 @@ DEFAULT_EMISSION_MAX_ABSTAIN_RATE = float(
 DEFAULT_EMISSION_SYMBOLS = os.getenv("MODEL_GOV_EMISSION_SYMBOLS", "")
 DEFAULT_EMISSION_DB = os.getenv("MODEL_GOV_EMISSION_DB", "").strip()
 DEFAULT_DB = os.getenv("PIVOT_DB", str(ROOT / "data" / "pivot_events.sqlite"))
+DEFAULT_DRIFT_WINDOW_DAYS = max(5, int(os.getenv("MODEL_GOV_DRIFT_WINDOW_DAYS", "20")))
+DEFAULT_DRIFT_WARN_DELTA = float(os.getenv("MODEL_GOV_DRIFT_WARN_DELTA", "0.15"))
+DEFAULT_DRIFT_CRITICAL_DELTA = float(os.getenv("MODEL_GOV_DRIFT_CRITICAL_DELTA", "0.30"))
+DEFAULT_DRIFT_MIN_ROWS = max(10, int(os.getenv("MODEL_GOV_DRIFT_MIN_ROWS", "30")))
+DEFAULT_ESCALATION_THRESHOLD = max(1, int(os.getenv("MODEL_GOV_ESCALATION_THRESHOLD", "10")))
 STATE_SCHEMA_VERSION = 1
 MAX_HISTORY = 200
 LEGACY_CANDIDATE_MANIFEST = "manifest_latest.json"
@@ -512,6 +517,7 @@ def empty_state() -> dict[str, Any]:
         "last_reason": "",
         "last_checked_at_ms": 0,
         "last_promoted_at_ms": 0,
+        "consecutive_rejections": 0,
         "history": [],
     }
 
@@ -523,6 +529,7 @@ def load_state(path: Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return empty_state()
     payload.setdefault("schema_version", STATE_SCHEMA_VERSION)
+    payload.setdefault("consecutive_rejections", 0)
     history = payload.setdefault("history", [])
     if not isinstance(history, list):
         history = []
@@ -1457,6 +1464,115 @@ def _metadata_manifest_candidates(
     return [preferred, legacy]
 
 
+def detect_regime_drift(
+    active_manifest: dict[str, Any],
+    *,
+    db_path: str,
+    window_days: int,
+    warn_delta: float,
+    critical_delta: float,
+    min_rows: int,
+    horizons: list[int] | None = None,
+) -> dict[str, Any]:
+    """Compare rolling empirical reject rate to the training-time prior.
+
+    Returns a dict with keys:
+      status:   "ok" | "warn" | "critical" | "insufficient_data" | "error"
+      details:  list of per-horizon finding strings
+      horizons: {horizon_key: {pi_train, pi_current, delta, status}}
+    """
+    import sqlite3
+    import time
+
+    if horizons is None:
+        horizons = [15, 30, 60]
+
+    cutoff_ms = int((time.time() - window_days * 86400) * 1000)
+    stats = active_manifest.get("stats") if isinstance(active_manifest.get("stats"), dict) else {}
+    details: list[str] = []
+    horizon_results: dict[str, Any] = {}
+    worst_status = "ok"
+
+    for h in horizons:
+        h_key = str(h)
+        reject_stats = (stats.get(h_key) or {}).get("reject", {})
+        pi_train = to_float(reject_stats.get("reject_rate"))
+        if pi_train is None:
+            details.append(f"{h}m: pi_train missing from active manifest stats")
+            horizon_results[h_key] = {"status": "insufficient_data", "pi_train": None, "pi_current": None}
+            if worst_status == "ok":
+                worst_status = "insufficient_data"
+            continue
+
+        try:
+            con = sqlite3.connect(db_path, timeout=5)
+            try:
+                cur = con.execute(
+                    """
+                    SELECT COUNT(*) AS total,
+                           SUM(CASE WHEN reject = 1 THEN 1 ELSE 0 END) AS reject_count
+                    FROM   ml_predictions
+                    WHERE  horizon_min = ?
+                      AND  reject IS NOT NULL
+                      AND  break IS NOT NULL
+                      AND  ts_event >= ?
+                    """,
+                    (h, cutoff_ms),
+                )
+                row = cur.fetchone()
+            finally:
+                con.close()
+        except Exception as exc:
+            details.append(f"{h}m: db query failed ({exc})")
+            horizon_results[h_key] = {"status": "error", "pi_train": pi_train, "pi_current": None}
+            worst_status = "error"
+            continue
+
+        if row is None or row[0] is None or int(row[0]) < min_rows:
+            n = int(row[0]) if row and row[0] is not None else 0
+            details.append(f"{h}m: insufficient labeled rows ({n} < {min_rows})")
+            horizon_results[h_key] = {"status": "insufficient_data", "pi_train": pi_train, "pi_current": None}
+            if worst_status == "ok":
+                worst_status = "insufficient_data"
+            continue
+
+        total, reject_count = int(row[0]), int(row[1] or 0)
+        pi_current = float(reject_count) / float(total)
+        delta = abs(pi_current - pi_train)
+
+        if delta >= critical_delta:
+            h_status = "critical"
+            worst_status = "critical"
+        elif delta >= warn_delta:
+            h_status = "warn"
+            if worst_status not in ("critical",):
+                worst_status = "warn"
+        else:
+            h_status = "ok"
+
+        horizon_results[h_key] = {
+            "status": h_status,
+            "pi_train": round(pi_train, 4),
+            "pi_current": round(pi_current, 4),
+            "delta": round(delta, 4),
+            "n": total,
+        }
+        if h_status != "ok":
+            direction = "down" if pi_current < pi_train else "up"
+            details.append(
+                f"{h}m: reject-rate shifted {direction} from {pi_train:.3f} (train) "
+                f"to {pi_current:.3f} (rolling {window_days}d), delta={delta:.3f} [{h_status.upper()}]"
+            )
+
+    return {
+        "status": worst_status,
+        "window_days": window_days,
+        "min_rows": min_rows,
+        "details": details,
+        "horizons": horizon_results,
+    }
+
+
 def _persist_state_and_ops(
     state_path: Path,
     state: dict[str, Any],
@@ -1469,6 +1585,21 @@ def _persist_state_and_ops(
         details = [str(item).strip() for item in gate_failures if str(item).strip()]
         if details:
             reason = f"{reason}: {'; '.join(details)}" if reason else "; ".join(details)
+
+    action = str(result.get("action") or "")
+    if action == "rejected":
+        state["consecutive_rejections"] = state.get("consecutive_rejections", 0) + 1
+    elif action in ("promoted", "bootstrap", "no_change"):
+        state["consecutive_rejections"] = 0
+
+    consecutive = int(state.get("consecutive_rejections", 0))
+    if action == "rejected" and consecutive >= DEFAULT_ESCALATION_THRESHOLD:
+        result.setdefault("escalation_warning", (
+            f"ESCALATION: {consecutive} consecutive rejections — model has not self-promoted in "
+            f"{consecutive} consecutive retrain cycles. Review gate failures and consider "
+            "whether training assumptions (window, decay, calibration) need adjustment. "
+            "Do NOT lower governance gates; fix root causes."
+        ))
 
     atomic_write_json(state_path, state)
     if ops_db:
@@ -1744,6 +1875,31 @@ def _cmd_evaluate_locked(
     active = load_manifest(active_path)
     active_version = version_of(active)
     result["active_version"] = active_version
+
+    try:
+        drift_assessment = detect_regime_drift(
+            active,
+            db_path=emission_db,
+            window_days=DEFAULT_DRIFT_WINDOW_DAYS,
+            warn_delta=DEFAULT_DRIFT_WARN_DELTA,
+            critical_delta=DEFAULT_DRIFT_CRITICAL_DELTA,
+            min_rows=DEFAULT_DRIFT_MIN_ROWS,
+            horizons=list(gates.required_horizons) if gates.required_horizons else [15, 30, 60],
+        )
+        result["drift_assessment"] = drift_assessment
+        if drift_assessment.get("status") == "critical":
+            print(
+                f"[DRIFT] CRITICAL: active model prior has shifted significantly — "
+                f"{'; '.join(drift_assessment.get('details', []))}",
+                file=__import__("sys").stderr,
+            )
+        elif drift_assessment.get("status") == "warn":
+            print(
+                f"[DRIFT] WARN: {'; '.join(drift_assessment.get('details', []))}",
+                file=__import__("sys").stderr,
+            )
+    except Exception as _drift_exc:
+        result["drift_assessment"] = {"status": "error", "error": str(_drift_exc)}
 
     if candidate_version == active_version:
         state.update(
