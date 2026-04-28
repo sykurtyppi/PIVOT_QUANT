@@ -624,6 +624,64 @@ def _compute_target_stats(sub_df, target: str) -> dict:
     return stats
 
 
+def select_calibration_dates(
+    df,
+    *,
+    calib_days: int,
+    calib_mode: str = "recent_days",
+    calib_lookback_days: int = 60,
+    calib_min_rows: int = 80,
+) -> set:
+    """Return a set of event_date_et values to use as the calibration window.
+
+    Modes:
+      recent_days   — last `calib_days` calendar dates (original behaviour).
+      regime_matched — prefer dates whose regime bucket matches the tail regime;
+                       falls back to recent_days when regime-matched rows < calib_min_rows.
+    """
+    dates = sorted({d for d in df["event_date_et"].tolist() if d is not None})
+    if not dates or not calib_days:
+        return set()
+
+    if calib_mode != "regime_matched" or "regime_type" not in df.columns:
+        return set(dates[-calib_days:])
+
+    # Determine current regime: majority bucket over the last 5 calendar dates.
+    tail_dates = set(dates[-5:])
+    tail_df = df[df["event_date_et"].isin(tail_dates)]
+    if not tail_df.empty:
+        buckets = tail_df["regime_type"].map(_regime_bucket)
+        current_regime = buckets.mode().iloc[0] if not buckets.mode().empty else "compression"
+    else:
+        current_regime = "compression"
+
+    # Restrict candidate pool to the last calib_lookback_days calendar dates.
+    cutoff_date = dates[-1] - __import__("datetime").timedelta(days=calib_lookback_days)
+    pool_dates = [d for d in dates if d > cutoff_date]
+
+    # Walk from the most-recent end, collecting dates whose majority regime matches.
+    df_pool = df[df["event_date_et"].isin(pool_dates)].copy()
+    df_pool["_rb"] = df_pool["regime_type"].map(_regime_bucket)
+
+    regime_matched: list = []
+    for d in reversed(pool_dates):
+        day_df = df_pool[df_pool["event_date_et"] == d]
+        if day_df.empty:
+            continue
+        day_buckets = day_df["_rb"]
+        if day_buckets.mode().iloc[0] == current_regime:
+            regime_matched.append(d)
+        if len(regime_matched) >= calib_days:
+            break
+
+    # Check whether we have enough rows; fall back if not.
+    matched_row_count = len(df_pool[df_pool["event_date_et"].isin(regime_matched)])
+    if matched_row_count < calib_min_rows:
+        return set(dates[-calib_days:])
+
+    return set(regime_matched)
+
+
 def compute_horizon_stats(df, target, horizon):
     stats = {}
     sub = df[df["horizon_min"] == horizon]
@@ -910,6 +968,43 @@ def main() -> None:
         default=int(_env_float("RF_CALIB_MIN_FIT_EVENTS", 20)),
         help="Minimum events reserved for calibration fitting slice.",
     )
+    parser.add_argument(
+        "--time-decay-enabled",
+        dest="time_decay_enabled",
+        action="store_true",
+        default=_env_bool("RF_TIME_DECAY_ENABLED", False),
+        help="Apply exponential time decay sample weights during RF training.",
+    )
+    parser.add_argument(
+        "--no-time-decay",
+        dest="time_decay_enabled",
+        action="store_false",
+        help="Disable time decay even if RF_TIME_DECAY_ENABLED=1 in env.",
+    )
+    parser.add_argument(
+        "--time-decay-half-life-days",
+        type=float,
+        default=_env_float("RF_TIME_DECAY_HALF_LIFE_DAYS", 45.0),
+        help="Half-life in days for exponential sample weight decay (default 45).",
+    )
+    parser.add_argument(
+        "--calib-mode",
+        default=os.getenv("RF_CALIB_MODE", "recent_days").strip() or "recent_days",
+        choices=["recent_days", "regime_matched"],
+        help="Calibration date selection mode (default: recent_days).",
+    )
+    parser.add_argument(
+        "--calib-lookback-days",
+        type=int,
+        default=_env_int("RF_CALIB_LOOKBACK_DAYS", 60),
+        help="Candidate pool for regime_matched calib mode: last N calendar days (default 60).",
+    )
+    parser.add_argument(
+        "--calib-min-rows",
+        type=int,
+        default=_env_int("RF_CALIB_MIN_ROWS", 80),
+        help="Minimum rows needed for regime_matched calib; falls back to recent_days if below (default 80).",
+    )
     parser.add_argument("--out-dir", default=DEFAULT_OUT_DIR)
     parser.add_argument(
         "--metadata-dir",
@@ -951,6 +1046,7 @@ def main() -> None:
         raise SystemExit("--shadow-policy-percentile must be within (0,1)")
 
     pd = require("pandas", "python3 -m pip install pandas")
+    np = require("numpy", "python3 -m pip install numpy")
     joblib = require("joblib", "python3 -m pip install joblib")
 
     out_dir = Path(args.out_dir)
@@ -973,6 +1069,10 @@ def main() -> None:
         "gamma_context": _gamma_context_metadata(),
         "trained_end_ts": None,
         "tune_date_range": None,
+        "time_decay_enabled": bool(args.time_decay_enabled),
+        "time_decay_half_life_days": float(args.time_decay_half_life_days) if args.time_decay_enabled else None,
+        "calib_mode": str(args.calib_mode),
+        "calib_lookback_days": int(args.calib_lookback_days),
     }
     shadow_policy_key = str(args.shadow_policy_name or DEFAULT_SHADOW_POLICY_NAME).strip() or DEFAULT_SHADOW_POLICY_NAME
     manifest["shadow_policies"][shadow_policy_key] = {
@@ -1041,8 +1141,13 @@ def main() -> None:
         feature_df = feature_df.drop(columns=[c for c in all_drops if c in feature_df.columns], errors="ignore")
         feature_df = feature_df.loc[:, feature_df.notna().any()]
 
-        dates = sorted({d for d in df["event_date_et"].tolist() if d is not None})
-        calib_dates = set(dates[-args.calib_days :]) if args.calib_days and dates else set()
+        calib_dates = select_calibration_dates(
+            df,
+            calib_days=args.calib_days,
+            calib_mode=args.calib_mode,
+            calib_lookback_days=args.calib_lookback_days,
+            calib_min_rows=args.calib_min_rows,
+        )
 
         for target in targets:
             if target not in df.columns:
@@ -1098,7 +1203,22 @@ def main() -> None:
             ]
             numeric_cols = [c for c in X.columns if pd.api.types.is_numeric_dtype(X[c])]
             pipeline = build_pipeline(numeric_cols, categorical_cols, args)
-            pipeline.fit(X_train, y_train)
+
+            train_weights = None
+            if args.time_decay_enabled:
+                half_life = float(args.time_decay_half_life_days)
+                if half_life > 0:
+                    all_dates = [d for d in sub["event_date_et"] if d is not None]
+                    if all_dates:
+                        max_date = max(all_dates)
+                        train_event_dates = sub.loc[X_train.index, "event_date_et"]
+                        age_days = np.array(
+                            [(max_date - d).days if d is not None else 0 for d in train_event_dates],
+                            dtype=float,
+                        )
+                        train_weights = np.exp(-np.log(2) / half_life * age_days)
+
+            pipeline.fit(X_train, y_train, rf__sample_weight=train_weights)
 
             calibrator = None
             calib_method = None
