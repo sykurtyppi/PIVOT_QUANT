@@ -29,6 +29,12 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    _load_dotenv(ROOT / ".env", override=False)
+except ImportError:
+    pass
+
 DEFAULT_MODELS_DIR = Path(os.getenv("RF_MODEL_DIR", "data/models"))
 DEFAULT_METADATA_DIR = os.getenv("RF_METADATA_DIR", "metadata_runtime").strip() or "metadata_runtime"
 DEFAULT_CANDIDATE_MANIFEST = (

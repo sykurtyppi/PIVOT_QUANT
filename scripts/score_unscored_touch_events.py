@@ -17,6 +17,13 @@ from urllib.request import Request, urlopen
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    _load_dotenv(ROOT / ".env", override=False)
+except ImportError:
+    pass
+
 DEFAULT_DB = os.getenv("PIVOT_DB", str(ROOT / "data" / "pivot_events.sqlite"))
 DEFAULT_SCORE_URL = os.getenv("LIVE_COLLECTOR_SCORE_URL", "http://127.0.0.1:5003/score")
 
@@ -129,6 +136,45 @@ def _resolve_repo_path(raw_path: str) -> Path:
     if not path.is_absolute():
         path = ROOT / path
     return path
+
+
+def _resolve_model_dir(manifest: Path) -> Path:
+    """Return the directory that contains the .pkl model files referenced by the manifest.
+
+    The manifest stores bare filenames only, so the model directory must be inferred.
+    We probe two candidates in order:
+
+    1. manifest.parent          – flat layout (data/models/manifest.json)
+    2. manifest.parent.parent   – subdirectory layout (data/models/metadata_runtime/metadata_vN.json)
+
+    Raises FileNotFoundError *before* any module is loaded if neither candidate contains
+    all expected model files, preventing silent NULL-probability prediction rows.
+    """
+    try:
+        data = json.loads(manifest.read_text())
+    except Exception as exc:
+        raise ValueError(f"Cannot parse manifest {manifest}: {exc}") from exc
+
+    sample_files: list[str] = []
+    for target_dict in data.get("models", {}).values():
+        if isinstance(target_dict, dict):
+            for fname in target_dict.values():
+                if isinstance(fname, str) and fname.endswith(".pkl"):
+                    sample_files.append(fname)
+
+    if not sample_files:
+        return manifest.parent
+
+    for candidate in (manifest.parent, manifest.parent.parent):
+        if all((candidate / f).exists() for f in sample_files):
+            return candidate
+
+    checked = [str(manifest.parent), str(manifest.parent.parent)]
+    raise FileNotFoundError(
+        f"Model artifact files not found in any candidate directory {checked}. "
+        f"Expected: {sample_files[:3]}{'...' if len(sample_files) > 3 else ''}. "
+        "Ensure the manifest's parent or grandparent directory contains the .pkl files."
+    )
 
 
 def _has_table(conn: sqlite3.Connection, table_name: str) -> bool:
@@ -373,7 +419,7 @@ def _build_local_manifest_batcher(
     module_path = ROOT / "server" / "ml_server.py"
     module_name = f"pq_ml_server_local_{os.getpid()}_{int(time.time() * 1000)}"
     env_updates = {
-        "RF_MODEL_DIR": str(manifest.parent),
+        "RF_MODEL_DIR": str(_resolve_model_dir(manifest)),
         "RF_MANIFEST_PATH": str(manifest),
         "PIVOT_DB": str(db),
         "PREDICTION_LOG_DB": str(db),
