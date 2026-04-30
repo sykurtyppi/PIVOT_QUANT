@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import heapq
 import json
@@ -105,6 +107,8 @@ import pandas as pd
 import joblib
 
 from ml.features import build_feature_row, collect_missing, FEATURE_VERSION
+from ml.label_shift import correct_prior_shift, rolling_class_rate
+from ml.regime_semantics import favored_side_for_trade_regime
 
 log = logging.getLogger("ml_server")
 _missing_threshold_warnings: set[tuple[str, int, str]] = set()
@@ -268,6 +272,9 @@ PREDICTION_LOG_ALERT_DROPPED_TOTAL = max(
 ML_RELOAD_MIN_INTERVAL_SEC = max(
     0.0, float(os.getenv("ML_RELOAD_MIN_INTERVAL_SEC", "1.5"))
 )
+RF_LABEL_SHIFT_CORRECTION_ENABLED = _env_bool("RF_LABEL_SHIFT_CORRECTION_ENABLED", False)
+RF_PRIOR_WINDOW_DAYS = max(5, int(os.getenv("RF_PRIOR_WINDOW_DAYS", "20")))
+RF_PRIOR_MIN_ROWS = max(10, int(os.getenv("RF_PRIOR_MIN_ROWS", "30")))
 ML_ANALOG_ENABLED = _env_bool("ML_ANALOG_ENABLED", True)
 ML_ANALOG_DB = Path(os.getenv("ML_ANALOG_DB", str(PREDICTION_LOG_DB)))
 ML_ANALOG_K = max(3, int(os.getenv("ML_ANALOG_K", "20")))
@@ -332,6 +339,15 @@ ML_ANALOG_PROMOTION_GATE_PATH = Path(
 ML_ANALOG_BLEND_MODE = (os.getenv("ML_ANALOG_BLEND_MODE", "shadow") or "shadow").strip().lower()
 if ML_ANALOG_BLEND_MODE not in {"off", "shadow", "active"}:
     ML_ANALOG_BLEND_MODE = "shadow"
+ML_MODEL_SIDE_MARGIN_SHADOW_MODE = (
+    os.getenv("ML_MODEL_SIDE_MARGIN_SHADOW_MODE", "log") or "log"
+).strip().lower()
+if ML_MODEL_SIDE_MARGIN_SHADOW_MODE not in {"off", "log"}:
+    ML_MODEL_SIDE_MARGIN_SHADOW_MODE = "log"
+ML_MODEL_SIDE_MARGIN_SHADOW_POLICY_NAME = (
+    os.getenv("ML_MODEL_SIDE_MARGIN_SHADOW_POLICY_NAME", "model_side_margin_v1").strip()
+    or "model_side_margin_v1"
+)
 ML_ANALOG_BLEND_PARTIAL_MODE = (
     os.getenv("ML_ANALOG_BLEND_PARTIAL_MODE", "off") or "off"
 ).strip().lower()
@@ -1228,7 +1244,8 @@ class AnalogEngine:
 
 registry = ModelRegistry()
 analog_engine = AnalogEngine(ML_ANALOG_DB)
-_startup_error: Optional[str] = None
+_startup_model_error: Optional[str] = None   # set when registry.load() fails
+_startup_analog_error: Optional[str] = None  # set when analog_engine.refresh() fails
 _RELOAD_LOCK = threading.Lock()
 _RELOAD_STATE_LOCK = threading.Lock()
 _reload_state: dict[str, object] = {
@@ -1390,15 +1407,23 @@ def _finish_score_request(*, ok: bool, duration_ms: float, error: str | None = N
 
 @asynccontextmanager
 async def lifespan(_app):
-    global _startup_error
+    global _startup_model_error, _startup_analog_error
     _start_prediction_log_writer()
+    # Model-load and analog-refresh are independent failure channels.
+    # A failure in one must not prevent the other from being attempted or
+    # from having its error state recorded separately.
     try:
         registry.load()
-        analog_engine.refresh()
-        _startup_error = None
+        _startup_model_error = None
     except Exception as exc:
-        _startup_error = str(exc)
-        print(f"ML server startup warning: {exc}")
+        _startup_model_error = str(exc)
+        print(f"ML server startup warning (model load): {exc}")
+    try:
+        analog_engine.refresh()
+        _startup_analog_error = None
+    except Exception as exc:
+        _startup_analog_error = str(exc)
+        print(f"ML server startup warning (analog refresh): {exc}")
     try:
         yield
     finally:
@@ -1511,15 +1536,30 @@ def _apply_blend_shift_cap(
 def _get_prediction_log_conn() -> sqlite3.Connection:
     conn = getattr(_PREDICTION_LOG_LOCAL, "conn", None)
     if conn is not None:
-        try:
-            conn.execute("SELECT 1")
-            return conn
-        except sqlite3.Error:
+        # A connection with an open transaction is not clean — it may carry
+        # uncommitted writes left over from a previous SQLITE_BUSY skip that
+        # returned without rolling back.  Close it immediately so the next
+        # write always starts from a known-clean state.
+        if getattr(conn, "in_transaction", False):
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                pass
             try:
                 conn.close()
             except sqlite3.Error:
                 pass
             _PREDICTION_LOG_LOCAL.conn = None
+        else:
+            try:
+                conn.execute("SELECT 1")
+                return conn
+            except sqlite3.Error:
+                try:
+                    conn.close()
+                except sqlite3.Error:
+                    pass
+                _PREDICTION_LOG_LOCAL.conn = None
 
     conn = sqlite3.connect(
         str(PREDICTION_LOG_DB),
@@ -1549,6 +1589,38 @@ def _close_prediction_log_conn() -> None:
 atexit.register(_close_prediction_log_conn)
 
 
+def _apply_migrations(conn: sqlite3.Connection) -> bool:
+    """Run all pending schema migrations via scripts/migrate_db.py.
+
+    This is the authoritative schema evolution path.  The inline DDL below is
+    kept only as a belt-and-suspenders fallback for environments where the
+    scripts directory is unavailable.  Any new tables or indexes should be
+    added to migrate_db.py first; this function ensures the server picks them
+    up automatically without requiring a separate migration step.
+
+    Returns True on success, False if migrate_db.py could not be loaded or the
+    migration itself raised.
+    """
+    try:
+        import importlib.util as _iutil
+        _spec = _iutil.spec_from_file_location(
+            "pivot_quant_migrate_db",
+            ROOT / "scripts" / "migrate_db.py",
+        )
+        _mod = _iutil.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)  # type: ignore[union-attr]
+        _mod.migrate_connection(conn, verbose=False)
+        return True
+    except Exception as _exc:
+        log.warning(
+            "schema migration via migrate_db.py failed (%s: %s); "
+            "falling back to inline DDL — new migrations may not have been applied",
+            type(_exc).__name__,
+            _exc,
+        )
+        return False
+
+
 def _ensure_prediction_log_schema(conn: sqlite3.Connection) -> None:
     global _PREDICTION_LOG_SCHEMA_READY
     if _PREDICTION_LOG_SCHEMA_READY:
@@ -1557,6 +1629,10 @@ def _ensure_prediction_log_schema(conn: sqlite3.Connection) -> None:
     with _PREDICTION_LOG_SCHEMA_LOCK:
         if _PREDICTION_LOG_SCHEMA_READY:
             return
+        # Primary path: delegate to migrate_db.py so the server always tracks
+        # the canonical migration chain.  If this succeeds the inline DDL below
+        # is entirely redundant but harmless (all statements use IF NOT EXISTS).
+        _apply_migrations(conn)
         conn.execute(
             """CREATE TABLE IF NOT EXISTS prediction_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1613,8 +1689,167 @@ def _ensure_prediction_log_schema(conn: sqlite3.Connection) -> None:
         for col_name, col_type in compat_cols.items():
             if col_name not in pred_cols:
                 conn.execute(f"ALTER TABLE prediction_log ADD COLUMN {col_name} {col_type}")
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS shadow_emission_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id TEXT NOT NULL,
+                ts_prediction INTEGER NOT NULL,
+                model_version TEXT,
+                feature_version TEXT,
+                policy_name TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT 'live',
+                shadow_horizon INTEGER,
+                shadow_side TEXT,
+                eligible INTEGER NOT NULL DEFAULT 0,
+                shadow_emit INTEGER NOT NULL DEFAULT 0,
+                ineligibility_reason TEXT,
+                selected_policy TEXT,
+                trade_regime TEXT,
+                side_prob REAL,
+                reference_threshold REAL,
+                runtime_threshold REAL,
+                model_side_margin REAL,
+                margin_cutoff REAL,
+                percentile_cutoff REAL,
+                fit_rows INTEGER,
+                eligible_rows INTEGER,
+                metadata_json TEXT,
+                created_at_ms INTEGER NOT NULL,
+                UNIQUE(event_id, model_version, policy_name, source)
+            );"""
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_shadow_emit_event "
+            "ON shadow_emission_log(event_id);"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_shadow_emit_ts "
+            "ON shadow_emission_log(ts_prediction);"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_shadow_emit_policy "
+            "ON shadow_emission_log(policy_name, source, ts_prediction);"
+        )
+        # idx_shadow_emit_event_model was added in migration_10 to backfill
+        # production DBs that received migration_9 without it.  It is also
+        # created here so that the inline fallback path stays in sync.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_shadow_emit_event_model "
+            "ON shadow_emission_log(event_id, model_version);"
+        )
+        shadow_cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(shadow_emission_log)").fetchall()
+        }
+        shadow_compat_cols = {
+            "feature_version": "TEXT",
+            "shadow_horizon": "INTEGER",
+            "shadow_side": "TEXT",
+            "eligible": "INTEGER NOT NULL DEFAULT 0",
+            "shadow_emit": "INTEGER NOT NULL DEFAULT 0",
+            "ineligibility_reason": "TEXT",
+            "selected_policy": "TEXT",
+            "trade_regime": "TEXT",
+            "side_prob": "REAL",
+            "reference_threshold": "REAL",
+            "runtime_threshold": "REAL",
+            "model_side_margin": "REAL",
+            "margin_cutoff": "REAL",
+            "percentile_cutoff": "REAL",
+            "fit_rows": "INTEGER",
+            "eligible_rows": "INTEGER",
+            "metadata_json": "TEXT",
+            "created_at_ms": "INTEGER",
+        }
+        for col_name, col_type in shadow_compat_cols.items():
+            if col_name not in shadow_cols:
+                conn.execute(f"ALTER TABLE shadow_emission_log ADD COLUMN {col_name} {col_type}")
         conn.commit()
         _PREDICTION_LOG_SCHEMA_READY = True
+
+
+def _write_shadow_emission_records(
+    *,
+    conn: sqlite3.Connection,
+    event: dict,
+    result: dict,
+    source: str,
+    ts_prediction_ms: int,
+) -> None:
+    shadow_emissions = result.get("shadow_emissions", {})
+    if not isinstance(shadow_emissions, dict):
+        log.warning(
+            "shadow_emission: discarded non-dict shadow_emissions (type=%s, event=%s)",
+            type(shadow_emissions).__name__,
+            event.get("event_id"),
+        )
+        return
+
+    event_id = event.get("event_id")
+    model_version = result.get("model_version")
+    feature_version = result.get("feature_version")
+    for policy_name, payload in shadow_emissions.items():
+        if not isinstance(payload, dict):
+            log.warning(
+                "shadow_emission: discarded non-dict payload for policy=%s event=%s (type=%s)",
+                policy_name,
+                event_id,
+                type(payload).__name__,
+            )
+            continue
+        conn.execute(
+            """INSERT INTO shadow_emission_log (
+                event_id, ts_prediction, model_version, feature_version,
+                policy_name, source, shadow_horizon, shadow_side,
+                eligible, shadow_emit, ineligibility_reason,
+                selected_policy, trade_regime, side_prob, reference_threshold,
+                runtime_threshold, model_side_margin, margin_cutoff,
+                percentile_cutoff, fit_rows, eligible_rows,
+                metadata_json, created_at_ms
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(event_id, model_version, policy_name, source) DO UPDATE SET
+                shadow_horizon = excluded.shadow_horizon,
+                shadow_side = excluded.shadow_side,
+                selected_policy = excluded.selected_policy,
+                trade_regime = excluded.trade_regime,
+                eligible = excluded.eligible,
+                shadow_emit = excluded.shadow_emit,
+                ineligibility_reason = excluded.ineligibility_reason,
+                side_prob = excluded.side_prob,
+                reference_threshold = excluded.reference_threshold,
+                runtime_threshold = excluded.runtime_threshold,
+                model_side_margin = excluded.model_side_margin,
+                margin_cutoff = excluded.margin_cutoff,
+                percentile_cutoff = excluded.percentile_cutoff,
+                fit_rows = excluded.fit_rows,
+                eligible_rows = excluded.eligible_rows,
+                metadata_json = excluded.metadata_json,
+                created_at_ms = excluded.created_at_ms""",
+            (
+                event_id,
+                ts_prediction_ms,
+                model_version,
+                feature_version,
+                str(policy_name),
+                source,
+                _to_int(payload.get("shadow_horizon")),
+                payload.get("shadow_side"),
+                1 if _to_bool(payload.get("eligible")) else 0,
+                1 if _to_bool(payload.get("shadow_emit")) else 0,
+                payload.get("ineligibility_reason"),
+                payload.get("selected_policy_runtime"),
+                payload.get("trade_regime"),
+                _to_float(payload.get("side_prob")),
+                _to_float(payload.get("reference_threshold")),
+                _to_float(payload.get("runtime_threshold")),
+                _to_float(payload.get("model_side_margin")),
+                _to_float(payload.get("margin_cutoff")),
+                _to_float(payload.get("percentile_cutoff")),
+                _to_int(payload.get("fit_rows")),
+                _to_int(payload.get("eligible_rows")),
+                json.dumps(payload, separators=(",", ":")),
+                ts_prediction_ms,
+            ),
+        )
 
 
 def _write_prediction_record(event: dict, result: dict) -> tuple[str, str | None]:
@@ -1649,6 +1884,8 @@ def _write_prediction_record(event: dict, result: dict) -> tuple[str, str | None
             else:
                 analog_best_ci_width = reject_w if reject_w is not None else break_w
         is_preview = 1 if event.get("preview") else 0
+        source = "preview" if is_preview else "live"
+        ts_prediction_ms = int(time.time() * 1000)
 
         # Preserve original signal/probability/threshold payload for each
         # (event_id, model_version) row and only refresh runtime metadata on
@@ -1684,7 +1921,7 @@ def _write_prediction_record(event: dict, result: dict) -> tuple[str, str | None
                 is_preview = excluded.is_preview""",
             (
                 event_id,
-                int(time.time() * 1000),
+                ts_prediction_ms,
                 result.get("model_version"),
                 result.get("feature_version"),
                 result.get("best_horizon"),
@@ -1723,12 +1960,36 @@ def _write_prediction_record(event: dict, result: dict) -> tuple[str, str | None
                 is_preview,
             ),
         )
+        _write_shadow_emission_records(
+            conn=conn,
+            event=event,
+            result=result,
+            source=source,
+            ts_prediction_ms=ts_prediction_ms,
+        )
         conn.commit()
         return "ok", None
     except Exception as exc:
         if isinstance(exc, sqlite3.OperationalError):
             lowered = str(exc).lower()
             if "database is locked" in lowered or "database is busy" in lowered:
+                # Rollback any partial writes and close the connection so the
+                # next write attempt starts from a clean slate.  Without this,
+                # the implicit transaction from the failed write would remain
+                # open on the thread-local connection and be committed
+                # accidentally as part of the next successful write — producing
+                # prediction_log rows with no shadow_emission_log counterpart.
+                if conn is not None:
+                    try:
+                        conn.rollback()
+                    except sqlite3.Error:
+                        pass
+                    if getattr(_PREDICTION_LOG_LOCAL, "conn", None) is conn:
+                        try:
+                            conn.close()
+                        except sqlite3.Error:
+                            pass
+                        _PREDICTION_LOG_LOCAL.conn = None
                 _warn_prediction_log_contention(exc)
                 return "skip", str(exc)
         if conn is not None and getattr(_PREDICTION_LOG_LOCAL, "conn", None) is conn:
@@ -1869,8 +2130,14 @@ async def health():
     }
     has_models = any(horizons for horizons in models.values())
     stale = _is_model_stale()
-    if not has_models or _startup_error is not None:
+    if not has_models or _startup_model_error is not None:
+        # Models failed to load or were never loaded — scoring is impaired.
         status = "degraded"
+    elif _startup_analog_error is not None:
+        # Models are loaded and scoring is live; only analog refresh failed.
+        # Use a distinct status so the watchdog / operator can distinguish
+        # "cannot score at all" from "scoring OK but analogs unavailable".
+        status = "analog_degraded"
     elif stale:
         status = "stale"
     else:
@@ -1967,8 +2234,10 @@ async def health():
             "feature_weights": ML_ANALOG_FEATURE_WEIGHTS,
         },
     }
-    if _startup_error is not None:
-        result["startup_error"] = _startup_error
+    if _startup_model_error is not None:
+        result["startup_model_error"] = _startup_model_error
+    if _startup_analog_error is not None:
+        result["startup_analog_error"] = _startup_analog_error
     if stale and manifest is not None:
         trained_end_ts = manifest.get("trained_end_ts", 0)
         age_hours = (time.time() * 1000 - trained_end_ts) / (3600 * 1000)
@@ -1979,7 +2248,7 @@ async def health():
 @app.post("/reload")
 async def reload_models(force: bool = False):
     """Hot-reload model artifacts from disk without restarting the server."""
-    global _startup_error
+    global _startup_model_error, _startup_analog_error
     now_ms = int(time.time() * 1000)
 
     state_before = _reload_state_snapshot()
@@ -2021,13 +2290,27 @@ async def reload_models(force: bool = False):
         last_error=None,
     )
     try:
+        # ── Phase 1: model load ──────────────────────────────────────────────
         if not force and registry.is_manifest_unchanged():
             changed = False
         else:
             changed = await asyncio.to_thread(registry.load, force=force)
-        if changed:
-            await asyncio.to_thread(analog_engine.refresh)
-        _startup_error = None
+        _startup_model_error = None  # model load succeeded
+
+        # ── Phase 2: analog refresh ──────────────────────────────────────────
+        # Refresh when: (a) the manifest changed, OR (b) a prior analog error
+        # is recorded so a noop reload can still heal an analog-only failure.
+        # Analog errors are captured independently and do NOT cause a 500 —
+        # models are loaded and scoring is live regardless.
+        should_refresh_analog = changed or (_startup_analog_error is not None)
+        if should_refresh_analog:
+            try:
+                await asyncio.to_thread(analog_engine.refresh)
+                _startup_analog_error = None
+            except Exception as analog_exc:
+                _startup_analog_error = str(analog_exc)
+                log.warning("analog refresh failed during reload: %s", analog_exc)
+
         duration_ms = (time.perf_counter() - started_at) * 1000.0
         complete_ms = int(time.time() * 1000)
         ok_before = _reload_state_snapshot()
@@ -2053,7 +2336,7 @@ async def reload_models(force: bool = False):
             for target, horizons in models_payload.items()
             if isinstance(horizons, dict)
         }
-        return {
+        result = {
             "status": status,
             "changed": changed,
             "models": models,
@@ -2061,8 +2344,11 @@ async def reload_models(force: bool = False):
             "analogs": analog_engine.health(),
             "reload": _reload_state_snapshot(),
         }
+        if _startup_analog_error is not None:
+            result["startup_analog_error"] = _startup_analog_error
+        return result
     except Exception as exc:
-        _startup_error = str(exc)
+        _startup_model_error = str(exc)
         duration_ms = (time.perf_counter() - started_at) * 1000.0
         complete_ms = int(time.time() * 1000)
         err_before = _reload_state_snapshot()
@@ -2545,6 +2831,103 @@ def _pick_best_horizon(
     return best_horizon, True
 
 
+def _compute_model_side_margin_shadow_emission(
+    *,
+    manifest: dict | None,
+    scores: dict[str, float | None],
+    selected_policy: str,
+    trade_regime: str,
+    selected_threshold_map: dict[str, dict[int, float]],
+) -> dict[str, dict[str, object]]:
+    policy_name = ML_MODEL_SIDE_MARGIN_SHADOW_POLICY_NAME
+    base_payload: dict[str, object] = {
+        "policy_name": policy_name,
+        "mode": ML_MODEL_SIDE_MARGIN_SHADOW_MODE,
+        "eligible": False,
+        "shadow_emit": False,
+        "selected_policy_runtime": selected_policy,
+        "trade_regime": trade_regime,
+        "shadow_horizon": None,
+        "shadow_side": None,
+        "ineligibility_reason": "",
+        "side_prob": None,
+        "reference_threshold": None,
+        "runtime_threshold": None,
+        "model_side_margin": None,
+        "margin_cutoff": None,
+        "percentile_cutoff": None,
+        "fit_rows": None,
+        "eligible_rows": None,
+        "reference_threshold_source": None,
+    }
+    if ML_MODEL_SIDE_MARGIN_SHADOW_MODE == "off":
+        payload = dict(base_payload)
+        payload["ineligibility_reason"] = "mode_off"
+        return {policy_name: payload}
+
+    manifest_shadow = manifest.get("shadow_policies") if isinstance(manifest, dict) else None
+    policy = manifest_shadow.get(policy_name) if isinstance(manifest_shadow, dict) else None
+    if not isinstance(policy, dict):
+        payload = dict(base_payload)
+        payload["ineligibility_reason"] = "missing_policy_config"
+        return {policy_name: payload}
+
+    horizon = _to_int(policy.get("horizon"))
+    if horizon not in {5, 15, 30, 60}:
+        payload = dict(base_payload)
+        payload["shadow_horizon"] = horizon
+        payload["ineligibility_reason"] = "invalid_policy_horizon"
+        return {policy_name: payload}
+
+    payload = dict(base_payload)
+    payload["shadow_horizon"] = horizon
+    payload["percentile_cutoff"] = _to_float(policy.get("percentile_cutoff"))
+    payload["reference_threshold_source"] = policy.get("reference_threshold_source")
+
+    if selected_policy != "regime_active":
+        payload["ineligibility_reason"] = f"selected_policy={selected_policy or 'unknown'}"
+        return {policy_name: payload}
+    if trade_regime not in {"expansion", "compression"}:
+        payload["ineligibility_reason"] = f"trade_regime={trade_regime or 'unknown'}"
+        return {policy_name: payload}
+
+    shadow_side = favored_side_for_trade_regime(trade_regime)
+    if shadow_side not in {"reject", "break"}:
+        payload["ineligibility_reason"] = f"unsupported_shadow_side={shadow_side}"
+        return {policy_name: payload}
+    payload["shadow_side"] = shadow_side
+    side_policy = policy.get(shadow_side)
+    if not isinstance(side_policy, dict):
+        payload["ineligibility_reason"] = f"missing_side_config={shadow_side}"
+        return {policy_name: payload}
+
+    reference_threshold = _to_float(side_policy.get("reference_threshold"))
+    margin_cutoff = _to_float(side_policy.get("margin_cutoff"))
+    side_prob = _to_float(scores.get(f"prob_{shadow_side}_{horizon}m"))
+    runtime_threshold = _to_float(
+        _threshold_from_map(selected_threshold_map, shadow_side, horizon, context="shadow_margin_runtime")
+    )
+    payload["reference_threshold"] = reference_threshold
+    payload["margin_cutoff"] = margin_cutoff
+    payload["side_prob"] = side_prob
+    payload["runtime_threshold"] = runtime_threshold
+    payload["fit_rows"] = _to_int(side_policy.get("fit_rows"))
+    payload["eligible_rows"] = _to_int(side_policy.get("eligible_rows"))
+
+    if reference_threshold is None or margin_cutoff is None:
+        payload["ineligibility_reason"] = "incomplete_side_config"
+        return {policy_name: payload}
+    if side_prob is None:
+        payload["ineligibility_reason"] = "missing_side_probability"
+        return {policy_name: payload}
+
+    margin = float(side_prob) - float(reference_threshold)
+    payload["eligible"] = True
+    payload["model_side_margin"] = margin
+    payload["shadow_emit"] = bool(margin >= float(margin_cutoff))
+    return {policy_name: payload}
+
+
 def _score_event(event: dict):
     load_shed_analogs = bool(getattr(_SCORE_LOAD_SHED_LOCAL, "disable_analogs", False))
     missing = collect_missing(event)
@@ -2616,13 +2999,29 @@ def _score_event(event: dict):
             if model is None:
                 continue
             prob = extract_prob(model, df)
+            horizon_stats = stats.get(str(horizon), {}).get(target, {})
+
+            if RF_LABEL_SHIFT_CORRECTION_ENABLED and prob is not None:
+                pi_train = horizon_stats.get(f"{target}_rate")
+                if pi_train is not None:
+                    pi_current = rolling_class_rate(
+                        str(PREDICTION_LOG_DB),
+                        target=target,
+                        horizon=horizon,
+                        window_days=RF_PRIOR_WINDOW_DAYS,
+                        min_rows=RF_PRIOR_MIN_ROWS,
+                    )
+                    if pi_current is not None:
+                        scores[f"prob_{target}_{horizon}m_raw"] = prob
+                        prob = correct_prior_shift(prob, pi_train, pi_current)
+                        scores[f"label_shift_pi_train_{target}_{horizon}m"] = pi_train
+                        scores[f"label_shift_pi_current_{target}_{horizon}m"] = pi_current
+
             scores[f"prob_{target}_{horizon}m"] = prob
 
             # Store the threshold used for this model
             threshold = _snapshot_threshold(target, horizon)
             thresholds_used[f"threshold_{target}_{horizon}m"] = threshold
-
-            horizon_stats = stats.get(str(horizon), {}).get(target, {})
             for metric in ("mfe_bps", "mae_bps"):
                 if f"{metric}_{target}" in horizon_stats:
                     scores[f"{metric}_{target}_{horizon}m"] = horizon_stats.get(f"{metric}_{target}")
@@ -3250,6 +3649,14 @@ def _score_event(event: dict):
             selected_threshold_map, "break", horizon, context="response_payload"
         )
 
+    shadow_emissions = _compute_model_side_margin_shadow_emission(
+        manifest=manifest,
+        scores=scores,
+        selected_policy=selected_policy,
+        trade_regime=regime_state["bucket"],
+        selected_threshold_map=selected_threshold_map,
+    )
+
     return {
         "status": "degraded" if missing else "ok",
         "scores": scores,
@@ -3265,6 +3672,7 @@ def _score_event(event: dict):
         "analogs": analog_summary,
         "analog_blend": blend_info,
         "analog_disagreement_guard": disagreement_guard_info,
+        "shadow_emissions": shadow_emissions,
         "regime_policy": {
             "mode": ML_REGIME_POLICY_MODE,
             "selected_policy": selected_policy,
@@ -3404,9 +3812,15 @@ async def score(request: Request):
     request_error: str | None = None
     score_state = _score_state_snapshot()
     current_in_flight = int(score_state.get("in_flight", 0))
+    # Use strict greater-than so the threshold behaves as "disable analogs when
+    # MORE THAN N requests are already in flight."  With the default of 1 this
+    # means analogs are disabled only when a second concurrent request arrives,
+    # not for every request.  (in_flight is incremented by _try_begin_score_request
+    # before this point, so >= 1 is always true for any active request — the old
+    # >= comparison made the default effectively always-disable-analogs.)
     disable_analogs = (
         ML_SCORE_ANALOG_DISABLE_IN_FLIGHT > 0
-        and current_in_flight >= ML_SCORE_ANALOG_DISABLE_IN_FLIGHT
+        and current_in_flight > ML_SCORE_ANALOG_DISABLE_IN_FLIGHT
     )
     try:
         payload = await _read_score_payload(request)

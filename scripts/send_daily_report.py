@@ -732,6 +732,7 @@ def compute_impact_stats(
     report_day: date,
     include_preview: bool = False,
     prediction_basis: str | None = None,
+    model_version: str | None = None,
 ) -> dict[str, Any]:
     spread = float(os.getenv("ML_COST_SPREAD_BPS", "0.8"))
     slippage = float(os.getenv("ML_COST_SLIPPAGE_BPS", "0.4"))
@@ -775,6 +776,12 @@ def compute_impact_stats(
         preview_filter = ""
         if has_preview and not include_preview:
             preview_filter = "AND COALESCE(lp.is_preview, 0) = 0"
+        model_filter = ""
+        params: list[Any] = []
+        scoped_model_version = (str(model_version).strip() if model_version is not None else "")
+        if scoped_model_version:
+            model_filter = "AND COALESCE(lp.model_version, '') = ?"
+            params.append(scoped_model_version)
         signal_select = ",\n                ".join(
             (
                 f"lp.signal_{h}m"
@@ -811,8 +818,9 @@ def compute_impact_stats(
             JOIN selected_pred lp ON lp.event_id = el.event_id
             WHERE te.ts_event >= ? AND te.ts_event < ?
               {preview_filter}
+              {model_filter}
             """,
-            (start_ms, end_ms),
+            (start_ms, end_ms, *params),
         ).fetchall()
 
         gross_vals: list[float] = []
@@ -981,6 +989,15 @@ def normalize_prediction_basis(raw: str | None) -> str:
     return basis if basis in {"first", "latest"} else "first"
 
 
+def extract_model_version(raw: str | None) -> str | None:
+    if raw is None:
+        return None
+    match = re.search(r"\b(v\d+)\b", str(raw))
+    if not match:
+        return None
+    return match.group(1)
+
+
 def parse_report_context(markdown: str, report_path: Path) -> dict[str, str]:
     report_date = "unknown"
     header = markdown.splitlines()[0].strip() if markdown else ""
@@ -1013,6 +1030,9 @@ def parse_report_context(markdown: str, report_path: Path) -> dict[str, str]:
         "trading_utility": extract_line_value(markdown, "Trading Utility") or "unknown",
         "operator_note": extract_line_value(markdown, "Operator Note") or "unknown",
         "model": extract_line_value(markdown, "Model") or "unknown",
+        "prediction_row_scope": extract_line_value(markdown, "Prediction Row Scope") or "",
+        "window_model_mix": extract_line_value(markdown, "Window Model-Version Mix") or "",
+        "excluded_other_model_events": extract_line_value(markdown, "Excluded Other-Model Events") or "",
         "staleness": extract_line_value(markdown, "Model Staleness") or "unknown",
         "prediction_basis": parsed_basis,
         "scored": scored_value,
@@ -1030,10 +1050,20 @@ def build_short_summary(context: dict[str, str]) -> str:
         f"Model readiness: {context.get('model_readiness', 'unknown')}",
         f"Trading utility: {context.get('trading_utility', 'unknown')}",
         f"Model: {context['model']}",
-        f"Model staleness: {context['staleness']}",
-        f"Scored predictions ({basis_label}): {context['scored']}",
-        f"Report file: {context['report_path']}",
     ]
+    if context.get("prediction_row_scope"):
+        lines.append(f"Prediction row scope: {context['prediction_row_scope']}")
+    if context.get("window_model_mix"):
+        lines.append(f"Window model-version mix: {context['window_model_mix']}")
+    if context.get("excluded_other_model_events"):
+        lines.append(f"Excluded other-model events: {context['excluded_other_model_events']}")
+    lines.extend(
+        [
+            f"Model staleness: {context['staleness']}",
+            f"Scored predictions ({basis_label}): {context['scored']}",
+            f"Report file: {context['report_path']}",
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -1250,6 +1280,12 @@ def build_compact_email_body(
     if operator_note and operator_note.lower() != "unknown":
         lines.append(f"- Operator Note: {operator_note}")
     lines.append(f"- Model: {context['model']}")
+    if context.get("prediction_row_scope"):
+        lines.append(f"- Prediction Row Scope: {context['prediction_row_scope']}")
+    if context.get("window_model_mix"):
+        lines.append(f"- Window Model-Version Mix: {context['window_model_mix']}")
+    if context.get("excluded_other_model_events"):
+        lines.append(f"- Excluded Other-Model Events: {context['excluded_other_model_events']}")
     lines.append(f"- Staleness: {context['staleness']}")
     lines.append(f"- Scored Predictions ({basis_label}): {context['scored']}")
     lines.append(f"- Unique Events Scored: {context['unique_events']}")
@@ -1582,7 +1618,15 @@ def main() -> int:
     if previous_report_path and previous_report_path.exists():
         previous_context = parse_report_context(read_report(previous_report_path), previous_report_path)
     trend_lines = build_trend_summary(context, previous_context, db_progress, db_prev, failures_today, failures_prev)
-    impact_stats = compute_impact_stats(args.db, report_day, prediction_basis=prediction_basis)
+    impact_model_version = extract_model_version(
+        context.get("prediction_row_scope") or context.get("model")
+    )
+    impact_stats = compute_impact_stats(
+        args.db,
+        report_day,
+        prediction_basis=prediction_basis,
+        model_version=impact_model_version,
+    )
     impact_lines = build_impact_lines(impact_stats)
     action_flags = build_action_flags(context, db_progress, retrain_status, failures_today, impact_stats)
     compact_body = build_compact_email_body(

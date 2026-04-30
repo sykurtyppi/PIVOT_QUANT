@@ -19,6 +19,7 @@ import os
 import shutil
 import sys
 import time
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,7 @@ if str(ROOT) not in sys.path:
 
 from ml.calibration import ProbabilityCalibrator
 from ml.features import drop_features, build_feature_row
+from ml.regime_semantics import favored_bucket_for_target
 from ml.thresholds import select_threshold, utility_bps_for_target
 
 DEFAULT_DUCKDB = os.getenv("DUCKDB_PATH", "data/pivot_training.duckdb")
@@ -36,6 +38,20 @@ DEFAULT_VIEW = os.getenv("DUCKDB_VIEW", "training_events_v1")
 DEFAULT_MODEL_DIR = os.getenv("RF_MODEL_DIR", "data/models")
 DEFAULT_ACTIVE_MANIFEST = os.getenv("RF_ACTIVE_MANIFEST", "manifest_active.json").strip() or "manifest_active.json"
 DEFAULT_SUMMARY_OUT = os.getenv("CALIB_REFIT_SUMMARY_PATH", "logs/calibration_refit_last.json")
+DEFAULT_SHADOW_POLICY_NAME = (
+    os.getenv("RF_SHADOW_POLICY_NAME", "model_side_margin_v1").strip()
+    or "model_side_margin_v1"
+)
+try:
+    DEFAULT_SHADOW_POLICY_HORIZON = int(os.getenv("RF_SHADOW_POLICY_HORIZON", "60") or "60")
+except (TypeError, ValueError):
+    DEFAULT_SHADOW_POLICY_HORIZON = 60
+try:
+    DEFAULT_SHADOW_POLICY_PERCENTILE = min(
+        0.99, max(0.50, float(os.getenv("RF_SHADOW_POLICY_PERCENTILE", "0.70")))
+    )
+except (TypeError, ValueError):
+    DEFAULT_SHADOW_POLICY_PERCENTILE = 0.70
 
 
 def _env_float(name: str, default: float) -> float:
@@ -53,6 +69,24 @@ def _env_bool(name: str, default: bool) -> bool:
     if raw is None or raw == "":
         return bool(default)
     return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _to_float(value) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_int(value) -> int | None:
+    try:
+        if value is None:
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def require(module_name: str, hint: str):
@@ -147,6 +181,205 @@ def parse_horizons(raw: str | None) -> list[int]:
     return out
 
 
+def _shadow_trade_regime_bucket(row) -> str:
+    """Mirror runtime regime bucketing closely enough for shadow-policy fitting."""
+    regime_type = _to_int(row.get("regime_type"))
+    rv_regime = _to_int(row.get("rv_regime"))
+    or_size_atr = _to_float(row.get("or_size_atr"))
+    or_breakout = _to_int(row.get("or_breakout"))
+    overnight_gap_atr = _to_float(row.get("overnight_gap_atr"))
+    gamma_mode = _to_int(row.get("gamma_mode"))
+
+    expansion_votes = 0
+    compression_votes = 0
+
+    if regime_type in (1, 2, 4):
+        expansion_votes += 1
+    elif regime_type == 3:
+        compression_votes += 1
+
+    if rv_regime == 3:
+        expansion_votes += 1
+    elif rv_regime == 1:
+        compression_votes += 1
+
+    if or_breakout in (-1, 1):
+        expansion_votes += 1
+
+    if or_size_atr is not None:
+        if or_size_atr >= 0.7:
+            expansion_votes += 1
+        elif or_size_atr <= 0.35:
+            compression_votes += 1
+
+    if overnight_gap_atr is not None and abs(overnight_gap_atr) >= 0.5:
+        expansion_votes += 1
+
+    if gamma_mode == -1:
+        expansion_votes += 1
+    elif gamma_mode == 1:
+        compression_votes += 1
+
+    if expansion_votes >= max(2, compression_votes + 1):
+        return "expansion"
+    if compression_votes >= max(2, expansion_votes + 1):
+        return "compression"
+    return "neutral"
+
+
+def _fit_model_side_margin_shadow_policy(
+    *,
+    target: str,
+    horizon: int,
+    tune_rows,
+    y_prob,
+    reference_threshold: float | None,
+    percentile_cutoff: float,
+    policy_name: str,
+    trade_cost_bps: float,
+) -> dict | None:
+    if target not in {"reject", "break"}:
+        return None
+    if reference_threshold is None:
+        return {
+            "policy_name": policy_name,
+            "horizon": int(horizon),
+            "side": target,
+            "status": "disabled",
+            "reason": "missing_reference_threshold",
+            "reference_threshold": None,
+            "margin_cutoff": None,
+            "percentile_cutoff": float(percentile_cutoff),
+            "fit_rows": 0,
+            "eligible_rows": 0,
+            "emitted_rows": 0,
+        }
+    if y_prob is None:
+        return {
+            "policy_name": policy_name,
+            "horizon": int(horizon),
+            "side": target,
+            "status": "disabled",
+            "reason": "missing_tune_probabilities",
+            "reference_threshold": float(reference_threshold),
+            "margin_cutoff": None,
+            "percentile_cutoff": float(percentile_cutoff),
+            "fit_rows": 0,
+            "eligible_rows": 0,
+            "emitted_rows": 0,
+        }
+
+    pd = require("pandas", "python3 -m pip install pandas")
+    np = require("numpy", "python3 -m pip install numpy")
+
+    tune_df = pd.DataFrame(tune_rows).copy()
+    if tune_df.empty:
+        return {
+            "policy_name": policy_name,
+            "horizon": int(horizon),
+            "side": target,
+            "status": "disabled",
+            "reason": "empty_tune_slice",
+            "reference_threshold": float(reference_threshold),
+            "margin_cutoff": None,
+            "percentile_cutoff": float(percentile_cutoff),
+            "fit_rows": 0,
+            "eligible_rows": 0,
+            "emitted_rows": 0,
+        }
+    if len(y_prob) != len(tune_df):
+        return {
+            "policy_name": policy_name,
+            "horizon": int(horizon),
+            "side": target,
+            "status": "disabled",
+            "reason": "probability_length_mismatch",
+            "reference_threshold": float(reference_threshold),
+            "margin_cutoff": None,
+            "percentile_cutoff": float(percentile_cutoff),
+            "fit_rows": int(len(tune_df)),
+            "eligible_rows": 0,
+            "emitted_rows": 0,
+        }
+
+    tune_df["_shadow_trade_regime"] = tune_df.apply(_shadow_trade_regime_bucket, axis=1)
+    eligible_bucket = favored_bucket_for_target(target)
+    if eligible_bucket is None:
+        return None
+    tune_df["_shadow_side_prob"] = np.asarray(y_prob, dtype=float)
+    tune_df["_model_side_margin"] = tune_df["_shadow_side_prob"] - float(reference_threshold)
+    eligible_df = tune_df[tune_df["_shadow_trade_regime"] == eligible_bucket].copy()
+    if eligible_df.empty:
+        return {
+            "policy_name": policy_name,
+            "horizon": int(horizon),
+            "side": target,
+            "status": "disabled",
+            "reason": "no_eligible_regime_rows",
+            "reference_threshold": float(reference_threshold),
+            "margin_cutoff": None,
+            "percentile_cutoff": float(percentile_cutoff),
+            "fit_rows": int(len(tune_df)),
+            "eligible_rows": 0,
+            "emitted_rows": 0,
+        }
+
+    margin_arr = eligible_df["_model_side_margin"].to_numpy(dtype=float)
+    if np.isnan(margin_arr).all():
+        return {
+            "policy_name": policy_name,
+            "horizon": int(horizon),
+            "side": target,
+            "status": "disabled",
+            "reason": "all_nan_margin",
+            "reference_threshold": float(reference_threshold),
+            "margin_cutoff": None,
+            "percentile_cutoff": float(percentile_cutoff),
+            "fit_rows": int(len(tune_df)),
+            "eligible_rows": int(len(eligible_df)),
+            "emitted_rows": 0,
+        }
+    margin_cutoff = float(np.quantile(margin_arr[~np.isnan(margin_arr)], percentile_cutoff))
+    emitted_df = eligible_df[eligible_df["_model_side_margin"] >= margin_cutoff].copy()
+    emitted_utility_avg = None
+    emitted_utility_sum = None
+    if (
+        not emitted_df.empty
+        and "return_bps" in emitted_df.columns
+        and "touch_side" in emitted_df.columns
+    ):
+        emitted_utility = utility_bps_for_target(
+            emitted_df["return_bps"],
+            emitted_df["touch_side"],
+            target,
+            trade_cost_bps=float(trade_cost_bps),
+        )
+        if len(emitted_utility) > 0:
+            emitted_utility_sum = float(np.sum(emitted_utility))
+            emitted_utility_avg = float(np.mean(emitted_utility))
+
+    return {
+        "policy_name": policy_name,
+        "horizon": int(horizon),
+        "side": target,
+        "status": "ok",
+        "reason": "",
+        "reference_threshold": float(reference_threshold),
+        "margin_cutoff": float(margin_cutoff),
+        "percentile_cutoff": float(percentile_cutoff),
+        "fit_rows": int(len(tune_df)),
+        "eligible_rows": int(len(eligible_df)),
+        "emitted_rows": int(len(emitted_df)),
+        "eligible_mean_margin": float(eligible_df["_model_side_margin"].mean()),
+        "eligible_p95_margin": float(eligible_df["_model_side_margin"].quantile(0.95)),
+        "emitted_mean_margin": float(emitted_df["_model_side_margin"].mean()) if not emitted_df.empty else None,
+        "eligible_positive_rate": float(eligible_df[target].mean()) if target in eligible_df.columns else None,
+        "emitted_positive_rate": float(emitted_df[target].mean()) if target in emitted_df.columns else None,
+        "emitted_utility_sum": emitted_utility_sum,
+        "emitted_utility_avg": emitted_utility_avg,
+    }
+
+
 def split_calibration_slices(X_calib, y_calib, *, fit_fraction: float, min_fit_events: int, min_tune_events: int):
     n = len(X_calib)
     if n == 0:
@@ -239,9 +472,14 @@ def main() -> None:
     )
     parser.add_argument(
         "--retune-thresholds",
-        action="store_true",
-        default=_env_bool("CALIB_REFIT_RETUNE_THRESHOLDS", False),
-        help="Enable threshold retuning during calibration refit.",
+        action=argparse.BooleanOptionalAction,
+        default=_env_bool("CALIB_REFIT_RETUNE_THRESHOLDS", True),
+        help=(
+            "Enable threshold retuning during calibration refit (default: True). "
+            "Pass --no-retune-thresholds or set CALIB_REFIT_RETUNE_THRESHOLDS=false to disable. "
+            "WARNING: disabling retune means live thresholds will NOT be updated — "
+            "this was the root cause of the v215 inactivity incident."
+        ),
     )
     parser.add_argument(
         "--calib-fit-fraction",
@@ -255,9 +493,49 @@ def main() -> None:
         default=int(_env_float("CALIB_REFIT_CALIB_MIN_FIT_EVENTS", 20)),
         help="Minimum rows reserved for calibration fitting slice.",
     )
+    parser.add_argument(
+        "--shadow-policy-name",
+        default=DEFAULT_SHADOW_POLICY_NAME,
+        help="Manifest key for the logging-only shadow emission policy.",
+    )
+    parser.add_argument(
+        "--shadow-policy-horizon",
+        type=int,
+        default=DEFAULT_SHADOW_POLICY_HORIZON,
+        help="Horizon used by the model-side-margin shadow emission policy.",
+    )
+    parser.add_argument(
+        "--shadow-policy-percentile",
+        type=float,
+        default=DEFAULT_SHADOW_POLICY_PERCENTILE,
+        help="Eligible-row quantile used to define shadow emits (0.70 = top 30%%).",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--summary-out", default=DEFAULT_SUMMARY_OUT)
     args = parser.parse_args()
+
+    # -----------------------------------------------------------------------
+    # Operational safety gate: make disabled-retune impossible to miss.
+    # Rationale: the previous production inactivity incident (v215) was caused
+    # by threshold retune being silently disabled in this path.  Emitting a
+    # prominent warning to BOTH stderr and stdout ensures it appears in any
+    # log capture regardless of stream routing.
+    # -----------------------------------------------------------------------
+    if not args.retune_thresholds:
+        _retune_warn = (
+            "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+            "[refit_calibration] WARNING: threshold retune is DISABLED.\n"
+            "  Live decision thresholds will NOT be updated by this refit run.\n"
+            "  Calibration curves will be refreshed but optimal_threshold values\n"
+            "  will remain frozen at their last-trained values.\n"
+            "  To enable: set CALIB_REFIT_RETUNE_THRESHOLDS=true in .env,\n"
+            "  or pass --retune-thresholds on the command line.\n"
+            "  Reminder: disabled retune was the root cause of the v215\n"
+            "  inactivity incident.  Confirm this is intentional.\n"
+            "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+        )
+        print(_retune_warn, file=sys.stderr)
+        print(_retune_warn)
 
     require("numpy", "python3 -m pip install numpy")
     joblib = require("joblib", "python3 -m pip install joblib")
@@ -278,6 +556,38 @@ def main() -> None:
 
     requested_targets = set(parse_csv(args.targets))
     requested_horizons = set(parse_horizons(args.horizons))
+    shadow_policy_key = str(args.shadow_policy_name or DEFAULT_SHADOW_POLICY_NAME).strip() or DEFAULT_SHADOW_POLICY_NAME
+    manifest.setdefault("shadow_policies", {})
+    shadow_policy_config = manifest["shadow_policies"].setdefault(shadow_policy_key, {})
+    shadow_policy_config["policy_name"] = shadow_policy_key
+    shadow_policy_config["horizon"] = int(args.shadow_policy_horizon)
+    shadow_policy_config["scope"] = "regime_active_only"
+    shadow_policy_config["percentile_cutoff"] = float(args.shadow_policy_percentile)
+    shadow_policy_config["reference_threshold_source"] = "selected_threshold_for_utility_diagnostics"
+    shadow_policy_config.setdefault(
+        "reject",
+        {
+            "status": "pending",
+            "reason": "target_horizon_not_processed",
+            "reference_threshold": None,
+            "margin_cutoff": None,
+            "fit_rows": 0,
+            "eligible_rows": 0,
+            "emitted_rows": 0,
+        },
+    )
+    shadow_policy_config.setdefault(
+        "break",
+        {
+            "status": "pending",
+            "reason": "target_horizon_not_processed",
+            "reference_threshold": None,
+            "margin_cutoff": None,
+            "fit_rows": 0,
+            "eligible_rows": 0,
+            "emitted_rows": 0,
+        },
+    )
 
     pairs: list[tuple[str, int, str]] = []
     for target, horizon_map in manifest_models.items():
@@ -437,6 +747,7 @@ def main() -> None:
 
         model_obj = calibrator if calibrator is not None else pipeline
         optimal_threshold = float(payload.get("optimal_threshold", 0.5) or 0.5)
+        y_prob_tune = None
         threshold_stability_band = float(args.threshold_stability_band)
         if args.threshold_objective == "utility_bps" and threshold_stability_band <= 0.0:
             threshold_stability_band = 0.02
@@ -481,7 +792,7 @@ def main() -> None:
             try:
                 probs = model_obj.predict_proba(X_calib_tune)
                 if probs.shape[1] == 2:
-                    y_prob = probs[:, 1]
+                    y_prob_tune = probs[:, 1]
                     utility_values = None
                     if args.threshold_objective == "utility_bps":
                         utility_values = utility_bps_for_target(
@@ -492,7 +803,7 @@ def main() -> None:
                         )
                     selection = select_threshold(
                         y_calib_tune.to_numpy(),
-                        y_prob,
+                        y_prob_tune,
                         objective=args.threshold_objective,
                         precision_floor=float(args.precision_floor),
                         min_signals=int(args.threshold_min_signals),
@@ -525,9 +836,58 @@ def main() -> None:
                 else:
                     threshold_meta["search_enabled"] = False
                     threshold_meta["search_skip_reason"] = "invalid_probability_shape"
-            except Exception:
+            except Exception as _exc:
+                _exc_tb = traceback.format_exc()
+                _exc_msg = (
+                    f"[refit_calibration] ERROR: threshold selection raised "
+                    f"{type(_exc).__name__} for target={target} horizon={horizon}m. "
+                    f"Refit continues with fallback threshold={optimal_threshold:.6f}. "
+                    f"This threshold will NOT be updated. Traceback:\n{_exc_tb}"
+                )
+                print(_exc_msg, file=sys.stderr)
+                print(_exc_msg)
                 threshold_meta["search_enabled"] = False
-                threshold_meta["search_skip_reason"] = "threshold_selection_exception"
+                threshold_meta["search_skip_reason"] = (
+                    f"threshold_selection_exception: {type(_exc).__name__}: {_exc}"
+                )
+
+        if y_prob_tune is None and hasattr(model_obj, "predict_proba") and len(X_calib_tune) > 0:
+            try:
+                probs = model_obj.predict_proba(X_calib_tune)
+                if probs.shape[1] == 2:
+                    y_prob_tune = probs[:, 1]
+            except Exception as _exc:
+                _exc_tb = traceback.format_exc()
+                _exc_msg = (
+                    f"[refit_calibration] WARNING: fallback predict_proba raised "
+                    f"{type(_exc).__name__} for target={target} horizon={horizon}m. "
+                    f"Shadow policy for this target/horizon will be fit without "
+                    f"probabilities (margin_cutoff will not be updated). Traceback:\n{_exc_tb}"
+                )
+                print(_exc_msg, file=sys.stderr)
+                print(_exc_msg)
+                y_prob_tune = None
+
+        threshold_meta["selected_threshold_for_utility_diagnostics"] = float(optimal_threshold)
+
+        if horizon == int(args.shadow_policy_horizon):
+            shadow_reference_threshold = _to_float(
+                threshold_meta.get("selected_threshold_for_utility_diagnostics")
+            )
+            if shadow_reference_threshold is None:
+                shadow_reference_threshold = float(optimal_threshold)
+            shadow_policy_payload = _fit_model_side_margin_shadow_policy(
+                target=target,
+                horizon=horizon,
+                tune_rows=sub.loc[X_calib_tune.index].to_dict("records"),
+                y_prob=y_prob_tune,
+                reference_threshold=shadow_reference_threshold,
+                percentile_cutoff=float(args.shadow_policy_percentile),
+                policy_name=shadow_policy_key,
+                trade_cost_bps=float(args.threshold_trade_cost_bps),
+            )
+            if shadow_policy_payload is not None:
+                manifest["shadow_policies"].setdefault(shadow_policy_key, {})[target] = shadow_policy_payload
 
         payload["calibrator"] = calibrator
         payload["calibration"] = method
@@ -587,12 +947,19 @@ def main() -> None:
         "view": args.view,
         "calib_days": int(args.calib_days),
         "retune_thresholds": bool(args.retune_thresholds),
+        "retune_thresholds_warning": (
+            "THRESHOLD RETUNE DISABLED: live thresholds were NOT updated by this run"
+            if not args.retune_thresholds else None
+        ),
         "calib_fit_fraction": float(args.calib_fit_fraction),
         "calib_min_fit_events": int(args.calib_min_fit_events),
         "threshold_objective": args.threshold_objective,
         "threshold_min_signals": int(args.threshold_min_signals),
         "threshold_trade_cost_bps": float(args.threshold_trade_cost_bps),
         "threshold_stability_band": float(args.threshold_stability_band),
+        "shadow_policy_name": shadow_policy_key,
+        "shadow_policy_horizon": int(args.shadow_policy_horizon),
+        "shadow_policy_percentile": float(args.shadow_policy_percentile),
         "results": [
             {
                 "target": r.target,

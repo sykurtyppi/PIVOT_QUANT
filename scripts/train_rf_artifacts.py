@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -14,6 +16,7 @@ if str(ROOT) not in sys.path:
 
 from ml.calibration import ProbabilityCalibrator
 from ml.features import FEATURE_VERSION, build_feature_row, drop_features
+from ml.regime_semantics import favored_bucket_for_target
 from ml.thresholds import select_threshold, utility_bps_for_target
 
 DEFAULT_DUCKDB = os.getenv("DUCKDB_PATH", "data/pivot_training.duckdb")
@@ -24,6 +27,20 @@ DEFAULT_CANDIDATE_MANIFEST = (
     os.getenv("RF_CANDIDATE_MANIFEST", "manifest_runtime_latest.json").strip()
     or "manifest_runtime_latest.json"
 )
+DEFAULT_SHADOW_POLICY_NAME = (
+    os.getenv("RF_SHADOW_POLICY_NAME", "model_side_margin_v1").strip()
+    or "model_side_margin_v1"
+)
+try:
+    DEFAULT_SHADOW_POLICY_HORIZON = int(os.getenv("RF_SHADOW_POLICY_HORIZON", "60") or "60")
+except (TypeError, ValueError):
+    DEFAULT_SHADOW_POLICY_HORIZON = 60
+try:
+    DEFAULT_SHADOW_POLICY_PERCENTILE = min(
+        0.99, max(0.50, float(os.getenv("RF_SHADOW_POLICY_PERCENTILE", "0.70")))
+    )
+except (TypeError, ValueError):
+    DEFAULT_SHADOW_POLICY_PERCENTILE = 0.70
 
 
 def _env_float(name: str, default: float) -> float:
@@ -326,6 +343,34 @@ def atomic_copy_file(src: Path, dst: Path) -> None:
             tmp_path.unlink()
 
 
+def _merge_tune_date_range(current: dict[str, str] | None, event_dates) -> dict[str, str] | None:
+    values: list[str] = []
+    for value in list(event_dates):
+        if value is None:
+            continue
+        iso_value = value.isoformat() if hasattr(value, "isoformat") else str(value)
+        # Normalize to date-only (YYYY-MM-DD) so lexicographic min/max is safe
+        iso_value = str(iso_value).strip()[:10]
+        if iso_value:
+            values.append(iso_value)
+    if not values:
+        return current
+
+    next_min = min(values)
+    next_max = max(values)
+    if not current:
+        return {
+            "min_event_date_et": next_min,
+            "max_event_date_et": next_max,
+        }
+    cur_min = (current.get("min_event_date_et") or next_min)[:10]
+    cur_max = (current.get("max_event_date_et") or next_max)[:10]
+    return {
+        "min_event_date_et": min(cur_min, next_min),
+        "max_event_date_et": max(cur_max, next_max),
+    }
+
+
 def _regime_bucket(regime_type_value) -> str:
     regime_type = None
     try:
@@ -338,6 +383,224 @@ def _regime_bucket(regime_type_value) -> str:
     if regime_type == 3:
         return "compression"
     return "neutral"
+
+
+def _to_int(value) -> int | None:
+    try:
+        if value is None:
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_float(value) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _shadow_trade_regime_bucket(row) -> str:
+    """Mirror runtime regime bucketing closely enough for tune-time shadow fitting."""
+    regime_type = _to_int(row.get("regime_type"))
+    rv_regime = _to_int(row.get("rv_regime"))
+    or_size_atr = _to_float(row.get("or_size_atr"))
+    or_breakout = _to_int(row.get("or_breakout"))
+    overnight_gap_atr = _to_float(row.get("overnight_gap_atr"))
+    gamma_mode = _to_int(row.get("gamma_mode"))
+
+    expansion_votes = 0
+    compression_votes = 0
+
+    if regime_type in (1, 2, 4):
+        expansion_votes += 1
+    elif regime_type == 3:
+        compression_votes += 1
+
+    if rv_regime == 3:
+        expansion_votes += 1
+    elif rv_regime == 1:
+        compression_votes += 1
+
+    if or_breakout in (-1, 1):
+        expansion_votes += 1
+
+    if or_size_atr is not None:
+        if or_size_atr >= 0.7:
+            expansion_votes += 1
+        elif or_size_atr <= 0.35:
+            compression_votes += 1
+
+    if overnight_gap_atr is not None and abs(overnight_gap_atr) >= 0.5:
+        expansion_votes += 1
+
+    if gamma_mode == -1:
+        expansion_votes += 1
+    elif gamma_mode == 1:
+        compression_votes += 1
+
+    if expansion_votes >= max(2, compression_votes + 1):
+        return "expansion"
+    if compression_votes >= max(2, expansion_votes + 1):
+        return "compression"
+    return "neutral"
+
+
+def _fit_model_side_margin_shadow_policy(
+    *,
+    target: str,
+    horizon: int,
+    tune_rows,
+    y_prob,
+    reference_threshold: float | None,
+    percentile_cutoff: float,
+    policy_name: str,
+    trade_cost_bps: float,
+) -> dict | None:
+    if target not in {"reject", "break"}:
+        return None
+    if reference_threshold is None:
+        return {
+            "policy_name": policy_name,
+            "horizon": int(horizon),
+            "side": target,
+            "status": "disabled",
+            "reason": "missing_reference_threshold",
+            "reference_threshold": None,
+            "margin_cutoff": None,
+            "percentile_cutoff": float(percentile_cutoff),
+            "fit_rows": 0,
+            "eligible_rows": 0,
+            "emitted_rows": 0,
+        }
+    if y_prob is None:
+        return {
+            "policy_name": policy_name,
+            "horizon": int(horizon),
+            "side": target,
+            "status": "disabled",
+            "reason": "missing_tune_probabilities",
+            "reference_threshold": float(reference_threshold),
+            "margin_cutoff": None,
+            "percentile_cutoff": float(percentile_cutoff),
+            "fit_rows": 0,
+            "eligible_rows": 0,
+            "emitted_rows": 0,
+        }
+
+    pd = require("pandas", "python3 -m pip install pandas")
+    np = require("numpy", "python3 -m pip install numpy")
+
+    tune_df = pd.DataFrame(tune_rows).copy()
+    if tune_df.empty:
+        return {
+            "policy_name": policy_name,
+            "horizon": int(horizon),
+            "side": target,
+            "status": "disabled",
+            "reason": "empty_tune_slice",
+            "reference_threshold": float(reference_threshold),
+            "margin_cutoff": None,
+            "percentile_cutoff": float(percentile_cutoff),
+            "fit_rows": 0,
+            "eligible_rows": 0,
+            "emitted_rows": 0,
+        }
+    if len(y_prob) != len(tune_df):
+        return {
+            "policy_name": policy_name,
+            "horizon": int(horizon),
+            "side": target,
+            "status": "disabled",
+            "reason": "probability_length_mismatch",
+            "reference_threshold": float(reference_threshold),
+            "margin_cutoff": None,
+            "percentile_cutoff": float(percentile_cutoff),
+            "fit_rows": int(len(tune_df)),
+            "eligible_rows": 0,
+            "emitted_rows": 0,
+        }
+
+    tune_df["_shadow_trade_regime"] = tune_df.apply(_shadow_trade_regime_bucket, axis=1)
+    eligible_bucket = favored_bucket_for_target(target)
+    if eligible_bucket is None:
+        return None
+    tune_df["_shadow_side_prob"] = np.asarray(y_prob, dtype=float)
+    tune_df["_model_side_margin"] = tune_df["_shadow_side_prob"] - float(reference_threshold)
+    eligible_df = tune_df[tune_df["_shadow_trade_regime"] == eligible_bucket].copy()
+    if eligible_df.empty:
+        return {
+            "policy_name": policy_name,
+            "horizon": int(horizon),
+            "side": target,
+            "status": "disabled",
+            "reason": "no_eligible_regime_rows",
+            "reference_threshold": float(reference_threshold),
+            "margin_cutoff": None,
+            "percentile_cutoff": float(percentile_cutoff),
+            "fit_rows": int(len(tune_df)),
+            "eligible_rows": 0,
+            "emitted_rows": 0,
+        }
+
+    margin_arr = eligible_df["_model_side_margin"].to_numpy(dtype=float)
+    if np.isnan(margin_arr).all():
+        return {
+            "policy_name": policy_name,
+            "horizon": int(horizon),
+            "side": target,
+            "status": "disabled",
+            "reason": "all_nan_margin",
+            "reference_threshold": float(reference_threshold),
+            "margin_cutoff": None,
+            "percentile_cutoff": float(percentile_cutoff),
+            "fit_rows": int(len(tune_df)),
+            "eligible_rows": int(len(eligible_df)),
+            "emitted_rows": 0,
+        }
+    margin_cutoff = float(np.quantile(margin_arr[~np.isnan(margin_arr)], percentile_cutoff))
+    emitted_df = eligible_df[eligible_df["_model_side_margin"] >= margin_cutoff].copy()
+    emitted_utility_avg = None
+    emitted_utility_sum = None
+    if (
+        not emitted_df.empty
+        and "return_bps" in emitted_df.columns
+        and "touch_side" in emitted_df.columns
+    ):
+        emitted_utility = utility_bps_for_target(
+            emitted_df["return_bps"],
+            emitted_df["touch_side"],
+            target,
+            trade_cost_bps=float(trade_cost_bps),
+        )
+        if len(emitted_utility) > 0:
+            emitted_utility_sum = float(np.sum(emitted_utility))
+            emitted_utility_avg = float(np.mean(emitted_utility))
+
+    payload = {
+        "policy_name": policy_name,
+        "horizon": int(horizon),
+        "side": target,
+        "status": "ok",
+        "reason": "",
+        "reference_threshold": float(reference_threshold),
+        "margin_cutoff": float(margin_cutoff),
+        "percentile_cutoff": float(percentile_cutoff),
+        "fit_rows": int(len(tune_df)),
+        "eligible_rows": int(len(eligible_df)),
+        "emitted_rows": int(len(emitted_df)),
+        "eligible_mean_margin": float(eligible_df["_model_side_margin"].mean()),
+        "eligible_p95_margin": float(eligible_df["_model_side_margin"].quantile(0.95)),
+        "emitted_mean_margin": float(emitted_df["_model_side_margin"].mean()) if not emitted_df.empty else None,
+        "eligible_positive_rate": float(eligible_df[target].mean()) if target in eligible_df.columns else None,
+        "emitted_positive_rate": float(emitted_df[target].mean()) if target in emitted_df.columns else None,
+        "emitted_utility_sum": emitted_utility_sum,
+        "emitted_utility_avg": emitted_utility_avg,
+    }
+    return payload
 
 
 def _compute_target_stats(sub_df, target: str) -> dict:
@@ -359,6 +622,64 @@ def _compute_target_stats(sub_df, target: str) -> dict:
         # reject/break stats are merged into a single payload.
         stats[f"{metric}_{target}_other"] = neg_metric
     return stats
+
+
+def select_calibration_dates(
+    df,
+    *,
+    calib_days: int,
+    calib_mode: str = "recent_days",
+    calib_lookback_days: int = 60,
+    calib_min_rows: int = 80,
+) -> set:
+    """Return a set of event_date_et values to use as the calibration window.
+
+    Modes:
+      recent_days   — last `calib_days` calendar dates (original behaviour).
+      regime_matched — prefer dates whose regime bucket matches the tail regime;
+                       falls back to recent_days when regime-matched rows < calib_min_rows.
+    """
+    dates = sorted({d for d in df["event_date_et"].tolist() if d is not None})
+    if not dates or not calib_days:
+        return set()
+
+    if calib_mode != "regime_matched" or "regime_type" not in df.columns:
+        return set(dates[-calib_days:])
+
+    # Determine current regime: majority bucket over the last 5 calendar dates.
+    tail_dates = set(dates[-5:])
+    tail_df = df[df["event_date_et"].isin(tail_dates)]
+    if not tail_df.empty:
+        buckets = tail_df["regime_type"].map(_regime_bucket)
+        current_regime = buckets.mode().iloc[0] if not buckets.mode().empty else "compression"
+    else:
+        current_regime = "compression"
+
+    # Restrict candidate pool to the last calib_lookback_days calendar dates.
+    cutoff_date = dates[-1] - __import__("datetime").timedelta(days=calib_lookback_days)
+    pool_dates = [d for d in dates if d > cutoff_date]
+
+    # Walk from the most-recent end, collecting dates whose majority regime matches.
+    df_pool = df[df["event_date_et"].isin(pool_dates)].copy()
+    df_pool["_rb"] = df_pool["regime_type"].map(_regime_bucket)
+
+    regime_matched: list = []
+    for d in reversed(pool_dates):
+        day_df = df_pool[df_pool["event_date_et"] == d]
+        if day_df.empty:
+            continue
+        day_buckets = day_df["_rb"]
+        if day_buckets.mode().iloc[0] == current_regime:
+            regime_matched.append(d)
+        if len(regime_matched) >= calib_days:
+            break
+
+    # Check whether we have enough rows; fall back if not.
+    matched_row_count = len(df_pool[df_pool["event_date_et"].isin(regime_matched)])
+    if matched_row_count < calib_min_rows:
+        return set(dates[-calib_days:])
+
+    return set(regime_matched)
 
 
 def compute_horizon_stats(df, target, horizon):
@@ -593,6 +914,23 @@ def main() -> None:
         help="Threshold used when risk guard disables a model/target horizon (typically 1.0).",
     )
     parser.add_argument(
+        "--shadow-policy-name",
+        default=DEFAULT_SHADOW_POLICY_NAME,
+        help="Manifest key for the logging-only shadow emission policy.",
+    )
+    parser.add_argument(
+        "--shadow-policy-horizon",
+        type=int,
+        default=DEFAULT_SHADOW_POLICY_HORIZON,
+        help="Horizon used by the model-side-margin shadow emission policy.",
+    )
+    parser.add_argument(
+        "--shadow-policy-percentile",
+        type=float,
+        default=DEFAULT_SHADOW_POLICY_PERCENTILE,
+        help="Eligible-row quantile used to define shadow emits (0.70 = top 30%%).",
+    )
+    parser.add_argument(
         "--threshold-disable-on-nonpositive-utility",
         dest="threshold_disable_on_nonpositive_utility",
         action="store_true",
@@ -630,6 +968,43 @@ def main() -> None:
         default=int(_env_float("RF_CALIB_MIN_FIT_EVENTS", 20)),
         help="Minimum events reserved for calibration fitting slice.",
     )
+    parser.add_argument(
+        "--time-decay-enabled",
+        dest="time_decay_enabled",
+        action="store_true",
+        default=_env_bool("RF_TIME_DECAY_ENABLED", False),
+        help="Apply exponential time decay sample weights during RF training.",
+    )
+    parser.add_argument(
+        "--no-time-decay",
+        dest="time_decay_enabled",
+        action="store_false",
+        help="Disable time decay even if RF_TIME_DECAY_ENABLED=1 in env.",
+    )
+    parser.add_argument(
+        "--time-decay-half-life-days",
+        type=float,
+        default=_env_float("RF_TIME_DECAY_HALF_LIFE_DAYS", 45.0),
+        help="Half-life in days for exponential sample weight decay (default 45).",
+    )
+    parser.add_argument(
+        "--calib-mode",
+        default=os.getenv("RF_CALIB_MODE", "recent_days").strip() or "recent_days",
+        choices=["recent_days", "regime_matched"],
+        help="Calibration date selection mode (default: recent_days).",
+    )
+    parser.add_argument(
+        "--calib-lookback-days",
+        type=int,
+        default=_env_int("RF_CALIB_LOOKBACK_DAYS", 60),
+        help="Candidate pool for regime_matched calib mode: last N calendar days (default 60).",
+    )
+    parser.add_argument(
+        "--calib-min-rows",
+        type=int,
+        default=_env_int("RF_CALIB_MIN_ROWS", 80),
+        help="Minimum rows needed for regime_matched calib; falls back to recent_days if below (default 80).",
+    )
     parser.add_argument("--out-dir", default=DEFAULT_OUT_DIR)
     parser.add_argument(
         "--metadata-dir",
@@ -665,7 +1040,13 @@ def main() -> None:
         print(str(exc), file=sys.stderr)
         raise SystemExit(2) from exc
 
+    if args.shadow_policy_horizon not in {5, 15, 30, 60}:
+        raise SystemExit("--shadow-policy-horizon must be one of 5, 15, 30, 60")
+    if not (0.0 < float(args.shadow_policy_percentile) < 1.0):
+        raise SystemExit("--shadow-policy-percentile must be within (0,1)")
+
     pd = require("pandas", "python3 -m pip install pandas")
+    np = require("numpy", "python3 -m pip install numpy")
     joblib = require("joblib", "python3 -m pip install joblib")
 
     out_dir = Path(args.out_dir)
@@ -683,9 +1064,41 @@ def main() -> None:
         "models": {},
         "calibration": {},
         "thresholds_meta": {},
+        "shadow_policies": {},
         "stats": {},
         "gamma_context": _gamma_context_metadata(),
         "trained_end_ts": None,
+        "tune_date_range": None,
+        "time_decay_enabled": bool(args.time_decay_enabled),
+        "time_decay_half_life_days": float(args.time_decay_half_life_days) if args.time_decay_enabled else None,
+        "calib_mode": str(args.calib_mode),
+        "calib_lookback_days": int(args.calib_lookback_days),
+    }
+    shadow_policy_key = str(args.shadow_policy_name or DEFAULT_SHADOW_POLICY_NAME).strip() or DEFAULT_SHADOW_POLICY_NAME
+    manifest["shadow_policies"][shadow_policy_key] = {
+        "policy_name": shadow_policy_key,
+        "horizon": int(args.shadow_policy_horizon),
+        "scope": "regime_active_only",
+        "percentile_cutoff": float(args.shadow_policy_percentile),
+        "reference_threshold_source": "selected_threshold_for_utility_diagnostics",
+        "reject": {
+            "status": "pending",
+            "reason": "target_horizon_not_processed",
+            "reference_threshold": None,
+            "margin_cutoff": None,
+            "fit_rows": 0,
+            "eligible_rows": 0,
+            "emitted_rows": 0,
+        },
+        "break": {
+            "status": "pending",
+            "reason": "target_horizon_not_processed",
+            "reference_threshold": None,
+            "margin_cutoff": None,
+            "fit_rows": 0,
+            "eligible_rows": 0,
+            "emitted_rows": 0,
+        },
     }
     trained_end_ts_max = None
     latest_aliases: list[tuple[Path, Path]] = []
@@ -728,8 +1141,13 @@ def main() -> None:
         feature_df = feature_df.drop(columns=[c for c in all_drops if c in feature_df.columns], errors="ignore")
         feature_df = feature_df.loc[:, feature_df.notna().any()]
 
-        dates = sorted({d for d in df["event_date_et"].tolist() if d is not None})
-        calib_dates = set(dates[-args.calib_days :]) if args.calib_days and dates else set()
+        calib_dates = select_calibration_dates(
+            df,
+            calib_days=args.calib_days,
+            calib_mode=args.calib_mode,
+            calib_lookback_days=args.calib_lookback_days,
+            calib_min_rows=args.calib_min_rows,
+        )
 
         for target in targets:
             if target not in df.columns:
@@ -785,7 +1203,22 @@ def main() -> None:
             ]
             numeric_cols = [c for c in X.columns if pd.api.types.is_numeric_dtype(X[c])]
             pipeline = build_pipeline(numeric_cols, categorical_cols, args)
-            pipeline.fit(X_train, y_train)
+
+            train_weights = None
+            if args.time_decay_enabled:
+                half_life = float(args.time_decay_half_life_days)
+                if half_life > 0:
+                    all_dates = [d for d in sub["event_date_et"] if d is not None]
+                    if all_dates:
+                        max_date = max(all_dates)
+                        train_event_dates = sub.loc[X_train.index, "event_date_et"]
+                        age_days = np.array(
+                            [(max_date - d).days if d is not None else 0 for d in train_event_dates],
+                            dtype=float,
+                        )
+                        train_weights = np.exp(-np.log(2) / half_life * age_days)
+
+            pipeline.fit(X_train, y_train, rf__sample_weight=train_weights)
 
             calibrator = None
             calib_method = None
@@ -854,6 +1287,10 @@ def main() -> None:
             model_obj = calibrator if calibrator is not None else pipeline
             X_calib_set = X_calib_tune if X_calib_tune is not None else X.loc[calib_mask_sub]
             y_calib_for_thresh = y_calib_tune if y_calib_tune is not None else y.loc[X_calib_set.index]
+            manifest["tune_date_range"] = _merge_tune_date_range(
+                manifest.get("tune_date_range"),
+                sub.loc[X_calib_set.index, "event_date_et"].tolist(),
+            )
             y_prob_calib = None
             utility_values_for_diag = None
             if calibrator is not None and calibration_shared_slice:
@@ -920,6 +1357,7 @@ def main() -> None:
                     threshold_meta["search_enabled"] = False
                     threshold_meta["search_skip_reason"] = "threshold_selection_exception"
 
+            pre_guard_reference_threshold = float(optimal_threshold)
             if (
                 args.threshold_objective == "utility_bps"
                 and y_prob_calib is not None
@@ -933,6 +1371,30 @@ def main() -> None:
                         threshold=float(optimal_threshold),
                     )
                 )
+
+            if horizon == int(args.shadow_policy_horizon):
+                shadow_reference_threshold = _to_float(
+                    threshold_meta.get("selected_threshold_for_utility_diagnostics")
+                )
+                if shadow_reference_threshold is None:
+                    shadow_reference_threshold = pre_guard_reference_threshold
+
+                shadow_policy_payload = _fit_model_side_margin_shadow_policy(
+                    target=target,
+                    horizon=horizon,
+                    tune_rows=sub.loc[X_calib_set.index].to_dict("records"),
+                    y_prob=(
+                        y_prob_calib
+                        if y_prob_calib is not None
+                        else []
+                    ),
+                    reference_threshold=shadow_reference_threshold,
+                    percentile_cutoff=float(args.shadow_policy_percentile),
+                    policy_name=shadow_policy_key,
+                    trade_cost_bps=float(args.threshold_trade_cost_bps),
+                )
+                if shadow_policy_payload is not None:
+                    manifest["shadow_policies"].setdefault(shadow_policy_key, {})[target] = shadow_policy_payload
 
             optimal_threshold, threshold_meta = apply_threshold_risk_guards(
                 objective=args.threshold_objective,

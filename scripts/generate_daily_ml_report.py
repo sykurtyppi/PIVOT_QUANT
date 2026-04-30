@@ -30,7 +30,31 @@ DEFAULT_PREDICTION_BASIS = (
 if DEFAULT_PREDICTION_BASIS not in {"first", "latest"}:
     DEFAULT_PREDICTION_BASIS = "first"
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.append(str(ROOT))
+
+from ml.regime_semantics import favored_side_for_trade_regime
+
 MODEL_DIR = Path(os.getenv("RF_MODEL_DIR", str(ROOT / "data" / "models")))
+DEFAULT_TRADE_COST_BPS = (
+    float(os.getenv("ML_COST_SPREAD_BPS", "0.8"))
+    + float(os.getenv("ML_COST_SLIPPAGE_BPS", "0.4"))
+    + float(os.getenv("ML_COST_COMMISSION_BPS", "0.1"))
+)
+DEFAULT_SHADOW_POLICY_NAME = (
+    os.getenv("ML_MODEL_SIDE_MARGIN_SHADOW_POLICY_NAME", "model_side_margin_v1").strip()
+    or "model_side_margin_v1"
+)
+POSTFIX_SHADOW_TRACKER_START_DATE = (
+    os.getenv("ML_POSTFIX_SHADOW_TRACKER_START_DATE", "").strip()
+)
+POSTFIX_SHADOW_TRACKER_LOOKBACK_DAYS = max(
+    1, int(os.getenv("ML_POSTFIX_SHADOW_TRACKER_LOOKBACK_DAYS", "5"))
+)
+DEFAULT_RANKED_SHADOW_HORIZON = int(os.getenv("ML_RANKED_SHADOW_HORIZON", "60") or "60")
+DEFAULT_RANKED_SHADOW_RETAIN_PCT = max(
+    0.01, min(1.0, float(os.getenv("ML_RANKED_SHADOW_RETAIN_PCT", "0.10") or "0.10"))
+)
 DEFAULT_GAMMA_LOG = ROOT / "logs" / "gamma_bridge.log"
 RF_MANIFEST_PATH = os.getenv("RF_MANIFEST_PATH", "").strip()
 RF_ACTIVE_MANIFEST = os.getenv("RF_ACTIVE_MANIFEST", "manifest_active.json").strip() or "manifest_active.json"
@@ -307,6 +331,27 @@ def day_bounds_ms(report_day: date) -> tuple[int, int]:
     return int(start_dt.timestamp() * 1000), int(end_dt.timestamp() * 1000)
 
 
+def compute_postfix_shadow_tracker_window(report_day: date) -> dict[str, Any]:
+    start_day = report_day - timedelta(days=max(0, POSTFIX_SHADOW_TRACKER_LOOKBACK_DAYS - 1))
+    configured_start = None
+    if POSTFIX_SHADOW_TRACKER_START_DATE:
+        configured_start = parse_report_date(POSTFIX_SHADOW_TRACKER_START_DATE)
+        if configured_start > start_day:
+            start_day = configured_start
+    start_ms, _ = day_bounds_ms(start_day)
+    _, end_ms = day_bounds_ms(report_day)
+    end_label = datetime.fromtimestamp(end_ms / 1000, tz=timezone.utc).astimezone(ET_TZ).strftime("%Y-%m-%d")
+    return {
+        "start_day": start_day,
+        "start_ms": start_ms,
+        "end_ms": end_ms,
+        "start_label": start_day.strftime("%Y-%m-%d"),
+        "end_label_exclusive": end_label,
+        "configured_start_label": configured_start.strftime("%Y-%m-%d") if configured_start else None,
+        "lookback_days": POSTFIX_SHADOW_TRACKER_LOOKBACK_DAYS,
+    }
+
+
 def mean_or_none(values: list[float]) -> float | None:
     return statistics.fmean(values) if values else None
 
@@ -443,12 +488,70 @@ def _prediction_basis_label(prediction_basis: str) -> str:
     return "first prediction per event"
 
 
+def _normalize_model_version(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _format_model_version_mix(model_version_mix: list[tuple[str, int]]) -> str:
+    parts: list[str] = []
+    for model_version, count in model_version_mix:
+        label = model_version if model_version and model_version != "<null>" else "<null>"
+        parts.append(f"{label}={int(count)}")
+    return ", ".join(parts)
+
+
+def fetch_prediction_model_mix(
+    conn: sqlite3.Connection,
+    start_ms: int,
+    end_ms: int,
+    include_preview: bool,
+    prediction_basis: str,
+) -> list[tuple[str, int]]:
+    pred_order = _prediction_order_sql(prediction_basis)
+    pred_cols = {r[1] for r in conn.execute("PRAGMA table_info(prediction_log)").fetchall()}
+    has_preview = "is_preview" in pred_cols
+    preview_filter = ""
+    if has_preview and not include_preview:
+        preview_filter = "AND COALESCE(lp.is_preview, 0) = 0"
+
+    sql = f"""
+        WITH selected_pred AS (
+            SELECT *
+            FROM (
+                SELECT
+                    pl.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY pl.event_id
+                        ORDER BY pl.ts_prediction {pred_order}
+                    ) AS rn
+                FROM prediction_log pl
+            )
+            WHERE rn = 1
+        )
+        SELECT
+            COALESCE(lp.model_version, '<null>') AS model_version,
+            COUNT(*) AS row_count
+        FROM selected_pred lp
+        JOIN touch_events te ON te.event_id = lp.event_id
+        WHERE te.ts_event >= ? AND te.ts_event < ?
+        {preview_filter}
+        GROUP BY 1
+        ORDER BY row_count DESC, model_version ASC
+    """
+    rows = conn.execute(sql, (start_ms, end_ms)).fetchall()
+    return [(str(r["model_version"]), int(r["row_count"] or 0)) for r in rows]
+
+
 def fetch_labeled_records(
     conn: sqlite3.Connection,
     start_ms: int,
     end_ms: int,
     include_preview: bool,
     prediction_basis: str,
+    model_version: str | None = None,
 ) -> list[dict[str, Any]]:
     pred_order = _prediction_order_sql(prediction_basis)
     pred_cols = {r[1] for r in conn.execute("PRAGMA table_info(prediction_log)").fetchall()}
@@ -467,6 +570,12 @@ def fetch_labeled_records(
     preview_filter = ""
     if has_preview and not include_preview:
         preview_filter = "AND COALESCE(lp.is_preview, 0) = 0"
+    model_filter = ""
+    params: list[Any] = [start_ms, end_ms]
+    scoped_model_version = _normalize_model_version(model_version)
+    if scoped_model_version is not None:
+        model_filter = "AND COALESCE(lp.model_version, '') = ?"
+        params.append(scoped_model_version)
 
     sql = f"""
         WITH selected_pred AS (
@@ -528,9 +637,10 @@ def fetch_labeled_records(
         JOIN event_labels el ON el.event_id = lp.event_id
         WHERE te.ts_event >= ? AND te.ts_event < ?
         {preview_filter}
+        {model_filter}
         ORDER BY te.ts_event ASC
     """
-    rows = conn.execute(sql, (start_ms, end_ms)).fetchall()
+    rows = conn.execute(sql, params).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -540,6 +650,7 @@ def fetch_latest_predictions(
     end_ms: int,
     include_preview: bool,
     prediction_basis: str,
+    model_version: str | None = None,
 ) -> list[dict[str, Any]]:
     pred_order = _prediction_order_sql(prediction_basis)
     pred_cols = {r[1] for r in conn.execute("PRAGMA table_info(prediction_log)").fetchall()}
@@ -558,6 +669,12 @@ def fetch_latest_predictions(
     preview_filter = ""
     if has_preview and not include_preview:
         preview_filter = "AND COALESCE(lp.is_preview, 0) = 0"
+    model_filter = ""
+    params: list[Any] = [start_ms, end_ms]
+    scoped_model_version = _normalize_model_version(model_version)
+    if scoped_model_version is not None:
+        model_filter = "AND COALESCE(lp.model_version, '') = ?"
+        params.append(scoped_model_version)
 
     sql = f"""
         WITH selected_pred AS (
@@ -612,10 +729,294 @@ def fetch_latest_predictions(
         JOIN touch_events te ON te.event_id = lp.event_id
         WHERE te.ts_event >= ? AND te.ts_event < ?
         {preview_filter}
+        {model_filter}
         ORDER BY te.ts_event ASC
     """
-    rows = conn.execute(sql, (start_ms, end_ms)).fetchall()
+    rows = conn.execute(sql, params).fetchall()
     return [dict(r) for r in rows]
+
+
+def fetch_shadow_emission_records(
+    conn: sqlite3.Connection,
+    start_ms: int,
+    end_ms: int,
+    include_preview: bool,
+    prediction_basis: str,
+    model_version: str | None = None,
+    policy_name: str = DEFAULT_SHADOW_POLICY_NAME,
+) -> list[dict[str, Any]]:
+    if not table_exists(conn, "shadow_emission_log"):
+        return []
+
+    pred_order = _prediction_order_sql(prediction_basis)
+    pred_cols = {r[1] for r in conn.execute("PRAGMA table_info(prediction_log)").fetchall()}
+    has_preview = "is_preview" in pred_cols
+    preview_source_expr = "CASE WHEN COALESCE(lp.is_preview, 0) = 1 THEN 'preview' ELSE 'live' END" if has_preview else "'live'"
+    preview_filter = ""
+    if has_preview and not include_preview:
+        preview_filter = "AND COALESCE(lp.is_preview, 0) = 0"
+    model_filter = ""
+    scoped_model_version = _normalize_model_version(model_version)
+    if scoped_model_version is not None:
+        model_filter = "AND COALESCE(lp.model_version, '') = ?"
+
+    sql = f"""
+        WITH selected_pred AS (
+            SELECT *
+            FROM (
+                SELECT
+                    pl.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY pl.event_id
+                        ORDER BY pl.ts_prediction {pred_order}
+                    ) AS rn
+                FROM prediction_log pl
+            )
+            WHERE rn = 1
+        )
+        SELECT
+            lp.event_id,
+            lp.model_version,
+            lp.feature_version,
+            lp.best_horizon,
+            lp.abstain,
+            lp.signal_5m,
+            lp.signal_15m,
+            lp.signal_30m,
+            lp.signal_60m,
+            te.ts_event,
+            sl.policy_name,
+            sl.source,
+            sl.shadow_horizon,
+            sl.shadow_side,
+            sl.eligible,
+            sl.shadow_emit,
+            sl.ineligibility_reason,
+            sl.selected_policy,
+            sl.trade_regime,
+            sl.side_prob,
+            sl.reference_threshold,
+            sl.runtime_threshold,
+            sl.model_side_margin,
+            sl.margin_cutoff,
+            sl.percentile_cutoff,
+            el.return_bps,
+            el.mfe_bps,
+            el.mae_bps
+        FROM selected_pred lp
+        JOIN touch_events te ON te.event_id = lp.event_id
+        LEFT JOIN shadow_emission_log sl
+          ON sl.event_id = lp.event_id
+         AND COALESCE(sl.model_version, '') = COALESCE(lp.model_version, '')
+         AND sl.policy_name = ?
+         AND sl.source = {preview_source_expr}
+        LEFT JOIN event_labels el
+          ON el.event_id = lp.event_id
+         AND el.horizon_min = sl.shadow_horizon
+        WHERE te.ts_event >= ? AND te.ts_event < ?
+        {preview_filter}
+        {model_filter}
+        ORDER BY te.ts_event ASC
+    """
+    # reorder params to match the SQL placeholder order
+    sql_params: list[Any] = [str(policy_name), start_ms, end_ms]
+    if scoped_model_version is not None:
+        sql_params.append(scoped_model_version)
+    rows = conn.execute(sql, sql_params).fetchall()
+    return [dict(r) for r in rows]
+
+
+def compute_shadow_emission_summary(
+    rows: list[dict[str, Any]],
+    *,
+    policy_name: str = DEFAULT_SHADOW_POLICY_NAME,
+    trade_cost_bps: float = DEFAULT_TRADE_COST_BPS,
+) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "policy_name": policy_name,
+        "status": "missing_rows",
+        "rows_total": len(rows),
+        "days_covered": 0,
+        "first_event_day_et": None,
+        "last_event_day_et": None,
+        "logged_rows": 0,
+        "eligible_rows": 0,
+        "emit_rows": 0,
+        "overlap_live_rows": 0,
+        "matured_emit_rows": 0,
+        "matured_utility_sum": None,
+        "matured_utility_avg": None,
+        "matured_win_rate": None,
+        "side_counts": {"reject": 0, "break": 0, "unknown": 0},
+        "regime_counts": {"compression": 0, "expansion": 0, "neutral": 0, "unknown": 0},
+        "selected_policy_counts": {"baseline": 0, "regime_active": 0, "other": 0, "unknown": 0},
+        "horizon_counts": {},
+        "matured_regime_summary": {},
+    }
+    if not rows:
+        return summary
+
+    summary["status"] = "ok"
+    matured_utils: list[float] = []
+    event_days: set[str] = set()
+    matured_by_regime: dict[str, list[float]] = {}
+    for row in rows:
+        if row.get("policy_name") is None:
+            continue
+        summary["logged_rows"] += 1
+        ts_event = row.get("ts_event")
+        if ts_event is not None:
+            day_label = ts_day_et(int(ts_event))
+            if day_label:
+                event_days.add(day_label)
+        eligible = bool(row.get("eligible"))
+        shadow_emit = bool(row.get("shadow_emit"))
+        trade_regime = str(row.get("trade_regime") or "unknown").strip().lower()
+        selected_policy = str(row.get("selected_policy") or "unknown").strip().lower()
+        shadow_side = str(row.get("shadow_side") or "unknown").strip().lower()
+        shadow_horizon = row.get("shadow_horizon")
+
+        if trade_regime not in summary["regime_counts"]:
+            trade_regime = "unknown"
+        if selected_policy == "baseline":
+            summary["selected_policy_counts"]["baseline"] += 1
+        elif selected_policy == "regime_active":
+            summary["selected_policy_counts"]["regime_active"] += 1
+        elif selected_policy == "unknown":
+            summary["selected_policy_counts"]["unknown"] += 1
+        else:
+            summary["selected_policy_counts"]["other"] += 1
+
+        if eligible:
+            summary["eligible_rows"] += 1
+            summary["regime_counts"][trade_regime] += 1
+        if shadow_emit:
+            summary["emit_rows"] += 1
+            if shadow_side in {"reject", "break"}:
+                summary["side_counts"][shadow_side] += 1
+            else:
+                summary["side_counts"]["unknown"] += 1
+            horizon_key = str(shadow_horizon) if shadow_horizon is not None else "unknown"
+            summary["horizon_counts"][horizon_key] = int(summary["horizon_counts"].get(horizon_key, 0)) + 1
+
+            live_signal = None
+            best_horizon = row.get("best_horizon")
+            if best_horizon is not None and int(row.get("abstain") or 0) == 0:
+                live_signal = row.get(f"signal_{int(best_horizon)}m")
+            if (
+                best_horizon is not None
+                and shadow_horizon is not None
+                and int(best_horizon) == int(shadow_horizon)
+                and str(live_signal or "").strip().lower() == shadow_side
+            ):
+                summary["overlap_live_rows"] += 1
+
+            return_bps = row.get("return_bps")
+            if return_bps is not None and shadow_side in {"reject", "break"}:
+                ret = float(return_bps)
+                util = (ret - float(trade_cost_bps)) if shadow_side == "reject" else (-ret - float(trade_cost_bps))
+                matured_utils.append(util)
+                matured_by_regime.setdefault(trade_regime, []).append(util)
+
+    if event_days:
+        ordered_days = sorted(event_days)
+        summary["days_covered"] = len(ordered_days)
+        summary["first_event_day_et"] = ordered_days[0]
+        summary["last_event_day_et"] = ordered_days[-1]
+
+    if summary["logged_rows"] <= 0:
+        summary["status"] = "missing_rows"
+        return summary
+    if matured_utils:
+        summary["matured_emit_rows"] = len(matured_utils)
+        summary["matured_utility_sum"] = float(sum(matured_utils))
+        summary["matured_utility_avg"] = float(sum(matured_utils) / len(matured_utils))
+        summary["matured_win_rate"] = float(sum(1 for x in matured_utils if x > 0) / len(matured_utils))
+        summary["matured_regime_summary"] = {
+            regime: {
+                "rows": len(utils),
+                "avg_utility": float(sum(utils) / len(utils)),
+                "total_utility": float(sum(utils)),
+                "win_rate": float(sum(1 for x in utils if x > 0) / len(utils)),
+            }
+            for regime, utils in sorted(matured_by_regime.items())
+        }
+    return summary
+
+
+def compute_ranked_shadow_summary(
+    rows: list[dict[str, Any]],
+    *,
+    horizon: int = DEFAULT_RANKED_SHADOW_HORIZON,
+    retain_pct: float = DEFAULT_RANKED_SHADOW_RETAIN_PCT,
+    trade_cost_bps: float = DEFAULT_TRADE_COST_BPS,
+) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "status": "missing_rows",
+        "method": "model_side_prob",
+        "horizon": int(horizon),
+        "retain_pct": float(retain_pct),
+        "rows_total": len(rows),
+        "eligible_rows": 0,
+        "retained_rows": 0,
+        "avg_side_prob": None,
+        "avg_utility": None,
+        "total_utility": None,
+        "win_rate": None,
+        "live_overlap_rows": 0,
+        "side_counts": {"reject": 0, "break": 0},
+        "regime_counts": {"compression": 0, "expansion": 0, "neutral": 0, "unknown": 0},
+    }
+    if not rows:
+        return summary
+
+    eligible: list[dict[str, Any]] = []
+    for row in rows:
+        if int(row.get("horizon_min") or -1) != int(horizon):
+            continue
+        if str(row.get("selected_policy") or "").strip().lower() != "regime_active":
+            continue
+        trade_regime = str(row.get("trade_regime") or "").strip().lower()
+        chosen_side = favored_side_for_trade_regime(trade_regime)
+        if chosen_side not in {"reject", "break"}:
+            continue
+        side_prob = row.get(f"prob_{chosen_side}_{horizon}m")
+        return_bps = row.get("return_bps")
+        if side_prob is None or return_bps is None:
+            continue
+        side_prob_f = float(side_prob)
+        ret = float(return_bps)
+        utility = (ret - float(trade_cost_bps)) if chosen_side == "reject" else (-ret - float(trade_cost_bps))
+        live_signal = str(row.get(f"signal_{horizon}m") or "").strip().lower()
+        eligible.append(
+            {
+                "trade_regime": trade_regime if trade_regime in summary["regime_counts"] else "unknown",
+                "chosen_side": chosen_side,
+                "side_prob": side_prob_f,
+                "utility": utility,
+                "live_overlap": live_signal == chosen_side and not bool(row.get("abstain")),
+            }
+        )
+
+    if not eligible:
+        summary["status"] = "no_eligible_rows"
+        return summary
+
+    ranked = sorted(eligible, key=lambda item: item["side_prob"], reverse=True)
+    retain_n = max(1, math.ceil(len(ranked) * float(retain_pct)))
+    selected = ranked[:retain_n]
+    summary["status"] = "ok"
+    summary["eligible_rows"] = len(ranked)
+    summary["retained_rows"] = len(selected)
+    summary["avg_side_prob"] = float(statistics.fmean(item["side_prob"] for item in selected))
+    summary["avg_utility"] = float(statistics.fmean(item["utility"] for item in selected))
+    summary["total_utility"] = float(sum(item["utility"] for item in selected))
+    summary["win_rate"] = float(sum(1 for item in selected if item["utility"] > 0) / len(selected))
+    summary["live_overlap_rows"] = int(sum(1 for item in selected if item["live_overlap"]))
+    for item in selected:
+        summary["side_counts"][item["chosen_side"]] += 1
+        summary["regime_counts"][item["trade_regime"]] += 1
+    return summary
 
 
 def compute_regime_summary(predictions: list[dict[str, Any]]) -> dict[str, int]:
@@ -801,6 +1202,13 @@ def ts_to_et(ts_ms: int | None) -> str:
         return "--"
     dt = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).astimezone(ET_TZ)
     return dt.strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+def ts_day_et(ts_ms: int | None) -> str | None:
+    if not ts_ms:
+        return None
+    dt = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).astimezone(ET_TZ)
+    return dt.strftime("%Y-%m-%d")
 
 
 def gamma_permission_missing_detected(log_path: Path = DEFAULT_GAMMA_LOG, tail_lines: int = 400) -> bool:
@@ -1633,37 +2041,54 @@ def format_metric(v: float | None, digits: int = 3) -> str:
 
 
 def summarize_tradeability_blockers(manifest: dict[str, Any]) -> str | None:
+    """Return a concise operator note describing active threshold suppressions.
+
+    Checks both reject and break for two independent suppression conditions:
+    - guard_applied: utility guard pushed the threshold to no-trade value
+    - fallback:      threshold search did not run / fell back to 0.5
+
+    Either condition on either target is a meaningful operational signal.
+    The previous implementation only checked reject-guard and break-fallback,
+    leaving reject-fallback and break-guard as silent blind spots.
+    """
     thresholds_meta = manifest.get("thresholds_meta")
     if not isinstance(thresholds_meta, dict):
         return None
-    reject_meta = thresholds_meta.get("reject")
-    break_meta = thresholds_meta.get("break")
+
     reject_guarded: list[int] = []
+    reject_fallback: list[int] = []
+    break_guarded: list[int] = []
     break_fallback: list[int] = []
 
-    if isinstance(reject_meta, dict):
-        for horizon_raw, payload in reject_meta.items():
+    for target, bucket_guarded, bucket_fallback in (
+        ("reject", reject_guarded, reject_fallback),
+        ("break", break_guarded, break_fallback),
+    ):
+        target_meta = thresholds_meta.get(target)
+        if not isinstance(target_meta, dict):
+            continue
+        for horizon_raw, payload in target_meta.items():
             if not isinstance(payload, dict):
+                continue
+            try:
+                h = int(horizon_raw)
+            except Exception:
                 continue
             if bool(payload.get("guard_applied")):
-                try:
-                    reject_guarded.append(int(horizon_raw))
-                except Exception:
-                    continue
-    if isinstance(break_meta, dict):
-        for horizon_raw, payload in break_meta.items():
-            if not isinstance(payload, dict):
-                continue
+                bucket_guarded.append(h)
             if bool(payload.get("fallback")):
-                try:
-                    break_fallback.append(int(horizon_raw))
-                except Exception:
-                    continue
+                bucket_fallback.append(h)
 
     notes: list[str] = []
     if reject_guarded:
         ordered = ", ".join(f"{h}m" for h in sorted(set(reject_guarded)))
         notes.append(f"reject utility guard active ({ordered})")
+    if reject_fallback:
+        ordered = ", ".join(f"{h}m" for h in sorted(set(reject_fallback)))
+        notes.append(f"reject thresholds on fallback ({ordered})")
+    if break_guarded:
+        ordered = ", ".join(f"{h}m" for h in sorted(set(break_guarded)))
+        notes.append(f"break utility guard active ({ordered})")
     if break_fallback:
         ordered = ", ".join(f"{h}m" for h in sorted(set(break_fallback)))
         notes.append(f"break thresholds on fallback ({ordered})")
@@ -1745,6 +2170,8 @@ def render_report(
     predictions: list[dict[str, Any]],
     prediction_basis: str,
     labeled_records: list[dict[str, Any]],
+    prediction_model_mix: list[tuple[str, int]],
+    scoped_model_version: str | None,
     bundles: list[MetricBundle],
     analog_summaries: list[AnalogHorizonSummary],
     analog_gate: AnalogPromotionGate,
@@ -1754,6 +2181,10 @@ def render_report(
     analog_gate_end_ms: int,
     regime_summary: dict[str, int],
     regime_policy_summary: dict[str, Any],
+    shadow_emission_summary: dict[str, Any],
+    postfix_shadow_window: dict[str, Any],
+    postfix_shadow_summary: dict[str, Any],
+    ranked_shadow_summary: dict[str, Any],
     manifest: dict[str, Any],
     conn: sqlite3.Connection,
 ) -> str:
@@ -1769,6 +2200,19 @@ def render_report(
     stale_hours_session = compute_session_staleness_hours(trained_end_ts, now_ms)
     gamma_permission_missing = gamma_permission_missing_detected()
     gamma_coverage = fetch_gamma_coverage(conn, start_ms, end_ms)
+    scoped_model_version = _normalize_model_version(scoped_model_version or model_version)
+    total_window_predictions = sum(int(count) for _, count in prediction_model_mix)
+    scoped_window_predictions = sum(
+        int(count)
+        for version, count in prediction_model_mix
+        if _normalize_model_version(version) == scoped_model_version
+    )
+    excluded_other_model_events = (
+        max(0, total_window_predictions - scoped_window_predictions)
+        if scoped_model_version is not None
+        else 0
+    )
+    model_mix_label = _format_model_version_mix(prediction_model_mix) if prediction_model_mix else ""
 
     health, health_notes = determine_health_status(
         bundles=bundles,
@@ -1813,6 +2257,12 @@ def render_report(
     lines.append(f"- Model: `{model_version}` (feature `{feature_version}`)")
     lines.append(f"- Trained End: {trained_end}")
     lines.append(f"- Prediction basis for scored rows: {prediction_basis_label}")
+    if scoped_model_version is not None:
+        lines.append(f"- Prediction Row Scope: current manifest model only (`{scoped_model_version}`)")
+    if model_mix_label:
+        lines.append(f"- Window Model-Version Mix: {model_mix_label}")
+    if excluded_other_model_events > 0:
+        lines.append(f"- Excluded Other-Model Events: {excluded_other_model_events}")
     lines.append(
         f"- Model Staleness: "
         f"{f'{stale_hours_session:.1f}h' if stale_hours_session is not None else '--'} "
@@ -1920,6 +2370,153 @@ def render_report(
         f"candidate_signals={or_breakout_filter_summary.get('candidate_signals', 0)}, "
         f"applied_signals={or_breakout_filter_summary.get('applied_signals', 0)}"
     )
+    lines.append("")
+
+    lines.append("## Shadow Margin Policy")
+    lines.append("")
+    shadow_policy_cfg = manifest.get("shadow_policies", {}).get(DEFAULT_SHADOW_POLICY_NAME, {})
+    if not isinstance(shadow_policy_cfg, dict):
+        shadow_policy_cfg = {}
+    if shadow_emission_summary.get("status") != "ok":
+        lines.append(
+            f"- Policy `{DEFAULT_SHADOW_POLICY_NAME}`: no shadow rows observed in this window yet."
+        )
+    else:
+        lines.append(
+            f"- Policy: `{DEFAULT_SHADOW_POLICY_NAME}` "
+            f"(horizon={shadow_policy_cfg.get('horizon', '--')}m, "
+            f"scope={shadow_policy_cfg.get('scope', '--')}, "
+            f"cutoff={format_metric(shadow_policy_cfg.get('percentile_cutoff'), 2)})"
+        )
+        lines.append(
+            f"- Shadow rows logged: {shadow_emission_summary.get('logged_rows', 0)} / "
+            f"{shadow_emission_summary.get('rows_total', 0)} current-model predictions"
+        )
+        eligible_rows = int(shadow_emission_summary.get("eligible_rows", 0) or 0)
+        logged_rows = max(1, int(shadow_emission_summary.get("logged_rows", 0) or 0))
+        emit_rows = int(shadow_emission_summary.get("emit_rows", 0) or 0)
+        lines.append(
+            f"- Eligible rows: {eligible_rows} ({pct(eligible_rows, logged_rows):.1f}% of logged rows)"
+        )
+        lines.append(
+            f"- Shadow emits: {emit_rows} "
+            f"({pct(emit_rows, eligible_rows):.1f}% of eligible rows)"
+        )
+        lines.append(
+            f"- Emits by side: "
+            f"reject={shadow_emission_summary.get('side_counts', {}).get('reject', 0)}, "
+            f"break={shadow_emission_summary.get('side_counts', {}).get('break', 0)}"
+        )
+        lines.append(
+            f"- Eligible trade regimes: "
+            f"compression={shadow_emission_summary.get('regime_counts', {}).get('compression', 0)}, "
+            f"expansion={shadow_emission_summary.get('regime_counts', {}).get('expansion', 0)}, "
+            f"neutral={shadow_emission_summary.get('regime_counts', {}).get('neutral', 0)}"
+        )
+        lines.append(
+            f"- Overlap with live emitted signal/horizon: "
+            f"{shadow_emission_summary.get('overlap_live_rows', 0)}"
+        )
+        matured_emit_rows = int(shadow_emission_summary.get("matured_emit_rows", 0) or 0)
+        if matured_emit_rows > 0:
+            lines.append(
+                f"- Matured shadow emits: {matured_emit_rows} "
+                f"(utility total={format_metric(shadow_emission_summary.get('matured_utility_sum'), 2)}, "
+                f"avg={format_metric(shadow_emission_summary.get('matured_utility_avg'), 2)}, "
+                f"win_rate={format_metric(shadow_emission_summary.get('matured_win_rate'), 3)})"
+            )
+        else:
+            lines.append("- Matured shadow emits: 0")
+    lines.append("")
+
+    lines.append("## Rolling Post-Fix Shadow Margin Tracker")
+    lines.append("")
+    lines.append(
+        f"- Window (ET): {postfix_shadow_window.get('start_label')} -> "
+        f"{postfix_shadow_window.get('end_label_exclusive')}"
+    )
+    lines.append(
+        f"- Start floor: {postfix_shadow_window.get('configured_start_label') or 'none'} "
+        f"(lookback={postfix_shadow_window.get('lookback_days', 0)}d)"
+    )
+    if postfix_shadow_summary.get("status") != "ok":
+        lines.append(
+            f"- Policy `{DEFAULT_SHADOW_POLICY_NAME}` rolling tracker: "
+            f"{postfix_shadow_summary.get('status', 'missing_rows')}"
+        )
+    else:
+        lines.append(
+            f"- Policy: `{DEFAULT_SHADOW_POLICY_NAME}` "
+            f"(days={postfix_shadow_summary.get('days_covered', 0)}, "
+            f"logged={postfix_shadow_summary.get('logged_rows', 0)}, "
+            f"eligible={postfix_shadow_summary.get('eligible_rows', 0)}, "
+            f"emits={postfix_shadow_summary.get('emit_rows', 0)})"
+        )
+        matured_emit_rows = int(postfix_shadow_summary.get("matured_emit_rows", 0) or 0)
+        if matured_emit_rows > 0:
+            lines.append(
+                f"- Matured emits: {matured_emit_rows} "
+                f"(utility total={format_metric(postfix_shadow_summary.get('matured_utility_sum'), 2)}, "
+                f"avg={format_metric(postfix_shadow_summary.get('matured_utility_avg'), 2)}, "
+                f"win_rate={format_metric(postfix_shadow_summary.get('matured_win_rate'), 3)})"
+            )
+            for regime in ("compression", "expansion", "neutral"):
+                regime_summary = postfix_shadow_summary.get("matured_regime_summary", {}).get(regime)
+                if not regime_summary:
+                    continue
+                lines.append(
+                    f"- Matured {regime}: rows={regime_summary.get('rows', 0)}, "
+                    f"avg={format_metric(regime_summary.get('avg_utility'), 2)}, "
+                    f"total={format_metric(regime_summary.get('total_utility'), 2)}, "
+                    f"win_rate={format_metric(regime_summary.get('win_rate'), 3)}"
+                )
+            lines.append(
+                f"- Overlap with live emitted signal/horizon: "
+                f"{postfix_shadow_summary.get('overlap_live_rows', 0)}"
+            )
+        else:
+            lines.append("- Matured emits: 0")
+    lines.append("")
+
+    lines.append("## Ranked Shadow Tracker")
+    lines.append("")
+    if ranked_shadow_summary.get("status") != "ok":
+        lines.append(
+            f"- 60m top-{int(float(ranked_shadow_summary.get('retain_pct', 0.10)) * 100)} tracker: "
+            f"{ranked_shadow_summary.get('status', 'missing_rows')}"
+        )
+    else:
+        lines.append(
+            f"- Method: `{ranked_shadow_summary.get('method', 'model_side_prob')}` "
+            f"(horizon={ranked_shadow_summary.get('horizon', '--')}m, "
+            f"retain={format_metric(100.0 * float(ranked_shadow_summary.get('retain_pct', 0.0)), 1)}%)"
+        )
+        lines.append(
+            f"- Eligible rows: {ranked_shadow_summary.get('eligible_rows', 0)}"
+        )
+        lines.append(
+            f"- Retained rows: {ranked_shadow_summary.get('retained_rows', 0)}"
+        )
+        lines.append(
+            f"- Avg aligned side prob: {format_metric(ranked_shadow_summary.get('avg_side_prob'), 3)}"
+        )
+        lines.append(
+            f"- Retained utility: total={format_metric(ranked_shadow_summary.get('total_utility'), 2)}, "
+            f"avg={format_metric(ranked_shadow_summary.get('avg_utility'), 2)}, "
+            f"win_rate={format_metric(ranked_shadow_summary.get('win_rate'), 3)}"
+        )
+        lines.append(
+            f"- Retained side mix: reject={ranked_shadow_summary.get('side_counts', {}).get('reject', 0)}, "
+            f"break={ranked_shadow_summary.get('side_counts', {}).get('break', 0)}"
+        )
+        lines.append(
+            f"- Retained regime mix: compression={ranked_shadow_summary.get('regime_counts', {}).get('compression', 0)}, "
+            f"expansion={ranked_shadow_summary.get('regime_counts', {}).get('expansion', 0)}, "
+            f"neutral={ranked_shadow_summary.get('regime_counts', {}).get('neutral', 0)}"
+        )
+        lines.append(
+            f"- Overlap with live emitted same-side 60m rows: {ranked_shadow_summary.get('live_overlap_rows', 0)}"
+        )
     lines.append("")
 
     lines.append("## Analog Shadow Evaluation")
@@ -2223,12 +2820,32 @@ def main() -> None:
         gate_eval_mode = str(args.analog_gate_eval_mode or ANALOG_PROMOTION_EVAL_MODE).strip().lower()
         if gate_eval_mode not in {"analog", "blend"}:
             gate_eval_mode = ANALOG_PROMOTION_EVAL_MODE
+        postfix_shadow_window = compute_postfix_shadow_tracker_window(report_day)
+        manifest = parse_manifest()
+        scoped_model_version = _normalize_model_version(manifest.get("version"))
+        prediction_model_mix = fetch_prediction_model_mix(
+            conn,
+            start_ms,
+            end_ms,
+            args.include_preview,
+            args.prediction_basis,
+        )
         predictions = fetch_latest_predictions(
             conn,
             start_ms,
             end_ms,
             args.include_preview,
             args.prediction_basis,
+            scoped_model_version,
+        )
+        shadow_emission_rows = fetch_shadow_emission_records(
+            conn,
+            start_ms,
+            end_ms,
+            args.include_preview,
+            args.prediction_basis,
+            scoped_model_version,
+            DEFAULT_SHADOW_POLICY_NAME,
         )
         labeled_records = fetch_labeled_records(
             conn,
@@ -2236,6 +2853,7 @@ def main() -> None:
             end_ms,
             args.include_preview,
             args.prediction_basis,
+            scoped_model_version,
         )
         labeled_records_gate = fetch_labeled_records(
             conn,
@@ -2243,6 +2861,7 @@ def main() -> None:
             end_ms,
             args.include_preview,
             args.prediction_basis,
+            scoped_model_version,
         )
 
         horizons = REPORT_HORIZONS or [5, 15, 30, 60]
@@ -2260,9 +2879,30 @@ def main() -> None:
         )
         regime_summary = compute_regime_summary(predictions)
         regime_policy_summary = compute_regime_policy_summary(predictions)
+        shadow_emission_summary = compute_shadow_emission_summary(
+            shadow_emission_rows,
+            policy_name=DEFAULT_SHADOW_POLICY_NAME,
+        )
+        postfix_shadow_rows = fetch_shadow_emission_records(
+            conn,
+            int(postfix_shadow_window["start_ms"]),
+            int(postfix_shadow_window["end_ms"]),
+            args.include_preview,
+            args.prediction_basis,
+            scoped_model_version,
+            DEFAULT_SHADOW_POLICY_NAME,
+        )
+        postfix_shadow_summary = compute_shadow_emission_summary(
+            postfix_shadow_rows,
+            policy_name=DEFAULT_SHADOW_POLICY_NAME,
+        )
+        ranked_shadow_summary = compute_ranked_shadow_summary(
+            labeled_records,
+            horizon=DEFAULT_RANKED_SHADOW_HORIZON,
+            retain_pct=DEFAULT_RANKED_SHADOW_RETAIN_PCT,
+        )
 
         persist_daily_metrics(conn, report_day.strftime("%Y-%m-%d"), regime_summary, bundles)
-        manifest = parse_manifest()
         content = render_report(
             report_day=report_day,
             start_ms=start_ms,
@@ -2270,6 +2910,8 @@ def main() -> None:
             predictions=predictions,
             prediction_basis=args.prediction_basis,
             labeled_records=labeled_records,
+            prediction_model_mix=prediction_model_mix,
+            scoped_model_version=scoped_model_version,
             bundles=bundles,
             analog_summaries=analog_summaries,
             analog_gate=analog_gate,
@@ -2279,6 +2921,10 @@ def main() -> None:
             analog_gate_end_ms=end_ms,
             regime_summary=regime_summary,
             regime_policy_summary=regime_policy_summary,
+            shadow_emission_summary=shadow_emission_summary,
+            postfix_shadow_window=postfix_shadow_window,
+            postfix_shadow_summary=postfix_shadow_summary,
+            ranked_shadow_summary=ranked_shadow_summary,
             manifest=manifest,
             conn=conn,
         )
