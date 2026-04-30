@@ -15,10 +15,16 @@ from pathlib import Path
 from typing import Any
 from urllib import error, request
 
+ROOT = Path(__file__).resolve().parents[1]
+
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    _load_dotenv(ROOT / ".env", override=False)
+except ImportError:
+    pass
+
 from audit_log import append_event, detect_commit_hash
 
-
-ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB = Path(os.getenv("PIVOT_DB", str(ROOT / "data" / "pivot_events.sqlite")))
 DEFAULT_RELEASE_DIR = ROOT / "logs" / "releases"
 DEFAULT_PYTHON = str((ROOT / ".venv" / "bin" / "python3"))
