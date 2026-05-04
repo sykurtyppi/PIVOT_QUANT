@@ -1317,16 +1317,80 @@ deterministically from the audit trail:
 
 ---
 
-## 9. Integration Plan — shipped (PR7)
+## 9. Integration Plan — shipped (PR7 + PR8)
 
-Three primary research scripts now expose the protocol flags via a
-shared helper:
+Research scripts wired to the protocol:
 
-| Script | Stage | Module-level constant |
+| Script | Stage | How it records |
 |---|---|---|
-| `scripts/run_model_ready_dataset_smoke.py` | 0 (infra) | `PROTOCOL_STAGE = 0` |
-| `scripts/run_ml_regime_validation.py` | 2 (single OOS) | `PROTOCOL_STAGE = 2` |
-| `scripts/run_ml_regime_validation_cross_period.py` | 3 (cross-period) | `PROTOCOL_STAGE = 3` |
+| `scripts/run_model_ready_dataset_smoke.py` | 0 (infra) | `PROTOCOL_STAGE = 0`; run completes, caller records if needed |
+| `scripts/record_stage1_sanity.py` | 1 (in-sample sanity) | Researcher-driven; `--passed` / `--failed` + `--reason` |
+| `scripts/run_ml_regime_validation.py` | 2 (single OOS) | `PROTOCOL_STAGE = 2`; gate requires stage 1 pass |
+| `scripts/run_ml_regime_validation_cross_period.py` | 3 (cross-period) | `PROTOCOL_STAGE = 3`; gate requires stages 1 + 2 pass |
+
+### Stage 1 — in-sample sanity (PR8)
+
+Stage 1 is a researcher-controlled gate. No ML model is run; the
+researcher confirms (or denies) that the signal implementation is sane
+against in-sample data. A pass is required before stage 2's OOS
+validation can run.
+
+Stage 1 does **not** require a `statistical_validity` block in metadata
+(statistics begin at stage 2). The researcher provides a free-text
+`--reason`; the verdict and dataset identifier are persisted in the
+validation-ladder state file and in the stage report artifact.
+
+#### Recording a pass
+
+```bash
+.venv/bin/python scripts/record_stage1_sanity.py \
+    --candidate-id sanity-check-001 \
+    --dataset-identifier "SPY_2024_in_sample" \
+    --passed \
+    --reason "Feature pipeline clean; in-sample signal firing as expected"
+```
+
+Output::
+
+    candidate_id : sanity-check-001
+    stage        : 1 (stage_1_in_sample_sanity)
+    verdict      : PASS
+    report_path  : reports/research_protocol/stage1/sanity-check-001_stage1_sanity.json
+
+#### Recording a fail
+
+```bash
+.venv/bin/python scripts/record_stage1_sanity.py \
+    --candidate-id sanity-check-001 \
+    --dataset-identifier "SPY_2024_in_sample" \
+    --failed \
+    --reason "Feature pipeline produced NaN for 30% of rows"
+```
+
+A failed stage 1 permanently blocks all later stages for this
+`candidate_id`. To continue, register a new candidate and restart from
+stage 1.
+
+#### Custom report path
+
+```bash
+.venv/bin/python scripts/record_stage1_sanity.py \
+    --candidate-id sanity-check-001 \
+    --dataset-identifier "SPY_2024_in_sample" \
+    --passed \
+    --report-path reports/research_protocol/stage1/custom_name.json
+```
+
+#### Failure modes
+
+| Symptom | Error |
+|---|---|
+| no registration file for `--candidate-id` | `RegistrationMissingError` |
+| registration schema invalid (e.g. `transformations` not a dict) | `RegistrationInvalidError` |
+| registration hash mismatch (edited after signing) | `RegistrationHashMismatchError` |
+| trial budget exhausted | `TrialBudgetViolationError` |
+| candidate on kill list | `CandidateKilledError` |
+| stage 1 already recorded as fail for this candidate | `StageGateError` |
 
 Each script wires the helper at two points:
 
