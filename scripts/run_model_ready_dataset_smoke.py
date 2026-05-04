@@ -19,7 +19,12 @@ from services.external_data.model_ready_dataset_export import (
 )
 
 
+PROTOCOL_STAGE = 0  # dataset infrastructure (RESEARCH_PROTOCOL §3, stage 0)
+
+
 def parse_args() -> argparse.Namespace:
+    from services.research_protocol.cli_protocol import add_protocol_arguments
+
     parser = argparse.ArgumentParser(description="Bounded model-ready dataset export smoke.")
     parser.add_argument("--symbol", default="SPY")
     parser.add_argument("--analysis-start-date", default="2024-01-02")
@@ -40,6 +45,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--missing-feature-policy", choices=["drop", "flag"], default="drop")
     parser.add_argument("--missing-label-policy", choices=["drop", "flag"], default="flag")
     parser.add_argument("--json", action="store_true", help="Print full metadata JSON.")
+    add_protocol_arguments(parser, expected_stage=PROTOCOL_STAGE)
     return parser.parse_args()
 
 
@@ -96,7 +102,10 @@ def _print_text(metadata: dict, paths: dict[str, Path]) -> None:
 
 
 def main() -> int:
+    from services.research_protocol.cli_protocol import enforce_protocol_from_args
+
     args = parse_args()
+    enforce_protocol_from_args(args, expected_stage=PROTOCOL_STAGE)
     analysis_start = args.start_date or args.analysis_start_date
     analysis_end = args.end_date or args.analysis_end_date
     read_start = _parse_day(analysis_start) - timedelta(days=max(0, args.feature_lookback_days))
