@@ -145,7 +145,9 @@ def _assert_schema(payload: dict[str, Any]) -> None:
     ):
         raise RegistrationInvalidError(
             f"stages_required must be a non-empty list of ints in [1,6];"
-            f" got {stages!r}"
+            f" got {stages!r}. Stage 0 (dataset/infrastructure smoke) is"
+            " implicit in every registration and must not be listed here;"
+            " runnable ladder stages begin at 1."
         )
     if not isinstance(payload.get("features"), list) or not payload["features"]:
         raise RegistrationInvalidError(
@@ -157,6 +159,18 @@ def _assert_schema(payload: dict[str, Any]) -> None:
     ):
         raise RegistrationInvalidError(
             "thresholds must be a non-empty list"
+        )
+    if not isinstance(payload.get("transformations"), dict):
+        raise RegistrationInvalidError(
+            "transformations must be a dict with 'allowed' and"
+            " 'forbidden_unless_listed' keys;"
+            f" got {type(payload.get('transformations')).__name__}"
+        )
+    if not isinstance(payload.get("forbidden_changes"), list):
+        raise RegistrationInvalidError(
+            "forbidden_changes must be a list of strings describing"
+            " what is locked after registration;"
+            f" got {type(payload.get('forbidden_changes')).__name__}"
         )
     if not isinstance(payload.get("falsification"), dict):
         raise RegistrationInvalidError("falsification must be a dict")
