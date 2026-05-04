@@ -9,6 +9,7 @@ from services.external_data.model_ready_dataset_export import (
     EXPORT_COLUMNS,
     FEATURE_DATA_COLUMNS,
     LABEL_COLUMNS,
+    LABEL_DATE_COLUMNS,
     build_model_ready_dataset_export,
     write_model_ready_dataset_export,
 )
@@ -71,7 +72,7 @@ class TestModelReadyDatasetExport(unittest.TestCase):
             requested_horizons=["1d", "5d", "21d"],
         )
 
-        self.assertEqual(list(export.dataset.columns), EXPORT_COLUMNS + ["missing_required_label_count"])
+        self.assertEqual(list(export.dataset.columns), EXPORT_COLUMNS + LABEL_DATE_COLUMNS + ["missing_required_label_count"])
         self.assertEqual(list(export.dataset.columns[:2]), ["symbol", "entry_date"])
         for label in LABEL_COLUMNS:
             self.assertIn(label, export.metadata["label_columns"])
@@ -290,6 +291,122 @@ class TestModelReadyDatasetExport(unittest.TestCase):
         self.assertEqual(export.metadata["rows"]["input"], 1)
         self.assertEqual(export.metadata["rows"]["exported"], 1)
         self.assertEqual(export.metadata["drop_reasons"]["missing_required_features"], 0)
+
+    def test_multimonth_metadata_contains_month_summary_and_stable_schema(self):
+        features = pd.DataFrame(
+            [
+                self._feature_row("2024-01-02"),
+                self._feature_row("2024-01-31"),
+                self._feature_row("2024-02-01"),
+                self._feature_row("2024-02-29"),
+                self._feature_row("2024-03-01"),
+            ]
+        )
+        labels = pd.concat(
+            [
+                self._labels(observation_date="2024-01-02"),
+                self._labels(observation_date="2024-01-31"),
+                self._labels(observation_date="2024-02-01"),
+                self._labels(observation_date="2024-02-29"),
+                self._labels(observation_date="2024-03-01"),
+            ],
+            ignore_index=True,
+        )
+
+        export = build_model_ready_dataset_export(
+            compatibility_rows=features,
+            compatibility_report=self._compatibility_report(),
+            label_candidates=labels,
+            symbol="SPY",
+            start_date="2024-01-02",
+            end_date="2024-03-29",
+            read_start_date="2023-09-04",
+            read_end_date="2024-05-13",
+            feature_lookback_days=120,
+            label_lookahead_days=45,
+            requested_horizons=["1d", "5d", "21d"],
+        )
+
+        self.assertEqual(export.metadata["monthly_summary"]["2024-01"]["analysis_rows"], 2)
+        self.assertEqual(export.metadata["monthly_summary"]["2024-02"]["analysis_rows"], 2)
+        self.assertEqual(export.metadata["monthly_summary"]["2024-03"]["analysis_rows"], 1)
+        self.assertTrue(export.metadata["schema_stability_checks"]["column_order_matches_expected"])
+        self.assertTrue(export.metadata["schema_stability_checks"]["label_columns_stable"])
+
+    def test_month_boundary_rows_do_not_create_leakage_failures(self):
+        features = pd.DataFrame(
+            [
+                self._feature_row("2024-01-31"),
+                self._feature_row("2024-02-01"),
+            ]
+        )
+        labels = pd.concat(
+            [
+                self._labels(observation_date="2024-01-31"),
+                self._labels(observation_date="2024-02-01"),
+            ],
+            ignore_index=True,
+        )
+
+        export = build_model_ready_dataset_export(
+            compatibility_rows=features,
+            compatibility_report=self._compatibility_report(),
+            label_candidates=labels,
+            symbol="SPY",
+            start_date="2024-01-31",
+            end_date="2024-02-01",
+            read_start_date="2023-09-04",
+            read_end_date="2024-03-16",
+            feature_lookback_days=120,
+            label_lookahead_days=45,
+            requested_horizons=["1d", "5d", "21d"],
+        )
+
+        self.assertEqual(export.dataset["entry_date"].tolist(), ["2024-01-31", "2024-02-01"])
+        self.assertTrue(export.metadata["leakage_checks"]["exported_rows_inside_analysis_window"])
+        self.assertEqual(export.metadata["monthly_summary"]["2024-01"]["exported_rows"], 1)
+        self.assertEqual(export.metadata["monthly_summary"]["2024-02"]["exported_rows"], 1)
+
+    def test_one_year_metadata_contains_stable_monthly_summary(self):
+        month_starts = [pd.Timestamp("2023-01-03"), *pd.date_range("2023-02-01", "2023-12-01", freq="MS")]
+        features = pd.DataFrame(
+            [
+                self._feature_row(day.strftime("%Y-%m-%d"))
+                for day in month_starts
+            ]
+        )
+        labels = pd.concat(
+            [
+                self._labels(observation_date=day.strftime("%Y-%m-%d"))
+                for day in month_starts
+            ],
+            ignore_index=True,
+        )
+
+        export = build_model_ready_dataset_export(
+            compatibility_rows=features,
+            compatibility_report=self._compatibility_report(),
+            label_candidates=labels,
+            symbol="SPY",
+            start_date="2023-01-03",
+            end_date="2023-12-29",
+            read_start_date="2022-09-05",
+            read_end_date="2024-02-12",
+            feature_lookback_days=120,
+            label_lookahead_days=45,
+            requested_horizons=["1d", "5d", "21d"],
+        )
+
+        self.assertEqual(export.metadata["windows"]["analysis_start_date"], "2023-01-03")
+        self.assertEqual(export.metadata["windows"]["analysis_end_date"], "2023-12-29")
+        self.assertEqual(export.metadata["config"]["feature_lookback_days"], 120)
+        self.assertEqual(export.metadata["config"]["label_lookahead_days"], 45)
+        self.assertEqual(len(export.metadata["monthly_summary"]), 12)
+        self.assertIn("2023-01", export.metadata["monthly_summary"])
+        self.assertIn("2023-12", export.metadata["monthly_summary"])
+        self.assertTrue(export.metadata["schema_stability_checks"]["column_order_matches_expected"])
+        self.assertTrue(export.metadata["leakage_checks"]["read_window_contains_feature_lookback"])
+        self.assertTrue(export.metadata["leakage_checks"]["read_window_contains_label_lookahead"])
 
 
 if __name__ == "__main__":

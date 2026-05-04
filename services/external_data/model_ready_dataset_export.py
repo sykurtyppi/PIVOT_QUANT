@@ -31,6 +31,7 @@ FEATURE_DATA_COLUMNS = [col for col in FEATURE_COLUMNS if col not in {"symbol", 
 LABEL_COLUMNS = list(EXPECTED_TARGET_COLUMNS)
 IDENTITY_COLUMNS = ["symbol", "entry_date"]
 QUALITY_COLUMNS = ["missing_required_feature_count", "missing_required_label_count"]
+LABEL_DATE_COLUMNS = ["label_date_1d", "label_date_5d", "label_date_21d"]
 EXPORT_COLUMNS = IDENTITY_COLUMNS + FEATURE_DATA_COLUMNS + LABEL_COLUMNS
 LEAKY_FEATURE_PATTERNS = ("future_", "forward_", "label", "target", "outcome")
 
@@ -150,6 +151,9 @@ def build_model_ready_dataset_export(
 
     missing_features = dataset[IDENTITY_COLUMNS + FEATURE_DATA_COLUMNS].isna().sum(axis=1)
     missing_labels = dataset[LABEL_COLUMNS].isna().sum(axis=1)
+    pre_policy_dataset = dataset.copy()
+    pre_policy_missing_features = missing_features.copy()
+    pre_policy_missing_labels = missing_labels.copy()
     feature_drop_mask = missing_features > 0
     label_drop_mask = missing_labels > 0
 
@@ -175,7 +179,10 @@ def build_model_ready_dataset_export(
         dataset["missing_required_label_count"] = missing_labels.astype("Int64")
         quality_columns.append("missing_required_label_count")
 
-    ordered_columns = EXPORT_COLUMNS + quality_columns
+    # Order label_date cols by LABEL_DATE_COLUMNS first, then any extra (non-standard horizons).
+    label_date_cols = [c for c in LABEL_DATE_COLUMNS if c in dataset.columns]
+    label_date_cols += [c for c in dataset.columns if c.startswith("label_date_") and c not in label_date_cols]
+    ordered_columns = EXPORT_COLUMNS + label_date_cols + quality_columns
     dataset = dataset[ordered_columns].sort_values("entry_date").reset_index(drop=True)
     metadata = _metadata(
         dataset=dataset,
@@ -194,6 +201,12 @@ def build_model_ready_dataset_export(
         label_lookahead_days=label_lookahead_days,
         drop_reasons=drop_reasons,
         quality_columns=quality_columns,
+        monthly_summary=_monthly_summary(
+            pre_policy_dataset=pre_policy_dataset,
+            exported_dataset=dataset,
+            missing_features=pre_policy_missing_features,
+            missing_labels=pre_policy_missing_labels,
+        ),
     )
     return ModelReadyDatasetExport(dataset=dataset, metadata=metadata)
 
@@ -255,18 +268,38 @@ def _pivot_label_candidates(label_candidates: pd.DataFrame) -> pd.DataFrame:
     labels["entry_date"] = pd.to_datetime(labels["observation_date"], errors="coerce").dt.date.astype("string")
     labels["horizon"] = labels["horizon"].astype("string")
     labels["forward_return"] = pd.to_numeric(labels["forward_return"], errors="coerce")
-    labels = labels.dropna(subset=["entry_date", "horizon", "forward_return"])
-    if labels.empty:
+    labels_clean = labels.dropna(subset=["entry_date", "horizon", "forward_return"])
+    if labels_clean.empty:
         return pd.DataFrame(columns=["entry_date", *LABEL_COLUMNS])
-    pivot = labels.pivot_table(
+
+    pivot = labels_clean.pivot_table(
         index="entry_date",
         columns="horizon",
         values="forward_return",
         aggfunc="first",
     ).reset_index()
     pivot.columns = [str(col) for col in pivot.columns]
-    rename = {horizon: f"forward_return_{horizon}" for horizon in pivot.columns if horizon != "entry_date"}
-    return pivot.rename(columns=rename)
+    rename = {h: f"forward_return_{h}" for h in pivot.columns if h != "entry_date"}
+    pivot = pivot.rename(columns=rename)
+
+    # Retain label_date per horizon so downstream purge can use exact dates.
+    if "label_date" in labels.columns:
+        labels_dated = labels.dropna(subset=["entry_date", "horizon"])
+        labels_dated = labels_dated[labels_dated["label_date"].notna()].copy()
+        labels_dated["label_date"] = labels_dated["label_date"].astype("string")
+        if not labels_dated.empty:
+            pivot_date = labels_dated.pivot_table(
+                index="entry_date",
+                columns="horizon",
+                values="label_date",
+                aggfunc="first",
+            ).reset_index()
+            pivot_date.columns = [str(col) for col in pivot_date.columns]
+            rename_d = {h: f"label_date_{h}" for h in pivot_date.columns if h != "entry_date"}
+            pivot_date = pivot_date.rename(columns=rename_d)
+            pivot = pivot.merge(pivot_date, on="entry_date", how="left")
+
+    return pivot
 
 
 def _merge_label_frames(returns: pd.DataFrame, volatility: pd.DataFrame) -> pd.DataFrame:
@@ -338,6 +371,7 @@ def _metadata(
     rows_read_input: int,
     drop_reasons: dict[str, int],
     quality_columns: list[str],
+    monthly_summary: dict[str, dict[str, int]],
 ) -> dict[str, Any]:
     label_null_counts = {column: int(dataset[column].isna().sum()) for column in LABEL_COLUMNS if column in dataset.columns}
     fully_labeled_rows = int(dataset[LABEL_COLUMNS].notna().all(axis=1).sum()) if not dataset.empty else 0
@@ -398,11 +432,20 @@ def _metadata(
         "feature_count": int(len(FEATURE_COLUMNS)),
         "label_count": int(len(LABEL_COLUMNS)),
         "column_order": list(dataset.columns),
+        "expected_column_order": list(EXPORT_COLUMNS + [c for c in dataset.columns if c.startswith("label_date_")] + quality_columns),
         "dtypes": {column: str(dtype) for column, dtype in dataset.dtypes.items()},
+        "schema_stability_checks": {
+            "feature_column_order_stable": list(dataset.columns[: len(IDENTITY_COLUMNS) + len(FEATURE_DATA_COLUMNS)])
+            == list(IDENTITY_COLUMNS + FEATURE_DATA_COLUMNS),
+            "label_columns_stable": all(column in dataset.columns for column in LABEL_COLUMNS),
+            "column_order_matches_expected": list(dataset.columns) == list(EXPORT_COLUMNS + [c for c in dataset.columns if c.startswith("label_date_")] + quality_columns),
+            "unexpected_columns": [column for column in dataset.columns if column not in set(EXPORT_COLUMNS) | set(quality_columns) | {c for c in dataset.columns if c.startswith("label_date_")}],
+        },
         "null_rates": {
             "features": feature_null_rates,
             "labels": label_null_rates,
         },
+        "monthly_summary": monthly_summary,
         "label_null_counts": label_null_counts,
         "fully_labeled_row_count": fully_labeled_rows,
         "compatibility_warnings": list(compatibility_report.get("warnings") or []),
@@ -432,6 +475,42 @@ def _rows_inside_window(dataset: pd.DataFrame, *, start_date: str, end_date: str
     end = _parse_date(end_date)
     dates = pd.to_datetime(dataset["entry_date"], errors="coerce").dt.date
     return bool(((dates >= start) & (dates <= end)).all())
+
+
+def _monthly_summary(
+    *,
+    pre_policy_dataset: pd.DataFrame,
+    exported_dataset: pd.DataFrame,
+    missing_features: pd.Series,
+    missing_labels: pd.Series,
+) -> dict[str, dict[str, int]]:
+    if pre_policy_dataset.empty:
+        return {}
+    working = pre_policy_dataset[["entry_date"]].copy()
+    working["month"] = pd.to_datetime(working["entry_date"], errors="coerce").dt.to_period("M").astype("string")
+    working["missing_required_features"] = missing_features.reindex(pre_policy_dataset.index).fillna(0).astype(int).gt(0)
+    working["missing_required_labels"] = missing_labels.reindex(pre_policy_dataset.index).fillna(0).astype(int).gt(0)
+    exported_months = pd.to_datetime(exported_dataset.get("entry_date", pd.Series(dtype="string")), errors="coerce").dt.to_period("M").astype("string")
+    exported_counts = exported_months.value_counts().to_dict()
+    fully_labeled = exported_dataset.copy()
+    if not fully_labeled.empty:
+        fully_labeled["month"] = pd.to_datetime(fully_labeled["entry_date"], errors="coerce").dt.to_period("M").astype("string")
+        fully_labeled["fully_labeled"] = fully_labeled[LABEL_COLUMNS].notna().all(axis=1)
+        fully_labeled_counts = fully_labeled.groupby("month")["fully_labeled"].sum().to_dict()
+    else:
+        fully_labeled_counts = {}
+
+    summary: dict[str, dict[str, int]] = {}
+    for month, group in working.groupby("month", dropna=True):
+        key = str(month)
+        summary[key] = {
+            "analysis_rows": int(len(group)),
+            "exported_rows": int(exported_counts.get(key, 0)),
+            "fully_labeled_rows": int(fully_labeled_counts.get(key, 0)),
+            "missing_feature_rows": int(group["missing_required_features"].sum()),
+            "missing_label_rows": int(group["missing_required_labels"].sum()),
+        }
+    return dict(sorted(summary.items()))
 
 
 def _null_rates(frame: pd.DataFrame, columns: list[str]) -> dict[str, float | None]:

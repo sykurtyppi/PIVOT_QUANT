@@ -80,6 +80,15 @@ def _print_text(metadata: dict, paths: dict[str, Path]) -> None:
         print(f"  {column}: {count}")
     print(f"Fully labeled rows: {metadata['fully_labeled_row_count']}")
 
+    if metadata.get("monthly_summary"):
+        print("\n[monthly_summary]")
+        for month, counts in metadata["monthly_summary"].items():
+            print(
+                f"  {month}: analysis={counts['analysis_rows']} "
+                f"exported={counts['exported_rows']} fully_labeled={counts['fully_labeled_rows']} "
+                f"missing_features={counts['missing_feature_rows']} missing_labels={counts['missing_label_rows']}"
+            )
+
     for warning in metadata.get("warnings") or []:
         print(f"[WARN] {warning}")
     for warning in metadata.get("export_warnings") or []:

@@ -27,6 +27,9 @@ config.json
 exports/
 archive/
 models/*.pkl
+reports/
+test-results/
+.pytest_cache/
 
 # Web frontend build artifacts
 web/frontend/node_modules/

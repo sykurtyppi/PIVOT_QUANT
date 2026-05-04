@@ -18,6 +18,7 @@ from services.external_data.historical_label_contract import (
     DEFAULT_HORIZONS,
     build_historical_label_contract,
 )
+from services.external_data.ml_effective_sample import date_weighted_metrics, effective_sample_diagnostics
 from services.external_data.t9_parquet_adapter import _normalize_symbol, _parse_date
 
 
@@ -92,6 +93,8 @@ def build_historical_baseline_report(
 ) -> HistoricalBaselineReport:
     normalized_symbol = _normalize_symbol(symbol)
     joined = _join_labels_to_option_context(label_candidates, option_context_features)
+    eff = effective_sample_diagnostics(joined, date_col="observation_date")
+    dw = date_weighted_metrics(joined, date_col="observation_date", return_col="forward_return")
     report = {
         "name": "historical_baseline_report",
         "status": "pass" if not label_candidates.empty else "warn",
@@ -100,6 +103,10 @@ def build_historical_baseline_report(
         "end_date": end_date,
         "read_only": True,
         "training_performed": False,
+        "data_level": "option_row",
+        "option_row_independence_warning": eff["effective_sample_warning"],
+        "date_weighted_metrics_available": dw["date_weighted_metrics_available"],
+        "effective_sample": {**eff, **dw},
         "config": {"horizons": list(horizons)},
         "rows": {
             "model_ready_daily_features": int(len(model_ready_daily_features)),

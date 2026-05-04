@@ -21,6 +21,7 @@ from services.external_data.historical_label_contract import (
     build_historical_label_contract,
 )
 from services.external_data.historical_walk_forward import build_historical_walk_forward_report
+from services.external_data.ml_effective_sample import date_weighted_metrics, effective_sample_diagnostics
 from services.external_data.t9_parquet_adapter import _normalize_symbol, _parse_date
 
 
@@ -162,6 +163,8 @@ def build_historical_rule_baseline_report(
     baseline_config = config or RuleBaselineConfig()
     validate_selection_columns(BASELINE_SELECTION_COLUMNS)
     joined = _join_labels_to_option_context(label_candidates, option_context_features)
+    eff = effective_sample_diagnostics(joined, date_col="observation_date")
+    dw = date_weighted_metrics(joined, date_col="observation_date", return_col="forward_return")
     windows = [
         _summarize_window(joined, window, baseline_config) for window in walk_forward_windows
     ]
@@ -179,6 +182,10 @@ def build_historical_rule_baseline_report(
         "training_performed": False,
         "threshold_optimization_performed": False,
         "performance_claim": False,
+        "data_level": "option_row",
+        "option_row_independence_warning": eff["effective_sample_warning"],
+        "date_weighted_metrics_available": dw["date_weighted_metrics_available"],
+        "effective_sample": {**eff, **dw},
         "config": {
             "horizons": list(horizons),
             "baseline_rule": baseline_config.as_dict(),
@@ -249,6 +256,8 @@ def _summarize_split(rows: pd.DataFrame, config: RuleBaselineConfig) -> dict[str
         int(pd.to_numeric(selected.get("forward_return"), errors="coerce").isna().sum()) if not selected.empty else 0
     )
     summary = _return_summary(selected)
+    eff = effective_sample_diagnostics(selected, date_col="observation_date")
+    dw = date_weighted_metrics(selected, date_col="observation_date", return_col="forward_return")
     return {
         "input_rows": int(len(rows)),
         "eligible_rows": int(len(eligible)),
@@ -261,6 +270,7 @@ def _summarize_split(rows: pd.DataFrame, config: RuleBaselineConfig) -> dict[str
         "counts_by_horizon": _count_by(selected, "horizon"),
         "counts_by_option_type": _count_by(selected, "option_type"),
         "forward_return": summary,
+        "effective_sample": {**eff, **dw},
     }
 
 
