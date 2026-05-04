@@ -239,13 +239,24 @@ ML_SCORE_ANALOG_DISABLE_IN_FLIGHT = max(
 )
 ML_INFERENCE_N_JOBS = _env_n_jobs("ML_INFERENCE_N_JOBS", 1)
 PREDICTION_LOG_CONNECT_TIMEOUT_SEC = max(
-    0.01, float(os.getenv("PREDICTION_LOG_CONNECT_TIMEOUT_SEC", "0.5"))
+    0.01, float(os.getenv("PREDICTION_LOG_CONNECT_TIMEOUT_SEC", "5.0"))
 )
 PREDICTION_LOG_BUSY_TIMEOUT_MS = max(
-    0, int(os.getenv("PREDICTION_LOG_BUSY_TIMEOUT_MS", "500"))
+    0, int(os.getenv("PREDICTION_LOG_BUSY_TIMEOUT_MS", "5000"))
 )
 PREDICTION_LOG_LOCK_WARN_INTERVAL_SEC = max(
     1.0, float(os.getenv("PREDICTION_LOG_LOCK_WARN_INTERVAL_SEC", "60"))
+)
+# Retry configuration for the background prediction-log writer.
+# On a transient "database is locked" / "database is busy" error the writer
+# will sleep PREDICTION_LOG_WRITE_RETRY_BACKOFF_SEC and try again, up to
+# PREDICTION_LOG_WRITE_RETRY_MAX additional attempts before giving up and
+# incrementing write_skip_total.
+PREDICTION_LOG_WRITE_RETRY_MAX = max(
+    0, int(os.getenv("PREDICTION_LOG_WRITE_RETRY_MAX", "3"))
+)
+PREDICTION_LOG_WRITE_RETRY_BACKOFF_SEC = max(
+    0.0, float(os.getenv("PREDICTION_LOG_WRITE_RETRY_BACKOFF_SEC", "0.5"))
 )
 PREDICTION_LOG_SQLITE_SYNC = (os.getenv("PREDICTION_LOG_SQLITE_SYNC", "FULL") or "FULL").strip().upper()
 if PREDICTION_LOG_SQLITE_SYNC not in {"OFF", "NORMAL", "FULL", "EXTRA"}:
@@ -1793,7 +1804,16 @@ def _prediction_log_writer_loop() -> None:
                 event, result = _PREDICTION_LOG_QUEUE.get(timeout=0.2)
             except queue.Empty:
                 continue
+
+            # --- attempt with bounded retry on transient SQLite contention ---
             status, error = _write_prediction_record(event, result)
+            retries_remaining = PREDICTION_LOG_WRITE_RETRY_MAX
+            while status == "skip" and retries_remaining > 0:
+                retries_remaining -= 1
+                if PREDICTION_LOG_WRITE_RETRY_BACKOFF_SEC > 0:
+                    time.sleep(PREDICTION_LOG_WRITE_RETRY_BACKOFF_SEC)
+                status, error = _write_prediction_record(event, result)
+
             now_ms = int(time.time() * 1000)
             state_before = _prediction_log_state_snapshot()
             if status == "ok":
