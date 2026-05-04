@@ -78,11 +78,13 @@ jobs:
           # requirements.txt / pyproject.toml for setup-python to key on.
 
       - name: Install test dependencies
-        # Only scikit-learn is needed (for test_sklearn_remainder_compat).
-        # Prediction-log reliability and research-protocol tests are stdlib-only.
+        # scikit-learn: needed by test_sklearn_remainder_compat.
+        # pandas: needed by test_audit_logger (exercises hash_dataframe_schema_or_csv).
+        # All other suites (prediction-log reliability, remaining protocol tests)
+        # are stdlib-only.
         run: |
           python -m pip install --upgrade pip
-          python -m pip install "scikit-learn==1.5.2"
+          python -m pip install "scikit-learn==1.5.2" "pandas==2.2.3"
 
       - name: Prediction-log reliability tests
         run: python -m unittest discover -s tests/python -p "test_prediction_log_reliability.py" -v
