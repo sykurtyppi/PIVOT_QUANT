@@ -35,6 +35,14 @@ test-results/
 web/frontend/node_modules/
 npm-debug.log*
 
+# Root-level generated / local-only artifacts (never commit these)
+.minimax/
+backups/
+coverage/
+dist/
+logs/
+node_modules/
+
 # Ignore those external repos if you keep them in the folder
 SuperClaude/
 SuperClaude_Framework/

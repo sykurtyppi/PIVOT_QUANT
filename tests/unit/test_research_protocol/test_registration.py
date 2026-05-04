@@ -213,6 +213,97 @@ class TestSchemaValidation(_ProtocolRootBase):
         with self.assertRaises(RegistrationInvalidError):
             self._write_and_load(payload)
 
+    # --- transformations type validation ---
+
+    def test_transformations_none_rejected(self):
+        payload = _valid_payload()
+        payload["transformations"] = None
+        payload[HASH_FIELD] = compute_registration_hash(payload)
+        with self.assertRaises(RegistrationInvalidError) as ctx:
+            self._write_and_load(payload)
+        self.assertIn("transformations", str(ctx.exception))
+
+    def test_transformations_list_rejected(self):
+        """A list is not a valid transformations value; must be a dict."""
+        payload = _valid_payload()
+        payload["transformations"] = ["log", "z_score"]
+        payload[HASH_FIELD] = compute_registration_hash(payload)
+        with self.assertRaises(RegistrationInvalidError) as ctx:
+            self._write_and_load(payload)
+        self.assertIn("transformations", str(ctx.exception))
+
+    def test_transformations_string_rejected(self):
+        payload = _valid_payload()
+        payload["transformations"] = "log"
+        payload[HASH_FIELD] = compute_registration_hash(payload)
+        with self.assertRaises(RegistrationInvalidError):
+            self._write_and_load(payload)
+
+    def test_transformations_dict_accepted(self):
+        """Empty dict is the minimal valid transformations value."""
+        payload = _valid_payload()
+        payload["transformations"] = {}
+        payload[HASH_FIELD] = compute_registration_hash(payload)
+        reg = None
+        try:
+            _write_registration(self.tmp, payload)
+            reg = load_registration(payload["candidate_id"])
+        except RegistrationInvalidError as exc:
+            self.fail(f"transformations={{}} should be accepted; got {exc}")
+        self.assertIsNotNone(reg)
+
+    # --- forbidden_changes type validation ---
+
+    def test_forbidden_changes_none_rejected(self):
+        payload = _valid_payload()
+        payload["forbidden_changes"] = None
+        payload[HASH_FIELD] = compute_registration_hash(payload)
+        with self.assertRaises(RegistrationInvalidError) as ctx:
+            self._write_and_load(payload)
+        self.assertIn("forbidden_changes", str(ctx.exception))
+
+    def test_forbidden_changes_dict_rejected(self):
+        """A dict is not a valid forbidden_changes value; must be a list."""
+        payload = _valid_payload()
+        payload["forbidden_changes"] = {"features": "locked"}
+        payload[HASH_FIELD] = compute_registration_hash(payload)
+        with self.assertRaises(RegistrationInvalidError) as ctx:
+            self._write_and_load(payload)
+        self.assertIn("forbidden_changes", str(ctx.exception))
+
+    def test_forbidden_changes_string_rejected(self):
+        payload = _valid_payload()
+        payload["forbidden_changes"] = "no threshold changes"
+        payload[HASH_FIELD] = compute_registration_hash(payload)
+        with self.assertRaises(RegistrationInvalidError):
+            self._write_and_load(payload)
+
+    def test_forbidden_changes_empty_list_accepted(self):
+        """An empty list is the minimal valid forbidden_changes value."""
+        payload = _valid_payload()
+        payload["forbidden_changes"] = []
+        payload[HASH_FIELD] = compute_registration_hash(payload)
+        reg = None
+        try:
+            _write_registration(self.tmp, payload)
+            reg = load_registration(payload["candidate_id"])
+        except RegistrationInvalidError as exc:
+            self.fail(f"forbidden_changes=[] should be accepted; got {exc}")
+        self.assertIsNotNone(reg)
+
+    # --- stages_required stage-0 error message ---
+
+    def test_stages_required_with_stage_0_error_mentions_implicit(self):
+        """Error message must explain that stage 0 is implicit, not runnable."""
+        payload = _valid_payload()
+        payload["stages_required"] = [0, 1, 2]
+        payload[HASH_FIELD] = compute_registration_hash(payload)
+        with self.assertRaises(RegistrationInvalidError) as ctx:
+            self._write_and_load(payload)
+        msg = str(ctx.exception)
+        self.assertIn("implicit", msg)
+        self.assertIn("Stage 0", msg)
+
 
 class TestRegistrationPath(_ProtocolRootBase):
     def test_path_is_under_registrations_dir(self):
