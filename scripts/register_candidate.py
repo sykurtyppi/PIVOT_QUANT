@@ -98,6 +98,65 @@ EXIT_OK = 0
 EXIT_OVERWRITE_REFUSED = 1
 EXIT_USER_ERROR = 2
 
+# Valid TOML registration template printed by --print-toml-template.
+# Structurally complete and accepted by assert_registration_valid after
+# the user replaces the candidate_id placeholder (which deliberately
+# contains uppercase characters so the protocol's CANDIDATE_ID_PATTERN
+# rejects it until edited).
+_TOML_TEMPLATE = """\
+# PivotQuant research-protocol registration template.
+#
+# Edit the fields below before running:
+#   1. Replace candidate_id with a kebab-case identifier matching
+#      ^[a-z][a-z0-9]*(-[a-z0-9]+)*$
+#   2. Adjust the [hypothesis] block to describe a concrete economic or
+#      microstructure mechanism.
+#   3. Adjust features, thresholds, transformations, falsification, and
+#      datasets to fit your hypothesis.
+#   4. Run:
+#        python scripts/register_candidate.py --input <this-file>.toml
+#
+# Do NOT add registration_hash, registration_timestamp, or
+# git_commit_sha — those are auto-filled by the CLI.
+
+candidate_id = "REPLACE-WITH-CANDIDATE-ID"
+horizon_days = 5
+random_seed = 42
+stages_required = [1, 2, 3, 4, 5, 6]
+forbidden_changes = [
+    "any threshold change",
+    "any feature change",
+    "any change to the forward-return horizon",
+]
+
+[hypothesis]
+mechanism = "Describe the economic or microstructure mechanism the signal exploits."
+predicted_direction = "long"
+why_might_fail = "Describe the regimes or conditions under which the mechanism breaks."
+citations = ["paper:replace-with-citation"]
+
+[[features]]
+name = "feature_a"
+input_columns = ["close"]
+
+[[thresholds]]
+name = "threshold_a"
+kind = "fixed"
+value = 0.5
+
+[transformations]
+allowed = ["log", "z_score_train"]
+forbidden_unless_listed = ["any non-monotonic transformation"]
+
+[falsification]
+stage_3 = "cross_period_validated=false"
+
+[datasets]
+symbol = "SPY"
+validation_dataset_pattern = "spy_2025_validation.parquet"
+holdout_dataset_pattern = "spy_2018_2020_holdout.parquet"
+"""
+
 
 # --------------------------------------------------------------------- #
 # Auto-fill helpers
@@ -198,11 +257,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--input",
         dest="input_path",
         type=Path,
-        required=True,
+        default=None,
         help=(
             "Path to a TOML file describing the registration body."
             " Must NOT contain registration_timestamp, git_commit_sha,"
-            " or registration_hash (those are auto-filled)."
+            " or registration_hash (those are auto-filled). Required"
+            " unless --print-toml-template is given."
+        ),
+    )
+    parser.add_argument(
+        "--print-toml-template",
+        dest="print_toml_template",
+        action="store_true",
+        help=(
+            "Print a valid TOML registration template to stdout and exit."
+            " Does not require --input, performs no file writes, and"
+            " does not run validation or hashing."
         ),
     )
     parser.add_argument(
@@ -298,6 +368,20 @@ def _print_next_command(payload: dict[str, Any]) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+
+    # --print-toml-template short-circuit: print and exit cleanly with
+    # zero side effects (no validation, no hashing, no filesystem writes).
+    if args.print_toml_template:
+        print(_TOML_TEMPLATE)
+        return EXIT_OK
+
+    if args.input_path is None:
+        print(
+            "[register_candidate] --input is required (or pass"
+            " --print-toml-template to emit a valid TOML skeleton).",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
 
     if not args.input_path.exists():
         print(
