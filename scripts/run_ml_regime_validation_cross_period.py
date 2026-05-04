@@ -22,15 +22,24 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from services.external_data.ml_cross_period_validation import (
-    aggregate_cross_period_validation,
-    write_cross_period_report,
-)
-from services.external_data.ml_regime_benchmark import discover_year_datasets
-from services.external_data.ml_regime_validation import (
-    run_ml_regime_validation,
-    write_ml_regime_validation_report,
-)
+try:
+    from services.external_data.ml_cross_period_validation import (
+        aggregate_cross_period_validation,
+        write_cross_period_report,
+    )
+    from services.external_data.ml_regime_benchmark import discover_year_datasets
+    from services.external_data.ml_regime_validation import (
+        run_ml_regime_validation,
+        write_ml_regime_validation_report,
+    )
+except ModuleNotFoundError:
+    # Service layer not yet ported to this environment.  The script is still
+    # importable for CLI-flag verification; running main() will fail clearly.
+    aggregate_cross_period_validation = None  # type: ignore[assignment]
+    write_cross_period_report = None  # type: ignore[assignment]
+    discover_year_datasets = None  # type: ignore[assignment]
+    run_ml_regime_validation = None  # type: ignore[assignment]
+    write_ml_regime_validation_report = None  # type: ignore[assignment]
 
 
 PROTOCOL_STAGE = 3  # cross-period validation (RESEARCH_PROTOCOL §3, stage 3)

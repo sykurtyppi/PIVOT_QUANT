@@ -12,12 +12,20 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from services.external_data.ml_regime_validation import (
-    DEFAULT_TEST_YEAR,
-    DEFAULT_TRAIN_YEARS,
-    run_ml_regime_validation,
-    write_ml_regime_validation_report,
-)
+try:
+    from services.external_data.ml_regime_validation import (
+        DEFAULT_TEST_YEAR,
+        DEFAULT_TRAIN_YEARS,
+        run_ml_regime_validation,
+        write_ml_regime_validation_report,
+    )
+except ModuleNotFoundError:
+    # Service layer not yet ported to this environment.  The script is still
+    # importable for CLI-flag verification; running main() will fail clearly.
+    DEFAULT_TRAIN_YEARS = ["2023", "2024"]  # type: ignore[assignment]
+    DEFAULT_TEST_YEAR = "2025"  # type: ignore[assignment]
+    run_ml_regime_validation = None  # type: ignore[assignment]
+    write_ml_regime_validation_report = None  # type: ignore[assignment]
 
 
 PROTOCOL_STAGE = 2  # single-period out-of-sample (RESEARCH_PROTOCOL §3, stage 2)
