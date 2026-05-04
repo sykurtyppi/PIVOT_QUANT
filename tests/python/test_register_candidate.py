@@ -9,10 +9,13 @@ overrides so determinism does not depend on wall-clock or VCS state.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -381,6 +384,145 @@ class TestTimestampFormat(unittest.TestCase):
         ts = rc.utc_now_iso()
         self.assertTrue(ts.endswith("Z"))
         self.assertEqual(len(ts), len("YYYY-MM-DDTHH:MM:SSZ"))
+
+
+# --------------------------------------------------------------------- #
+# --print-toml-template flag (small UX add; closes hand-rolled-TOML gap)
+# --------------------------------------------------------------------- #
+
+
+class TestPrintTomlTemplate(unittest.TestCase):
+    """The ``--print-toml-template`` flag emits a structurally complete
+    TOML skeleton, exits 0, requires no other arguments, and performs
+    no filesystem writes."""
+
+    def setUp(self) -> None:
+        # Per-test tmp dir used as a sentinel for "no side effects".
+        self._tmp_ctx = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp_ctx.name).resolve()
+        self.reports_dir = self.tmp / "registrations"
+
+    def tearDown(self) -> None:
+        self._tmp_ctx.cleanup()
+
+    @staticmethod
+    def _capture_template() -> str:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc_code = rc.main(["--print-toml-template"])
+        return rc_code, buf.getvalue()
+
+    # ------------------------------------------------------------------ #
+    # 1. test_flag_prints_template
+    # ------------------------------------------------------------------ #
+    def test_flag_prints_template(self):
+        rc_code, output = self._capture_template()
+        self.assertEqual(rc_code, rc.EXIT_OK)
+        # Required substrings per spec.
+        self.assertIn("[hypothesis]", output)
+        self.assertIn("[[features]]", output)
+        self.assertIn("candidate_id", output)
+        self.assertIn("stages_required", output)
+        # Sanity: also includes the other required structural blocks so
+        # the template is genuinely complete.
+        for marker in (
+            "[[thresholds]]",
+            "[transformations]",
+            "[falsification]",
+            "[datasets]",
+            "horizon_days",
+            "random_seed",
+            "forbidden_changes",
+            "predicted_direction",
+        ):
+            self.assertIn(
+                marker, output,
+                msg=f"template missing structural marker: {marker!r}",
+            )
+
+    # ------------------------------------------------------------------ #
+    # 2. test_template_is_usable
+    # ------------------------------------------------------------------ #
+    def test_template_is_usable(self):
+        rc_code, template = self._capture_template()
+        self.assertEqual(rc_code, rc.EXIT_OK)
+
+        # The placeholder is intentionally invalid until the user edits it.
+        self.assertIn('candidate_id = "REPLACE-WITH-CANDIDATE-ID"', template)
+        usable = template.replace(
+            'candidate_id = "REPLACE-WITH-CANDIDATE-ID"',
+            'candidate_id = "template-test-001"',
+        )
+
+        # Sanity: the edited template parses as TOML.
+        body = tomllib.loads(usable)
+        self.assertEqual(body["candidate_id"], "template-test-001")
+
+        # Round-trip through the CLI.
+        toml_path = self.tmp / "from_template.toml"
+        toml_path.write_text(usable, encoding="utf-8")
+        argv = [
+            "--input", str(toml_path),
+            "--reports-dir", str(self.reports_dir),
+            "--git-commit-sha", "0123456789abcdef0123456789abcdef01234567",
+            "--registration-timestamp", "2026-05-04T18:00:00Z",
+        ]
+        # Suppress the success print block so test output stays clean.
+        with contextlib.redirect_stdout(io.StringIO()):
+            run_rc = rc.main(argv)
+        self.assertEqual(run_rc, rc.EXIT_OK)
+        out_path = self.reports_dir / "template-test-001.json"
+        self.assertTrue(out_path.exists())
+
+        # Final defensive: the emitted JSON round-trips through the
+        # protocol's own validator (no schema drift).
+        from services.research_protocol.registration import (
+            assert_registration_valid,
+        )
+
+        payload = json.loads(out_path.read_text())
+        # Must not raise.
+        assert_registration_valid(payload)
+
+    # ------------------------------------------------------------------ #
+    # 3. test_no_side_effects
+    # ------------------------------------------------------------------ #
+    def test_no_side_effects(self):
+        # tmp dir is empty before; the CLI run should not create anything.
+        before = sorted(self.tmp.rglob("*"))
+        # Provide --reports-dir pointing into the tmp tree so that *if*
+        # any filesystem write code path leaks, it would land here and
+        # be detected by the post-run snapshot.
+        argv = [
+            "--print-toml-template",
+            "--reports-dir", str(self.reports_dir),
+        ]
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc_code = rc.main(argv)
+        self.assertEqual(rc_code, rc.EXIT_OK)
+
+        # No new files in the tmp tree; reports_dir was never created.
+        after = sorted(self.tmp.rglob("*"))
+        self.assertEqual(before, after)
+        self.assertFalse(self.reports_dir.exists())
+
+    # ------------------------------------------------------------------ #
+    # Defensive guardrails (not required by spec but cheap to add)
+    # ------------------------------------------------------------------ #
+    def test_no_input_required_when_flag_passed(self):
+        # No --input, no other args at all.
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc_code = rc.main(["--print-toml-template"])
+        self.assertEqual(rc_code, rc.EXIT_OK)
+
+    def test_missing_input_without_flag_returns_user_error(self):
+        # The pre-existing requirement that --input is needed for normal
+        # operation must still be enforced (relaxing it from required=True
+        # to default=None is a change in behavior; we verify the runtime
+        # error replaces argparse's required-arg error cleanly).
+        with contextlib.redirect_stderr(io.StringIO()):
+            rc_code = rc.main([])
+        self.assertEqual(rc_code, rc.EXIT_USER_ERROR)
 
 
 if __name__ == "__main__":
