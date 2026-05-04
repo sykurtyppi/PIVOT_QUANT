@@ -410,6 +410,44 @@ def _threshold_from_map(
     return 0.5
 
 
+def _patch_sklearn_remainder_compat() -> None:
+    """Register a compatibility shim for pickles created under sklearn 1.3–1.6.x.
+
+    scikit-learn 1.3.0 introduced ``_RemainderColsList``, a private ``list``
+    subclass used by ``ColumnTransformer`` to store remainder-column indices.
+    The class was removed before sklearn 1.7 / 1.8, which uses a plain
+    ``list`` for the same purpose.
+
+    When a model pkl serialised under sklearn ≤1.6.x is loaded under sklearn
+    ≥1.7, Python's pickle machinery tries to resolve
+    ``sklearn.compose._column_transformer._RemainderColsList`` and raises::
+
+        AttributeError: Can't get attribute '_RemainderColsList' on
+            <module 'sklearn.compose._column_transformer' …>
+
+    Fix: register a minimal ``list`` subclass under the missing name *before*
+    deserialisation.
+
+    Why a subclass, not bare ``list``:
+        The pickle stores ``_RemainderColsList`` instances with a ``__dict__``
+        containing ``data``, ``future_dtype``, ``warning_was_emitted``, and
+        ``warning_enabled``.  Plain ``list`` has no ``__dict__``, so pickle's
+        BUILD step raises ``'list' object has no attribute '__dict__'``.  A
+        user-defined ``list`` subclass gets ``__dict__`` for free.
+
+    Semantic correctness:
+        sklearn ≥1.7 treats ``_remainder[2]`` as a plain list.  The extra
+        instance attributes are legacy book-keeping and are never accessed by
+        the current estimator code.  The shim is idempotent and harmless when
+        the attribute already exists (i.e., on sklearn 1.3–1.6 environments).
+    """
+    import sklearn.compose._column_transformer as _ct  # local import keeps top-level clean
+    if not hasattr(_ct, "_RemainderColsList"):
+        class _RemainderColsList(list):  # noqa: N801
+            """Compat shim: list subclass with __dict__ for pickle compat."""
+        _ct._RemainderColsList = _RemainderColsList  # type: ignore[attr-defined]
+
+
 class ModelRegistry:
     def __init__(self):
         self.manifest = None
@@ -536,6 +574,11 @@ class ModelRegistry:
         for target in ("reject", "break"):
             for horizon_str, threshold in manifest_thresholds.get(target, {}).items():
                 thresholds[target][int(horizon_str)] = float(threshold)
+
+        # Ensure sklearn remainder compat shim is registered before any
+        # joblib.load() call so pickles from sklearn 1.3–1.6.x deserialise
+        # cleanly under sklearn 1.7+/1.8+.
+        _patch_sklearn_remainder_compat()
 
         for target, horizons in manifest.get("models", {}).items():
             for horizon, filename in horizons.items():
