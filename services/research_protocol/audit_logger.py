@@ -40,7 +40,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-import pandas as pd
+# pandas is imported lazily inside hash_dataframe_schema_or_csv so that
+# environments that don't have pandas (e.g. the python-fast CI job) can still
+# import this module and run all other protocol machinery without it.
 
 from services.research_protocol._paths import audit_log_path, protocol_root
 from services.research_protocol.errors import AuditLogTamperingError
@@ -456,15 +458,14 @@ def hash_dataframe_schema_or_csv(
     column_set_hash: str | None = None
     min_date: str | None = None
     max_date: str | None = None
-    df: pd.DataFrame | None = None
-    if suffix == ".parquet":
+    df = None
+    # pandas is lazy-imported here so callers in environments without pandas
+    # (e.g. CI runners that only have scikit-learn) can still import this module
+    # and exercise all other protocol machinery.
+    if suffix in (".parquet", ".csv"):
         try:
-            df = pd.read_parquet(p)
-        except Exception:
-            df = None
-    elif suffix == ".csv":
-        try:
-            df = pd.read_csv(p)
+            import pandas as pd  # noqa: PLC0415
+            df = pd.read_parquet(p) if suffix == ".parquet" else pd.read_csv(p)
         except Exception:
             df = None
     if df is not None:
@@ -480,6 +481,7 @@ def hash_dataframe_schema_or_csv(
         )
         if date_col is not None and len(df) > 0:
             try:
+                import pandas as pd  # noqa: PLC0415,F811
                 dates = pd.to_datetime(df[date_col], errors="coerce").dropna()
                 if len(dates):
                     min_date = str(dates.min().date())
