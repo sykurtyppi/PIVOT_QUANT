@@ -126,8 +126,16 @@ def _validate_feature_column(col: str) -> str:
 def _apply_signal_filter(
     feature_values: np.ndarray,
     threshold_val: float,
+    *,
+    operator: str = "lte",
 ) -> np.ndarray:
-    """Return a boolean mask: True where the signal fires (value <= threshold)."""
+    """Return a boolean mask: True where the signal fires.
+
+    ``operator="lte"`` (default) → ``value <= threshold`` (long break signal).
+    ``operator="gte"``           → ``value >= threshold`` (inverted / short signal).
+    """
+    if operator == "gte":
+        return feature_values >= threshold_val
     return feature_values <= threshold_val
 
 
@@ -220,6 +228,7 @@ def run_ml_regime_validation(
     label_horizon_min: int = 5
     feature_col: str = "distance_bps"     # sensible default
     threshold_val: float | None = None
+    threshold_operator: str = "lte"
 
     if candidate_id is not None:
         from services.research_protocol.registration import load_registration
@@ -244,6 +253,7 @@ def run_ml_regime_validation(
         if features and thresholds:
             feature_col = _validate_feature_column(features[0]["name"])
             threshold_val = float(thresholds[0]["value"])
+            threshold_operator = str(thresholds[0].get("operator", "lte"))
     else:
         test_start = f"{test_year}-01-01"
         test_end = f"{test_year}-12-31"
@@ -286,7 +296,9 @@ def run_ml_regime_validation(
     baseline_reject_rate = 1.0 - baseline_break_rate
 
     if threshold_val is not None:
-        signal_mask = _apply_signal_filter(feature_arr, threshold_val)
+        signal_mask = _apply_signal_filter(
+            feature_arr, threshold_val, operator=threshold_operator
+        )
     else:
         signal_mask = np.ones(n_all, dtype=bool)
 
@@ -297,7 +309,7 @@ def run_ml_regime_validation(
         return ValidationResult(report={
             "status": "error",
             "error": (
-                f"Signal filter ({feature_col} <= {threshold_val})"
+                f"Signal filter ({feature_col} {threshold_operator} {threshold_val})"
                 f" produced 0 events in OOS period"
                 f" {test_start} to {test_end}."
             ),
@@ -368,6 +380,7 @@ def run_ml_regime_validation(
         "dataset_identifier": dataset_identifier,
         "feature_col": feature_col,
         "threshold_val": threshold_val,
+        "threshold_operator": threshold_operator,
         "n_all_oos": n_all,
         "n_signal_oos": n_signal,
         "baseline_break_rate": round(baseline_break_rate, 6),
