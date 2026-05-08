@@ -29,7 +29,7 @@ if str(ROOT) not in sys.path:
 
 from ml.calibration import ProbabilityCalibrator
 from ml.features import drop_features, build_feature_row
-from ml.thresholds import select_threshold, utility_bps_for_target
+from ml.thresholds import NO_SIGNAL_THRESHOLD, select_threshold, utility_bps_for_target
 
 DEFAULT_DUCKDB = os.getenv("DUCKDB_PATH", "data/pivot_training.duckdb")
 DEFAULT_VIEW = os.getenv("DUCKDB_VIEW", "training_events_v1")
@@ -504,6 +504,9 @@ def main() -> None:
                             if args.threshold_objective == "utility_bps"
                             else None
                         ),
+                        enforce_min_score=args.threshold_objective == "utility_bps",
+                        enforce_no_fallback=args.threshold_objective == "utility_bps",
+                        no_signal_threshold=NO_SIGNAL_THRESHOLD,
                     )
                     optimal_threshold = float(selection.threshold)
                     threshold_meta.update(

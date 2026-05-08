@@ -14,7 +14,7 @@ if str(ROOT) not in sys.path:
 
 from ml.calibration import ProbabilityCalibrator
 from ml.features import FEATURE_VERSION, build_feature_row, drop_features
-from ml.thresholds import select_threshold, utility_bps_for_target
+from ml.thresholds import NO_SIGNAL_THRESHOLD, select_threshold, utility_bps_for_target
 
 DEFAULT_DUCKDB = os.getenv("DUCKDB_PATH", "data/pivot_training.duckdb")
 DEFAULT_VIEW = os.getenv("DUCKDB_VIEW", "training_events_v1")
@@ -416,7 +416,7 @@ def apply_threshold_risk_guards(
     disable_on_nonpositive_utility: bool,
     disable_on_fallback: bool,
 ) -> tuple[float, dict]:
-    guarded_threshold = min(1.0, max(0.0, float(no_trade_threshold)))
+    guarded_threshold = max(0.0, float(no_trade_threshold))
     reasons: list[str] = []
 
     if objective == "utility_bps":
@@ -589,8 +589,8 @@ def main() -> None:
     parser.add_argument(
         "--threshold-no-trade-threshold",
         type=float,
-        default=_env_float("RF_THRESHOLD_NO_TRADE_THRESHOLD", 1.0),
-        help="Threshold used when risk guard disables a model/target horizon (typically 1.0).",
+        default=_env_float("RF_THRESHOLD_NO_TRADE_THRESHOLD", NO_SIGNAL_THRESHOLD),
+        help="Threshold used when risk guard disables a model/target horizon (typically >1.0).",
     )
     parser.add_argument(
         "--threshold-disable-on-nonpositive-utility",
@@ -894,6 +894,15 @@ def main() -> None:
                                 if args.threshold_objective == "utility_bps"
                                 else None
                             ),
+                            enforce_min_score=(
+                                args.threshold_objective == "utility_bps"
+                                and bool(args.threshold_disable_on_nonpositive_utility)
+                            ),
+                            enforce_no_fallback=(
+                                args.threshold_objective == "utility_bps"
+                                and bool(args.threshold_disable_on_fallback)
+                            ),
+                            no_signal_threshold=NO_SIGNAL_THRESHOLD,
                         )
                         optimal_threshold = float(selection.threshold)
                         threshold_meta.update(

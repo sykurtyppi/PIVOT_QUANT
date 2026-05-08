@@ -105,6 +105,7 @@ import pandas as pd
 import joblib
 
 from ml.features import build_feature_row, collect_missing, FEATURE_VERSION
+from ml.thresholds import NO_SIGNAL_THRESHOLD
 
 log = logging.getLogger("ml_server")
 _missing_threshold_warnings: set[tuple[str, int, str]] = set()
@@ -2260,7 +2261,10 @@ def _serialize_reject_or_breakout_filter_rules(rules: dict[int, set[int]]) -> di
 
 
 def _clamp_threshold(value: float) -> float:
-    return max(0.01, min(0.99, float(value)))
+    value_f = float(value)
+    if value_f >= 1.0:
+        return value_f
+    return max(0.01, min(0.99, value_f))
 
 
 def _compute_trade_regime(event: dict, features: dict) -> dict:

@@ -7811,6 +7811,73 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertAlmostEqual(float(selection.threshold), 0.95, places=9)
         self.assertAlmostEqual(float(selection.score), 34.0, places=9)
 
+    def test_threshold_selector_strict_floor_returns_no_signal_fallback(self) -> None:
+        module = load_module(
+            "thresholds_strict_floor_no_signal",
+            REPO_ROOT / "ml" / "thresholds.py",
+        )
+        y_true = np.asarray([1, 1, 1, 1], dtype=int)
+        y_prob = np.asarray([0.95, 0.85, 0.75, 0.65], dtype=float)
+        utility = np.asarray([-2.0, -3.0, -4.0, -5.0], dtype=float)
+
+        selection = module.select_threshold(
+            y_true,
+            y_prob,
+            objective="utility_bps",
+            precision_floor=0.0,
+            min_signals=1,
+            default_threshold=0.5,
+            utility_per_signal=utility,
+            preferred_min_score=0.0,
+            enforce_min_score=True,
+            no_signal_threshold=module.NO_SIGNAL_THRESHOLD,
+        )
+
+        self.assertTrue(bool(selection.fallback))
+        self.assertGreater(float(selection.threshold), 1.0)
+        self.assertEqual(int(selection.signals), 0)
+        self.assertLessEqual(float(selection.score), 0.0)
+        self.assertGreater(len(selection.top_candidates), 0)
+
+    def test_threshold_selector_strict_fallback_returns_no_signal(self) -> None:
+        module = load_module(
+            "thresholds_strict_fallback_no_signal",
+            REPO_ROOT / "ml" / "thresholds.py",
+        )
+        y_true = np.asarray([1, 0, 1, 0], dtype=int)
+        y_prob = np.asarray([0.95, 0.85, 0.75, 0.65], dtype=float)
+        utility = np.asarray([10.0, -1.0, 10.0, -1.0], dtype=float)
+
+        selection = module.select_threshold(
+            y_true,
+            y_prob,
+            objective="utility_bps",
+            precision_floor=0.99,
+            min_signals=10,
+            default_threshold=0.5,
+            utility_per_signal=utility,
+            preferred_min_score=0.0,
+            enforce_min_score=True,
+            enforce_no_fallback=True,
+            no_signal_threshold=module.NO_SIGNAL_THRESHOLD,
+        )
+
+        self.assertTrue(bool(selection.fallback))
+        self.assertGreater(float(selection.threshold), 1.0)
+        self.assertEqual(int(selection.signals), 0)
+        self.assertEqual(int(selection.evaluated_candidates), 0)
+
+    def test_ml_server_preserves_no_signal_threshold_sentinel(self) -> None:
+        module = load_module(
+            "ml_server_no_signal_threshold_sentinel",
+            REPO_ROOT / "server" / "ml_server.py",
+        )
+
+        self.assertGreater(float(module.NO_SIGNAL_THRESHOLD), 1.0)
+        self.assertGreater(float(module._clamp_threshold(module.NO_SIGNAL_THRESHOLD)), 1.0)
+        self.assertEqual(float(module._clamp_threshold(1.0)), 1.0)
+        self.assertAlmostEqual(float(module._clamp_threshold(0.995)), 0.99, places=9)
+
     def test_train_artifacts_threshold_guard_disables_fallback_threshold(self) -> None:
         module = load_module(
             "train_rf_artifacts_threshold_guard_fallback",
