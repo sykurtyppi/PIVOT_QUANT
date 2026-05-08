@@ -7593,6 +7593,85 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertNotIn("mfe_bps_other", break_stats)
         self.assertNotIn("mae_bps_other", break_stats)
 
+    def test_train_artifacts_purges_train_rows_overlapping_calibration_window(self) -> None:
+        module = load_module(
+            "train_rf_artifacts_purge_overlap",
+            REPO_ROOT / "scripts" / "train_rf_artifacts.py",
+        )
+        try:
+            import pandas as pd
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"pandas unavailable: {exc}")
+
+        # Calibration starts at ts=1000 (ms). Embargo of 60min = 3_600_000 ms.
+        # Any training row with ts_event > (1000 - 3_600_000) overlaps.
+        # We construct rows so that train rows at ts=500 and ts=900 overlap;
+        # train row at ts=-10_000_000 is safely earlier and must be kept.
+        calib_start = 10_000_000
+        embargo_min = 60.0
+        df = pd.DataFrame(
+            [
+                {"ts_event": -10_000_000, "horizon_min": 60},  # safe
+                {"ts_event": calib_start - 100, "horizon_min": 60},  # overlap
+                {"ts_event": calib_start - 1, "horizon_min": 60},  # overlap
+                {"ts_event": calib_start, "horizon_min": 60},  # calib
+                {"ts_event": calib_start + 60_000, "horizon_min": 60},  # calib
+            ]
+        )
+        train_mask = pd.Series([True, True, True, False, False], index=df.index)
+        calib_mask = pd.Series([False, False, False, True, True], index=df.index)
+
+        purged_mask, diag = module.purge_training_overlap(
+            df, train_mask, calib_mask, embargo_minutes=embargo_min
+        )
+
+        self.assertEqual(int(purged_mask.sum()), 1)
+        self.assertTrue(bool(purged_mask.iloc[0]))
+        self.assertFalse(bool(purged_mask.iloc[1]))
+        self.assertFalse(bool(purged_mask.iloc[2]))
+        self.assertEqual(diag["train_rows_before_purge"], 3)
+        self.assertEqual(diag["train_rows_after_purge"], 1)
+        self.assertEqual(diag["train_rows_purged"], 2)
+        self.assertEqual(diag["embargo_minutes"], embargo_min)
+        self.assertEqual(diag["calibration_start_ts"], calib_start)
+        self.assertTrue(diag["enabled"])
+        self.assertEqual(diag["earliest_purged_ts"], calib_start - 100)
+        self.assertEqual(diag["latest_purged_ts"], calib_start - 1)
+        self.assertEqual(diag["skip_reason"], "")
+
+    def test_train_artifacts_purge_disabled_preserves_training_rows(self) -> None:
+        module = load_module(
+            "train_rf_artifacts_purge_disabled",
+            REPO_ROOT / "scripts" / "train_rf_artifacts.py",
+        )
+        try:
+            import pandas as pd
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"pandas unavailable: {exc}")
+
+        df = pd.DataFrame(
+            [
+                {"ts_event": 100, "horizon_min": 30},
+                {"ts_event": 200, "horizon_min": 30},
+                {"ts_event": 300, "horizon_min": 30},
+            ]
+        )
+        train_mask = pd.Series([True, True, False], index=df.index)
+        calib_mask = pd.Series([False, False, True], index=df.index)
+
+        purged_mask, diag = module.purge_training_overlap(
+            df, train_mask, calib_mask, embargo_minutes=0.0
+        )
+
+        self.assertEqual(int(purged_mask.sum()), 2)
+        self.assertFalse(diag["enabled"])
+        self.assertEqual(diag["skip_reason"], "disabled")
+        self.assertEqual(diag["train_rows_before_purge"], 2)
+        self.assertEqual(diag["train_rows_after_purge"], 2)
+        self.assertEqual(diag["train_rows_purged"], 0)
+        self.assertIsNone(diag["earliest_purged_ts"])
+        self.assertIsNone(diag["latest_purged_ts"])
+
     def test_train_artifacts_horizon_stats_emit_by_regime(self) -> None:
         module = load_module("train_rf_artifacts_stats_regime", REPO_ROOT / "scripts" / "train_rf_artifacts.py")
         try:
