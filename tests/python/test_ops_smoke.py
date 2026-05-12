@@ -8611,6 +8611,192 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertTrue(any("break:5m mae_bps_break worsened" in item for item in failures))
         self.assertEqual(skips, [])
 
+    # ------------------------------------------------------------------ #
+    # Held-out feasibility audit
+    # ------------------------------------------------------------------ #
+
+    def _audit_module(self):
+        return load_module(
+            "held_out_feasibility_audit",
+            REPO_ROOT / "scripts" / "audit_held_out_feasibility.py",
+        )
+
+    @staticmethod
+    def _stub_df(n: int):
+        """Tiny dataframe whose row index doubles as a unique label."""
+        import pandas as pd
+        return pd.DataFrame({"row_id": list(range(n))})
+
+    class _StubModel:
+        """``predict_proba`` returns the second column from a caller-supplied
+        callable. Records the input X so tests can verify which rows were
+        scored."""
+
+        def __init__(self, probs_fn):
+            self._probs_fn = probs_fn
+            self.last_X = None
+
+        def predict_proba(self, X):
+            import numpy as np
+            self.last_X = X
+            n = len(X)
+            arr = np.zeros((n, 2), dtype=float)
+            arr[:, 1] = self._probs_fn(X)
+            arr[:, 0] = 1.0 - arr[:, 1]
+            return arr
+
+    def test_audit_compute_slice_uses_chronological_tail(self) -> None:
+        """``compute_slice`` must score the LAST ``slice_size`` rows of the
+        passed df — never random, never the head."""
+        module = self._audit_module()
+        df = self._stub_df(100)
+        feature_columns = ["row_id"]
+
+        seen_indices: list[list[int]] = []
+
+        def _probs(X):
+            seen_indices.append(list(X.index))
+            return [0.0] * len(X)
+
+        model = self._StubModel(_probs)
+        # build_features_aligned will reindex to feature_columns. We need
+        # build_feature_row to return something usable; patch it to just
+        # echo the row dict.
+        import ml.features as features_mod
+        original_build_row = features_mod.build_feature_row
+        features_mod.build_feature_row = lambda row: {"row_id": row.get("row_id")}
+        try:
+            module.compute_slice(
+                df, 10,
+                model_obj=model, feature_columns=feature_columns,
+                threshold=0.5, floor_total=0,
+            )
+        finally:
+            features_mod.build_feature_row = original_build_row
+
+        self.assertEqual(seen_indices[-1], list(range(90, 100)))
+
+    def test_audit_compute_slice_uses_fixed_threshold_no_search(self) -> None:
+        """Signal count must come from a SINGLE comparison against the
+        passed threshold. The audit must not iterate alternative thresholds.
+
+        We assert this by checking ``predict_proba`` is called at most once
+        per slice, and that the signal count matches a hand calculation
+        for the given (probs, threshold) pair."""
+        module = self._audit_module()
+        df = self._stub_df(20)
+        feature_columns = ["row_id"]
+
+        call_count = {"n": 0}
+
+        def _probs(X):
+            call_count["n"] += 1
+            # First 5 rows of the slice land above 0.75; rest below 0.5.
+            n = len(X)
+            return [0.9 if i < 5 else 0.3 for i in range(n)]
+
+        model = self._StubModel(_probs)
+        import ml.features as features_mod
+        original_build_row = features_mod.build_feature_row
+        features_mod.build_feature_row = lambda row: {"row_id": row.get("row_id")}
+        try:
+            result = module.compute_slice(
+                df, 20,
+                model_obj=model, feature_columns=feature_columns,
+                threshold=0.75, floor_total=0,
+            )
+        finally:
+            features_mod.build_feature_row = original_build_row
+
+        self.assertEqual(call_count["n"], 1)
+        self.assertEqual(result["signal_count"], 5)
+        self.assertAlmostEqual(result["signal_rate"], 0.25, places=6)
+
+    def test_audit_recommendation_single_held_out_slice_feasible(self) -> None:
+        """At least one slice with meets_min_signals AND leaves_room
+        => ``single_held_out_slice_feasible``."""
+        module = self._audit_module()
+        slices = [
+            {"meets_min_signals": True, "leaves_train_calib_tune_room": True},
+            {"meets_min_signals": True, "leaves_train_calib_tune_room": False},
+        ]
+        rec = module.determine_recommendation(
+            total_rows=25_000, slices=slices, floor_total=21_430,
+        )
+        self.assertEqual(rec, "single_held_out_slice_feasible")
+
+    def test_audit_recommendation_walk_forward_required(self) -> None:
+        """No slice satisfies BOTH gates, but total data >= floor
+        => ``walk_forward_oos_required``."""
+        module = self._audit_module()
+        slices = [
+            {"meets_min_signals": True, "leaves_train_calib_tune_room": False},
+            {"meets_min_signals": False, "leaves_train_calib_tune_room": True},
+        ]
+        rec = module.determine_recommendation(
+            total_rows=21_500, slices=slices, floor_total=21_430,
+        )
+        self.assertEqual(rec, "walk_forward_oos_required")
+
+    def test_audit_recommendation_insufficient_data(self) -> None:
+        """``total_rows < floor_total`` => no clean OOS is achievable
+        regardless of per-slice flags."""
+        module = self._audit_module()
+        slices = [
+            {"meets_min_signals": True, "leaves_train_calib_tune_room": True},
+        ]
+        rec = module.determine_recommendation(
+            total_rows=15_000, slices=slices, floor_total=21_430,
+        )
+        self.assertEqual(rec, "insufficient_data_for_clean_oos")
+
+    def test_audit_report_schema_stable(self) -> None:
+        """The JSON report must always carry the same top-level keys
+        regardless of the recommendation branch."""
+        module = self._audit_module()
+        report = module.build_report(
+            target="reject", horizon=15,
+            active_manifest_path=Path("/tmp/manifest_active.json"),
+            manifest={"version": "v999"},
+            model_path=Path("/tmp/rf_reject_15m_v999.pkl"),
+            threshold=0.5,
+            total_rows=21_500,
+            slices=[{"meets_min_signals": False, "leaves_train_calib_tune_room": True}],
+            recommendation="walk_forward_oos_required",
+        )
+        for key in (
+            "schema_version", "audit_type", "generated_at",
+            "target", "horizon",
+            "active_manifest_path", "active_manifest_version",
+            "model_path", "deployed_threshold",
+            "min_signals_floor",
+            "existing_floor", "existing_floor_total",
+            "total_labeled_rows", "slices",
+            "recommendation", "scope_disclosure",
+        ):
+            self.assertIn(key, report, f"missing report key: {key}")
+        self.assertEqual(report["audit_type"], "held_out_feasibility")
+        self.assertEqual(report["target"], "reject")
+        self.assertEqual(report["horizon"], 15)
+        # Schema version pinned so downstream consumers can detect drift.
+        self.assertEqual(report["schema_version"], 1)
+
+    def test_audit_compute_slice_handles_oversized_request(self) -> None:
+        """If asked for more rows than the df contains, return a clean
+        ``skip_reason`` rather than crashing or silently truncating."""
+        module = self._audit_module()
+        df = self._stub_df(50)
+        model = self._StubModel(lambda X: [0.0] * len(X))
+        result = module.compute_slice(
+            df, 100,
+            model_obj=model, feature_columns=["row_id"],
+            threshold=0.5, floor_total=0,
+        )
+        self.assertEqual(result["signal_count"], None)
+        self.assertEqual(result["available_rows"], 0)
+        self.assertEqual(result["skip_reason"], "slice_size_exceeds_total_rows")
+        self.assertFalse(result["meets_min_signals"])
+
     def test_retrain_evidence_pack_refuses_overlap_with_live_model_dir(self) -> None:
         module = load_module(
             "retrain_evidence_pack_overlap",
