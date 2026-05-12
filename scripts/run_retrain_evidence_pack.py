@@ -672,9 +672,28 @@ def _horizon_viability(
     reasons: list[str] = []
     if row.get("objective") != "utility_bps":
         reasons.append("wrong_objective")
+    # Score must be a finite, positive number. The previous predicate
+    # ``not isinstance(score, (int, float)) or float(score) <= 0.0`` is
+    # fail-open against NaN because ``NaN <= 0.0`` is False per IEEE 754.
+    # Runtime safety (PR #12) catches NaN scores when fastapi is available,
+    # but ``runtime_safety_dry_run.skipped == True`` is a supported case
+    # (dev envs without fastapi), and readiness must close the same hole
+    # at this layer rather than relying on a downstream gate that may not
+    # have run. Mirrors the predicate in
+    # ``server.ml_server.ModelRegistry._apply_runtime_threshold_safety``.
     score = row.get("score")
-    if not isinstance(score, (int, float)) or float(score) <= 0.0:
+    if isinstance(score, bool) or not isinstance(score, (int, float)):
         reasons.append("nonpositive_utility")
+    else:
+        try:
+            score_f = float(score)
+        except (TypeError, ValueError):
+            reasons.append("nonpositive_utility")
+        else:
+            if not math.isfinite(score_f):
+                reasons.append("nonfinite_utility")
+            elif score_f <= 0.0:
+                reasons.append("nonpositive_utility")
     if bool(row.get("fallback")):
         reasons.append("fallback")
     if bool(row.get("no_signal_substituted")):

@@ -9248,6 +9248,63 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertFalse(result["promotion_ready"])
         self.assertEqual(result["promotion_disposition"], "blocked_not_ready")
 
+    def test_readiness_nan_score_is_not_viable(self) -> None:
+        """NaN scores must not pass the viability gate.
+
+        ``NaN <= 0.0`` is False per IEEE 754, so the previous predicate would
+        fail-open. PR #12 caught this at runtime, but readiness has to close
+        the same hole here in case ``runtime_safety_dry_run`` is skipped."""
+        module = self._readiness_module()
+        rows = [
+            self._ph_row("reject", 15, score=float("nan")),
+        ]
+        result = module.classify_candidate_readiness(self._build_report_stub(rows))
+        viable_ids = {(v["target"], v["horizon"]) for v in result["viable_horizons"]}
+        self.assertNotIn(("reject", 15), viable_ids)
+        self.assertEqual(result["viable_horizons"], [])
+        blocked_reasons = result["blocked_horizons"][0]["reasons"]
+        self.assertIn("nonfinite_utility", blocked_reasons)
+        # No viable horizons => not_ready.
+        self.assertEqual(result["state"], "not_ready")
+
+    def test_readiness_inf_scores_are_not_viable(self) -> None:
+        module = self._readiness_module()
+        rows = [
+            self._ph_row("reject", 15, score=float("inf")),
+            self._ph_row("reject", 30, score=float("-inf")),
+        ]
+        result = module.classify_candidate_readiness(self._build_report_stub(rows))
+        self.assertEqual(result["viable_horizons"], [])
+        blocked_reasons_15 = result["blocked_horizons"][0]["reasons"]
+        blocked_reasons_30 = result["blocked_horizons"][1]["reasons"]
+        self.assertIn("nonfinite_utility", blocked_reasons_15)
+        self.assertIn("nonfinite_utility", blocked_reasons_30)
+        # Neither +inf nor -inf should be misclassified as nonpositive_utility:
+        # they are not less-than-or-equal in the meaningful sense; the gate
+        # is "must be finite AND > 0".
+        self.assertNotIn("nonpositive_utility", blocked_reasons_15)
+
+    def test_readiness_nan_blocked_even_when_runtime_safety_skipped(self) -> None:
+        """Worst case: fastapi missing, runtime dry-run skipped, NaN score.
+
+        Without this fix, the runtime layer never sees the NaN and readiness
+        used to mark the horizon viable. This test pins the defense-in-depth:
+        readiness must reject NaN by itself, independent of the runtime
+        check."""
+        module = self._readiness_module()
+        rows = [
+            # Otherwise-clean: utility_bps, fallback False, no_signal False.
+            self._ph_row("reject", 15, score=float("nan")),
+        ]
+        stub = self._build_report_stub(rows, runtime_safety_skipped=True)
+        result = module.classify_candidate_readiness(stub)
+        self.assertEqual(result["viable_horizons"], [])
+        self.assertEqual(result["state"], "not_ready")
+        self.assertIn("no_viable_horizons", result["reasons"])
+        # And the runtime-safety-skipped reason is also surfaced separately
+        # (it is a soft signal, not the fatal cause here).
+        self.assertIn("runtime_safety_skipped", result["reasons"])
+
     def test_readiness_missing_candidate_manifest_not_ready(self) -> None:
         module = self._readiness_module()
         result = module.classify_candidate_readiness(
