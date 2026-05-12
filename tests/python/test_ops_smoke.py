@@ -9151,6 +9151,103 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(result["state"], "not_ready")
         self.assertIn("training_failed", result["reasons"])
 
+    def test_promotion_disposition_current_evidence_hold_pending_stat_validation(self) -> None:
+        """2 viable / 6 blocked with stat validation missing must not be
+        promotion_ready and must carry disposition=hold_pending_statistical_validation."""
+        module = self._readiness_module()
+        rows = [
+            self._ph_row("reject", 5, score=-4.82, fallback=True, no_signal_substituted=True),
+            self._ph_row("reject", 15, score=117.46),
+            self._ph_row("reject", 30, score=85.89),
+            self._ph_row("reject", 60, score=-33.48, fallback=True, no_signal_substituted=True),
+            self._ph_row("break", 5, score=0.0, fallback=True, no_signal_substituted=True),
+            self._ph_row("break", 15, score=0.0, fallback=True, no_signal_substituted=True),
+            self._ph_row("break", 30, score=0.0, fallback=True, no_signal_substituted=True),
+            self._ph_row("break", 60, score=0.0, fallback=True, no_signal_substituted=True),
+        ]
+        result = module.classify_candidate_readiness(self._build_report_stub(rows))
+        self.assertEqual(result["state"], "degraded_candidate")
+        self.assertFalse(result["promotion_ready"])
+        self.assertEqual(
+            result["promotion_disposition"], "hold_pending_statistical_validation"
+        )
+
+    def test_promotion_disposition_full_family_missing_stat_validation(self) -> None:
+        """All 8 viable but stat validation missing is still NOT promotion_ready."""
+        module = self._readiness_module()
+        rows = [
+            self._ph_row("reject", 5, score=10.0),
+            self._ph_row("reject", 15, score=20.0),
+            self._ph_row("reject", 30, score=30.0),
+            self._ph_row("reject", 60, score=40.0),
+            self._ph_row("break", 5, score=5.0),
+            self._ph_row("break", 15, score=6.0),
+            self._ph_row("break", 30, score=7.0),
+            self._ph_row("break", 60, score=8.0),
+        ]
+        result = module.classify_candidate_readiness(self._build_report_stub(rows))
+        self.assertEqual(result["state"], "full_family_ready")
+        self.assertFalse(result["promotion_ready"])
+        self.assertEqual(
+            result["promotion_disposition"], "hold_pending_statistical_validation"
+        )
+
+    def test_promotion_disposition_full_family_with_stat_validated_is_ready(self) -> None:
+        """When B3 lands and stat validation is present+passed, full_family_ready
+        must map to ready_full_family / promotion_ready=True.
+
+        Tested via the isolated ``_compute_promotion_disposition`` helper so
+        the disposition mapping is verifiable independently of the deferred
+        statistical_validation stub still hard-coded in classify_*."""
+        module = self._readiness_module()
+        promotion_ready, disposition = module._compute_promotion_disposition(
+            state="full_family_ready",
+            has_viable=True,
+            statistical_validation_present=True,
+            statistical_validation_passed=True,
+        )
+        self.assertTrue(promotion_ready)
+        self.assertEqual(disposition, "ready_full_family")
+
+        # Negative control: full_family_ready but stat validation absent must
+        # not be promotion_ready.
+        promotion_ready_neg, disposition_neg = module._compute_promotion_disposition(
+            state="full_family_ready",
+            has_viable=True,
+            statistical_validation_present=False,
+            statistical_validation_passed=None,
+        )
+        self.assertFalse(promotion_ready_neg)
+        self.assertEqual(disposition_neg, "hold_pending_statistical_validation")
+
+        # B3 future slot: partial+passed stat validation lands in hold_partial_degraded.
+        promotion_ready_partial, disposition_partial = module._compute_promotion_disposition(
+            state="degraded_candidate",
+            has_viable=True,
+            statistical_validation_present=True,
+            statistical_validation_passed=True,
+        )
+        self.assertFalse(promotion_ready_partial)
+        self.assertEqual(disposition_partial, "hold_partial_degraded")
+
+    def test_promotion_disposition_runtime_safety_disagreement_blocked(self) -> None:
+        """would_neutralize_count > 0 => not_ready => blocked_not_ready."""
+        module = self._readiness_module()
+        rows = [
+            self._ph_row("reject", 15, score=117.0),
+            self._ph_row("reject", 30, score=85.0),
+        ]
+        stub = self._build_report_stub(
+            rows,
+            would_neutralize=[
+                {"target": "reject", "horizon": 15, "original_threshold": 0.6, "reason": "nonpositive_score"},
+            ],
+        )
+        result = module.classify_candidate_readiness(stub)
+        self.assertEqual(result["state"], "not_ready")
+        self.assertFalse(result["promotion_ready"])
+        self.assertEqual(result["promotion_disposition"], "blocked_not_ready")
+
     def test_readiness_missing_candidate_manifest_not_ready(self) -> None:
         module = self._readiness_module()
         result = module.classify_candidate_readiness(

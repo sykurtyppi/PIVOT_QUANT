@@ -685,6 +685,52 @@ def _horizon_viability(
     return (len(reasons) == 0), reasons
 
 
+def _compute_promotion_disposition(
+    *,
+    state: str,
+    has_viable: bool,
+    statistical_validation_present: bool,
+    statistical_validation_passed: object,
+) -> tuple[bool, str]:
+    """Map (state, statistical-validation) into the promotion axis.
+
+    Promotion is a *second* axis on top of readiness. Readiness ("how did
+    training + safety look?") is necessary but not sufficient for promotion;
+    statistical validation is an independent gate. Keeping the fields
+    separate prevents future automation from reading ``partial_ready=true``
+    or ``degraded_candidate=true`` as ``promotion_ready=true``.
+
+    Disposition order (most-blocking first):
+
+    - ``blocked_not_ready``                    — ``state == "not_ready"``.
+    - ``ready_full_family``                    — ``state == "full_family_ready"``
+                                                 AND statistical validation is
+                                                 present AND passed.
+    - ``hold_pending_statistical_validation``  — has at least one viable horizon
+                                                 AND statistical validation is
+                                                 missing or did not pass. This is
+                                                 where the current candidate sits
+                                                 until B3 lands.
+    - ``hold_partial_degraded``                — partial/degraded with statistical
+                                                 validation present-and-passed
+                                                 but not the full family. Reserved
+                                                 for the B3+B4 regime; not
+                                                 reachable from this PR's
+                                                 hard-coded stat-validation
+                                                 stub.
+    """
+    stat_promotable = bool(
+        statistical_validation_present and statistical_validation_passed is True
+    )
+    if state == "not_ready":
+        return False, "blocked_not_ready"
+    if state == "full_family_ready" and stat_promotable:
+        return True, "ready_full_family"
+    if has_viable and not stat_promotable:
+        return False, "hold_pending_statistical_validation"
+    return False, "hold_partial_degraded"
+
+
 def classify_candidate_readiness(report: dict) -> dict:
     """Classify a candidate from its evidence report (policy-only, no mutation).
 
@@ -807,6 +853,14 @@ def classify_candidate_readiness(report: dict) -> dict:
         if majority_blocked:
             reasons.append("majority_horizons_blocked")
 
+    # --- Promotion disposition ---------------------------------------------
+    promotion_ready, promotion_disposition = _compute_promotion_disposition(
+        state=state,
+        has_viable=bool(viable_horizons),
+        statistical_validation_present=statistical_validation_present,
+        statistical_validation_passed=statistical_validation_passed,
+    )
+
     # Dedupe reasons while preserving order.
     seen_r: set[str] = set()
     reasons_ordered: list[str] = []
@@ -821,6 +875,8 @@ def classify_candidate_readiness(report: dict) -> dict:
         "partial_ready": bool(partial_ready),
         "degraded_candidate": bool(degraded_candidate),
         "not_ready": bool(not_ready),
+        "promotion_ready": bool(promotion_ready),
+        "promotion_disposition": promotion_disposition,
         "viable_horizons": viable_horizons,
         "blocked_horizons": blocked_horizons,
         "runtime_safety_agreement": bool(runtime_safety_agreement),
@@ -994,6 +1050,10 @@ def _print_readiness_summary(readiness: dict) -> None:
     viable = readiness.get("viable_horizons") or []
     blocked = readiness.get("blocked_horizons") or []
     print(f"[candidate readiness] state={readiness.get('state')}")
+    print(
+        f"  promotion_ready:         {readiness.get('promotion_ready')}  "
+        f"(disposition={readiness.get('promotion_disposition')})"
+    )
     if viable:
         bits = []
         for v in viable:
