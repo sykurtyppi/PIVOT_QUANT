@@ -406,6 +406,66 @@ def split_calibration_slices(X_calib, y_calib, *, fit_fraction: float, min_fit_e
     return X_fit, y_fit, X_tune, y_tune, True
 
 
+def purge_training_overlap(df, train_mask, calib_mask, *, embargo_minutes: float):
+    """Drop training rows whose label window overlaps the calibration slice."""
+    pd = require("pandas", "python3 -m pip install pandas")
+
+    train_mask_series = pd.Series(train_mask, index=df.index).astype(bool)
+    calib_mask_series = pd.Series(calib_mask, index=df.index).astype(bool)
+    train_before = int(train_mask_series.sum())
+    diag = {
+        "enabled": bool(float(embargo_minutes) > 0.0),
+        "embargo_minutes": float(embargo_minutes),
+        "calibration_start_ts": None,
+        "train_rows_before_purge": train_before,
+        "train_rows_after_purge": train_before,
+        "train_rows_purged": 0,
+        "earliest_purged_ts": None,
+        "latest_purged_ts": None,
+        "skip_reason": "",
+    }
+
+    if float(embargo_minutes) <= 0.0:
+        diag["skip_reason"] = "disabled"
+        return train_mask_series, diag
+    if "ts_event" not in df.columns:
+        diag["skip_reason"] = "missing_ts_event"
+        return train_mask_series, diag
+    if train_before == 0:
+        diag["skip_reason"] = "no_training_rows"
+        return train_mask_series, diag
+    if not bool(calib_mask_series.any()):
+        diag["skip_reason"] = "no_calibration_rows"
+        return train_mask_series, diag
+
+    ts_values = pd.to_numeric(df["ts_event"], errors="coerce")
+    calib_start_ts = ts_values.loc[calib_mask_series].min()
+    if pd.isna(calib_start_ts):
+        diag["skip_reason"] = "invalid_calibration_start_ts"
+        return train_mask_series, diag
+
+    calib_start_ts = int(calib_start_ts)
+    embargo_ms = int(round(float(embargo_minutes) * 60_000.0))
+    train_ts = ts_values.loc[train_mask_series]
+    overlap = (train_ts + embargo_ms) > calib_start_ts
+    overlap = overlap.fillna(False)
+    purged_index = overlap[overlap].index
+
+    purged_train_mask = train_mask_series.copy()
+    if len(purged_index) > 0:
+        purged_train_mask.loc[purged_index] = False
+        purged_ts = train_ts.loc[purged_index].dropna()
+        if not purged_ts.empty:
+            diag["earliest_purged_ts"] = int(purged_ts.min())
+            diag["latest_purged_ts"] = int(purged_ts.max())
+
+    train_after = int(purged_train_mask.sum())
+    diag["calibration_start_ts"] = calib_start_ts
+    diag["train_rows_after_purge"] = train_after
+    diag["train_rows_purged"] = int(train_before - train_after)
+    return purged_train_mask, diag
+
+
 def apply_threshold_risk_guards(
     *,
     objective: str,
@@ -630,6 +690,15 @@ def main() -> None:
         default=int(_env_float("RF_CALIB_MIN_FIT_EVENTS", 20)),
         help="Minimum events reserved for calibration fitting slice.",
     )
+    parser.add_argument(
+        "--train-embargo-minutes",
+        default=os.getenv("RF_TRAIN_EMBARGO_MINUTES", ""),
+        help=(
+            "Minutes of embargo applied to training rows whose label window overlaps "
+            "the calibration slice. Empty/unset defaults to max(horizons) (in minutes). "
+            "Set to '0' to disable purging."
+        ),
+    )
     parser.add_argument("--out-dir", default=DEFAULT_OUT_DIR)
     parser.add_argument(
         "--metadata-dir",
@@ -677,6 +746,16 @@ def main() -> None:
     horizons = [int(h.strip()) for h in args.horizons.split(",") if h.strip()]
     targets = [t.strip() for t in args.targets.split(",") if t.strip()]
 
+    raw_embargo = (args.train_embargo_minutes or "").strip()
+    if raw_embargo == "":
+        train_embargo_minutes = float(max(horizons)) if horizons else 0.0
+    else:
+        try:
+            train_embargo_minutes = float(raw_embargo)
+        except (TypeError, ValueError):
+            train_embargo_minutes = float(max(horizons)) if horizons else 0.0
+    train_embargo_minutes = max(0.0, train_embargo_minutes)
+
     manifest = {
         "version": version,
         "feature_version": FEATURE_VERSION,
@@ -686,6 +765,7 @@ def main() -> None:
         "stats": {},
         "gamma_context": _gamma_context_metadata(),
         "trained_end_ts": None,
+        "train_embargo_minutes": float(train_embargo_minutes),
     }
     trained_end_ts_max = None
     latest_aliases: list[tuple[Path, Path]] = []
@@ -763,8 +843,27 @@ def main() -> None:
                 print(f"Not enough events for {target} {horizon}m.")
                 continue
 
-            X_train = X.loc[~calib_mask_sub]
-            y_train = y.loc[~calib_mask_sub]
+            train_mask_sub = ~calib_mask_sub
+            train_mask_sub, train_purge_diag = purge_training_overlap(
+                sub,
+                train_mask_sub,
+                calib_mask_sub,
+                embargo_minutes=float(train_embargo_minutes),
+            )
+            if train_purge_diag.get("train_rows_purged", 0) > 0:
+                print(
+                    f"Train-fold purge {target} {horizon}m: "
+                    f"{train_purge_diag['train_rows_purged']} rows removed "
+                    f"(embargo={train_purge_diag['embargo_minutes']}m)."
+                )
+
+            X_train = X.loc[train_mask_sub]
+            y_train = y.loc[train_mask_sub]
+            if X_train.empty:
+                print(
+                    f"All training rows purged for {target} {horizon}m after embargo. Skipping."
+                )
+                continue
             # Some features can be present overall but become fully missing in
             # the non-calibration training split. Drop them to avoid imputer warnings.
             all_null_train_cols = [col for col in X_train.columns if not X_train[col].notna().any()]
@@ -850,6 +949,7 @@ def main() -> None:
                 "min_utility_score": float(args.threshold_min_utility_score),
                 "disable_on_nonpositive_utility": bool(args.threshold_disable_on_nonpositive_utility),
                 "disable_on_fallback": bool(args.threshold_disable_on_fallback),
+                "train_purge": train_purge_diag,
             }
             model_obj = calibrator if calibrator is not None else pipeline
             X_calib_set = X_calib_tune if X_calib_tune is not None else X.loc[calib_mask_sub]
