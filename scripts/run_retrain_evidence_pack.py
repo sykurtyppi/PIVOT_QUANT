@@ -60,11 +60,16 @@ DEFAULT_CANDIDATE_MANIFEST_NAME = (
 DEFAULT_LIVE_MODEL_DIR = os.getenv("RF_MODEL_DIR", "data/models")
 
 # Env keys --pass-through is not allowed to override. These either control
-# where artifacts land (RF_MODEL_DIR -- the isolation guarantee) or where
-# the candidate manifest is read from after training (RF_CANDIDATE_MANIFEST
-# -- the pack already exposes its own --candidate-manifest flag). Allowing
-# silent overrides via --pass-through would defeat the safety contract.
-PROTECTED_ENV_KEYS = frozenset({"RF_MODEL_DIR", "RF_CANDIDATE_MANIFEST"})
+# where artifacts land (RF_MODEL_DIR / RF_METADATA_DIR -- the isolation
+# guarantees) or where the candidate manifest is read from after training
+# (RF_CANDIDATE_MANIFEST -- the pack already exposes its own
+# --candidate-manifest flag). Allowing silent overrides via --pass-through
+# would defeat the safety contract. RF_METADATA_DIR mirrors the
+# --metadata-dir CLI protection: the train script accepts it as absolute,
+# so the env equivalent is the same write-redirect risk.
+PROTECTED_ENV_KEYS = frozenset(
+    {"RF_MODEL_DIR", "RF_METADATA_DIR", "RF_CANDIDATE_MANIFEST"}
+)
 
 # CLI flags --train-arg is not allowed to forward. argparse takes the last
 # occurrence, so a trailing --train-arg --out-dir=data/models would silently
@@ -423,13 +428,18 @@ def invoke_training(
     # cannot accidentally redirect artifact writes back to the live model
     # dir. parse_pass_through already rejects PROTECTED_ENV_KEYS, but this
     # is defense-in-depth: the dry-run contract is non-publishing.
+    # RF_METADATA_DIR is pinned to the relative "metadata_runtime" so it
+    # resolves inside out_dir via _resolve_metadata_dir in the train script.
     env["RF_MODEL_DIR"] = str(out_dir)
+    env["RF_METADATA_DIR"] = "metadata_runtime"
     env["RF_CANDIDATE_MANIFEST"] = candidate_manifest_name
     cmd = [
         sys.executable,
         str(ROOT / "scripts" / "train_rf_artifacts.py"),
         "--out-dir",
         str(out_dir),
+        "--metadata-dir",
+        "metadata_runtime",
         "--candidate-manifest",
         candidate_manifest_name,
         *extra_args,

@@ -8663,15 +8663,21 @@ class OpsSmokeTests(unittest.TestCase):
             "retrain_evidence_pack_protected_keys",
             REPO_ROOT / "scripts" / "run_retrain_evidence_pack.py",
         )
-        for protected in ("RF_MODEL_DIR", "RF_CANDIDATE_MANIFEST"):
+        for protected in ("RF_MODEL_DIR", "RF_METADATA_DIR", "RF_CANDIDATE_MANIFEST"):
             with self.subTest(key=protected):
                 with self.assertRaises(SystemExit) as ctx:
                     module.parse_pass_through([f"{protected}=/tmp/foo"])
                 self.assertIn(protected, str(ctx.exception))
                 self.assertIn("not allowed", str(ctx.exception))
-        # Non-protected keys still pass through.
-        result = module.parse_pass_through(["RF_TRAIN_EMBARGO_MINUTES=30"])
-        self.assertEqual(result, {"RF_TRAIN_EMBARGO_MINUTES": "30"})
+        # Non-protected keys still pass through. DUCKDB_PATH is a read-only
+        # input and intentionally remains overridable for alternate-DB runs.
+        result = module.parse_pass_through(
+            ["RF_TRAIN_EMBARGO_MINUTES=30", "DUCKDB_PATH=/tmp/alt.duckdb"]
+        )
+        self.assertEqual(
+            result,
+            {"RF_TRAIN_EMBARGO_MINUTES": "30", "DUCKDB_PATH": "/tmp/alt.duckdb"},
+        )
 
     def test_retrain_evidence_pack_rejects_protected_train_arg_overrides(self) -> None:
         # argparse takes the last occurrence; a trailing --train-arg
