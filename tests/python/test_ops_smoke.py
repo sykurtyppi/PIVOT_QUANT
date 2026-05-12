@@ -7986,6 +7986,38 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(float(safe["reject"][15]), 0.44)
         self.assertEqual(float(safe["break"][15]), 0.48)
 
+    def test_ml_server_runtime_threshold_safety_neutralizes_nonfinite_scores(self) -> None:
+        # Regression: NaN <= 0.0 is False per IEEE 754, so a NaN score with
+        # fallback=False would previously slip through the safety net.
+        # +/-inf scores must also be rejected as unsafe.
+        module = load_module(
+            "ml_server_runtime_threshold_safety_nan",
+            REPO_ROOT / "server" / "ml_server.py",
+        )
+        thresholds = {
+            "reject": {5: 0.42, 15: 0.44, 30: 0.46},
+            "break": {5: 0.48},
+        }
+        manifest = {
+            "thresholds_meta": {
+                "reject": {
+                    "5": {"objective": "utility_bps", "score": float("nan"), "fallback": False},
+                    "15": {"objective": "utility_bps", "score": float("inf"), "fallback": False},
+                    "30": {"objective": "utility_bps", "score": float("-inf"), "fallback": False},
+                },
+                "break": {
+                    "5": {"objective": "utility_bps", "score": 1.5, "fallback": False},
+                },
+            }
+        }
+
+        safe = module.ModelRegistry._apply_runtime_threshold_safety(thresholds, manifest)
+
+        self.assertEqual(float(safe["reject"][5]), float(module.NO_SIGNAL_THRESHOLD))
+        self.assertEqual(float(safe["reject"][15]), float(module.NO_SIGNAL_THRESHOLD))
+        self.assertEqual(float(safe["reject"][30]), float(module.NO_SIGNAL_THRESHOLD))
+        self.assertEqual(float(safe["break"][5]), 0.48)
+
     def test_train_artifacts_threshold_guard_disables_fallback_threshold(self) -> None:
         module = load_module(
             "train_rf_artifacts_threshold_guard_fallback",
