@@ -8763,6 +8763,174 @@ class OpsSmokeTests(unittest.TestCase):
         # Input thresholds dict was deep-copied, not mutated.
         self.assertAlmostEqual(thresholds["reject"][15], 0.6, places=6)
 
+    def test_retrain_evidence_pack_uses_resolved_training_python(self) -> None:
+        """invoke_training() must spawn the resolver-selected interpreter, not
+        sys.executable, and must record both fields on the training block.
+
+        Prevents the Python 3.9 regression: train_rf_artifacts.py imports fail
+        before any training happens when invoked under <3.10. The evidence pack
+        is responsible for not putting the user there silently.
+        """
+        module = load_module(
+            "retrain_evidence_pack_python_resolver",
+            REPO_ROOT / "scripts" / "run_retrain_evidence_pack.py",
+        )
+
+        fake_python = "/opt/fake/bin/python3.11"
+        fake_version = "3.11.99"
+        fake_source = ".venv/bin/python"
+        captured: dict = {}
+
+        original_resolver = module.resolve_training_python
+        original_subprocess_run = module.subprocess.run
+
+        def _fake_resolver():
+            return fake_python, fake_version, fake_source
+
+        class _FakeCompleted:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        def _fake_subprocess_run(cmd, **kwargs):
+            captured["cmd"] = list(cmd)
+            captured["kwargs"] = kwargs
+            return _FakeCompleted()
+
+        module.resolve_training_python = _fake_resolver
+        module.subprocess.run = _fake_subprocess_run
+        try:
+            out_dir = Path(self.tmp) / "resolver_run"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            block = module.invoke_training(
+                out_dir,
+                pass_through_env={},
+                extra_args=[],
+                candidate_manifest_name="manifest_runtime_latest.json",
+            )
+        finally:
+            module.resolve_training_python = original_resolver
+            module.subprocess.run = original_subprocess_run
+
+        self.assertIn("cmd", captured)
+        self.assertEqual(captured["cmd"][0], fake_python)
+        self.assertNotEqual(captured["cmd"][0], sys.executable)
+        self.assertEqual(block["training_python_executable"], fake_python)
+        self.assertEqual(block["training_python_version"], fake_version)
+        self.assertEqual(block["training_python_resolution_source"], fake_source)
+        self.assertEqual(block["cmd"][0], fake_python)
+        self.assertEqual(block["exit_code"], 0)
+
+    def test_resolve_training_python_prefers_project_venv(self) -> None:
+        """When PYTHON_BIN unset and ``.venv/bin/python`` exists with version
+        >= 3.10, the resolver must pick it ahead of sys.executable."""
+        module = load_module(
+            "retrain_evidence_pack_python_resolver_prefers_venv",
+            REPO_ROOT / "scripts" / "run_retrain_evidence_pack.py",
+        )
+
+        original_env = os.environ.get("PYTHON_BIN")
+        original_root = module.ROOT
+        original_version_probe = module._python_version_tuple
+
+        fake_root = Path(self.tmp) / "fake_root"
+        venv_python = fake_root / ".venv" / "bin" / "python"
+        venv_python.parent.mkdir(parents=True, exist_ok=True)
+        venv_python.write_text("#!/bin/sh\nexit 0\n")
+        venv_python.chmod(0o755)
+        module.ROOT = fake_root
+
+        # No .venv313, so .venv/bin/python should win — but it must report a
+        # 3.10+ version. Any sys.executable probe result must also be 3.10+
+        # so the test cannot accidentally succeed via fallback.
+        def _probe(exe: str) -> tuple[int, int, int]:
+            if exe == str(venv_python):
+                return (3, 11, 14)
+            return (3, 12, 0)  # also valid; resolver should still prefer venv
+
+        module._python_version_tuple = _probe
+        os.environ.pop("PYTHON_BIN", None)
+        try:
+            executable, version, source = module.resolve_training_python()
+        finally:
+            module.ROOT = original_root
+            module._python_version_tuple = original_version_probe
+            if original_env is not None:
+                os.environ["PYTHON_BIN"] = original_env
+
+        self.assertEqual(executable, str(venv_python))
+        self.assertEqual(version, "3.11.14")
+        self.assertEqual(source, ".venv/bin/python")
+
+    def test_resolve_training_python_honors_python_bin_env(self) -> None:
+        """``PYTHON_BIN`` must outrank ``.venv/bin/python`` when both are valid."""
+        module = load_module(
+            "retrain_evidence_pack_python_resolver_pythonbin",
+            REPO_ROOT / "scripts" / "run_retrain_evidence_pack.py",
+        )
+
+        original_env = os.environ.get("PYTHON_BIN")
+        original_root = module.ROOT
+        original_version_probe = module._python_version_tuple
+
+        fake_root = Path(self.tmp) / "fake_root_pythonbin"
+        venv_python = fake_root / ".venv" / "bin" / "python"
+        venv_python.parent.mkdir(parents=True, exist_ok=True)
+        venv_python.write_text("#!/bin/sh\nexit 0\n")
+        venv_python.chmod(0o755)
+
+        pinned_python = fake_root / "pin" / "python3.12"
+        pinned_python.parent.mkdir(parents=True, exist_ok=True)
+        pinned_python.write_text("#!/bin/sh\nexit 0\n")
+        pinned_python.chmod(0o755)
+
+        module.ROOT = fake_root
+        module._python_version_tuple = lambda exe: (3, 12, 1)
+        os.environ["PYTHON_BIN"] = str(pinned_python)
+        try:
+            executable, version, source = module.resolve_training_python()
+        finally:
+            module.ROOT = original_root
+            module._python_version_tuple = original_version_probe
+            if original_env is None:
+                os.environ.pop("PYTHON_BIN", None)
+            else:
+                os.environ["PYTHON_BIN"] = original_env
+
+        self.assertEqual(executable, str(pinned_python))
+        self.assertEqual(version, "3.12.1")
+        self.assertEqual(source, "PYTHON_BIN")
+
+    def test_resolve_training_python_rejects_old_interpreter(self) -> None:
+        """If only Python 3.9 is reachable, resolver must SystemExit clearly."""
+        module = load_module(
+            "retrain_evidence_pack_python_resolver_reject",
+            REPO_ROOT / "scripts" / "run_retrain_evidence_pack.py",
+        )
+
+        original_env = os.environ.get("PYTHON_BIN")
+        original_root = module.ROOT
+        original_version_probe = module._python_version_tuple
+        original_sys_executable = module.sys.executable
+
+        # Point ROOT at a tmp dir with no .venv / .venv313 present.
+        bare_root = Path(self.tmp) / "bare_root"
+        bare_root.mkdir(parents=True, exist_ok=True)
+        module.ROOT = bare_root
+        # Force sys.executable probe to look like Python 3.9.
+        module._python_version_tuple = lambda exe: (3, 9, 6)
+        os.environ.pop("PYTHON_BIN", None)
+        try:
+            with self.assertRaises(SystemExit) as ctx:
+                module.resolve_training_python()
+            self.assertIn(">= 3.10", str(ctx.exception))
+            self.assertIn("3.9", str(ctx.exception))
+        finally:
+            module.ROOT = original_root
+            module._python_version_tuple = original_version_probe
+            if original_env is not None:
+                os.environ["PYTHON_BIN"] = original_env
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

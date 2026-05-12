@@ -163,6 +163,79 @@ def _git_head() -> tuple[str, bool]:
     return sha, dirty
 
 
+def _python_version_tuple(executable: str) -> tuple[int, int, int] | None:
+    """Return (major, minor, micro) for an interpreter, or None on failure."""
+    try:
+        out = subprocess.check_output(
+            [executable, "-c", "import sys; print('%d.%d.%d' % sys.version_info[:3])"],
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        ).decode().strip()
+        parts = [int(p) for p in out.split(".")[:3]]
+        while len(parts) < 3:
+            parts.append(0)
+        return (parts[0], parts[1], parts[2])
+    except Exception:
+        return None
+
+
+def resolve_training_python() -> tuple[str, str, str]:
+    """Pick the interpreter used to spawn ``train_rf_artifacts.py``.
+
+    Resolution order:
+      1. ``PYTHON_BIN`` env var, if set and executable.
+      2. ``<ROOT>/.venv313/bin/python``, if present.
+      3. ``<ROOT>/.venv/bin/python``, if present.
+      4. ``sys.executable``, if its version is >= 3.10.
+      5. Otherwise SystemExit with the missing-prerequisite message.
+
+    Returns ``(executable, version, source)`` where ``version`` is
+    ``"MAJOR.MINOR.MICRO"`` and ``source`` is the label of the rule that
+    matched (e.g. ``".venv/bin/python"`` or ``"PYTHON_BIN"``).
+
+    The training script (``scripts/train_rf_artifacts.py``) uses Python 3.10+
+    type syntax (``int | None``) at module level, so Python 3.9 cannot import
+    it and must be rejected here rather than failing opaquely inside the
+    subprocess.
+    """
+    candidates: list[tuple[str, str]] = []
+
+    env_bin = os.environ.get("PYTHON_BIN", "").strip()
+    if env_bin:
+        candidates.append(("PYTHON_BIN", env_bin))
+
+    candidates.append((".venv313/bin/python", str(ROOT / ".venv313" / "bin" / "python")))
+    candidates.append((".venv/bin/python", str(ROOT / ".venv" / "bin" / "python")))
+    candidates.append(("sys.executable", sys.executable))
+
+    seen: set[str] = set()
+    tried: list[str] = []
+    for label, path in candidates:
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        # PYTHON_BIN / venv paths must exist on disk to be usable; sys.executable
+        # always exists by definition but may still be the wrong version.
+        if label != "sys.executable" and not Path(path).is_file():
+            tried.append(f"{label}={path} (not present)")
+            continue
+        version = _python_version_tuple(path)
+        if version is None:
+            tried.append(f"{label}={path} (probe failed)")
+            continue
+        if version < (3, 10):
+            tried.append(f"{label}={path} (version {version[0]}.{version[1]}.{version[2]} < 3.10)")
+            continue
+        return path, "%d.%d.%d" % version, label
+
+    raise SystemExit(
+        "Could not resolve a Python >= 3.10 to run train_rf_artifacts.py. "
+        "Tried in order: " + "; ".join(tried) + ". "
+        "Set PYTHON_BIN, create .venv/ with a 3.10+ interpreter, or run the "
+        "evidence pack under a 3.10+ python."
+    )
+
+
 def build_provenance(active_manifest_path: Path) -> dict:
     sha, dirty = _git_head()
     rf_env = {key: os.environ.get(key, "") for key in RF_ENV_KEYS}
@@ -184,6 +257,8 @@ def build_provenance(active_manifest_path: Path) -> dict:
         "git_dirty": dirty,
         "python_executable": sys.executable,
         "python_version": sys.version.split()[0],
+        "evidence_pack_python_executable": sys.executable,
+        "evidence_pack_python_version": sys.version.split()[0],
         "rf_env_snapshot": rf_env,
         "active_manifest_path": active_path_resolved,
         "active_manifest_exists": active_manifest_path.exists(),
@@ -433,8 +508,9 @@ def invoke_training(
     env["RF_MODEL_DIR"] = str(out_dir)
     env["RF_METADATA_DIR"] = "metadata_runtime"
     env["RF_CANDIDATE_MANIFEST"] = candidate_manifest_name
+    training_python, training_python_version, training_python_source = resolve_training_python()
     cmd = [
-        sys.executable,
+        training_python,
         str(ROOT / "scripts" / "train_rf_artifacts.py"),
         "--out-dir",
         str(out_dir),
@@ -471,6 +547,9 @@ def invoke_training(
         "stdout_tail": stdout_tail,
         "stderr_tail": stderr_tail,
         "error": error,
+        "training_python_executable": training_python,
+        "training_python_version": training_python_version,
+        "training_python_resolution_source": training_python_source,
     }
 
 
