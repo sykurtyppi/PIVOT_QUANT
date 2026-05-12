@@ -8655,6 +8655,24 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("would_neutralize", safety)
         self.assertIsInstance(safety["would_neutralize"], list)
 
+    def test_retrain_evidence_pack_rejects_protected_pass_through_keys(self) -> None:
+        # Pass-through env must not be allowed to override the isolation
+        # contract (RF_MODEL_DIR) or redirect candidate manifest reads
+        # away from --candidate-manifest (RF_CANDIDATE_MANIFEST).
+        module = load_module(
+            "retrain_evidence_pack_protected_keys",
+            REPO_ROOT / "scripts" / "run_retrain_evidence_pack.py",
+        )
+        for protected in ("RF_MODEL_DIR", "RF_CANDIDATE_MANIFEST"):
+            with self.subTest(key=protected):
+                with self.assertRaises(SystemExit) as ctx:
+                    module.parse_pass_through([f"{protected}=/tmp/foo"])
+                self.assertIn(protected, str(ctx.exception))
+                self.assertIn("not allowed", str(ctx.exception))
+        # Non-protected keys still pass through.
+        result = module.parse_pass_through(["RF_TRAIN_EMBARGO_MINUTES=30"])
+        self.assertEqual(result, {"RF_TRAIN_EMBARGO_MINUTES": "30"})
+
     def test_retrain_evidence_pack_runtime_safety_diff_logic(self) -> None:
         """Exercise runtime_safety_dry_run diff logic with a stubbed ml_server module.
 

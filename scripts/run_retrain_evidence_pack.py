@@ -59,6 +59,13 @@ DEFAULT_CANDIDATE_MANIFEST_NAME = (
 )
 DEFAULT_LIVE_MODEL_DIR = os.getenv("RF_MODEL_DIR", "data/models")
 
+# Env keys --pass-through is not allowed to override. These either control
+# where artifacts land (RF_MODEL_DIR -- the isolation guarantee) or where
+# the candidate manifest is read from after training (RF_CANDIDATE_MANIFEST
+# -- the pack already exposes its own --candidate-manifest flag). Allowing
+# silent overrides via --pass-through would defeat the safety contract.
+PROTECTED_ENV_KEYS = frozenset({"RF_MODEL_DIR", "RF_CANDIDATE_MANIFEST"})
+
 RF_ENV_KEYS = (
     "RF_TRAIN_EMBARGO_MINUTES",
     "RF_THRESHOLD_OBJECTIVE",
@@ -399,17 +406,24 @@ def invoke_training(
     out_dir: Path,
     pass_through_env: dict[str, str],
     extra_args: list[str],
+    *,
+    candidate_manifest_name: str,
 ) -> dict:
     env = os.environ.copy()
-    # Point the live-model-dir env at the isolated location so any code path
-    # inside training that resolves via RF_MODEL_DIR also lands in out_dir.
-    env["RF_MODEL_DIR"] = str(out_dir)
     env.update(pass_through_env)
+    # Re-assert isolation AFTER pass_through_env so a misconfigured caller
+    # cannot accidentally redirect artifact writes back to the live model
+    # dir. parse_pass_through already rejects PROTECTED_ENV_KEYS, but this
+    # is defense-in-depth: the dry-run contract is non-publishing.
+    env["RF_MODEL_DIR"] = str(out_dir)
+    env["RF_CANDIDATE_MANIFEST"] = candidate_manifest_name
     cmd = [
         sys.executable,
         str(ROOT / "scripts" / "train_rf_artifacts.py"),
         "--out-dir",
         str(out_dir),
+        "--candidate-manifest",
+        candidate_manifest_name,
         *extra_args,
     ]
     start = time.time()
@@ -448,7 +462,13 @@ def parse_pass_through(values: list[str]) -> dict[str, str]:
         if "=" not in item:
             raise SystemExit(f"--pass-through expects KEY=VALUE, got {item!r}")
         key, value = item.split("=", 1)
-        parsed[key.strip()] = value
+        key = key.strip()
+        if key in PROTECTED_ENV_KEYS:
+            raise SystemExit(
+                f"--pass-through {key} is not allowed; it is controlled by this script "
+                "to preserve the dry-run isolation contract."
+            )
+        parsed[key] = value
     return parsed
 
 
@@ -580,7 +600,12 @@ def main(argv: list[str] | None = None) -> int:
             "error": None,
         }
     else:
-        training_block = invoke_training(out_dir, pass_through_env, args.train_arg)
+        training_block = invoke_training(
+            out_dir,
+            pass_through_env,
+            args.train_arg,
+            candidate_manifest_name=args.candidate_manifest,
+        )
 
     candidate_manifest_path = out_dir / args.candidate_manifest
     candidate_manifest = _load_candidate_manifest(candidate_manifest_path)
