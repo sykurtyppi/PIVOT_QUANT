@@ -931,9 +931,17 @@ def classify_candidate_readiness(report: dict) -> dict:
     ``degraded_candidate`` can both be true at once — the ``state`` field
     picks the most specific applicable label.
 
-    Statistical validation is intentionally NOT implemented yet (B3 follow-up);
-    we surface explicit ``statistical_validation_*`` fields and a reason so the
-    promotion gate cannot silently treat positive utility as validated edge.
+    Statistical validation (B3, ``_validate_horizon_statistically`` /
+    ``run_statistical_validation``) runs on the mechanically-viable horizons
+    here. It depends on the manifest exposing per-signal utility observations
+    under ``thresholds_meta[target][horizon]["score_observations"]``; current
+    training runs do not yet write that field, so today's candidates report
+    ``status="insufficient_data"`` per viable horizon. The aggregate
+    ``statistical_validation_present`` / ``statistical_validation_passed``
+    booleans reflect that honestly, and ``promotion_disposition`` stays at
+    ``hold_pending_statistical_validation`` until a future training-side PR
+    captures observations. Statistical validation never unblocks a horizon
+    the safety chain rejected.
     """
     per_horizon = report.get("per_horizon") or []
     safety = report.get("runtime_safety_dry_run") or {}
