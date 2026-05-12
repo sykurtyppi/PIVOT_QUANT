@@ -66,6 +66,14 @@ DEFAULT_LIVE_MODEL_DIR = os.getenv("RF_MODEL_DIR", "data/models")
 # silent overrides via --pass-through would defeat the safety contract.
 PROTECTED_ENV_KEYS = frozenset({"RF_MODEL_DIR", "RF_CANDIDATE_MANIFEST"})
 
+# CLI flags --train-arg is not allowed to forward. argparse takes the last
+# occurrence, so a trailing --train-arg --out-dir=data/models would silently
+# override the controlled --out-dir we put earlier in the command and
+# redirect writes back to the live model tree. --metadata-dir is protected
+# for the same reason -- the train script lets it be an absolute path and
+# would otherwise write metadata_v*.json outside the isolated tree.
+PROTECTED_TRAIN_ARGS = frozenset({"--out-dir", "--candidate-manifest", "--metadata-dir"})
+
 RF_ENV_KEYS = (
     "RF_TRAIN_EMBARGO_MINUTES",
     "RF_THRESHOLD_OBJECTIVE",
@@ -456,6 +464,19 @@ def invoke_training(
     }
 
 
+def parse_train_args(values: list[str]) -> list[str]:
+    """Validate forwarded train args; reject anything that could override
+    the safety-critical flags we set in invoke_training()."""
+    for item in values or []:
+        for protected in PROTECTED_TRAIN_ARGS:
+            if item == protected or item.startswith(protected + "="):
+                raise SystemExit(
+                    f"--train-arg {item!r} is not allowed; {protected} is controlled by "
+                    "this script to preserve the dry-run isolation contract."
+                )
+    return list(values or [])
+
+
 def parse_pass_through(values: list[str]) -> dict[str, str]:
     parsed: dict[str, str] = {}
     for item in values or []:
@@ -575,6 +596,7 @@ def main(argv: list[str] | None = None) -> int:
 
     out_dir.mkdir(parents=True, exist_ok=True)
     pass_through_env = parse_pass_through(args.pass_through)
+    forwarded_train_args = parse_train_args(args.train_arg)
 
     run_id = (
         dt.datetime.now(dt.timezone.utc)
@@ -603,7 +625,7 @@ def main(argv: list[str] | None = None) -> int:
         training_block = invoke_training(
             out_dir,
             pass_through_env,
-            args.train_arg,
+            forwarded_train_args,
             candidate_manifest_name=args.candidate_manifest,
         )
 

@@ -8673,6 +8673,35 @@ class OpsSmokeTests(unittest.TestCase):
         result = module.parse_pass_through(["RF_TRAIN_EMBARGO_MINUTES=30"])
         self.assertEqual(result, {"RF_TRAIN_EMBARGO_MINUTES": "30"})
 
+    def test_retrain_evidence_pack_rejects_protected_train_arg_overrides(self) -> None:
+        # argparse takes the last occurrence; a trailing --train-arg
+        # --out-dir=data/models would otherwise silently redirect writes
+        # back to the live tree. Same risk for --candidate-manifest and
+        # --metadata-dir (latter can be absolute).
+        module = load_module(
+            "retrain_evidence_pack_protected_train_args",
+            REPO_ROOT / "scripts" / "run_retrain_evidence_pack.py",
+        )
+        protected = ["--out-dir", "--candidate-manifest", "--metadata-dir"]
+        for flag in protected:
+            with self.subTest(flag=flag, form="space"):
+                with self.assertRaises(SystemExit) as ctx:
+                    module.parse_train_args([flag, "/tmp/hostile"])
+                self.assertIn(flag, str(ctx.exception))
+                self.assertIn("not allowed", str(ctx.exception))
+            with self.subTest(flag=flag, form="equals"):
+                with self.assertRaises(SystemExit) as ctx:
+                    module.parse_train_args([f"{flag}=/tmp/hostile"])
+                self.assertIn(flag, str(ctx.exception))
+                self.assertIn("not allowed", str(ctx.exception))
+        # Harmless args still pass through unchanged.
+        passed = module.parse_train_args(
+            ["--n-estimators", "100", "--threshold-objective=utility_bps"]
+        )
+        self.assertEqual(
+            passed, ["--n-estimators", "100", "--threshold-objective=utility_bps"]
+        )
+
     def test_retrain_evidence_pack_runtime_safety_diff_logic(self) -> None:
         """Exercise runtime_safety_dry_run diff logic with a stubbed ml_server module.
 
