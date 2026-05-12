@@ -7918,6 +7918,131 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertLessEqual(float(selection.score), 0.0)
         self.assertGreater(len(selection.top_candidates), 0)
 
+    def test_threshold_selector_captures_score_observations_at_chosen_threshold(self) -> None:
+        """``select_threshold`` must return per-signal utility observations at
+        the SELECTED threshold (not the default, not all candidates).
+        Length must equal ``signals``; values must equal utility_per_signal
+        on the rows where ``y_prob >= chosen_threshold``."""
+        module = load_module(
+            "thresholds_capture_obs",
+            REPO_ROOT / "ml" / "thresholds.py",
+        )
+        y_true = np.asarray([1, 1, 1, 0, 1, 0], dtype=int)
+        y_prob = np.asarray([0.95, 0.85, 0.75, 0.65, 0.55, 0.45], dtype=float)
+        utility = np.asarray([7.0, 5.0, 3.0, -2.0, 11.0, -50.0], dtype=float)
+
+        selection = module.select_threshold(
+            y_true,
+            y_prob,
+            objective="utility_bps",
+            precision_floor=0.0,
+            min_signals=1,
+            default_threshold=0.5,
+            utility_per_signal=utility,
+            stability_band=0.0,
+            top_k=6,
+            preferred_min_score=0.0,
+        )
+
+        chosen = float(selection.threshold)
+        self.assertLess(chosen, module.NO_SIGNAL_THRESHOLD)
+        # Observations are the utility values on rows where y_prob >= chosen.
+        mask = y_prob >= chosen
+        expected = [float(u) for u in utility[mask]]
+        self.assertIsNotNone(selection.score_observations)
+        self.assertEqual(list(selection.score_observations), expected)
+        # Length matches signals reported by the selection.
+        self.assertEqual(len(selection.score_observations), int(selection.signals))
+        # Aggregate score equals the sum of observations (within float tol).
+        self.assertAlmostEqual(
+            sum(selection.score_observations), float(selection.score), places=9
+        )
+
+    def test_threshold_selector_observations_none_for_no_signal_substitution(self) -> None:
+        """When strict floor forces NO_SIGNAL substitution, observations
+        must be None — the on-disk threshold no longer fires."""
+        module = load_module(
+            "thresholds_no_signal_no_obs",
+            REPO_ROOT / "ml" / "thresholds.py",
+        )
+        y_true = np.asarray([1, 1, 1, 1], dtype=int)
+        y_prob = np.asarray([0.95, 0.85, 0.75, 0.65], dtype=float)
+        utility = np.asarray([-2.0, -3.0, -4.0, -5.0], dtype=float)
+
+        selection = module.select_threshold(
+            y_true, y_prob,
+            objective="utility_bps", precision_floor=0.0, min_signals=1,
+            default_threshold=0.5, utility_per_signal=utility,
+            preferred_min_score=0.0, enforce_min_score=True,
+            no_signal_threshold=module.NO_SIGNAL_THRESHOLD,
+        )
+        self.assertGreater(float(selection.threshold), 1.0)  # no-signal sentinel
+        self.assertEqual(int(selection.signals), 0)
+        self.assertIsNone(selection.score_observations)
+
+    def test_threshold_selector_observations_none_for_f1_objective(self) -> None:
+        """F1 objective has no per-signal utility array; observations must be None."""
+        module = load_module(
+            "thresholds_f1_no_obs",
+            REPO_ROOT / "ml" / "thresholds.py",
+        )
+        y_true = np.asarray([1, 0, 1, 0, 1, 0], dtype=int)
+        y_prob = np.asarray([0.9, 0.8, 0.7, 0.6, 0.5, 0.4], dtype=float)
+        selection = module.select_threshold(
+            y_true, y_prob,
+            objective="f1", precision_floor=0.0, min_signals=1,
+            default_threshold=0.5,
+        )
+        self.assertIsNone(selection.score_observations)
+
+    def test_threshold_selector_choice_unchanged_by_observation_capture(self) -> None:
+        """Regression: adding score_observations must not change which
+        threshold is selected, its score, or its signals count."""
+        module = load_module(
+            "thresholds_choice_regression",
+            REPO_ROOT / "ml" / "thresholds.py",
+        )
+        y_true = np.asarray([1, 1, 1, 1, 1, 1], dtype=int)
+        y_prob = np.asarray([0.99, 0.98, 0.97, 0.96, 0.95, 0.94], dtype=float)
+        utility = np.asarray([12.0, -1.0, 12.0, -1.0, 12.0, -40.0], dtype=float)
+
+        selection = module.select_threshold(
+            y_true, y_prob,
+            objective="utility_bps", precision_floor=0.0, min_signals=1,
+            default_threshold=0.5, utility_per_signal=utility,
+            stability_band=0.011, top_k=6, preferred_min_score=0.0,
+        )
+        # These exact values appear in
+        # test_threshold_selector_uses_utility_tiebreak_within_preferred_floor
+        # and must be preserved bit-for-bit.
+        self.assertAlmostEqual(float(selection.threshold), 0.95, places=9)
+        self.assertAlmostEqual(float(selection.score), 34.0, places=9)
+
+    def test_threshold_selector_observations_count_matches_signals(self) -> None:
+        """Across a larger synthetic slice, len(score_observations) must
+        equal selection.signals, and the sum must equal selection.score."""
+        module = load_module(
+            "thresholds_count_matches_signals",
+            REPO_ROOT / "ml" / "thresholds.py",
+        )
+        rng = np.random.default_rng(42)
+        n = 300
+        y_prob = rng.uniform(0.0, 1.0, size=n)
+        y_true = (y_prob > 0.6).astype(int)
+        utility = rng.normal(loc=0.5, scale=2.0, size=n)
+
+        selection = module.select_threshold(
+            y_true, y_prob,
+            objective="utility_bps", precision_floor=0.0, min_signals=10,
+            default_threshold=0.5, utility_per_signal=utility,
+            stability_band=0.0, top_k=5, preferred_min_score=0.0,
+        )
+        self.assertIsNotNone(selection.score_observations)
+        self.assertEqual(len(selection.score_observations), int(selection.signals))
+        self.assertAlmostEqual(
+            sum(selection.score_observations), float(selection.score), places=6
+        )
+
     def test_threshold_selector_strict_fallback_returns_no_signal(self) -> None:
         module = load_module(
             "thresholds_strict_fallback_no_signal",

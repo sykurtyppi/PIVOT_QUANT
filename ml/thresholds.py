@@ -33,6 +33,15 @@ class ThresholdSelection:
     stability_score: float | None = None
     stability_band: float = 0.0
     top_candidates: list[dict[str, float | int]] = field(default_factory=list)
+    # Per-signal utility values at the SELECTED threshold on the input
+    # (typically a threshold-tune slice). Populated only when:
+    #   - objective == "utility_bps" (utility_per_signal was provided), AND
+    #   - the selected threshold actually fires (signals > 0) AND is not the
+    #     no-signal sentinel.
+    # Length equals ``signals``. Use this for downstream statistical
+    # validation; consumers must record that the source is the same slice
+    # that picked the threshold (in-sample), not a clean OOS slice.
+    score_observations: list[float] | None = None
 
 
 def directional_return_bps(return_bps, touch_side) -> np.ndarray:
@@ -242,6 +251,14 @@ def select_threshold(
                 top_candidates=top,
             )
 
+        # Capture per-signal utility observations at the SELECTED threshold.
+        # Only meaningful for utility_bps with utility_per_signal provided.
+        score_observations: list[float] | None = None
+        if utility_arr is not None and float(best.threshold) < float(no_signal_threshold):
+            mask_best = (y_prob_arr >= float(best.threshold))
+            if int(mask_best.sum()) > 0:
+                score_observations = [float(x) for x in utility_arr[mask_best]]
+
         return ThresholdSelection(
             threshold=float(best.threshold),
             objective=objective,
@@ -254,6 +271,7 @@ def select_threshold(
             stability_score=float(best.stability_score if best.stability_score is not None else best.score),
             stability_band=band,
             top_candidates=top,
+            score_observations=score_observations,
         )
 
     y_pred = (y_prob_arr >= float(default_threshold)).astype(int)
@@ -278,6 +296,18 @@ def select_threshold(
         selected_recall = 0.0
         selected_signals = 0
 
+    # Fallback path. Capture observations only when the selected threshold
+    # actually fires (not the no-signal sentinel) and we have a utility
+    # array. The y_pred above is at default_threshold, which is what gets
+    # returned in non-substituted fallback.
+    fallback_observations: list[float] | None = None
+    if (
+        utility_arr is not None
+        and float(selected_threshold) < float(no_signal_threshold)
+        and int(np.sum(y_pred)) > 0
+    ):
+        fallback_observations = [float(x) for x in utility_arr[y_pred == 1]]
+
     return ThresholdSelection(
         threshold=selected_threshold,
         objective=objective,
@@ -299,4 +329,5 @@ def select_threshold(
                 "signals": fallback_signals,
             }
         ],
+        score_observations=fallback_observations,
     )
