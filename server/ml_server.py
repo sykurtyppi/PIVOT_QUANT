@@ -549,6 +549,41 @@ class ModelRegistry:
             for child in estimators:
                 ModelRegistry._set_inference_n_jobs(child, n_jobs, seen)
 
+    @staticmethod
+    def _horizon_threshold_meta(manifest: dict, target: str, horizon: int) -> dict:
+        thresholds_meta = manifest.get("thresholds_meta", {})
+        if not isinstance(thresholds_meta, dict):
+            return {}
+        target_meta = thresholds_meta.get(target, {})
+        if not isinstance(target_meta, dict):
+            return {}
+        horizon_meta = target_meta.get(str(horizon), target_meta.get(int(horizon), {}))
+        return horizon_meta if isinstance(horizon_meta, dict) else {}
+
+    @staticmethod
+    def _apply_runtime_threshold_safety(
+        thresholds: dict[str, dict[int, float]],
+        manifest: dict,
+    ) -> dict[str, dict[int, float]]:
+        for target, horizon_map in thresholds.items():
+            for horizon in list(horizon_map.keys()):
+                meta = ModelRegistry._horizon_threshold_meta(manifest, target, int(horizon))
+                if meta.get("objective") != "utility_bps":
+                    continue
+                score_raw = meta.get("score")
+                score = float(score_raw) if score_raw is not None else None
+                if bool(meta.get("fallback")) or score is None or score <= 0.0:
+                    horizon_map[int(horizon)] = NO_SIGNAL_THRESHOLD
+                    log.warning(
+                        "Runtime threshold safety disabled %s %sm threshold: "
+                        "objective=utility_bps score=%s fallback=%s",
+                        target,
+                        int(horizon),
+                        score_raw,
+                        bool(meta.get("fallback")),
+                    )
+        return thresholds
+
     def is_manifest_unchanged(self) -> bool:
         manifest_path = self.resolve_manifest_path()
         if not manifest_path.exists():
@@ -618,6 +653,8 @@ class ModelRegistry:
                         target,
                         h_int,
                     )
+
+        thresholds = ModelRegistry._apply_runtime_threshold_safety(thresholds, manifest)
 
         # Atomically swap in the newly built registry payload so /score never
         # sees a transient empty model map during reload.
@@ -2513,6 +2550,8 @@ def _apply_expansion_near_guardrail(
         "break": {},
     }
     if ML_REGIME_GUARD_EXPANSION_NEAR_STRATEGY == "no_trade":
+        # This remains a high-bar diagnostic threshold. The active no-trade
+        # policy below force-converts guardrail signals to no_edge explicitly.
         for horizon in all_horizons:
             guarded["reject"][horizon] = 0.99
             guarded["break"][horizon] = 0.99

@@ -7878,6 +7878,35 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(float(module._clamp_threshold(1.0)), 1.0)
         self.assertAlmostEqual(float(module._clamp_threshold(0.995)), 0.99, places=9)
 
+    def test_ml_server_runtime_threshold_safety_neutralizes_bad_manifest_thresholds(self) -> None:
+        module = load_module(
+            "ml_server_runtime_threshold_safety",
+            REPO_ROOT / "server" / "ml_server.py",
+        )
+        thresholds = {
+            "reject": {5: 0.42, 15: 0.44},
+            "break": {5: 0.46, 15: 0.48},
+        }
+        manifest = {
+            "thresholds_meta": {
+                "reject": {
+                    "5": {"objective": "utility_bps", "score": -1.0, "fallback": False},
+                    "15": {"objective": "utility_bps", "score": 3.0, "fallback": False},
+                },
+                "break": {
+                    "5": {"objective": "utility_bps", "score": 2.0, "fallback": True},
+                    "15": {"objective": "f1", "score": -1.0, "fallback": True},
+                },
+            }
+        }
+
+        safe = module.ModelRegistry._apply_runtime_threshold_safety(thresholds, manifest)
+
+        self.assertEqual(float(safe["reject"][5]), float(module.NO_SIGNAL_THRESHOLD))
+        self.assertEqual(float(safe["break"][5]), float(module.NO_SIGNAL_THRESHOLD))
+        self.assertEqual(float(safe["reject"][15]), 0.44)
+        self.assertEqual(float(safe["break"][15]), 0.48)
+
     def test_train_artifacts_threshold_guard_disables_fallback_threshold(self) -> None:
         module = load_module(
             "train_rf_artifacts_threshold_guard_fallback",
