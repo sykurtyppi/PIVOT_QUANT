@@ -112,6 +112,58 @@ def deployed_threshold(manifest: dict, target: str, horizon: int) -> float | Non
         return None
 
 
+def resolve_runtime_threshold(
+    manifest_threshold: float | None,
+    artifact_threshold: float | None,
+    *,
+    mismatch_tol: float = 1e-12,
+) -> dict:
+    """Mirror ``server.ml_server.ModelRegistry`` threshold resolution.
+
+    The server loads thresholds from ``manifest['thresholds']`` first and
+    only falls back to ``artifact['optimal_threshold']`` if the manifest
+    is missing that horizon. The audit MUST use the same precedence so
+    that runtime-safety substitutions (PRs #9/#10/#12) — which rewrite
+    the manifest threshold to the no-signal sentinel without touching the
+    artifact — cannot silently mask a divergence.
+
+    Returns a dict with:
+
+      - ``runtime_threshold``         — the value the audit will compare against
+      - ``threshold_source``          — ``"manifest"`` or ``"artifact_fallback"``
+      - ``manifest_threshold``        — verbatim from manifest, may be None
+      - ``artifact_threshold``        — verbatim from pickle, may be None
+      - ``threshold_mismatch_detected`` — True iff both exist AND differ by > tol
+
+    Raises ``SystemExit`` if neither threshold is available.
+    """
+    have_manifest = manifest_threshold is not None
+    have_artifact = artifact_threshold is not None
+    if have_manifest:
+        runtime = float(manifest_threshold)
+        source = "manifest"
+    elif have_artifact:
+        runtime = float(artifact_threshold)
+        source = "artifact_fallback"
+    else:
+        raise SystemExit(
+            "Neither manifest nor artifact carries a threshold for the "
+            "requested (target, horizon)."
+        )
+    mismatch = bool(
+        have_manifest
+        and have_artifact
+        and abs(float(manifest_threshold) - float(artifact_threshold)) > float(mismatch_tol)
+    )
+    return {
+        "runtime_threshold": runtime,
+        "threshold_source": source,
+        "manifest_threshold": float(manifest_threshold) if have_manifest else None,
+        "artifact_threshold": float(artifact_threshold) if have_artifact else None,
+        "threshold_mismatch_detected": mismatch,
+    }
+
+
 def load_labeled_events(duckdb_path: Path, view: str, horizon: int, target: str):
     """Read all labeled events for the (target, horizon), ordered by ts_event."""
     duckdb = _require("duckdb", "python3 -m pip install duckdb")
@@ -255,10 +307,11 @@ def build_report(
     active_manifest_path: Path,
     manifest: dict,
     model_path: Path,
-    threshold: float,
+    threshold_resolution: dict,
     total_rows: int,
     slices: list[dict],
     recommendation: str,
+    warnings: list[str] | None = None,
 ) -> dict:
     return {
         "schema_version": 1,
@@ -269,16 +322,29 @@ def build_report(
         "active_manifest_path": str(active_manifest_path),
         "active_manifest_version": manifest.get("version"),
         "model_path": str(model_path),
-        "deployed_threshold": float(threshold),
+        # ``deployed_threshold`` is the *runtime* threshold — the same one
+        # the server would use. Source + both raw values are surfaced so
+        # divergence cannot be silent.
+        "deployed_threshold": float(threshold_resolution["runtime_threshold"]),
+        "threshold_source": threshold_resolution["threshold_source"],
+        "manifest_threshold": threshold_resolution["manifest_threshold"],
+        "artifact_threshold": threshold_resolution["artifact_threshold"],
+        "threshold_mismatch_detected": bool(
+            threshold_resolution["threshold_mismatch_detected"]
+        ),
         "min_signals_floor": int(MIN_SIGNALS),
         "existing_floor": dict(EXISTING_FLOOR),
         "existing_floor_total": int(EXISTING_FLOOR_TOTAL),
         "total_labeled_rows": int(total_rows),
         "slices": slices,
         "recommendation": recommendation,
+        "warnings": list(warnings or []),
         "scope_disclosure": (
             "read_only_audit; no training, no threshold search, no tuning, "
-            "no promotion. min_signals mirrors B3 validator floor."
+            "no promotion. min_signals mirrors B3 validator floor. "
+            "Threshold is resolved with the same precedence used by "
+            "server.ml_server.ModelRegistry: manifest first, artifact only "
+            "as fallback. Both raw values + mismatch flag are reported."
         ),
     }
 
@@ -315,7 +381,22 @@ def main(argv: list[str] | None = None) -> int:
     model_obj = calibrator if calibrator is not None else pipeline
     if model_obj is None or not hasattr(model_obj, "predict_proba"):
         raise SystemExit("Model artifact missing pipeline/calibrator with predict_proba")
-    threshold = float(artifact.get("optimal_threshold"))
+
+    # Resolve threshold with server semantics: manifest first, artifact
+    # only as fallback. Surface mismatches loudly — runtime-safety
+    # substitution (PRs #9/#10/#12) can rewrite the manifest threshold
+    # without touching the artifact, and the audit must not mask that.
+    manifest_thr = deployed_threshold(manifest, args.target, args.horizon)
+    artifact_thr_raw = artifact.get("optimal_threshold")
+    artifact_thr = None
+    if artifact_thr_raw is not None:
+        try:
+            artifact_thr = float(artifact_thr_raw)
+        except (TypeError, ValueError):
+            artifact_thr = None
+    threshold_resolution = resolve_runtime_threshold(manifest_thr, artifact_thr)
+    threshold = threshold_resolution["runtime_threshold"]
+
     feature_columns = list(artifact.get("feature_columns") or [])
     if not feature_columns:
         raise SystemExit("Model artifact missing feature_columns")
@@ -350,16 +431,28 @@ def main(argv: list[str] | None = None) -> int:
 
     recommendation = determine_recommendation(total_rows=total_rows, slices=slices)
 
+    warnings: list[str] = []
+    if threshold_resolution["threshold_mismatch_detected"]:
+        warnings.append(
+            f"threshold_mismatch:manifest={threshold_resolution['manifest_threshold']} "
+            f"artifact={threshold_resolution['artifact_threshold']}"
+        )
+    if threshold_resolution["threshold_source"] == "artifact_fallback":
+        warnings.append(
+            "manifest_missing_threshold_for_target_horizon; used artifact fallback"
+        )
+
     report = build_report(
         target=args.target,
         horizon=args.horizon,
         active_manifest_path=manifest_path,
         manifest=manifest,
         model_path=model_path,
-        threshold=threshold,
+        threshold_resolution=threshold_resolution,
         total_rows=total_rows,
         slices=slices,
         recommendation=recommendation,
+        warnings=warnings,
     )
 
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
@@ -376,8 +469,24 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Held-out feasibility report written to {report_path}")
     print()
     print(
-        f"=== {args.target}@{args.horizon}m   deployed threshold={threshold:.6f} ==="
+        f"=== {args.target}@{args.horizon}m   deployed (runtime) threshold="
+        f"{threshold:.6f} ==="
     )
+    mt = threshold_resolution["manifest_threshold"]
+    at = threshold_resolution["artifact_threshold"]
+    mt_s = f"{mt:.6f}" if mt is not None else "MISSING"
+    at_s = f"{at:.6f}" if at is not None else "MISSING"
+    print(
+        f"  threshold_source:        {threshold_resolution['threshold_source']}"
+    )
+    print(f"  manifest_threshold:      {mt_s}")
+    print(f"  artifact_threshold:      {at_s}")
+    if threshold_resolution["threshold_mismatch_detected"]:
+        print(
+            "  [!] THRESHOLD MISMATCH: manifest and artifact disagree. "
+            "Runtime would serve the manifest value; the artifact value is "
+            "ignored at serve time."
+        )
     print(f"Total labeled rows:          {total_rows}")
     print(f"Existing slices floor total: {EXISTING_FLOOR_TOTAL}")
     print(f"min_signals floor (B3):      {MIN_SIGNALS}")

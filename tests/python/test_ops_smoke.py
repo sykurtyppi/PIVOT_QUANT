@@ -8754,12 +8754,19 @@ class OpsSmokeTests(unittest.TestCase):
         """The JSON report must always carry the same top-level keys
         regardless of the recommendation branch."""
         module = self._audit_module()
+        threshold_resolution = {
+            "runtime_threshold": 0.5,
+            "threshold_source": "manifest",
+            "manifest_threshold": 0.5,
+            "artifact_threshold": 0.5,
+            "threshold_mismatch_detected": False,
+        }
         report = module.build_report(
             target="reject", horizon=15,
             active_manifest_path=Path("/tmp/manifest_active.json"),
             manifest={"version": "v999"},
             model_path=Path("/tmp/rf_reject_15m_v999.pkl"),
-            threshold=0.5,
+            threshold_resolution=threshold_resolution,
             total_rows=21_500,
             slices=[{"meets_min_signals": False, "leaves_train_calib_tune_room": True}],
             recommendation="walk_forward_oos_required",
@@ -8769,10 +8776,13 @@ class OpsSmokeTests(unittest.TestCase):
             "target", "horizon",
             "active_manifest_path", "active_manifest_version",
             "model_path", "deployed_threshold",
+            # New: threshold provenance + mismatch surface
+            "threshold_source", "manifest_threshold", "artifact_threshold",
+            "threshold_mismatch_detected",
             "min_signals_floor",
             "existing_floor", "existing_floor_total",
             "total_labeled_rows", "slices",
-            "recommendation", "scope_disclosure",
+            "recommendation", "warnings", "scope_disclosure",
         ):
             self.assertIn(key, report, f"missing report key: {key}")
         self.assertEqual(report["audit_type"], "held_out_feasibility")
@@ -8780,6 +8790,54 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(report["horizon"], 15)
         # Schema version pinned so downstream consumers can detect drift.
         self.assertEqual(report["schema_version"], 1)
+        # deployed_threshold mirrors runtime_threshold from the resolution.
+        self.assertEqual(report["deployed_threshold"], 0.5)
+        self.assertEqual(report["threshold_source"], "manifest")
+        self.assertFalse(report["threshold_mismatch_detected"])
+
+    def test_audit_resolve_runtime_threshold_prefers_manifest(self) -> None:
+        """Server semantics: manifest threshold wins over artifact when both
+        are present, even when they agree."""
+        module = self._audit_module()
+        out = module.resolve_runtime_threshold(0.80, 0.80)
+        self.assertEqual(out["runtime_threshold"], 0.80)
+        self.assertEqual(out["threshold_source"], "manifest")
+        self.assertFalse(out["threshold_mismatch_detected"])
+        self.assertEqual(out["manifest_threshold"], 0.80)
+        self.assertEqual(out["artifact_threshold"], 0.80)
+
+    def test_audit_resolve_runtime_threshold_falls_back_to_artifact(self) -> None:
+        """When the manifest is missing the horizon, fall back to the
+        artifact threshold (matches server.ml_server.ModelRegistry
+        fallback) and label the source accordingly."""
+        module = self._audit_module()
+        out = module.resolve_runtime_threshold(None, 0.65)
+        self.assertEqual(out["runtime_threshold"], 0.65)
+        self.assertEqual(out["threshold_source"], "artifact_fallback")
+        self.assertFalse(out["threshold_mismatch_detected"])
+        self.assertIsNone(out["manifest_threshold"])
+        self.assertEqual(out["artifact_threshold"], 0.65)
+
+    def test_audit_resolve_runtime_threshold_flags_mismatch(self) -> None:
+        """Critical case: manifest and artifact disagree. The runtime uses
+        the manifest value, so the audit must compute against it AND emit
+        a mismatch flag so the divergence cannot be silent."""
+        module = self._audit_module()
+        # Simulates the runtime-safety substitution case (PRs #9/#10/#12):
+        # the manifest carries the no-signal sentinel after substitution,
+        # while the pickle still has the original ``optimal_threshold``.
+        sentinel = float(1.0000000000000002)  # mirrors NO_SIGNAL_THRESHOLD
+        out = module.resolve_runtime_threshold(sentinel, 0.80)
+        self.assertEqual(out["runtime_threshold"], sentinel)
+        self.assertEqual(out["threshold_source"], "manifest")
+        self.assertTrue(out["threshold_mismatch_detected"])
+        self.assertEqual(out["manifest_threshold"], sentinel)
+        self.assertEqual(out["artifact_threshold"], 0.80)
+
+    def test_audit_resolve_runtime_threshold_raises_when_neither_present(self) -> None:
+        module = self._audit_module()
+        with self.assertRaises(SystemExit):
+            module.resolve_runtime_threshold(None, None)
 
     def test_audit_compute_slice_handles_oversized_request(self) -> None:
         """If asked for more rows than the df contains, return a clean
