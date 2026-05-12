@@ -427,6 +427,10 @@ def _row_for_horizon(
         "train_purge": meta.get("train_purge"),
         "calibration_fit_size": meta.get("calibration_fit_size"),
         "threshold_tune_size": meta.get("threshold_tune_size"),
+        # B3: per-signal utility observations, if the training script
+        # captured them. Today's manifests do not; the validator reports
+        # ``insufficient_data`` for such horizons.
+        "score_observations": meta.get("score_observations"),
     }
 
 
@@ -704,6 +708,175 @@ def _horizon_viability(
     return (len(reasons) == 0), reasons
 
 
+def _validate_horizon_statistically(
+    row: dict,
+    *,
+    n_bootstrap: int = 5000,
+    n_permutations: int = 2000,
+    alpha: float = 0.05,
+    rng_seed: int = 42,
+    min_signals: int = 30,
+) -> dict:
+    """One-sample statistical validation of per-signal utility observations.
+
+    The validator is **only** meaningful when the candidate manifest exposes a
+    raw per-signal utility distribution (``meta["score_observations"]``) for the
+    horizon. When that field is absent or too small, this function reports
+    ``status="insufficient_data"`` — not a pass. Aggregate scores alone cannot
+    be tested for significance; fabricating one would defeat the purpose of B2.
+
+    When per-signal observations are available, two complementary tests run:
+
+    - Bootstrap CI on the mean utility (``n_bootstrap`` resamples). Pass
+      criterion: ``ci_low > 0`` at ``alpha``.
+    - One-sample sign-flip permutation against H0 ``mean == 0`` vs
+      H1 ``mean > 0``. Pass criterion: ``p_value < alpha``.
+
+    The horizon passes iff BOTH criteria hold. This is intentionally strict —
+    promotion gates should err on the side of withholding readiness.
+
+    Returns a dict with: method, sample_size, observed_score, ci_low, ci_high,
+    p_value, passed, status, warnings.
+    """
+    import numpy as np  # noqa: PLC0415 — keep numpy out of cold import paths
+    target = row.get("target")
+    horizon = row.get("horizon")
+    observations = row.get("score_observations")
+    observed_score = row.get("score")
+
+    result: dict = {
+        "target": target,
+        "horizon": horizon,
+        "method": None,
+        "sample_size": 0,
+        "observed_score": observed_score,
+        "observed_mean": None,
+        "ci_low": None,
+        "ci_high": None,
+        "p_value": None,
+        "passed": False,
+        "status": "insufficient_data",
+        "warnings": [],
+    }
+
+    if observations is None:
+        result["warnings"].append("no_score_observations_in_manifest")
+        return result
+    if not isinstance(observations, (list, tuple)):
+        result["warnings"].append("score_observations_not_list")
+        return result
+
+    # Filter to finite numeric values; ignore NaN/inf/non-numeric entries
+    # rather than failing — but track how many were dropped.
+    raw_n = len(observations)
+    cleaned: list[float] = []
+    for x in observations:
+        if isinstance(x, bool) or not isinstance(x, (int, float)):
+            continue
+        try:
+            xf = float(x)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(xf):
+            continue
+        cleaned.append(xf)
+    n = len(cleaned)
+    result["sample_size"] = int(n)
+    dropped = raw_n - n
+    if dropped > 0:
+        result["warnings"].append(f"dropped_{dropped}_non_finite_observations")
+
+    if n < min_signals:
+        result["warnings"].append(f"sample_size_{n}_below_min_{min_signals}")
+        result["status"] = "insufficient_data"
+        return result
+
+    arr = np.asarray(cleaned, dtype=float)
+    rng = np.random.default_rng(rng_seed)
+
+    # --- Bootstrap CI on mean -------------------------------------------
+    idx = rng.integers(0, n, size=(n_bootstrap, n))
+    boot_means = arr[idx].mean(axis=1)
+    ci_low = float(np.percentile(boot_means, 100 * alpha / 2))
+    ci_high = float(np.percentile(boot_means, 100 * (1 - alpha / 2)))
+
+    # --- One-sample sign-flip permutation against H0: mean = 0 ------------
+    observed_mean = float(arr.mean())
+    signs = rng.choice([-1.0, 1.0], size=(n_permutations, n))
+    perm_means = (signs * arr).mean(axis=1)
+    # One-sided: P(perm_mean >= observed_mean) under null. Add-one smoothing
+    # so a perfect-pass run does not report p == 0.
+    p_value = float((perm_means >= observed_mean).sum() + 1) / float(n_permutations + 1)
+
+    passed = bool(ci_low > 0.0 and p_value < alpha)
+
+    result["method"] = "bootstrap_ci + one_sample_sign_flip_permutation"
+    result["observed_mean"] = observed_mean
+    result["ci_low"] = ci_low
+    result["ci_high"] = ci_high
+    result["p_value"] = p_value
+    result["passed"] = passed
+    result["status"] = "passed" if passed else "failed"
+    return result
+
+
+def run_statistical_validation(
+    per_horizon: list[dict],
+    *,
+    viable_set: set[tuple[str, int]],
+    rng_seed: int = 42,
+) -> dict[str, dict]:
+    """Validate only mechanically-viable horizons.
+
+    ``viable_set`` is the set of ``(target, horizon)`` tuples that already
+    passed mechanical viability in ``classify_candidate_readiness``. Anything
+    not in that set is silently skipped — statistical validation never
+    unblocks a horizon the safety chain has rejected.
+    """
+    out: dict[str, dict] = {}
+    for row in per_horizon:
+        target = row.get("target")
+        horizon = row.get("horizon")
+        if horizon is None:
+            continue
+        try:
+            key_tuple = (target, int(horizon))
+        except (TypeError, ValueError):
+            continue
+        if key_tuple not in viable_set:
+            continue
+        key = f"{target}@{int(horizon)}m"
+        out[key] = _validate_horizon_statistically(row, rng_seed=rng_seed)
+    return out
+
+
+def _aggregate_statistical_validation(per_horizon_results: dict) -> tuple[bool, bool | None]:
+    """Roll per-horizon statistical results up to (present, passed).
+
+    ``present`` is True when at least one mechanically-viable horizon ran a
+    real test (status ``passed`` or ``failed``); False when every viable
+    horizon was ``insufficient_data`` (or there were none).
+
+    ``passed`` is True only when every viable horizon's test ran AND every
+    one passed. False when any ran and failed. None when coverage is
+    incomplete (some insufficient_data) or no test ran.
+    """
+    if not per_horizon_results:
+        return False, None
+    statuses = [r.get("status") for r in per_horizon_results.values()]
+    ran = [s for s in statuses if s in ("passed", "failed")]
+    if not ran:
+        return False, None
+    present = True
+    if any(s == "failed" for s in ran):
+        return present, False
+    # No failures among those that ran. Pass only if every viable horizon
+    # actually ran (no insufficient_data anywhere).
+    if all(s == "passed" for s in statuses):
+        return present, True
+    return present, None
+
+
 def _compute_promotion_disposition(
     *,
     state: str,
@@ -758,9 +931,17 @@ def classify_candidate_readiness(report: dict) -> dict:
     ``degraded_candidate`` can both be true at once — the ``state`` field
     picks the most specific applicable label.
 
-    Statistical validation is intentionally NOT implemented yet (B3 follow-up);
-    we surface explicit ``statistical_validation_*`` fields and a reason so the
-    promotion gate cannot silently treat positive utility as validated edge.
+    Statistical validation (B3, ``_validate_horizon_statistically`` /
+    ``run_statistical_validation``) runs on the mechanically-viable horizons
+    here. It depends on the manifest exposing per-signal utility observations
+    under ``thresholds_meta[target][horizon]["score_observations"]``; current
+    training runs do not yet write that field, so today's candidates report
+    ``status="insufficient_data"`` per viable horizon. The aggregate
+    ``statistical_validation_present`` / ``statistical_validation_passed``
+    booleans reflect that honestly, and ``promotion_disposition`` stays at
+    ``hold_pending_statistical_validation`` until a future training-side PR
+    captures observations. Statistical validation never unblocks a horizon
+    the safety chain rejected.
     """
     per_horizon = report.get("per_horizon") or []
     safety = report.get("runtime_safety_dry_run") or {}
@@ -832,14 +1013,34 @@ def classify_candidate_readiness(report: dict) -> dict:
     elif purge_state == "disabled":
         reasons.append("purge_disabled")
 
-    # --- Statistical validation (B3 deferred) ------------------------------
-    # Hard-coded for this PR: not yet implemented. Surfaced explicitly so the
-    # promotion gate cannot mistake positive utility for validated edge.
+    # --- Statistical validation (B3) ---------------------------------------
+    # Run validation ONLY on mechanically-viable horizons. The framework here
+    # is real; whether it produces ``passed``/``failed`` or
+    # ``insufficient_data`` depends on what the candidate manifest stored
+    # for each horizon (``score_observations``). Today's manifests do not
+    # capture per-signal observations, so today's report is honest about
+    # being unable to test significance — and the promotion disposition
+    # reflects that.
     statistical_validation_required = True
-    statistical_validation_present = False
-    statistical_validation_passed = None
-    if viable_horizons:
+    viable_set_for_validation: set[tuple[str, int]] = {
+        (v.get("target"), int(v.get("horizon")))
+        for v in viable_horizons
+        if v.get("horizon") is not None
+    }
+    statistical_validation_per_horizon = run_statistical_validation(
+        per_horizon, viable_set=viable_set_for_validation
+    )
+    statistical_validation_present, statistical_validation_passed = (
+        _aggregate_statistical_validation(statistical_validation_per_horizon)
+    )
+    if viable_horizons and not statistical_validation_present:
         reasons.append("statistical_validation_missing")
+    if statistical_validation_present and statistical_validation_passed is False:
+        reasons.append("statistical_validation_failed")
+    # Surface per-horizon insufficient_data so the reason list is actionable.
+    for key, res in statistical_validation_per_horizon.items():
+        if res.get("status") == "insufficient_data":
+            reasons.append(f"statistical_validation_insufficient_data:{key}")
 
     # --- State resolution --------------------------------------------------
     if fatal:
@@ -903,6 +1104,7 @@ def classify_candidate_readiness(report: dict) -> dict:
         "statistical_validation_required": statistical_validation_required,
         "statistical_validation_present": statistical_validation_present,
         "statistical_validation_passed": statistical_validation_passed,
+        "statistical_validation": statistical_validation_per_horizon,
         "reasons": reasons_ordered,
     }
 
@@ -1088,13 +1290,25 @@ def _print_readiness_summary(readiness: dict) -> None:
     sv_required = readiness.get("statistical_validation_required")
     sv_present = readiness.get("statistical_validation_present")
     sv_passed = readiness.get("statistical_validation_passed")
-    if sv_required and not sv_present:
-        print("  statistical_validation:   missing (required for promotion; B3 deferred)")
-    else:
-        print(
-            f"  statistical_validation:   required={sv_required} present={sv_present} "
-            f"passed={sv_passed}"
-        )
+    sv_per_horizon = readiness.get("statistical_validation") or {}
+    print(
+        f"  statistical_validation:   required={sv_required} "
+        f"present={sv_present} passed={sv_passed}"
+    )
+    for key, res in sv_per_horizon.items():
+        status = res.get("status")
+        n = res.get("sample_size")
+        ci_low = res.get("ci_low")
+        ci_high = res.get("ci_high")
+        p_value = res.get("p_value")
+        if status in ("passed", "failed"):
+            print(
+                f"    {key:<14} {status:<11} n={n}  "
+                f"ci=[{ci_low:.4f},{ci_high:.4f}]  p={p_value:.4f}"
+            )
+        else:
+            warnings = ",".join(res.get("warnings") or [])
+            print(f"    {key:<14} {status:<11} n={n}  warnings={warnings}")
 
 
 if __name__ == "__main__":

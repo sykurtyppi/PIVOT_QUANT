@@ -8951,6 +8951,7 @@ class OpsSmokeTests(unittest.TestCase):
         no_signal_substituted: bool = False,
         objective: str = "utility_bps",
         train_purge: dict | None = None,
+        score_observations: list | None = None,
     ) -> dict:
         if train_purge is None:
             train_purge = {
@@ -8972,6 +8973,7 @@ class OpsSmokeTests(unittest.TestCase):
             "calibration_fit_size": 800,
             "threshold_tune_size": 500,
             "train_purge": train_purge,
+            "score_observations": score_observations,
         }
 
     @classmethod
@@ -9304,6 +9306,180 @@ class OpsSmokeTests(unittest.TestCase):
         # And the runtime-safety-skipped reason is also surfaced separately
         # (it is a soft signal, not the fatal cause here).
         self.assertIn("runtime_safety_skipped", result["reasons"])
+
+    # ------------------------------------------------------------------ #
+    # B3: statistical validation
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _strong_pass_obs(n: int = 60, seed: int = 1) -> list[float]:
+        import random
+        rng = random.Random(seed)
+        return [rng.gauss(2.0, 0.5) for _ in range(n)]
+
+    @staticmethod
+    def _near_zero_obs(n: int = 60, seed: int = 2) -> list[float]:
+        import random
+        rng = random.Random(seed)
+        return [rng.gauss(0.0, 1.0) for _ in range(n)]
+
+    def test_b3_passing_validation_sets_present_true(self) -> None:
+        """8 viable + per-signal observations supporting positive mean
+        => statistical_validation_present=True, passed=True. With
+        full_family_ready that also unlocks promotion_ready."""
+        module = self._readiness_module()
+        obs = self._strong_pass_obs()
+        rows = [
+            self._ph_row("reject", 5, score=10.0, score_observations=obs),
+            self._ph_row("reject", 15, score=20.0, score_observations=obs),
+            self._ph_row("reject", 30, score=30.0, score_observations=obs),
+            self._ph_row("reject", 60, score=40.0, score_observations=obs),
+            self._ph_row("break", 5, score=5.0, score_observations=obs),
+            self._ph_row("break", 15, score=6.0, score_observations=obs),
+            self._ph_row("break", 30, score=7.0, score_observations=obs),
+            self._ph_row("break", 60, score=8.0, score_observations=obs),
+        ]
+        result = module.classify_candidate_readiness(self._build_report_stub(rows))
+        self.assertEqual(result["state"], "full_family_ready")
+        self.assertTrue(result["statistical_validation_present"])
+        self.assertTrue(result["statistical_validation_passed"])
+        # All 8 viable horizons must have per-horizon detail.
+        sv = result["statistical_validation"]
+        self.assertEqual(len(sv), 8)
+        for entry in sv.values():
+            self.assertEqual(entry["status"], "passed")
+            self.assertTrue(entry["passed"])
+            self.assertIsNotNone(entry["ci_low"])
+            self.assertGreater(entry["ci_low"], 0.0)
+        # Disposition: full family + stat validated => ready_full_family.
+        self.assertEqual(result["promotion_disposition"], "ready_full_family")
+        self.assertTrue(result["promotion_ready"])
+
+    def test_b3_insufficient_data_when_no_observations(self) -> None:
+        """Today's real shape: no score_observations field in the manifest
+        => status=insufficient_data, present=False, not promotion_ready."""
+        module = self._readiness_module()
+        rows = [
+            self._ph_row("reject", 15, score=117.0),
+            self._ph_row("reject", 30, score=85.0),
+        ]
+        result = module.classify_candidate_readiness(self._build_report_stub(rows))
+        self.assertFalse(result["statistical_validation_present"])
+        self.assertIsNone(result["statistical_validation_passed"])
+        for entry in result["statistical_validation"].values():
+            self.assertEqual(entry["status"], "insufficient_data")
+            self.assertIn("no_score_observations_in_manifest", entry["warnings"])
+        self.assertFalse(result["promotion_ready"])
+        self.assertEqual(
+            result["promotion_disposition"], "hold_pending_statistical_validation"
+        )
+
+    def test_b3_insufficient_data_when_too_few_signals(self) -> None:
+        """Observations below ``min_signals`` => insufficient_data, not a pass."""
+        module = self._readiness_module()
+        too_few = [1.0, 2.0, 3.0, 4.0, 5.0]
+        rows = [self._ph_row("reject", 15, score=15.0, score_observations=too_few)]
+        result = module.classify_candidate_readiness(self._build_report_stub(rows))
+        sv = result["statistical_validation"]["reject@15m"]
+        self.assertEqual(sv["status"], "insufficient_data")
+        self.assertEqual(sv["sample_size"], 5)
+        self.assertFalse(sv["passed"])
+        self.assertTrue(any("below_min" in w for w in sv["warnings"]))
+
+    def test_b3_failed_validation_does_not_promote(self) -> None:
+        """All 8 viable but observations centered on 0 => statistical_validation_passed=False;
+        promotion_ready stays False and disposition falls back to hold_pending_statistical_validation."""
+        module = self._readiness_module()
+        obs = self._near_zero_obs()
+        rows = [
+            self._ph_row(t, h, score=10.0, score_observations=obs)
+            for t, h in [
+                ("reject", 5), ("reject", 15), ("reject", 30), ("reject", 60),
+                ("break", 5), ("break", 15), ("break", 30), ("break", 60),
+            ]
+        ]
+        result = module.classify_candidate_readiness(self._build_report_stub(rows))
+        self.assertEqual(result["state"], "full_family_ready")
+        self.assertTrue(result["statistical_validation_present"])
+        self.assertFalse(result["statistical_validation_passed"])
+        self.assertFalse(result["promotion_ready"])
+        self.assertEqual(
+            result["promotion_disposition"], "hold_pending_statistical_validation"
+        )
+        self.assertIn("statistical_validation_failed", result["reasons"])
+
+    def test_b3_degraded_with_passing_stat_validation_is_hold_partial_degraded(self) -> None:
+        """Current evidence shape (2 viable / 6 blocked) with the two viable horizons'
+        statistical validation passing => state=degraded_candidate, disposition=hold_partial_degraded,
+        promotion_ready=False (never promotable while the family is degraded)."""
+        module = self._readiness_module()
+        obs = self._strong_pass_obs()
+        rows = [
+            self._ph_row("reject", 5, score=-4.82, fallback=True, no_signal_substituted=True),
+            self._ph_row("reject", 15, score=117.46, score_observations=obs),
+            self._ph_row("reject", 30, score=85.89, score_observations=obs),
+            self._ph_row("reject", 60, score=-33.48, fallback=True, no_signal_substituted=True),
+            self._ph_row("break", 5, score=0.0, fallback=True, no_signal_substituted=True),
+            self._ph_row("break", 15, score=0.0, fallback=True, no_signal_substituted=True),
+            self._ph_row("break", 30, score=0.0, fallback=True, no_signal_substituted=True),
+            self._ph_row("break", 60, score=0.0, fallback=True, no_signal_substituted=True),
+        ]
+        result = module.classify_candidate_readiness(self._build_report_stub(rows))
+        self.assertEqual(result["state"], "degraded_candidate")
+        self.assertTrue(result["statistical_validation_present"])
+        self.assertTrue(result["statistical_validation_passed"])
+        self.assertFalse(result["promotion_ready"])
+        self.assertEqual(result["promotion_disposition"], "hold_partial_degraded")
+
+    def test_b3_blocked_horizon_not_statistically_validated(self) -> None:
+        """Statistical validation must never run on a blocked horizon —
+        even if score_observations is present. The safety chain's verdict
+        is upstream of the statistical layer."""
+        module = self._readiness_module()
+        obs = self._strong_pass_obs()
+        rows = [
+            self._ph_row("reject", 15, score=10.0, score_observations=obs),
+            # Blocked: fallback=True, also has obs that would otherwise pass.
+            self._ph_row(
+                "reject", 30,
+                score=-5.0, fallback=True, no_signal_substituted=True,
+                score_observations=obs,
+            ),
+        ]
+        result = module.classify_candidate_readiness(self._build_report_stub(rows))
+        sv_keys = set(result["statistical_validation"].keys())
+        self.assertIn("reject@15m", sv_keys)
+        self.assertNotIn("reject@30m", sv_keys)
+        # The viable one passes.
+        self.assertEqual(result["statistical_validation"]["reject@15m"]["status"], "passed")
+
+    def test_b3_report_schema_stable(self) -> None:
+        """The candidate_readiness block must always carry the same keys,
+        regardless of which path the validator takes."""
+        module = self._readiness_module()
+        rows = [self._ph_row("reject", 15, score=10.0)]
+        result = module.classify_candidate_readiness(self._build_report_stub(rows))
+        for key in (
+            "state",
+            "full_family_ready", "partial_ready", "degraded_candidate", "not_ready",
+            "promotion_ready", "promotion_disposition",
+            "viable_horizons", "blocked_horizons",
+            "runtime_safety_agreement", "purge_diagnostic_state",
+            "statistical_validation_required",
+            "statistical_validation_present",
+            "statistical_validation_passed",
+            "statistical_validation",
+            "reasons",
+        ):
+            self.assertIn(key, result, f"missing readiness key: {key}")
+        # Per-horizon detail shape.
+        entry = result["statistical_validation"]["reject@15m"]
+        for key in (
+            "target", "horizon", "method", "sample_size", "observed_score",
+            "observed_mean", "ci_low", "ci_high", "p_value",
+            "passed", "status", "warnings",
+        ):
+            self.assertIn(key, entry, f"missing per-horizon validation key: {key}")
 
     def test_readiness_missing_candidate_manifest_not_ready(self) -> None:
         module = self._readiness_module()
