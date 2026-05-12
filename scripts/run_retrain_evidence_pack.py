@@ -582,6 +582,331 @@ def parse_pass_through(values: list[str]) -> dict[str, str]:
     return parsed
 
 
+def _purge_diagnostic_state(per_horizon: list[dict]) -> tuple[str, list[str]]:
+    """Aggregate per-horizon ``train_purge`` blocks into one of:
+
+    ``valid_noop``  — purge enabled, ran, found nothing to drop (current data layout).
+    ``valid_purged`` — purge enabled, ran, dropped >0 train rows.
+    ``disabled``    — any horizon explicitly disabled (operator opt-out).
+    ``invalid``     — missing/inconsistent diagnostic; treated as not-ready.
+
+    Returns ``(state, reasons)`` where ``reasons`` is empty when state is
+    ``valid_noop`` or ``valid_purged``.
+
+    Aggregation precedence (most severe wins): invalid > disabled > valid_purged > valid_noop.
+    """
+    if not per_horizon:
+        return "invalid", ["purge_no_horizons"]
+
+    any_purged = False
+    any_disabled = False
+    any_invalid = False
+    reasons: list[str] = []
+
+    for row in per_horizon:
+        tp = row.get("train_purge")
+        target = row.get("target")
+        horizon = row.get("horizon")
+        tag = f"{target}@{horizon}"
+        if not isinstance(tp, dict):
+            any_invalid = True
+            reasons.append(f"purge_missing_diagnostic:{tag}")
+            continue
+        enabled = bool(tp.get("enabled"))
+        skip_reason = (tp.get("skip_reason") or "").strip()
+        before = tp.get("train_rows_before_purge")
+        after = tp.get("train_rows_after_purge")
+        purged = tp.get("train_rows_purged")
+        calib_start = tp.get("calibration_start_ts")
+
+        if not enabled or skip_reason == "disabled":
+            any_disabled = True
+            continue
+
+        # Enabled path: validate the diagnostic block is internally consistent.
+        if skip_reason:
+            any_invalid = True
+            reasons.append(f"purge_unexpected_skip_reason:{tag}:{skip_reason}")
+            continue
+        if calib_start is None:
+            any_invalid = True
+            reasons.append(f"purge_missing_calibration_start_ts:{tag}")
+            continue
+        if not isinstance(before, int) or before <= 0:
+            any_invalid = True
+            reasons.append(f"purge_no_train_rows_before:{tag}")
+            continue
+        if not isinstance(after, int) or after < 0:
+            any_invalid = True
+            reasons.append(f"purge_invalid_train_rows_after:{tag}")
+            continue
+        if not isinstance(purged, int) or purged < 0:
+            any_invalid = True
+            reasons.append(f"purge_invalid_train_rows_purged:{tag}")
+            continue
+        if purged > 0:
+            any_purged = True
+
+    if any_invalid:
+        return "invalid", reasons
+    if any_disabled:
+        return "disabled", ["purge_disabled"]
+    if any_purged:
+        return "valid_purged", []
+    return "valid_noop", []
+
+
+def _horizon_viability(
+    row: dict,
+    neutralize_set: set[tuple[str, int]],
+) -> tuple[bool, list[str]]:
+    """Return ``(is_viable, blocked_reasons)`` for a per-horizon row.
+
+    A horizon is viable only when ALL of:
+      - ``objective == "utility_bps"``
+      - ``score > 0`` (numeric)
+      - ``fallback == False``
+      - ``no_signal_substituted == False``
+      - the runtime-safety dry-run would not neutralize this (target, horizon)
+    """
+    reasons: list[str] = []
+    if row.get("objective") != "utility_bps":
+        reasons.append("wrong_objective")
+    # Score must be a finite, positive number. The previous predicate
+    # ``not isinstance(score, (int, float)) or float(score) <= 0.0`` is
+    # fail-open against NaN because ``NaN <= 0.0`` is False per IEEE 754.
+    # Runtime safety (PR #12) catches NaN scores when fastapi is available,
+    # but ``runtime_safety_dry_run.skipped == True`` is a supported case
+    # (dev envs without fastapi), and readiness must close the same hole
+    # at this layer rather than relying on a downstream gate that may not
+    # have run. Mirrors the predicate in
+    # ``server.ml_server.ModelRegistry._apply_runtime_threshold_safety``.
+    score = row.get("score")
+    if isinstance(score, bool) or not isinstance(score, (int, float)):
+        reasons.append("nonpositive_utility")
+    else:
+        try:
+            score_f = float(score)
+        except (TypeError, ValueError):
+            reasons.append("nonpositive_utility")
+        else:
+            if not math.isfinite(score_f):
+                reasons.append("nonfinite_utility")
+            elif score_f <= 0.0:
+                reasons.append("nonpositive_utility")
+    if bool(row.get("fallback")):
+        reasons.append("fallback")
+    if bool(row.get("no_signal_substituted")):
+        reasons.append("no_signal_substituted")
+    key = (row.get("target"), int(row.get("horizon"))) if row.get("horizon") is not None else None
+    if key is not None and key in neutralize_set:
+        reasons.append("runtime_safety_neutralize")
+    return (len(reasons) == 0), reasons
+
+
+def _compute_promotion_disposition(
+    *,
+    state: str,
+    has_viable: bool,
+    statistical_validation_present: bool,
+    statistical_validation_passed: object,
+) -> tuple[bool, str]:
+    """Map (state, statistical-validation) into the promotion axis.
+
+    Promotion is a *second* axis on top of readiness. Readiness ("how did
+    training + safety look?") is necessary but not sufficient for promotion;
+    statistical validation is an independent gate. Keeping the fields
+    separate prevents future automation from reading ``partial_ready=true``
+    or ``degraded_candidate=true`` as ``promotion_ready=true``.
+
+    Disposition order (most-blocking first):
+
+    - ``blocked_not_ready``                    — ``state == "not_ready"``.
+    - ``ready_full_family``                    — ``state == "full_family_ready"``
+                                                 AND statistical validation is
+                                                 present AND passed.
+    - ``hold_pending_statistical_validation``  — has at least one viable horizon
+                                                 AND statistical validation is
+                                                 missing or did not pass. This is
+                                                 where the current candidate sits
+                                                 until B3 lands.
+    - ``hold_partial_degraded``                — partial/degraded with statistical
+                                                 validation present-and-passed
+                                                 but not the full family. Reserved
+                                                 for the B3+B4 regime; not
+                                                 reachable from this PR's
+                                                 hard-coded stat-validation
+                                                 stub.
+    """
+    stat_promotable = bool(
+        statistical_validation_present and statistical_validation_passed is True
+    )
+    if state == "not_ready":
+        return False, "blocked_not_ready"
+    if state == "full_family_ready" and stat_promotable:
+        return True, "ready_full_family"
+    if has_viable and not stat_promotable:
+        return False, "hold_pending_statistical_validation"
+    return False, "hold_partial_degraded"
+
+
+def classify_candidate_readiness(report: dict) -> dict:
+    """Classify a candidate from its evidence report (policy-only, no mutation).
+
+    See module docstring; states are ``full_family_ready``, ``partial_ready``,
+    ``degraded_candidate``, ``not_ready``. ``partial_ready`` and
+    ``degraded_candidate`` can both be true at once — the ``state`` field
+    picks the most specific applicable label.
+
+    Statistical validation is intentionally NOT implemented yet (B3 follow-up);
+    we surface explicit ``statistical_validation_*`` fields and a reason so the
+    promotion gate cannot silently treat positive utility as validated edge.
+    """
+    per_horizon = report.get("per_horizon") or []
+    safety = report.get("runtime_safety_dry_run") or {}
+    training = report.get("training") or {}
+    candidate_manifest = report.get("candidate_manifest")
+
+    reasons: list[str] = []
+    fatal: list[str] = []
+
+    # --- Training / manifest preconditions ---------------------------------
+    training_skipped = bool(training.get("skipped"))
+    training_exit_code = training.get("exit_code")
+    if not training_skipped and training_exit_code not in (0, None):
+        fatal.append("training_failed")
+    if candidate_manifest is None or (
+        isinstance(candidate_manifest, dict) and "_parse_error" in candidate_manifest
+    ):
+        fatal.append("no_candidate_manifest")
+
+    # --- Runtime-safety agreement -----------------------------------------
+    would_neutralize = safety.get("would_neutralize") or []
+    would_neutralize_count = int(safety.get("would_neutralize_count") or 0)
+    runtime_safety_skipped = bool(safety.get("skipped"))
+    runtime_safety_agreement = (
+        not runtime_safety_skipped and would_neutralize_count == 0
+    )
+    if would_neutralize_count > 0:
+        fatal.append("runtime_safety_disagreement")
+    elif runtime_safety_skipped:
+        # Skipped dry-run isn't a hard fail (dev environments without
+        # fastapi), but it prevents the strongest readiness claim.
+        reasons.append("runtime_safety_skipped")
+
+    neutralize_set: set[tuple[str, int]] = set()
+    for entry in would_neutralize:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            neutralize_set.add((entry.get("target"), int(entry.get("horizon"))))
+        except (TypeError, ValueError):
+            continue
+
+    # --- Horizon viability -------------------------------------------------
+    viable_horizons: list[dict] = []
+    blocked_horizons: list[dict] = []
+    for row in per_horizon:
+        is_viable, blocked_reasons = _horizon_viability(row, neutralize_set)
+        if is_viable:
+            viable_horizons.append({
+                "target": row.get("target"),
+                "horizon": row.get("horizon"),
+                "score": row.get("score"),
+            })
+        else:
+            blocked_horizons.append({
+                "target": row.get("target"),
+                "horizon": row.get("horizon"),
+                "reasons": blocked_reasons,
+            })
+
+    if not viable_horizons:
+        fatal.append("no_viable_horizons")
+
+    # --- Purge diagnostic --------------------------------------------------
+    purge_state, purge_reasons = _purge_diagnostic_state(per_horizon)
+    if purge_state == "invalid":
+        fatal.append("purge_diagnostic_invalid")
+        reasons.extend(purge_reasons)
+    elif purge_state == "disabled":
+        reasons.append("purge_disabled")
+
+    # --- Statistical validation (B3 deferred) ------------------------------
+    # Hard-coded for this PR: not yet implemented. Surfaced explicitly so the
+    # promotion gate cannot mistake positive utility for validated edge.
+    statistical_validation_required = True
+    statistical_validation_present = False
+    statistical_validation_passed = None
+    if viable_horizons:
+        reasons.append("statistical_validation_missing")
+
+    # --- State resolution --------------------------------------------------
+    if fatal:
+        state = "not_ready"
+        full_family_ready = False
+        partial_ready = False
+        degraded_candidate = False
+        not_ready = True
+    elif (
+        len(viable_horizons) == len(per_horizon)
+        and runtime_safety_agreement
+        and purge_state in ("valid_noop", "valid_purged")
+    ):
+        # All attempted horizons viable; clean across all gates.
+        state = "full_family_ready"
+        full_family_ready = True
+        partial_ready = False
+        degraded_candidate = False
+        not_ready = False
+    else:
+        # Mixed: at least one viable, at least one blocked or a soft issue.
+        full_family_ready = False
+        not_ready = False
+        partial_ready = True
+        # Promote to degraded_candidate when the failure signal is strong:
+        # half or more horizons blocked, OR purge was operator-disabled.
+        majority_blocked = len(blocked_horizons) * 2 >= len(per_horizon) if per_horizon else False
+        degraded_candidate = bool(majority_blocked or purge_state == "disabled")
+        state = "degraded_candidate" if degraded_candidate else "partial_ready"
+        if majority_blocked:
+            reasons.append("majority_horizons_blocked")
+
+    # --- Promotion disposition ---------------------------------------------
+    promotion_ready, promotion_disposition = _compute_promotion_disposition(
+        state=state,
+        has_viable=bool(viable_horizons),
+        statistical_validation_present=statistical_validation_present,
+        statistical_validation_passed=statistical_validation_passed,
+    )
+
+    # Dedupe reasons while preserving order.
+    seen_r: set[str] = set()
+    reasons_ordered: list[str] = []
+    for item in fatal + reasons:
+        if item not in seen_r:
+            seen_r.add(item)
+            reasons_ordered.append(item)
+
+    return {
+        "state": state,
+        "full_family_ready": bool(full_family_ready),
+        "partial_ready": bool(partial_ready),
+        "degraded_candidate": bool(degraded_candidate),
+        "not_ready": bool(not_ready),
+        "promotion_ready": bool(promotion_ready),
+        "promotion_disposition": promotion_disposition,
+        "viable_horizons": viable_horizons,
+        "blocked_horizons": blocked_horizons,
+        "runtime_safety_agreement": bool(runtime_safety_agreement),
+        "purge_diagnostic_state": purge_state,
+        "statistical_validation_required": statistical_validation_required,
+        "statistical_validation_present": statistical_validation_present,
+        "statistical_validation_passed": statistical_validation_passed,
+        "reasons": reasons_ordered,
+    }
+
+
 def build_report(
     *,
     run_id: str,
@@ -607,7 +932,7 @@ def build_report(
         }
         summary = summary_block(per_horizon)
 
-    return {
+    report = {
         "schema_version": SCHEMA_VERSION,
         "run_id": run_id,
         "out_dir": str(out_dir),
@@ -619,6 +944,8 @@ def build_report(
         "runtime_safety_dry_run": safety,
         "summary": summary,
     }
+    report["candidate_readiness"] = classify_candidate_readiness(report)
+    return report
 
 
 def _load_candidate_manifest(path: Path) -> dict | None:
@@ -731,7 +1058,43 @@ def main(argv: list[str] | None = None) -> int:
     )
     report_path.write_text(json.dumps(report, indent=2, default=str))
     print(f"Evidence pack report written to {report_path}")
+    _print_readiness_summary(report.get("candidate_readiness") or {})
     return 0
+
+
+def _print_readiness_summary(readiness: dict) -> None:
+    """One-screen recap of the candidate_readiness block."""
+    if not readiness:
+        return
+    viable = readiness.get("viable_horizons") or []
+    blocked = readiness.get("blocked_horizons") or []
+    print(f"[candidate readiness] state={readiness.get('state')}")
+    print(
+        f"  promotion_ready:         {readiness.get('promotion_ready')}  "
+        f"(disposition={readiness.get('promotion_disposition')})"
+    )
+    if viable:
+        bits = []
+        for v in viable:
+            score = v.get("score")
+            score_s = f"{float(score):.3f}" if isinstance(score, (int, float)) else "n/a"
+            bits.append(f"{v.get('target')}@{v.get('horizon')}m (score {score_s})")
+        print(f"  viable:                  {', '.join(bits)}")
+    else:
+        print("  viable:                  none")
+    print(f"  blocked horizons:        {len(blocked)}")
+    print(f"  runtime_safety_agreement: {readiness.get('runtime_safety_agreement')}")
+    print(f"  purge_diagnostic_state:   {readiness.get('purge_diagnostic_state')}")
+    sv_required = readiness.get("statistical_validation_required")
+    sv_present = readiness.get("statistical_validation_present")
+    sv_passed = readiness.get("statistical_validation_passed")
+    if sv_required and not sv_present:
+        print("  statistical_validation:   missing (required for promotion; B3 deferred)")
+    else:
+        print(
+            f"  statistical_validation:   required={sv_required} present={sv_present} "
+            f"passed={sv_passed}"
+        )
 
 
 if __name__ == "__main__":
