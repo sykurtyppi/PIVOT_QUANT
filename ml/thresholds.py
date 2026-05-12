@@ -7,6 +7,7 @@ import numpy as np
 
 ThresholdObjective = Literal["f1", "utility_bps"]
 ThresholdTarget = Literal["reject", "break"]
+NO_SIGNAL_THRESHOLD = float(np.nextafter(1.0, 2.0))
 
 
 @dataclass
@@ -105,12 +106,17 @@ def select_threshold(
     stability_band: float = 0.0,
     top_k: int = 5,
     preferred_min_score: float | None = None,
+    enforce_min_score: bool = False,
+    enforce_no_fallback: bool = False,
+    no_signal_threshold: float = NO_SIGNAL_THRESHOLD,
 ) -> ThresholdSelection:
     """Select a probability threshold using either F1 or cost-aware utility.
 
     When ``preferred_min_score`` is set for ``utility_bps``, candidates above the
-    floor are preferred before stability/score tie-breaks. This avoids selecting
-    a negative-utility threshold when positive-utility alternatives exist.
+    floor are preferred before stability/score tie-breaks. If
+    ``enforce_min_score`` is also true, candidates at or below the floor are
+    rejected and the selector returns a no-signal fallback. ``enforce_no_fallback``
+    makes the normal fallback path no-signal as well.
     """
     y_true_arr = np.asarray(y_true, dtype=int)
     y_prob_arr = np.asarray(y_prob, dtype=float)
@@ -201,7 +207,6 @@ def select_threshold(
             reverse=True,
         )
 
-        best = ranked[0]
         top = [
             {
                 "threshold": float(c.threshold),
@@ -213,6 +218,29 @@ def select_threshold(
             }
             for c in ranked[: max(1, int(top_k))]
         ]
+
+        best = ranked[0]
+        if (
+            objective == "utility_bps"
+            and bool(enforce_min_score)
+            and preferred_floor is not None
+            and float(best.score) <= preferred_floor
+        ):
+            return ThresholdSelection(
+                threshold=float(no_signal_threshold),
+                objective=objective,
+                score=float(best.score),
+                precision=0.0,
+                recall=0.0,
+                signals=0,
+                evaluated_candidates=int(evaluated),
+                fallback=True,
+                stability_score=float(
+                    best.stability_score if best.stability_score is not None else best.score
+                ),
+                stability_band=band,
+                top_candidates=top,
+            )
 
         return ThresholdSelection(
             threshold=float(best.threshold),
@@ -234,14 +262,29 @@ def select_threshold(
     if objective == "utility_bps" and utility_arr is not None:
         fallback_score = float(np.sum(utility_arr[y_pred == 1]))
     fallback_signals = int(np.sum(y_pred))
+    selected_threshold = float(default_threshold)
+    selected_precision = float(precision)
+    selected_recall = float(recall)
+    selected_signals = fallback_signals
+    preferred_floor = float(preferred_min_score) if preferred_min_score is not None else None
+    if bool(enforce_no_fallback) or (
+        objective == "utility_bps"
+        and bool(enforce_min_score)
+        and preferred_floor is not None
+        and float(fallback_score) <= preferred_floor
+    ):
+        selected_threshold = float(no_signal_threshold)
+        selected_precision = 0.0
+        selected_recall = 0.0
+        selected_signals = 0
 
     return ThresholdSelection(
-        threshold=float(default_threshold),
+        threshold=selected_threshold,
         objective=objective,
         score=fallback_score,
-        precision=float(precision),
-        recall=float(recall),
-        signals=fallback_signals,
+        precision=selected_precision,
+        recall=selected_recall,
+        signals=selected_signals,
         evaluated_candidates=int(evaluated),
         fallback=True,
         stability_score=fallback_score,
