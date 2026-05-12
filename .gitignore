@@ -103,3 +103,7 @@ coverage/
 
 # Package lock (optional - uncomment if you want to track it)
 # package-lock.json
+
+# Evidence pack reports (keep the directory marker only)
+evidence/*
+!evidence/.gitkeep
