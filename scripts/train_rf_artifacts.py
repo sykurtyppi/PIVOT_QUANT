@@ -1021,6 +1021,29 @@ def main() -> None:
                                 "top_candidates": selection.top_candidates,
                             }
                         )
+                        # B3-feed: per-signal utility observations at the SELECTED
+                        # threshold on the threshold-tune slice. Downstream consumers
+                        # (run_retrain_evidence_pack.classify_candidate_readiness)
+                        # use this for statistical validation. The source field is
+                        # mandatory so readers cannot mistake this for clean OOS
+                        # evidence — it is in-sample on the same slice that picked
+                        # the threshold.
+                        if selection.score_observations is not None:
+                            threshold_meta["score_observations"] = list(
+                                selection.score_observations
+                            )
+                            threshold_meta["score_observations_source"] = (
+                                "threshold_tune_slice"
+                            )
+                            threshold_meta["signals_on_tune_slice"] = int(
+                                len(selection.score_observations)
+                            )
+                        else:
+                            threshold_meta["score_observations"] = None
+                            threshold_meta["score_observations_source"] = (
+                                "threshold_tune_slice"
+                            )
+                            threshold_meta["signals_on_tune_slice"] = 0
                     else:
                         threshold_meta["search_enabled"] = False
                         threshold_meta["search_skip_reason"] = "invalid_probability_shape_or_labels"
@@ -1052,6 +1075,14 @@ def main() -> None:
                 disable_on_nonpositive_utility=bool(args.threshold_disable_on_nonpositive_utility),
                 disable_on_fallback=bool(args.threshold_disable_on_fallback),
             )
+
+            # If post-hoc guards substituted the threshold to the no-signal
+            # sentinel, the on-disk threshold no longer fires. Drop captured
+            # observations so the manifest's score_observations always refers
+            # to the threshold that ships.
+            if bool(threshold_meta.get("guard_applied")):
+                threshold_meta["score_observations"] = None
+                threshold_meta["signals_on_tune_slice"] = 0
 
             # Compute per-feature quantile bounds for drift detection at inference.
             # Uses the full training set (not calib) since we want the broadest
