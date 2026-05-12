@@ -8931,6 +8931,234 @@ class OpsSmokeTests(unittest.TestCase):
             if original_env is not None:
                 os.environ["PYTHON_BIN"] = original_env
 
+    # ------------------------------------------------------------------ #
+    # B2: candidate readiness classifier
+    # ------------------------------------------------------------------ #
+
+    def _readiness_module(self):
+        return load_module(
+            "retrain_evidence_pack_readiness",
+            REPO_ROOT / "scripts" / "run_retrain_evidence_pack.py",
+        )
+
+    @staticmethod
+    def _ph_row(
+        target: str,
+        horizon: int,
+        *,
+        score: float,
+        fallback: bool = False,
+        no_signal_substituted: bool = False,
+        objective: str = "utility_bps",
+        train_purge: dict | None = None,
+    ) -> dict:
+        if train_purge is None:
+            train_purge = {
+                "enabled": True,
+                "embargo_minutes": 60.0,
+                "calibration_start_ts": 1_777_383_000_000,
+                "train_rows_before_purge": 20000,
+                "train_rows_after_purge": 20000,
+                "train_rows_purged": 0,
+                "skip_reason": "",
+            }
+        return {
+            "target": target,
+            "horizon": horizon,
+            "objective": objective,
+            "score": score,
+            "fallback": fallback,
+            "no_signal_substituted": no_signal_substituted,
+            "calibration_fit_size": 800,
+            "threshold_tune_size": 500,
+            "train_purge": train_purge,
+        }
+
+    @classmethod
+    def _build_report_stub(
+        cls,
+        per_horizon: list[dict],
+        *,
+        would_neutralize: list[dict] | None = None,
+        runtime_safety_skipped: bool = False,
+        training_exit_code: int = 0,
+        candidate_manifest_present: bool = True,
+    ) -> dict:
+        would_neutralize = would_neutralize or []
+        return {
+            "training": {"exit_code": training_exit_code, "skipped": False},
+            "candidate_manifest": {"version": "v001"} if candidate_manifest_present else None,
+            "per_horizon": per_horizon,
+            "runtime_safety_dry_run": {
+                "skipped": runtime_safety_skipped,
+                "would_neutralize_count": len(would_neutralize),
+                "would_neutralize": would_neutralize,
+            },
+        }
+
+    def test_readiness_current_evidence_pattern_degraded_candidate(self) -> None:
+        """2 viable / 6 blocked / clean runtime / valid_noop purge → degraded_candidate."""
+        module = self._readiness_module()
+        rows = [
+            self._ph_row("reject", 5, score=-4.82, fallback=True, no_signal_substituted=True),
+            self._ph_row("reject", 15, score=117.46),
+            self._ph_row("reject", 30, score=85.89),
+            self._ph_row("reject", 60, score=-33.48, fallback=True, no_signal_substituted=True),
+            self._ph_row("break", 5, score=0.0, fallback=True, no_signal_substituted=True),
+            self._ph_row("break", 15, score=0.0, fallback=True, no_signal_substituted=True),
+            self._ph_row("break", 30, score=0.0, fallback=True, no_signal_substituted=True),
+            self._ph_row("break", 60, score=0.0, fallback=True, no_signal_substituted=True),
+        ]
+        result = module.classify_candidate_readiness(self._build_report_stub(rows))
+
+        self.assertEqual(result["state"], "degraded_candidate")
+        self.assertFalse(result["full_family_ready"])
+        self.assertTrue(result["partial_ready"])
+        self.assertTrue(result["degraded_candidate"])
+        self.assertFalse(result["not_ready"])
+        self.assertEqual(len(result["viable_horizons"]), 2)
+        self.assertEqual(len(result["blocked_horizons"]), 6)
+        self.assertTrue(result["runtime_safety_agreement"])
+        self.assertEqual(result["purge_diagnostic_state"], "valid_noop")
+        self.assertIn("statistical_validation_missing", result["reasons"])
+        self.assertIn("majority_horizons_blocked", result["reasons"])
+        viable_ids = {(v["target"], v["horizon"]) for v in result["viable_horizons"]}
+        self.assertEqual(viable_ids, {("reject", 15), ("reject", 30)})
+
+    def test_readiness_all_viable_full_family_ready(self) -> None:
+        module = self._readiness_module()
+        rows = [
+            self._ph_row("reject", 5, score=10.0),
+            self._ph_row("reject", 15, score=20.0),
+            self._ph_row("reject", 30, score=30.0),
+            self._ph_row("reject", 60, score=40.0),
+            self._ph_row("break", 5, score=5.0),
+            self._ph_row("break", 15, score=6.0),
+            self._ph_row("break", 30, score=7.0),
+            self._ph_row("break", 60, score=8.0),
+        ]
+        result = module.classify_candidate_readiness(self._build_report_stub(rows))
+        self.assertEqual(result["state"], "full_family_ready")
+        self.assertTrue(result["full_family_ready"])
+        self.assertFalse(result["partial_ready"])
+        self.assertFalse(result["degraded_candidate"])
+        self.assertFalse(result["not_ready"])
+        self.assertEqual(len(result["viable_horizons"]), 8)
+        self.assertEqual(result["blocked_horizons"], [])
+        # Statistical validation still flagged because B3 is deferred.
+        self.assertIn("statistical_validation_missing", result["reasons"])
+        self.assertFalse(result["statistical_validation_present"])
+
+    def test_readiness_no_viable_horizons_not_ready(self) -> None:
+        module = self._readiness_module()
+        rows = [
+            self._ph_row("reject", 5, score=-1.0, fallback=True, no_signal_substituted=True),
+            self._ph_row("break", 5, score=0.0, fallback=True, no_signal_substituted=True),
+        ]
+        result = module.classify_candidate_readiness(self._build_report_stub(rows))
+        self.assertEqual(result["state"], "not_ready")
+        self.assertTrue(result["not_ready"])
+        self.assertFalse(result["full_family_ready"])
+        self.assertFalse(result["partial_ready"])
+        self.assertIn("no_viable_horizons", result["reasons"])
+
+    def test_readiness_runtime_safety_disagreement_not_ready(self) -> None:
+        """Even with viable horizons, would_neutralize_count > 0 forces not_ready."""
+        module = self._readiness_module()
+        rows = [
+            self._ph_row("reject", 15, score=117.0),
+            self._ph_row("reject", 30, score=85.0),
+        ]
+        stub = self._build_report_stub(
+            rows,
+            would_neutralize=[
+                {"target": "reject", "horizon": 15, "original_threshold": 0.6, "reason": "nonpositive_score"},
+            ],
+        )
+        result = module.classify_candidate_readiness(stub)
+        self.assertEqual(result["state"], "not_ready")
+        self.assertTrue(result["not_ready"])
+        self.assertFalse(result["runtime_safety_agreement"])
+        self.assertIn("runtime_safety_disagreement", result["reasons"])
+        # The neutralized horizon must not appear in viable list.
+        viable_ids = {(v["target"], v["horizon"]) for v in result["viable_horizons"]}
+        self.assertNotIn(("reject", 15), viable_ids)
+
+    def test_readiness_purge_valid_noop_classification(self) -> None:
+        module = self._readiness_module()
+        rows = [self._ph_row("reject", 15, score=10.0)]
+        result = module.classify_candidate_readiness(self._build_report_stub(rows))
+        self.assertEqual(result["purge_diagnostic_state"], "valid_noop")
+
+    def test_readiness_purge_disabled_blocks_full_readiness(self) -> None:
+        """Any horizon with the purge disabled prevents full_family_ready
+        and (combined with all viable) lands in degraded_candidate."""
+        module = self._readiness_module()
+        disabled_tp = {
+            "enabled": False,
+            "embargo_minutes": 0.0,
+            "calibration_start_ts": None,
+            "train_rows_before_purge": 20000,
+            "train_rows_after_purge": 20000,
+            "train_rows_purged": 0,
+            "skip_reason": "disabled",
+        }
+        rows = [
+            self._ph_row("reject", 15, score=10.0, train_purge=disabled_tp),
+            self._ph_row("reject", 30, score=20.0, train_purge=disabled_tp),
+        ]
+        result = module.classify_candidate_readiness(self._build_report_stub(rows))
+        self.assertEqual(result["purge_diagnostic_state"], "disabled")
+        # All viable but purge disabled — not full_family, must be degraded.
+        self.assertFalse(result["full_family_ready"])
+        self.assertTrue(result["degraded_candidate"])
+        self.assertEqual(result["state"], "degraded_candidate")
+        self.assertIn("purge_disabled", result["reasons"])
+
+    def test_readiness_purge_invalid_diagnostic_not_ready(self) -> None:
+        """Missing/inconsistent train_purge block forces not_ready."""
+        module = self._readiness_module()
+        invalid_tp = {
+            "enabled": True,
+            "embargo_minutes": 60.0,
+            "calibration_start_ts": None,  # invalid: enabled but no start ts
+            "train_rows_before_purge": 20000,
+            "train_rows_after_purge": 20000,
+            "train_rows_purged": 0,
+            "skip_reason": "",
+        }
+        rows = [self._ph_row("reject", 15, score=10.0, train_purge=invalid_tp)]
+        result = module.classify_candidate_readiness(self._build_report_stub(rows))
+        self.assertEqual(result["purge_diagnostic_state"], "invalid")
+        self.assertEqual(result["state"], "not_ready")
+        self.assertIn("purge_diagnostic_invalid", result["reasons"])
+
+    def test_readiness_statistical_validation_missing_is_explicit(self) -> None:
+        module = self._readiness_module()
+        rows = [self._ph_row("reject", 15, score=10.0)]
+        result = module.classify_candidate_readiness(self._build_report_stub(rows))
+        self.assertTrue(result["statistical_validation_required"])
+        self.assertFalse(result["statistical_validation_present"])
+        self.assertIsNone(result["statistical_validation_passed"])
+        self.assertIn("statistical_validation_missing", result["reasons"])
+
+    def test_readiness_training_failed_not_ready(self) -> None:
+        module = self._readiness_module()
+        rows = [self._ph_row("reject", 15, score=10.0)]
+        result = module.classify_candidate_readiness(
+            self._build_report_stub(rows, training_exit_code=1)
+        )
+        self.assertEqual(result["state"], "not_ready")
+        self.assertIn("training_failed", result["reasons"])
+
+    def test_readiness_missing_candidate_manifest_not_ready(self) -> None:
+        module = self._readiness_module()
+        result = module.classify_candidate_readiness(
+            self._build_report_stub([], candidate_manifest_present=False)
+        )
+        self.assertEqual(result["state"], "not_ready")
+        self.assertIn("no_candidate_manifest", result["reasons"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
