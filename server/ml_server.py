@@ -572,7 +572,15 @@ class ModelRegistry:
                     continue
                 score_raw = meta.get("score")
                 score = float(score_raw) if score_raw is not None else None
-                if bool(meta.get("fallback")) or score is None or score <= 0.0:
+                # NaN <= 0.0 is False per IEEE 754, so a NaN score with
+                # fallback=False would slip through the score check and leave
+                # the threshold live. Treat any non-finite score as unsafe.
+                if (
+                    bool(meta.get("fallback"))
+                    or score is None
+                    or not math.isfinite(score)
+                    or score <= 0.0
+                ):
                     horizon_map[int(horizon)] = NO_SIGNAL_THRESHOLD
                     log.warning(
                         "Runtime threshold safety disabled %s %sm threshold: "
