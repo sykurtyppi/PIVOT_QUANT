@@ -8486,6 +8486,283 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertTrue(any("break:5m mae_bps_break worsened" in item for item in failures))
         self.assertEqual(skips, [])
 
+    def test_retrain_evidence_pack_refuses_overlap_with_live_model_dir(self) -> None:
+        module = load_module(
+            "retrain_evidence_pack_overlap",
+            REPO_ROOT / "scripts" / "run_retrain_evidence_pack.py",
+        )
+        live = Path(self.tmp) / "data" / "models"
+        live.mkdir(parents=True, exist_ok=True)
+        active_manifest = Path(self.tmp) / "elsewhere" / "manifest_active.json"
+        active_manifest.parent.mkdir(parents=True, exist_ok=True)
+
+        # Same dir: refused.
+        with self.assertRaises(SystemExit) as ctx:
+            module.validate_out_dir(live, live, active_manifest)
+        self.assertIn("live model dir", str(ctx.exception))
+
+        # --out-dir inside live dir: refused.
+        nested = live / "candidate"
+        nested.mkdir(parents=True, exist_ok=True)
+        with self.assertRaises(SystemExit):
+            module.validate_out_dir(nested, live, active_manifest)
+
+        # Live dir inside --out-dir: refused.
+        parent = Path(self.tmp) / "wraps"
+        parent.mkdir(parents=True, exist_ok=True)
+        wrapped_live = parent / "data" / "models"
+        wrapped_live.mkdir(parents=True, exist_ok=True)
+        with self.assertRaises(SystemExit):
+            module.validate_out_dir(parent, wrapped_live, active_manifest)
+
+    def test_retrain_evidence_pack_refuses_active_manifest_inside_out_dir(self) -> None:
+        module = load_module(
+            "retrain_evidence_pack_active_inside",
+            REPO_ROOT / "scripts" / "run_retrain_evidence_pack.py",
+        )
+        out_dir = Path(self.tmp) / "candidate_dir"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        live = Path(self.tmp) / "live_models"
+        live.mkdir(parents=True, exist_ok=True)
+        active_manifest_inside = out_dir / "manifest_active.json"
+        active_manifest_inside.write_text("{}")
+
+        with self.assertRaises(SystemExit) as ctx:
+            module.validate_out_dir(out_dir, live, active_manifest_inside)
+        self.assertIn("Active manifest", str(ctx.exception))
+
+    def test_retrain_evidence_pack_report_shape_from_stub_manifest(self) -> None:
+        module = load_module(
+            "retrain_evidence_pack_shape",
+            REPO_ROOT / "scripts" / "run_retrain_evidence_pack.py",
+        )
+        out_dir = Path(self.tmp) / "pack_out"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        live = Path(self.tmp) / "live_models"
+        live.mkdir(parents=True, exist_ok=True)
+        active_manifest = Path(self.tmp) / "data" / "models_external" / "manifest_active.json"
+        active_manifest.parent.mkdir(parents=True, exist_ok=True)
+        active_manifest.write_text(json.dumps({"version": "v999_active_stub"}))
+
+        candidate_manifest = {
+            "version": "v999_candidate_stub",
+            "feature_version": "fv_test",
+            "thresholds": {
+                "reject": {"5": 0.55, "15": 0.6},
+                "break": {"5": 0.5},
+            },
+            "thresholds_meta": {
+                "reject": {
+                    "5": {
+                        "objective": "utility_bps",
+                        "score": 12.3,
+                        "fallback": False,
+                        "signals": 40,
+                        "calibration_fit_size": 100,
+                        "threshold_tune_size": 60,
+                        "train_purge": {"train_rows_purged": 4, "enabled": True},
+                    },
+                    "15": {
+                        "objective": "utility_bps",
+                        "score": -0.5,
+                        "fallback": False,
+                        "signals": 20,
+                        "train_purge": {"train_rows_purged": 0, "enabled": True},
+                    },
+                },
+                "break": {
+                    "5": {
+                        "objective": "utility_bps",
+                        "score": None,
+                        "fallback": True,
+                        "signals": 10,
+                        "train_purge": {"train_rows_purged": 2, "enabled": True},
+                    }
+                },
+            },
+            "train_embargo_minutes": 60.0,
+        }
+        candidate_path = out_dir / "manifest_runtime_latest.json"
+        candidate_path.write_text(json.dumps(candidate_manifest))
+
+        report_path = Path(self.tmp) / "report.json"
+
+        argv = [
+            "--out-dir",
+            str(out_dir),
+            "--live-model-dir",
+            str(live),
+            "--active-manifest",
+            str(active_manifest),
+            "--report",
+            str(report_path),
+            "--skip-training",
+        ]
+        rc = module.main(argv)
+        self.assertEqual(rc, 0)
+        self.assertTrue(report_path.exists())
+
+        report = json.loads(report_path.read_text())
+        self.assertEqual(report["schema_version"], 1)
+        self.assertIn("run_id", report)
+        self.assertEqual(report["out_dir"], str(out_dir.resolve()))
+
+        self.assertTrue(report["training"]["skipped"])
+        self.assertEqual(report["training"]["skip_reason"], "skip_training=true")
+
+        self.assertEqual(
+            report["candidate_manifest_path"], str((out_dir.resolve() / "manifest_runtime_latest.json"))
+        )
+        self.assertEqual(report["candidate_manifest"]["version"], "v999_candidate_stub")
+
+        provenance = report["provenance"]
+        for key in (
+            "git_sha",
+            "python_executable",
+            "python_version",
+            "rf_env_snapshot",
+            "active_manifest_path",
+            "active_manifest_exists",
+            "active_manifest_version",
+            "active_manifest_signature",
+        ):
+            self.assertIn(key, provenance)
+        self.assertTrue(provenance["active_manifest_exists"])
+        self.assertEqual(provenance["active_manifest_version"], "v999_active_stub")
+        self.assertIsInstance(provenance["active_manifest_signature"], str)
+        self.assertEqual(len(provenance["active_manifest_signature"]), 64)
+        self.assertIsInstance(provenance["rf_env_snapshot"], dict)
+
+        rows = report["per_horizon"]
+        self.assertEqual(len(rows), 3)
+        rows_by_key = {(row["target"], row["horizon"]): row for row in rows}
+        self.assertAlmostEqual(rows_by_key[("reject", 5)]["threshold"], 0.55, places=6)
+        self.assertFalse(rows_by_key[("reject", 5)]["fallback"])
+        self.assertEqual(rows_by_key[("reject", 5)]["score"], 12.3)
+        self.assertFalse(rows_by_key[("reject", 5)]["no_signal_substituted"])
+        self.assertTrue(rows_by_key[("break", 5)]["fallback"])
+
+        summary = report["summary"]
+        self.assertEqual(summary["models_attempted"], 3)
+        self.assertEqual(summary["models_with_fallback_threshold"], 1)
+        self.assertEqual(summary["models_with_negative_utility"], 1)
+        self.assertEqual(summary["models_with_no_signal"], 0)
+        self.assertEqual(summary["total_train_rows_purged"], 6)
+
+        # runtime_safety_dry_run is present either way (skipped or not).
+        safety = report["runtime_safety_dry_run"]
+        self.assertIn("skipped", safety)
+        self.assertIn("would_neutralize", safety)
+        self.assertIsInstance(safety["would_neutralize"], list)
+
+    def test_retrain_evidence_pack_rejects_protected_pass_through_keys(self) -> None:
+        # Pass-through env must not be allowed to override the isolation
+        # contract (RF_MODEL_DIR) or redirect candidate manifest reads
+        # away from --candidate-manifest (RF_CANDIDATE_MANIFEST).
+        module = load_module(
+            "retrain_evidence_pack_protected_keys",
+            REPO_ROOT / "scripts" / "run_retrain_evidence_pack.py",
+        )
+        for protected in ("RF_MODEL_DIR", "RF_METADATA_DIR", "RF_CANDIDATE_MANIFEST"):
+            with self.subTest(key=protected):
+                with self.assertRaises(SystemExit) as ctx:
+                    module.parse_pass_through([f"{protected}=/tmp/foo"])
+                self.assertIn(protected, str(ctx.exception))
+                self.assertIn("not allowed", str(ctx.exception))
+        # Non-protected keys still pass through. DUCKDB_PATH is a read-only
+        # input and intentionally remains overridable for alternate-DB runs.
+        result = module.parse_pass_through(
+            ["RF_TRAIN_EMBARGO_MINUTES=30", "DUCKDB_PATH=/tmp/alt.duckdb"]
+        )
+        self.assertEqual(
+            result,
+            {"RF_TRAIN_EMBARGO_MINUTES": "30", "DUCKDB_PATH": "/tmp/alt.duckdb"},
+        )
+
+    def test_retrain_evidence_pack_rejects_protected_train_arg_overrides(self) -> None:
+        # argparse takes the last occurrence; a trailing --train-arg
+        # --out-dir=data/models would otherwise silently redirect writes
+        # back to the live tree. Same risk for --candidate-manifest and
+        # --metadata-dir (latter can be absolute).
+        module = load_module(
+            "retrain_evidence_pack_protected_train_args",
+            REPO_ROOT / "scripts" / "run_retrain_evidence_pack.py",
+        )
+        protected = ["--out-dir", "--candidate-manifest", "--metadata-dir"]
+        for flag in protected:
+            with self.subTest(flag=flag, form="space"):
+                with self.assertRaises(SystemExit) as ctx:
+                    module.parse_train_args([flag, "/tmp/hostile"])
+                self.assertIn(flag, str(ctx.exception))
+                self.assertIn("not allowed", str(ctx.exception))
+            with self.subTest(flag=flag, form="equals"):
+                with self.assertRaises(SystemExit) as ctx:
+                    module.parse_train_args([f"{flag}=/tmp/hostile"])
+                self.assertIn(flag, str(ctx.exception))
+                self.assertIn("not allowed", str(ctx.exception))
+        # Harmless args still pass through unchanged.
+        passed = module.parse_train_args(
+            ["--n-estimators", "100", "--threshold-objective=utility_bps"]
+        )
+        self.assertEqual(
+            passed, ["--n-estimators", "100", "--threshold-objective=utility_bps"]
+        )
+
+    def test_retrain_evidence_pack_runtime_safety_diff_logic(self) -> None:
+        """Exercise runtime_safety_dry_run diff logic with a stubbed ml_server module.
+
+        Independent of fastapi: we monkey-patch _load_ml_server_module to return
+        a stub that mimics ModelRegistry._apply_runtime_threshold_safety.
+        """
+        module = load_module(
+            "retrain_evidence_pack_runtime_safety",
+            REPO_ROOT / "scripts" / "run_retrain_evidence_pack.py",
+        )
+
+        class _StubRegistry:
+            @staticmethod
+            def _apply_runtime_threshold_safety(thresholds, manifest):
+                # Simulate runtime safety: neutralize reject@15 only.
+                thresholds["reject"][15] = module._no_signal_sentinel()
+                return thresholds
+
+        class _StubModule:
+            NO_SIGNAL_THRESHOLD = module._no_signal_sentinel()
+            ModelRegistry = _StubRegistry
+
+        original_loader = module._load_ml_server_module
+        module._load_ml_server_module = lambda: (_StubModule(), None)
+        try:
+            thresholds = {
+                "reject": {5: 0.55, 15: 0.6},
+                "break": {5: 0.5},
+            }
+            manifest = {
+                "thresholds_meta": {
+                    "reject": {
+                        "5": {"objective": "utility_bps", "score": 12.3, "fallback": False},
+                        "15": {"objective": "utility_bps", "score": -0.5, "fallback": False},
+                    },
+                    "break": {
+                        "5": {"objective": "utility_bps", "score": 1.5, "fallback": False},
+                    },
+                }
+            }
+            result = module.runtime_safety_dry_run(thresholds, manifest)
+        finally:
+            module._load_ml_server_module = original_loader
+
+        self.assertFalse(result["skipped"])
+        self.assertEqual(result["would_neutralize_count"], 1)
+        self.assertEqual(len(result["would_neutralize"]), 1)
+        entry = result["would_neutralize"][0]
+        self.assertEqual(entry["target"], "reject")
+        self.assertEqual(entry["horizon"], 15)
+        self.assertAlmostEqual(entry["original_threshold"], 0.6, places=6)
+        self.assertIn("nonpositive_score", entry["reason"])
+        # Input thresholds dict was deep-copied, not mutated.
+        self.assertAlmostEqual(thresholds["reject"][15], 0.6, places=6)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
