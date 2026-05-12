@@ -9603,8 +9603,40 @@ class OpsSmokeTests(unittest.TestCase):
             "target", "horizon", "method", "sample_size", "observed_score",
             "observed_mean", "ci_low", "ci_high", "p_value",
             "passed", "status", "warnings",
+            # Disclosure surface: validation entries must carry the slice
+            # source and the on-tune signal count so downstream readers
+            # don't have to dig into the raw manifest.
+            "score_observations_source", "signals_on_tune_slice",
         ):
             self.assertIn(key, entry, f"missing per-horizon validation key: {key}")
+
+    def test_b3_surface_score_observations_source_and_signals_on_tune_slice(self) -> None:
+        """Per-horizon validation entries must surface the disclosure fields
+        regardless of which branch the validator takes (passed/failed/
+        insufficient_data). Source + signals_on_tune_slice come from the
+        manifest via _row_for_horizon, then end up in each validation
+        entry beside the CI/p-value."""
+        module = self._readiness_module()
+
+        # Build a per_horizon row carrying the manifest's disclosure fields.
+        obs = self._strong_pass_obs(n=60, seed=7)
+        row = self._ph_row("reject", 15, score=12.0, score_observations=obs)
+        row["score_observations_source"] = "threshold_tune_slice"
+        row["signals_on_tune_slice"] = len(obs)
+        result = module.classify_candidate_readiness(self._build_report_stub([row]))
+        entry = result["statistical_validation"]["reject@15m"]
+        self.assertEqual(entry["score_observations_source"], "threshold_tune_slice")
+        self.assertEqual(entry["signals_on_tune_slice"], len(obs))
+        # And on the insufficient_data branch as well: disclosure still
+        # surfaces, even though the test could not run.
+        row2 = self._ph_row("reject", 15, score=12.0, score_observations=None)
+        row2["score_observations_source"] = "threshold_tune_slice"
+        row2["signals_on_tune_slice"] = 0
+        result2 = module.classify_candidate_readiness(self._build_report_stub([row2]))
+        entry2 = result2["statistical_validation"]["reject@15m"]
+        self.assertEqual(entry2["status"], "insufficient_data")
+        self.assertEqual(entry2["score_observations_source"], "threshold_tune_slice")
+        self.assertEqual(entry2["signals_on_tune_slice"], 0)
 
     def test_readiness_missing_candidate_manifest_not_ready(self) -> None:
         module = self._readiness_module()

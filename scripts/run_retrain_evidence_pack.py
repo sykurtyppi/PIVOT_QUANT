@@ -431,6 +431,14 @@ def _row_for_horizon(
         # captured them. Today's manifests do not; the validator reports
         # ``insufficient_data`` for such horizons.
         "score_observations": meta.get("score_observations"),
+        # Disclosure: which slice the observations came from, and how many
+        # signals fired there. Surfaced into ``candidate_readiness.
+        # statistical_validation`` so downstream readers see the caveat
+        # right beside the CI/p-value rather than having to dig into the
+        # raw manifest. Current values: source="threshold_tune_slice"
+        # (in-sample on the slice that picked the threshold).
+        "score_observations_source": meta.get("score_observations_source"),
+        "signals_on_tune_slice": meta.get("signals_on_tune_slice"),
     }
 
 
@@ -757,6 +765,12 @@ def _validate_horizon_statistically(
         "passed": False,
         "status": "insufficient_data",
         "warnings": [],
+        # Disclosure attached to each validation entry: which slice the
+        # observations came from and the firing-count that produced them.
+        # Critical caveat: at present the source is the same slice that
+        # picked the threshold (in-sample), not a clean OOS slice.
+        "score_observations_source": row.get("score_observations_source"),
+        "signals_on_tune_slice": row.get("signals_on_tune_slice"),
     }
 
     if observations is None:
@@ -1301,14 +1315,20 @@ def _print_readiness_summary(readiness: dict) -> None:
         ci_low = res.get("ci_low")
         ci_high = res.get("ci_high")
         p_value = res.get("p_value")
+        source = res.get("score_observations_source") or "unknown"
+        sigs_tune = res.get("signals_on_tune_slice")
         if status in ("passed", "failed"):
             print(
                 f"    {key:<14} {status:<11} n={n}  "
-                f"ci=[{ci_low:.4f},{ci_high:.4f}]  p={p_value:.4f}"
+                f"ci=[{ci_low:.4f},{ci_high:.4f}]  p={p_value:.4f}  "
+                f"source={source} signals_on_tune_slice={sigs_tune}"
             )
         else:
             warnings = ",".join(res.get("warnings") or [])
-            print(f"    {key:<14} {status:<11} n={n}  warnings={warnings}")
+            print(
+                f"    {key:<14} {status:<11} n={n}  warnings={warnings}  "
+                f"source={source} signals_on_tune_slice={sigs_tune}"
+            )
 
 
 if __name__ == "__main__":
