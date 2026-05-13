@@ -106,6 +106,10 @@ import joblib
 
 from ml.features import build_feature_row, collect_missing, FEATURE_VERSION
 from ml.thresholds import NO_SIGNAL_THRESHOLD, threshold_score_is_unsafe
+from server.serving_state import (
+    SERVING_STATE_FILENAME,
+    ServingStateRegistry,
+)
 
 log = logging.getLogger("ml_server")
 _missing_threshold_warnings: set[tuple[str, int, str]] = set()
@@ -1325,6 +1329,11 @@ class AnalogEngine:
 
 registry = ModelRegistry()
 analog_engine = AnalogEngine(ML_ANALOG_DB)
+# Serving-state registry — the third axis on top of readiness and promotion.
+# Reads ``<MODEL_DIR>/serving_state.json``; written by scripts/set_serving_state.py.
+# Missing file -> default active. Unparseable file -> dormant_data_quality.
+serving_state = ServingStateRegistry(MODEL_DIR / SERVING_STATE_FILENAME)
+serving_state.load()
 _startup_error: Optional[str] = None
 _RELOAD_LOCK = threading.Lock()
 _RELOAD_STATE_LOCK = threading.Lock()
@@ -2016,6 +2025,10 @@ async def health():
         "reload": _reload_state_snapshot(),
         "score": _score_state_snapshot(),
         "inference_n_jobs": ML_INFERENCE_N_JOBS,
+        # Serving state is the third axis (readiness != promotion != serving
+        # state). Surfaced here so ops can distinguish "model is quiet" from
+        # "serving is intentionally paused." See server/serving_state.py.
+        "serving_state": serving_state.snapshot(),
         "prediction_log": prediction_log_state,
         "prediction_log_alerts": prediction_log_alerts,
         "regime_policy_mode": ML_REGIME_POLICY_MODE,
@@ -2133,6 +2146,11 @@ async def reload_models(force: bool = False):
             changed = await asyncio.to_thread(registry.load, force=force)
         if changed:
             await asyncio.to_thread(analog_engine.refresh)
+        # Always reload serving state on /reload — operators rely on
+        # `curl -X POST /reload` to pick up a fresh serving_state.json
+        # without restarting the server. Cheap (signature-cached); never
+        # raises (missing/invalid file fall back to safe defaults).
+        await asyncio.to_thread(serving_state.load, force=force)
         _startup_error = None
         duration_ms = (time.perf_counter() - started_at) * 1000.0
         complete_ms = int(time.time() * 1000)
@@ -3499,6 +3517,31 @@ async def score(request: Request):
     has_models = any(horizons for horizons in models.values())
     if manifest is None or not has_models:
         raise HTTPException(status_code=503, detail="Models not loaded. Train artifacts first.")
+
+    # Serving-state gate (D1). When the manual flag in serving_state.json
+    # is not ``active``, short-circuit with a structured dormant response
+    # for every event in the request. Does NOT mutate the manifest, the
+    # thresholds, the model artifacts, or the promotion status — only the
+    # response shape. /health continues to expose the live manifest so ops
+    # tooling can still see what would be served if active.
+    if not serving_state.is_active():
+        manifest_version = manifest.get("version") if isinstance(manifest, dict) else None
+        blocked = serving_state.blocked_payload(manifest_version=manifest_version)
+        try:
+            payload = await _read_score_payload(request)
+            mode, normalized = _validate_score_payload(payload)
+        except HTTPException:
+            # Even when dormant, malformed requests still get the normal
+            # 4xx; otherwise clients can't distinguish "I sent garbage"
+            # from "serving is paused."
+            raise
+        if mode == "single":
+            return JSONResponse(blocked)
+        if mode == "batch":
+            events = normalized
+            results = [dict(blocked) for _ in events]
+            return JSONResponse({"results": results})
+        raise HTTPException(status_code=400, detail="Unsupported score payload mode.")
 
     if not _try_begin_score_request():
         return JSONResponse(

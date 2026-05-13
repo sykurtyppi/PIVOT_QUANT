@@ -12447,6 +12447,884 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("5", captured["args"])
         self.assertIn("15", captured["args"])
 
+    # ------------------------------------------------------------------ #
+    # D1: manual serving-state gate
+    # ------------------------------------------------------------------ #
+
+    def _serving_state_module(self):
+        return load_module(
+            "server_serving_state",
+            REPO_ROOT / "server" / "serving_state.py",
+        )
+
+    def _cli_module(self):
+        return load_module(
+            "scripts_set_serving_state",
+            REPO_ROOT / "scripts" / "set_serving_state.py",
+        )
+
+    def test_serving_state_missing_file_defaults_active(self) -> None:
+        """No file -> default active with the missing-file source marker so
+        /health can distinguish "flag set to active" from "no flag set"."""
+        module = self._serving_state_module()
+        state_path = Path(self.tmp) / "data" / "models" / "serving_state.json"
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        # File intentionally absent.
+        registry = module.ServingStateRegistry(state_path)
+        registry.load()
+        self.assertTrue(registry.is_active())
+        snap = registry.snapshot()
+        self.assertEqual(snap["state"], module.STATE_ACTIVE)
+        self.assertEqual(snap["source"], "default_missing_file")
+        self.assertEqual(snap["reason"], "serving_state_missing_default_active")
+        self.assertIsNone(snap["load_error"])
+
+    def test_serving_state_valid_active_loads_from_file(self) -> None:
+        module = self._serving_state_module()
+        state_path = Path(self.tmp) / "serving_state.json"
+        payload = {
+            "schema_version": 1,
+            "state": "active",
+            "since_ts": 1700000000000,
+            "reason": "resumed after review",
+            "triggering_audit": None,
+            "set_by": "ops_user@host",
+            "manifest_version_when_set": "v415",
+            "expires_at": None,
+        }
+        state_path.write_text(json.dumps(payload))
+        registry = module.ServingStateRegistry(state_path)
+        registry.load()
+        self.assertTrue(registry.is_active())
+        snap = registry.snapshot()
+        self.assertEqual(snap["state"], "active")
+        self.assertEqual(snap["reason"], "resumed after review")
+        self.assertEqual(snap["source"], "file")
+        self.assertEqual(snap["manifest_version_when_set"], "v415")
+        self.assertIsNone(snap["load_error"])
+
+    def test_serving_state_valid_dormant_blocks(self) -> None:
+        module = self._serving_state_module()
+        state_path = Path(self.tmp) / "serving_state.json"
+        payload = {
+            "schema_version": 1,
+            "state": "dormant_manual_pause",
+            "since_ts": 1700000000000,
+            "reason": "manual review pending",
+            "triggering_audit": "evidence/regime/foo.json",
+            "set_by": "ops_user@host",
+            "manifest_version_when_set": "v415",
+            "expires_at": 1701000000000,
+        }
+        state_path.write_text(json.dumps(payload))
+        registry = module.ServingStateRegistry(state_path)
+        registry.load()
+        self.assertFalse(registry.is_active())
+        self.assertEqual(registry.state(), "dormant_manual_pause")
+        blocked = registry.blocked_payload(manifest_version="v415")
+        self.assertIsNone(blocked["signal"])
+        self.assertEqual(blocked["blocked_reason"], "serving_dormant")
+        self.assertEqual(blocked["serving_state"], "dormant_manual_pause")
+        self.assertEqual(blocked["serving_state_reason"], "manual review pending")
+        self.assertEqual(blocked["serving_state_since_ts"], 1700000000000)
+        self.assertEqual(blocked["serving_state_expires_at"], 1701000000000)
+        self.assertEqual(
+            blocked["serving_state_triggering_audit"], "evidence/regime/foo.json"
+        )
+        self.assertEqual(blocked["manifest_version"], "v415")
+        # Dormant response must NOT leak probability/threshold.
+        for forbidden in ("probability", "p", "threshold", "score"):
+            self.assertNotIn(forbidden, blocked)
+
+    def test_serving_state_invalid_json_falls_back_to_dormant_data_quality(self) -> None:
+        """Unparseable control-plane file must NOT silently allow serving."""
+        module = self._serving_state_module()
+        state_path = Path(self.tmp) / "serving_state.json"
+        state_path.write_text("{not valid json")
+        registry = module.ServingStateRegistry(state_path)
+        registry.load()
+        self.assertFalse(registry.is_active())
+        snap = registry.snapshot()
+        self.assertEqual(snap["state"], "dormant_data_quality")
+        self.assertEqual(snap["reason"], "serving_state_invalid")
+        self.assertEqual(snap["source"], "invalid_file")
+        self.assertIsNotNone(snap["load_error"])
+
+    def test_serving_state_invalid_schema_falls_back_to_dormant_data_quality(self) -> None:
+        """Valid JSON but bad schema (unknown state value) is also blocked."""
+        module = self._serving_state_module()
+        state_path = Path(self.tmp) / "serving_state.json"
+        state_path.write_text(json.dumps({"state": "totally_made_up", "schema_version": 1}))
+        registry = module.ServingStateRegistry(state_path)
+        registry.load()
+        self.assertFalse(registry.is_active())
+        snap = registry.snapshot()
+        self.assertEqual(snap["state"], "dormant_data_quality")
+        self.assertEqual(snap["source"], "invalid_file")
+        self.assertIn("state_invalid", str(snap["load_error"]))
+
+    def test_serving_state_reload_picks_up_file_changes(self) -> None:
+        """A subsequent ``load()`` after the file changes flips the cached state.
+
+        Mirrors what /reload does — atomic-swap a new serving_state.json
+        and the next signature check picks it up."""
+        module = self._serving_state_module()
+        state_path = Path(self.tmp) / "serving_state.json"
+        # Start active.
+        state_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "state": "active",
+                    "since_ts": 1700000000000,
+                    "reason": "initial",
+                }
+            )
+        )
+        registry = module.ServingStateRegistry(state_path)
+        self.assertTrue(registry.load())
+        self.assertTrue(registry.is_active())
+        # No change -> reload reports unchanged.
+        self.assertFalse(registry.load())
+        # Flip to dormant by rewriting the file with a fresh mtime/size.
+        time.sleep(0.01)  # ensure mtime_ns differs
+        state_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "state": "dormant_manual_pause",
+                    "since_ts": 1700000050000,
+                    "reason": "flipped during reload smoke",
+                }
+            )
+        )
+        self.assertTrue(registry.load())
+        self.assertFalse(registry.is_active())
+        self.assertEqual(registry.state(), "dormant_manual_pause")
+
+    def test_serving_state_cli_writes_valid_schema(self) -> None:
+        cli = self._cli_module()
+        model_dir = Path(self.tmp) / "models_cli_write"
+        model_dir.mkdir(parents=True, exist_ok=True)
+        rc = cli.main(
+            [
+                "--state",
+                "dormant_manual_pause",
+                "--reason",
+                "test pause",
+                "--expires-at",
+                "2026-05-15T12:00:00Z",
+                "--model-dir",
+                str(model_dir),
+                "--set-by",
+                "unit_test@runner",
+                "--now-ms",
+                "1700000000000",
+                "--quiet",
+            ]
+        )
+        self.assertEqual(rc, 0)
+        state_path = model_dir / "serving_state.json"
+        self.assertTrue(state_path.is_file())
+        data = json.loads(state_path.read_text())
+        self.assertEqual(data["schema_version"], 1)
+        self.assertEqual(data["state"], "dormant_manual_pause")
+        self.assertEqual(data["reason"], "test pause")
+        self.assertEqual(data["set_by"], "unit_test@runner")
+        self.assertEqual(data["since_ts"], 1700000000000)
+        # 2026-05-15T12:00:00Z -> epoch ms.
+        expected_ms = int(
+            datetime(2026, 5, 15, 12, 0, 0, tzinfo=timezone.utc).timestamp() * 1000
+        )
+        self.assertEqual(data["expires_at"], expected_ms)
+        # Validates against the shared validator.
+        sv = self._serving_state_module()
+        ok, reason = sv.validate_state_payload(data)
+        self.assertTrue(ok, f"CLI wrote schema-invalid payload: {reason}")
+
+    def test_serving_state_cli_refuses_dormant_overwrite_without_force(self) -> None:
+        cli = self._cli_module()
+        model_dir = Path(self.tmp) / "models_cli_force"
+        model_dir.mkdir(parents=True, exist_ok=True)
+        # Plant an existing dormant state.
+        existing = {
+            "schema_version": 1,
+            "state": "dormant_manual_pause",
+            "since_ts": 1700000000000,
+            "reason": "existing pause",
+            "set_by": "ops@host",
+            "manifest_version_when_set": None,
+            "expires_at": None,
+        }
+        (model_dir / "serving_state.json").write_text(json.dumps(existing))
+        # Attempt a different dormant state without --force should refuse.
+        with self.assertRaises(SystemExit) as ctx:
+            cli.main(
+                [
+                    "--state",
+                    "dormant_audit_fail",
+                    "--reason",
+                    "audit hit",
+                    "--model-dir",
+                    str(model_dir),
+                    "--quiet",
+                ]
+            )
+        self.assertIn("Refusing to overwrite", str(ctx.exception))
+        # File is unchanged.
+        current = json.loads((model_dir / "serving_state.json").read_text())
+        self.assertEqual(current["state"], "dormant_manual_pause")
+        self.assertEqual(current["reason"], "existing pause")
+        # With --force, it succeeds.
+        rc = cli.main(
+            [
+                "--state",
+                "dormant_audit_fail",
+                "--reason",
+                "audit hit",
+                "--model-dir",
+                str(model_dir),
+                "--force",
+                "--set-by",
+                "ops@host",
+                "--now-ms",
+                "1700001000000",
+                "--quiet",
+            ]
+        )
+        self.assertEqual(rc, 0)
+        current = json.loads((model_dir / "serving_state.json").read_text())
+        self.assertEqual(current["state"], "dormant_audit_fail")
+
+    def test_serving_state_cli_clear_to_active_never_requires_force(self) -> None:
+        cli = self._cli_module()
+        model_dir = Path(self.tmp) / "models_cli_clear"
+        model_dir.mkdir(parents=True, exist_ok=True)
+        existing = {
+            "schema_version": 1,
+            "state": "dormant_audit_fail",
+            "since_ts": 1700000000000,
+            "reason": "regime mismatch",
+            "set_by": "ops@host",
+            "manifest_version_when_set": "v999",
+            "expires_at": None,
+        }
+        (model_dir / "serving_state.json").write_text(json.dumps(existing))
+        rc = cli.main(
+            [
+                "--state",
+                "active",
+                "--reason",
+                "regime recovered, resuming",
+                "--model-dir",
+                str(model_dir),
+                "--set-by",
+                "ops@host",
+                "--now-ms",
+                "1700002000000",
+                "--quiet",
+            ]
+        )
+        self.assertEqual(rc, 0)
+        data = json.loads((model_dir / "serving_state.json").read_text())
+        self.assertEqual(data["state"], "active")
+        self.assertEqual(data["reason"], "regime recovered, resuming")
+
+    def test_serving_state_cli_records_manifest_version_when_present(self) -> None:
+        cli = self._cli_module()
+        model_dir = Path(self.tmp) / "models_cli_manifest"
+        model_dir.mkdir(parents=True, exist_ok=True)
+        (model_dir / "manifest_active.json").write_text(
+            json.dumps({"version": "v_test_777", "thresholds": {}, "models": {}})
+        )
+        rc = cli.main(
+            [
+                "--state",
+                "dormant_manual_pause",
+                "--reason",
+                "pause",
+                "--expires-at",
+                "2026-12-31T23:59:59Z",
+                "--model-dir",
+                str(model_dir),
+                "--set-by",
+                "ops@host",
+                "--now-ms",
+                "1700000000000",
+                "--quiet",
+            ]
+        )
+        self.assertEqual(rc, 0)
+        data = json.loads((model_dir / "serving_state.json").read_text())
+        self.assertEqual(data["manifest_version_when_set"], "v_test_777")
+
+    def test_serving_state_dormant_does_not_mutate_manifest_or_thresholds(self) -> None:
+        """The serving-state gate must be a read-only short-circuit. It
+        cannot rewrite serving_state.json, manifests, thresholds, or
+        model artifacts under any code path exercised here."""
+        module = self._serving_state_module()
+        state_path = Path(self.tmp) / "serving_state.json"
+        before_payload = {
+            "schema_version": 1,
+            "state": "dormant_manual_pause",
+            "since_ts": 1700000000000,
+            "reason": "static",
+            "set_by": "ops@host",
+            "manifest_version_when_set": "v_immutable",
+            "expires_at": None,
+        }
+        state_path.write_text(json.dumps(before_payload))
+        before_sig = state_path.stat().st_mtime_ns
+        before_bytes = state_path.read_bytes()
+
+        registry = module.ServingStateRegistry(state_path)
+        registry.load()
+        # Exercise the read API as the server would.
+        _ = registry.is_active()
+        _ = registry.state()
+        _ = registry.snapshot()
+        _ = registry.blocked_payload(manifest_version="v_test")
+        # Re-read; bytes and mtime are unchanged.
+        self.assertEqual(state_path.read_bytes(), before_bytes)
+        self.assertEqual(state_path.stat().st_mtime_ns, before_sig)
+
+    # ------------------------------------------------------------------ #
+    # D1 fixup: stricter validate_state_payload — fail-closed on
+    # incomplete operator-written control-plane files.
+    # ------------------------------------------------------------------ #
+
+    def _valid_full_payload(self, **overrides):
+        base = {
+            "schema_version": 1,
+            "state": "dormant_manual_pause",
+            "since_ts": 1700000000000,
+            "reason": "manual review pending",
+            "triggering_audit": None,
+            "set_by": "ops_user@host",
+            "manifest_version_when_set": "v415",
+            "expires_at": 1701000000000,
+        }
+        base.update(overrides)
+        return base
+
+    def test_serving_state_validator_accepts_full_payload(self) -> None:
+        module = self._serving_state_module()
+        ok, reason = module.validate_state_payload(self._valid_full_payload())
+        self.assertTrue(ok, f"full payload should validate (got reason={reason})")
+        self.assertIsNone(reason)
+
+    def test_serving_state_validator_rejects_incomplete_dormant_payload(self) -> None:
+        """The exact scenario from PR #29 review: a manual write like
+        ``{"state": "dormant_manual_pause"}`` lacks every other required
+        field. Must fail closed, not silently pause serving."""
+        module = self._serving_state_module()
+        ok, reason = module.validate_state_payload({"state": "dormant_manual_pause"})
+        self.assertFalse(ok)
+        # First missing-required field encountered drives the reason; the
+        # exact code is not asserted (operators get the loud message via
+        # /health.load_error), but it must be one of the missing-required
+        # markers so callers can grep for it.
+        self.assertIn("missing", reason or "")
+
+    def test_serving_state_validator_rejects_missing_schema_version(self) -> None:
+        module = self._serving_state_module()
+        payload = self._valid_full_payload()
+        payload.pop("schema_version")
+        ok, reason = module.validate_state_payload(payload)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "schema_version_missing")
+
+    def test_serving_state_validator_rejects_wrong_schema_version(self) -> None:
+        module = self._serving_state_module()
+        payload = self._valid_full_payload(schema_version=2)
+        ok, reason = module.validate_state_payload(payload)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "schema_version_unsupported")
+
+    def test_serving_state_validator_rejects_missing_state(self) -> None:
+        module = self._serving_state_module()
+        payload = self._valid_full_payload()
+        payload.pop("state")
+        ok, reason = module.validate_state_payload(payload)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "state_missing")
+
+    def test_serving_state_validator_rejects_missing_since_ts(self) -> None:
+        module = self._serving_state_module()
+        payload = self._valid_full_payload()
+        payload.pop("since_ts")
+        ok, reason = module.validate_state_payload(payload)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "since_ts_missing")
+
+    def test_serving_state_validator_rejects_missing_or_blank_reason(self) -> None:
+        module = self._serving_state_module()
+        # Missing reason.
+        p1 = self._valid_full_payload()
+        p1.pop("reason")
+        ok, reason = module.validate_state_payload(p1)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "reason_missing")
+        # Empty string.
+        ok, reason = module.validate_state_payload(self._valid_full_payload(reason=""))
+        self.assertFalse(ok)
+        self.assertEqual(reason, "reason_empty")
+        # Whitespace only.
+        ok, reason = module.validate_state_payload(self._valid_full_payload(reason="   "))
+        self.assertFalse(ok)
+        self.assertEqual(reason, "reason_empty")
+        # Wrong type.
+        ok, reason = module.validate_state_payload(self._valid_full_payload(reason=123))
+        self.assertFalse(ok)
+        self.assertEqual(reason, "reason_invalid_type")
+
+    def test_serving_state_validator_rejects_bad_since_ts_types(self) -> None:
+        module = self._serving_state_module()
+        # Bool subclass of int -> must be rejected.
+        ok, reason = module.validate_state_payload(self._valid_full_payload(since_ts=True))
+        self.assertFalse(ok)
+        self.assertEqual(reason, "since_ts_invalid_type")
+        # String -> rejected.
+        ok, reason = module.validate_state_payload(self._valid_full_payload(since_ts="1700000000000"))
+        self.assertFalse(ok)
+        self.assertEqual(reason, "since_ts_invalid_type")
+        # Negative -> rejected.
+        ok, reason = module.validate_state_payload(self._valid_full_payload(since_ts=-1))
+        self.assertFalse(ok)
+        self.assertEqual(reason, "since_ts_negative")
+
+    def test_serving_state_validator_rejects_bad_optional_types(self) -> None:
+        """``triggering_audit``, ``set_by``, ``manifest_version_when_set``
+        must be null or string. ``expires_at`` must be null or numeric."""
+        module = self._serving_state_module()
+        # Numeric triggering_audit -> rejected.
+        ok, reason = module.validate_state_payload(
+            self._valid_full_payload(triggering_audit=42)
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "triggering_audit_invalid_type")
+        # List set_by -> rejected.
+        ok, reason = module.validate_state_payload(
+            self._valid_full_payload(set_by=["ops"])
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "set_by_invalid_type")
+        # Dict manifest_version_when_set -> rejected.
+        ok, reason = module.validate_state_payload(
+            self._valid_full_payload(manifest_version_when_set={"v": 1})
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "manifest_version_when_set_invalid_type")
+        # String expires_at -> rejected (must be numeric).
+        ok, reason = module.validate_state_payload(
+            self._valid_full_payload(expires_at="tomorrow")
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "expires_at_invalid_type")
+        # Negative expires_at -> rejected.
+        ok, reason = module.validate_state_payload(
+            self._valid_full_payload(expires_at=-5)
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "expires_at_negative")
+        # All explicit-null optional fields are accepted (CLI emits this shape
+        # when the operator does not pass --triggering-audit / --expires-at).
+        ok, reason = module.validate_state_payload(
+            self._valid_full_payload(
+                triggering_audit=None,
+                set_by=None,
+                manifest_version_when_set=None,
+                expires_at=None,
+            )
+        )
+        self.assertTrue(ok, f"all-null optionals must validate (got reason={reason})")
+
+    def test_serving_state_loader_fail_closed_on_incomplete_file(self) -> None:
+        """Stricter validator + loader contract: an incomplete operator
+        write becomes ``dormant_data_quality`` with a visible load_error."""
+        module = self._serving_state_module()
+        state_path = Path(self.tmp) / "serving_state_incomplete.json"
+        state_path.write_text(json.dumps({"state": "dormant_manual_pause"}))
+        registry = module.ServingStateRegistry(state_path)
+        registry.load()
+        self.assertFalse(registry.is_active())
+        snap = registry.snapshot()
+        self.assertEqual(snap["state"], "dormant_data_quality")
+        self.assertEqual(snap["reason"], "serving_state_invalid")
+        self.assertEqual(snap["source"], "invalid_file")
+        self.assertIsNotNone(snap["load_error"])
+        self.assertIn("schema_invalid", str(snap["load_error"]))
+
+    def test_serving_state_cli_payload_validates_under_strict_rules(self) -> None:
+        """The CLI's built payload must still pass the tightened validator
+        — otherwise the loader would reject CLI-written files."""
+        cli = self._cli_module()
+        sv = self._serving_state_module()
+        model_dir = Path(self.tmp) / "models_strict_cli"
+        model_dir.mkdir(parents=True, exist_ok=True)
+        rc = cli.main(
+            [
+                "--state",
+                "dormant_manual_pause",
+                "--reason",
+                "regime review pending",
+                "--triggering-audit",
+                "evidence/foo/bar.json",
+                "--expires-at",
+                "2026-12-31T23:59:59Z",
+                "--model-dir",
+                str(model_dir),
+                "--set-by",
+                "ops@runner",
+                "--now-ms",
+                "1700000000000",
+                "--quiet",
+            ]
+        )
+        self.assertEqual(rc, 0)
+        data = json.loads((model_dir / "serving_state.json").read_text())
+        ok, reason = sv.validate_state_payload(data)
+        self.assertTrue(ok, f"CLI payload failed stricter validator: {reason}")
+
+    def test_serving_state_ml_server_wires_serving_state_registry(self) -> None:
+        """ml_server.py imports and instantiates a module-level
+        ``serving_state`` singleton; ``/score`` consults
+        ``serving_state.is_active()`` before answering. This is the
+        smallest test that proves the wiring exists without spinning up
+        the FastAPI surface."""
+        try:
+            ml_server = load_module(
+                "ml_server_serving_state_wiring",
+                REPO_ROOT / "server" / "ml_server.py",
+            )
+        except ModuleNotFoundError as exc:
+            # Local dev envs without fastapi cannot load ml_server.py;
+            # the CI Python Ops Smoke job covers this path.
+            self.skipTest(f"ml_server import skipped: {exc}")
+            return
+        # Class-identity check would fail under ``load_module`` (custom
+        # module name -> different class instance), so duck-type the
+        # registry instead: it exposes the read API the server uses.
+        self.assertTrue(hasattr(ml_server, "serving_state"))
+        registry = ml_server.serving_state
+        self.assertEqual(
+            type(registry).__name__, "ServingStateRegistry"
+        )
+        for attr in ("is_active", "state", "snapshot", "blocked_payload", "load"):
+            self.assertTrue(
+                callable(getattr(registry, attr, None)),
+                f"serving_state registry missing callable .{attr}",
+            )
+        # blocked_payload shape sanity (no probability / threshold leak).
+        bp = registry.blocked_payload(manifest_version="v_test")
+        for key in (
+            "signal",
+            "blocked_reason",
+            "serving_state",
+            "serving_state_reason",
+            "serving_state_since_ts",
+            "serving_state_expires_at",
+            "manifest_version",
+        ):
+            self.assertIn(key, bp)
+        self.assertIsNone(bp["signal"])
+        self.assertEqual(bp["blocked_reason"], "serving_dormant")
+        for forbidden in ("probability", "threshold", "score"):
+            self.assertNotIn(forbidden, bp)
+
+    # ------------------------------------------------------------------ #
+    # D1 fixup #2: direct /score endpoint coverage for the dormant branch.
+    # ------------------------------------------------------------------ #
+    # These tests invoke the async route handler with a minimal mock
+    # Request and inspect the JSONResponse. They avoid fastapi.TestClient
+    # because the dev venv intentionally does not include httpx, and the
+    # broader test contract here is "no new runtime deps."
+    # The handler reads three module-level singletons (``registry``,
+    # ``serving_state``, ``_score_single_event_with_log``) which Python
+    # resolves at call time -- so patching them on the loaded ml_server
+    # module is sufficient to drive every branch deterministically.
+
+    @staticmethod
+    def _build_stub_request(body: bytes, *, headers: dict | None = None):
+        """Minimal asyncio-compatible Request stub.
+
+        Only exposes ``.headers`` and an awaitable ``.body()`` -- the
+        only surface ``_read_score_payload`` touches.
+        """
+        class _StubRequest:
+            def __init__(self, body_bytes: bytes, hdrs: dict):
+                self._body = body_bytes
+                self.headers = hdrs
+
+            async def body(self):
+                return self._body
+
+        return _StubRequest(body, headers or {})
+
+    @staticmethod
+    def _stub_active_registry_snapshot():
+        # ``_score_event`` is downstream of the dormant branch and never
+        # called in these tests because the active-path test stubs
+        # ``_score_single_event_with_log``. The model object can be any
+        # truthy sentinel since the dormant short-circuit never inspects
+        # it; the active-path stub also never dereferences it.
+        return {
+            "manifest": {"version": "v_dormant_endpoint_test"},
+            "models": {"reject": {15: object()}, "break": {}},
+            "thresholds": {"reject": {15: 0.5}, "break": {}},
+            "manifest_path": "/tmp/stub_dormant",
+            "manifest_signature": (0, 0),
+        }
+
+    @staticmethod
+    def _build_dormant_serving_state():
+        class _DormantServingState:
+            @staticmethod
+            def is_active():
+                return False
+
+            @staticmethod
+            def blocked_payload(*, manifest_version):
+                return {
+                    "signal": None,
+                    "blocked_reason": "serving_dormant",
+                    "serving_state": "dormant_manual_pause",
+                    "serving_state_reason": "endpoint test pause",
+                    "serving_state_since_ts": 1700000000000,
+                    "serving_state_expires_at": 1700001000000,
+                    "serving_state_triggering_audit": None,
+                    "manifest_version": manifest_version,
+                    "manifest_version_when_set": "v_dormant_endpoint_test",
+                }
+
+        return _DormantServingState()
+
+    @staticmethod
+    def _build_active_serving_state():
+        class _ActiveServingState:
+            @staticmethod
+            def is_active():
+                return True
+
+            @staticmethod
+            def blocked_payload(*, manifest_version):
+                # Should never be called from the active path; surface it
+                # loudly if the wiring regresses.
+                raise AssertionError(
+                    "serving_state.blocked_payload was called from the active path"
+                )
+
+        return _ActiveServingState()
+
+    def _load_ml_server_for_endpoint(self):
+        try:
+            return load_module(
+                "ml_server_score_endpoint",
+                REPO_ROOT / "server" / "ml_server.py",
+            )
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"ml_server import skipped: {exc}")
+            return None
+
+    def _patch_score_path(self, ml_server, registry, serving_state):
+        """Returns a restore-callable; use with try/finally in tests."""
+        # Stash the originals.
+        original_registry = ml_server.registry
+        original_serving_state = ml_server.serving_state
+        ml_server.registry = registry
+        ml_server.serving_state = serving_state
+
+        def restore():
+            ml_server.registry = original_registry
+            ml_server.serving_state = original_serving_state
+
+        return restore
+
+    def test_score_endpoint_dormant_single_returns_blocked(self) -> None:
+        ml_server = self._load_ml_server_for_endpoint()
+        if ml_server is None:
+            return
+
+        class _StubRegistry:
+            @staticmethod
+            def snapshot():
+                return OpsSmokeTests._stub_active_registry_snapshot()
+
+        restore = self._patch_score_path(
+            ml_server,
+            _StubRegistry(),
+            self._build_dormant_serving_state(),
+        )
+        try:
+            body = json.dumps({"event": {"symbol": "SPY", "horizon_min": 15}}).encode("utf-8")
+            request = self._build_stub_request(body)
+            response = asyncio.run(ml_server.score(request))
+        finally:
+            restore()
+
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.body)
+        # Required dormant-response fields.
+        self.assertIsNone(data["signal"])
+        self.assertEqual(data["blocked_reason"], "serving_dormant")
+        self.assertEqual(data["serving_state"], "dormant_manual_pause")
+        self.assertEqual(data["serving_state_reason"], "endpoint test pause")
+        self.assertEqual(data["serving_state_since_ts"], 1700000000000)
+        self.assertEqual(data["serving_state_expires_at"], 1700001000000)
+        self.assertEqual(data["manifest_version"], "v_dormant_endpoint_test")
+        # Probability / threshold / scoring internals must NOT leak.
+        for forbidden in ("probability", "p", "threshold", "score", "horizons", "scores"):
+            self.assertNotIn(
+                forbidden, data,
+                f"dormant response leaked prediction-internal key {forbidden!r}",
+            )
+
+    def test_score_endpoint_dormant_batch_returns_one_blocked_per_event(self) -> None:
+        ml_server = self._load_ml_server_for_endpoint()
+        if ml_server is None:
+            return
+
+        class _StubRegistry:
+            @staticmethod
+            def snapshot():
+                return OpsSmokeTests._stub_active_registry_snapshot()
+
+        restore = self._patch_score_path(
+            ml_server,
+            _StubRegistry(),
+            self._build_dormant_serving_state(),
+        )
+        try:
+            events_payload = {
+                "events": [
+                    {"symbol": "SPY", "horizon_min": 15},
+                    {"symbol": "SPY", "horizon_min": 30},
+                    {"symbol": "SPY", "horizon_min": 60},
+                ]
+            }
+            body = json.dumps(events_payload).encode("utf-8")
+            request = self._build_stub_request(body)
+            response = asyncio.run(ml_server.score(request))
+        finally:
+            restore()
+
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.body)
+        self.assertIn("results", data)
+        self.assertIsInstance(data["results"], list)
+        self.assertEqual(len(data["results"]), 3)
+        # Every result entry is a fresh dormant response (defensive copy
+        # per event so callers cannot mutate one into the others).
+        for entry in data["results"]:
+            self.assertIsNone(entry["signal"])
+            self.assertEqual(entry["blocked_reason"], "serving_dormant")
+            self.assertEqual(entry["serving_state"], "dormant_manual_pause")
+            self.assertEqual(entry["manifest_version"], "v_dormant_endpoint_test")
+            for forbidden in ("probability", "p", "threshold", "score"):
+                self.assertNotIn(forbidden, entry)
+
+    def test_score_endpoint_dormant_malformed_request_still_returns_4xx(self) -> None:
+        """Even when serving is dormant, malformed bodies must return the
+        normal validation 4xx so clients can distinguish "I sent garbage"
+        from "serving is paused." Two shapes covered:
+        ``{}`` (missing both ``event`` and ``events``) and
+        ``{"events": "not_a_list"}`` (wrong type)."""
+        ml_server = self._load_ml_server_for_endpoint()
+        if ml_server is None:
+            return
+
+        class _StubRegistry:
+            @staticmethod
+            def snapshot():
+                return OpsSmokeTests._stub_active_registry_snapshot()
+
+        restore = self._patch_score_path(
+            ml_server,
+            _StubRegistry(),
+            self._build_dormant_serving_state(),
+        )
+        try:
+            # Body missing both 'event' and 'events' -> 400.
+            request = self._build_stub_request(b"{}")
+            with self.assertRaises(ml_server.HTTPException) as ctx:
+                asyncio.run(ml_server.score(request))
+            self.assertEqual(ctx.exception.status_code, 400)
+            self.assertIn("event", str(ctx.exception.detail).lower())
+
+            # 'events' present but wrong type -> 400.
+            bad_body = json.dumps({"events": "not_a_list"}).encode("utf-8")
+            request2 = self._build_stub_request(bad_body)
+            with self.assertRaises(ml_server.HTTPException) as ctx2:
+                asyncio.run(ml_server.score(request2))
+            self.assertEqual(ctx2.exception.status_code, 400)
+
+            # Non-JSON body -> 400 (parser error, before our shape check).
+            request3 = self._build_stub_request(b"not json at all")
+            with self.assertRaises(ml_server.HTTPException) as ctx3:
+                asyncio.run(ml_server.score(request3))
+            self.assertEqual(ctx3.exception.status_code, 400)
+        finally:
+            restore()
+
+    def test_score_endpoint_active_path_is_not_blocked(self) -> None:
+        """When serving_state is active, the dormant short-circuit must
+        NOT fire. Stub the normal scoring path so the test does not need
+        a real model, and verify the sentinel returns (proving the
+        dormant branch was skipped). The active stub explicitly raises
+        if ``blocked_payload`` is called, so a regression would surface
+        as an immediate AssertionError rather than a silent pass-through."""
+        ml_server = self._load_ml_server_for_endpoint()
+        if ml_server is None:
+            return
+
+        class _StubRegistry:
+            @staticmethod
+            def snapshot():
+                return OpsSmokeTests._stub_active_registry_snapshot()
+
+        sentinel = {
+            "sentinel_active_path": True,
+            "manifest_version": "v_dormant_endpoint_test",
+        }
+        called: dict[str, int] = {"count": 0}
+
+        def _stub_score_single(event, disable_analogs=False):
+            called["count"] += 1
+            return dict(sentinel)
+
+        original_score = ml_server._score_single_event_with_log
+        original_try_begin = ml_server._try_begin_score_request
+        original_finish = ml_server._finish_score_request
+        ml_server._score_single_event_with_log = _stub_score_single
+        # Make the concurrency gate a no-op so we don't fight the real
+        # semaphore in test runs.
+        ml_server._try_begin_score_request = lambda: True
+        ml_server._finish_score_request = lambda **kwargs: None
+
+        restore_path = self._patch_score_path(
+            ml_server,
+            _StubRegistry(),
+            self._build_active_serving_state(),
+        )
+        try:
+            body = json.dumps({"event": {"symbol": "SPY", "horizon_min": 15}}).encode("utf-8")
+            request = self._build_stub_request(body)
+            response = asyncio.run(ml_server.score(request))
+        finally:
+            restore_path()
+            ml_server._score_single_event_with_log = original_score
+            ml_server._try_begin_score_request = original_try_begin
+            ml_server._finish_score_request = original_finish
+
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.body)
+        self.assertTrue(data.get("sentinel_active_path"))
+        # Dormant-shape markers must NOT be present.
+        self.assertNotIn("blocked_reason", data)
+        self.assertNotIn("serving_state", data)
+        # The stubbed scorer was called exactly once.
+        self.assertEqual(called["count"], 1)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

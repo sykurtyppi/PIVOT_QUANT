@@ -62,6 +62,7 @@ data/exports/
 data/models/*.pkl
 data/models/manifest_runtime_latest.json
 data/models/manifest_active.json
+data/models/serving_state.json
 data/models/manifest_active_prev.json
 data/models/model_registry.json
 data/models/metadata_runtime/
