@@ -10107,6 +10107,35 @@ class OpsSmokeTests(unittest.TestCase):
     # scripts/run_replay_backfill.sh — replay wrapper resolver fix
     # ------------------------------------------------------------------ #
 
+    def test_package_json_ml_scripts_route_python_through_resolver(self) -> None:
+        """Codex review on PR #20: ``package.json`` ``ml:*`` scripts must
+        not invoke ``python3`` or ``./.venv/bin/python`` directly.
+        Every Python entrypoint goes through the shared exec wrapper
+        (``scripts/_pybin_exec.sh``) so PYTHON_BIN / .venv313 / version
+        probe semantics are honored consistently."""
+        import json
+        with open(REPO_ROOT / "package.json", "r", encoding="utf-8") as fh:
+            pkg = json.load(fh)
+        scripts = pkg.get("scripts") or {}
+        violations: list[str] = []
+        for name, value in scripts.items():
+            if not name.startswith("ml:"):
+                continue
+            v = str(value)
+            # Allow ``bash scripts/run_*.sh`` paths — those wrappers
+            # themselves source ``_pybin.sh``. Only flag direct python
+            # invocations.
+            if "python3 " in v or v.startswith("python3 ") or v == "python3":
+                violations.append(f"{name}: {v!r}")
+            if "./.venv/bin/python " in v or "./.venv/bin/python3 " in v:
+                violations.append(f"{name}: {v!r}")
+        self.assertEqual(
+            violations, [],
+            msg="ml:* scripts must route through scripts/_pybin_exec.sh, "
+                "not call python3/.venv/bin/python directly:\n  "
+                + "\n  ".join(violations),
+        )
+
     def test_replay_backfill_sources_pybin_helper(self) -> None:
         """``run_replay_backfill.sh`` was a P2 miss in the original sweep:
         it previously honored ``PYTHON=`` unchecked and defaulted to
