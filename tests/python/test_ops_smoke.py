@@ -13032,6 +13032,299 @@ class OpsSmokeTests(unittest.TestCase):
         for forbidden in ("probability", "threshold", "score"):
             self.assertNotIn(forbidden, bp)
 
+    # ------------------------------------------------------------------ #
+    # D1 fixup #2: direct /score endpoint coverage for the dormant branch.
+    # ------------------------------------------------------------------ #
+    # These tests invoke the async route handler with a minimal mock
+    # Request and inspect the JSONResponse. They avoid fastapi.TestClient
+    # because the dev venv intentionally does not include httpx, and the
+    # broader test contract here is "no new runtime deps."
+    # The handler reads three module-level singletons (``registry``,
+    # ``serving_state``, ``_score_single_event_with_log``) which Python
+    # resolves at call time -- so patching them on the loaded ml_server
+    # module is sufficient to drive every branch deterministically.
+
+    @staticmethod
+    def _build_stub_request(body: bytes, *, headers: dict | None = None):
+        """Minimal asyncio-compatible Request stub.
+
+        Only exposes ``.headers`` and an awaitable ``.body()`` -- the
+        only surface ``_read_score_payload`` touches.
+        """
+        class _StubRequest:
+            def __init__(self, body_bytes: bytes, hdrs: dict):
+                self._body = body_bytes
+                self.headers = hdrs
+
+            async def body(self):
+                return self._body
+
+        return _StubRequest(body, headers or {})
+
+    @staticmethod
+    def _stub_active_registry_snapshot():
+        # ``_score_event`` is downstream of the dormant branch and never
+        # called in these tests because the active-path test stubs
+        # ``_score_single_event_with_log``. The model object can be any
+        # truthy sentinel since the dormant short-circuit never inspects
+        # it; the active-path stub also never dereferences it.
+        return {
+            "manifest": {"version": "v_dormant_endpoint_test"},
+            "models": {"reject": {15: object()}, "break": {}},
+            "thresholds": {"reject": {15: 0.5}, "break": {}},
+            "manifest_path": "/tmp/stub_dormant",
+            "manifest_signature": (0, 0),
+        }
+
+    @staticmethod
+    def _build_dormant_serving_state():
+        class _DormantServingState:
+            @staticmethod
+            def is_active():
+                return False
+
+            @staticmethod
+            def blocked_payload(*, manifest_version):
+                return {
+                    "signal": None,
+                    "blocked_reason": "serving_dormant",
+                    "serving_state": "dormant_manual_pause",
+                    "serving_state_reason": "endpoint test pause",
+                    "serving_state_since_ts": 1700000000000,
+                    "serving_state_expires_at": 1700001000000,
+                    "serving_state_triggering_audit": None,
+                    "manifest_version": manifest_version,
+                    "manifest_version_when_set": "v_dormant_endpoint_test",
+                }
+
+        return _DormantServingState()
+
+    @staticmethod
+    def _build_active_serving_state():
+        class _ActiveServingState:
+            @staticmethod
+            def is_active():
+                return True
+
+            @staticmethod
+            def blocked_payload(*, manifest_version):
+                # Should never be called from the active path; surface it
+                # loudly if the wiring regresses.
+                raise AssertionError(
+                    "serving_state.blocked_payload was called from the active path"
+                )
+
+        return _ActiveServingState()
+
+    def _load_ml_server_for_endpoint(self):
+        try:
+            return load_module(
+                "ml_server_score_endpoint",
+                REPO_ROOT / "server" / "ml_server.py",
+            )
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"ml_server import skipped: {exc}")
+            return None
+
+    def _patch_score_path(self, ml_server, registry, serving_state):
+        """Returns a restore-callable; use with try/finally in tests."""
+        # Stash the originals.
+        original_registry = ml_server.registry
+        original_serving_state = ml_server.serving_state
+        ml_server.registry = registry
+        ml_server.serving_state = serving_state
+
+        def restore():
+            ml_server.registry = original_registry
+            ml_server.serving_state = original_serving_state
+
+        return restore
+
+    def test_score_endpoint_dormant_single_returns_blocked(self) -> None:
+        ml_server = self._load_ml_server_for_endpoint()
+        if ml_server is None:
+            return
+
+        class _StubRegistry:
+            @staticmethod
+            def snapshot():
+                return OpsSmokeTests._stub_active_registry_snapshot()
+
+        restore = self._patch_score_path(
+            ml_server,
+            _StubRegistry(),
+            self._build_dormant_serving_state(),
+        )
+        try:
+            body = json.dumps({"event": {"symbol": "SPY", "horizon_min": 15}}).encode("utf-8")
+            request = self._build_stub_request(body)
+            response = asyncio.run(ml_server.score(request))
+        finally:
+            restore()
+
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.body)
+        # Required dormant-response fields.
+        self.assertIsNone(data["signal"])
+        self.assertEqual(data["blocked_reason"], "serving_dormant")
+        self.assertEqual(data["serving_state"], "dormant_manual_pause")
+        self.assertEqual(data["serving_state_reason"], "endpoint test pause")
+        self.assertEqual(data["serving_state_since_ts"], 1700000000000)
+        self.assertEqual(data["serving_state_expires_at"], 1700001000000)
+        self.assertEqual(data["manifest_version"], "v_dormant_endpoint_test")
+        # Probability / threshold / scoring internals must NOT leak.
+        for forbidden in ("probability", "p", "threshold", "score", "horizons", "scores"):
+            self.assertNotIn(
+                forbidden, data,
+                f"dormant response leaked prediction-internal key {forbidden!r}",
+            )
+
+    def test_score_endpoint_dormant_batch_returns_one_blocked_per_event(self) -> None:
+        ml_server = self._load_ml_server_for_endpoint()
+        if ml_server is None:
+            return
+
+        class _StubRegistry:
+            @staticmethod
+            def snapshot():
+                return OpsSmokeTests._stub_active_registry_snapshot()
+
+        restore = self._patch_score_path(
+            ml_server,
+            _StubRegistry(),
+            self._build_dormant_serving_state(),
+        )
+        try:
+            events_payload = {
+                "events": [
+                    {"symbol": "SPY", "horizon_min": 15},
+                    {"symbol": "SPY", "horizon_min": 30},
+                    {"symbol": "SPY", "horizon_min": 60},
+                ]
+            }
+            body = json.dumps(events_payload).encode("utf-8")
+            request = self._build_stub_request(body)
+            response = asyncio.run(ml_server.score(request))
+        finally:
+            restore()
+
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.body)
+        self.assertIn("results", data)
+        self.assertIsInstance(data["results"], list)
+        self.assertEqual(len(data["results"]), 3)
+        # Every result entry is a fresh dormant response (defensive copy
+        # per event so callers cannot mutate one into the others).
+        for entry in data["results"]:
+            self.assertIsNone(entry["signal"])
+            self.assertEqual(entry["blocked_reason"], "serving_dormant")
+            self.assertEqual(entry["serving_state"], "dormant_manual_pause")
+            self.assertEqual(entry["manifest_version"], "v_dormant_endpoint_test")
+            for forbidden in ("probability", "p", "threshold", "score"):
+                self.assertNotIn(forbidden, entry)
+
+    def test_score_endpoint_dormant_malformed_request_still_returns_4xx(self) -> None:
+        """Even when serving is dormant, malformed bodies must return the
+        normal validation 4xx so clients can distinguish "I sent garbage"
+        from "serving is paused." Two shapes covered:
+        ``{}`` (missing both ``event`` and ``events``) and
+        ``{"events": "not_a_list"}`` (wrong type)."""
+        ml_server = self._load_ml_server_for_endpoint()
+        if ml_server is None:
+            return
+
+        class _StubRegistry:
+            @staticmethod
+            def snapshot():
+                return OpsSmokeTests._stub_active_registry_snapshot()
+
+        restore = self._patch_score_path(
+            ml_server,
+            _StubRegistry(),
+            self._build_dormant_serving_state(),
+        )
+        try:
+            # Body missing both 'event' and 'events' -> 400.
+            request = self._build_stub_request(b"{}")
+            with self.assertRaises(ml_server.HTTPException) as ctx:
+                asyncio.run(ml_server.score(request))
+            self.assertEqual(ctx.exception.status_code, 400)
+            self.assertIn("event", str(ctx.exception.detail).lower())
+
+            # 'events' present but wrong type -> 400.
+            bad_body = json.dumps({"events": "not_a_list"}).encode("utf-8")
+            request2 = self._build_stub_request(bad_body)
+            with self.assertRaises(ml_server.HTTPException) as ctx2:
+                asyncio.run(ml_server.score(request2))
+            self.assertEqual(ctx2.exception.status_code, 400)
+
+            # Non-JSON body -> 400 (parser error, before our shape check).
+            request3 = self._build_stub_request(b"not json at all")
+            with self.assertRaises(ml_server.HTTPException) as ctx3:
+                asyncio.run(ml_server.score(request3))
+            self.assertEqual(ctx3.exception.status_code, 400)
+        finally:
+            restore()
+
+    def test_score_endpoint_active_path_is_not_blocked(self) -> None:
+        """When serving_state is active, the dormant short-circuit must
+        NOT fire. Stub the normal scoring path so the test does not need
+        a real model, and verify the sentinel returns (proving the
+        dormant branch was skipped). The active stub explicitly raises
+        if ``blocked_payload`` is called, so a regression would surface
+        as an immediate AssertionError rather than a silent pass-through."""
+        ml_server = self._load_ml_server_for_endpoint()
+        if ml_server is None:
+            return
+
+        class _StubRegistry:
+            @staticmethod
+            def snapshot():
+                return OpsSmokeTests._stub_active_registry_snapshot()
+
+        sentinel = {
+            "sentinel_active_path": True,
+            "manifest_version": "v_dormant_endpoint_test",
+        }
+        called: dict[str, int] = {"count": 0}
+
+        def _stub_score_single(event, disable_analogs=False):
+            called["count"] += 1
+            return dict(sentinel)
+
+        original_score = ml_server._score_single_event_with_log
+        original_try_begin = ml_server._try_begin_score_request
+        original_finish = ml_server._finish_score_request
+        ml_server._score_single_event_with_log = _stub_score_single
+        # Make the concurrency gate a no-op so we don't fight the real
+        # semaphore in test runs.
+        ml_server._try_begin_score_request = lambda: True
+        ml_server._finish_score_request = lambda **kwargs: None
+
+        restore_path = self._patch_score_path(
+            ml_server,
+            _StubRegistry(),
+            self._build_active_serving_state(),
+        )
+        try:
+            body = json.dumps({"event": {"symbol": "SPY", "horizon_min": 15}}).encode("utf-8")
+            request = self._build_stub_request(body)
+            response = asyncio.run(ml_server.score(request))
+        finally:
+            restore_path()
+            ml_server._score_single_event_with_log = original_score
+            ml_server._try_begin_score_request = original_try_begin
+            ml_server._finish_score_request = original_finish
+
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.body)
+        self.assertTrue(data.get("sentinel_active_path"))
+        # Dormant-shape markers must NOT be present.
+        self.assertNotIn("blocked_reason", data)
+        self.assertNotIn("serving_state", data)
+        # The stubbed scorer was called exactly once.
+        self.assertEqual(called["count"], 1)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
