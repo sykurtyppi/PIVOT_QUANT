@@ -9190,6 +9190,435 @@ class OpsSmokeTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             module.main(["--highprob-low", "1.5"])
 
+    # ------------------------------------------------------------------ #
+    # Phase 2B regime data-quality audit
+    # ------------------------------------------------------------------ #
+
+    def _data_quality_module(self):
+        return load_module(
+            "regime_data_quality",
+            REPO_ROOT / "scripts" / "audit_regime_data_quality.py",
+        )
+
+    def test_data_quality_feature_quality_stats_clean_numeric(self) -> None:
+        """A well-behaved numeric series with no nulls, no constants, and
+        no concentration must NOT trigger imputed/constant flags. Quantile
+        profile must be populated."""
+        import pandas as pd
+        module = self._data_quality_module()
+        s = pd.Series([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0])
+        stats = module.feature_quality_stats(s)
+        self.assertEqual(stats["row_count"], 10)
+        self.assertEqual(stats["null_count"], 0)
+        self.assertEqual(stats["null_rate"], 0.0)
+        self.assertEqual(stats["non_finite_count"], 0)
+        self.assertEqual(stats["zero_count"], 0)
+        self.assertEqual(stats["distinct_count"], 10)
+        self.assertFalse(stats["appears_constant"])
+        self.assertFalse(stats["appears_imputed_default"])
+        self.assertEqual(stats["min"], 1.0)
+        self.assertEqual(stats["max"], 10.0)
+        self.assertAlmostEqual(stats["median"], 5.5)
+
+    def test_data_quality_detects_null_and_non_finite(self) -> None:
+        """NaN counts as null; +/-inf counts as non-finite (separately)."""
+        import pandas as pd
+        import numpy as np
+        module = self._data_quality_module()
+        s = pd.Series([1.0, np.nan, np.inf, -np.inf, 0.0, 2.0])
+        stats = module.feature_quality_stats(s)
+        self.assertEqual(stats["row_count"], 6)
+        self.assertEqual(stats["null_count"], 1)
+        # +inf and -inf should both be counted as non-finite, distinct
+        # from the NaN.
+        self.assertEqual(stats["non_finite_count"], 2)
+        self.assertAlmostEqual(stats["non_finite_rate"], 2.0 / 6.0)
+        # Zero rate is computed on the finite, non-null values: [1, 0, 2].
+        self.assertAlmostEqual(stats["zero_rate"], 1.0 / 3.0)
+
+    def test_data_quality_detects_imputed_default_zero(self) -> None:
+        """A feature whose >50% of values are 0.0 (a known default
+        sentinel) must trigger ``appears_imputed_default``."""
+        import pandas as pd
+        module = self._data_quality_module()
+        s = pd.Series([0.0] * 80 + [1.5, 2.5, 3.5] * 5 + [4.0] * 5)
+        stats = module.feature_quality_stats(s)
+        self.assertTrue(stats["appears_imputed_default"])
+        self.assertEqual(stats["imputed_default_value"], 0.0)
+        self.assertGreaterEqual(stats["max_repeat_share"], 0.5)
+        self.assertEqual(stats["top_repeated"][0]["value"], 0.0)
+
+    def test_data_quality_does_not_flag_clean_shifted_distribution(self) -> None:
+        """A shifted-but-clean numeric distribution must NOT be flagged as
+        imputed or constant. This is the false-positive guard — Phase 2
+        attribution surfaces lots of shifted features, and most of them
+        should *not* be DQ-flagged here."""
+        import pandas as pd
+        module = self._data_quality_module()
+        # Two clean groups with different means but no concentration.
+        recent = pd.Series([1.0 + 0.01 * i for i in range(100)])
+        older = pd.Series([5.0 + 0.01 * i for i in range(100)])
+        for s in (recent, older):
+            stats = module.feature_quality_stats(s)
+            self.assertFalse(stats["appears_imputed_default"])
+            self.assertFalse(stats["appears_constant"])
+            self.assertEqual(stats["null_count"], 0)
+            self.assertEqual(stats["non_finite_count"], 0)
+            # 100 distinct values - no false constant flag.
+            self.assertEqual(stats["distinct_count"], 100)
+
+    def test_data_quality_detects_constant_feature(self) -> None:
+        import pandas as pd
+        module = self._data_quality_module()
+        s = pd.Series([3.14] * 50)
+        stats = module.feature_quality_stats(s)
+        self.assertTrue(stats["appears_constant"])
+        self.assertEqual(stats["distinct_count"], 1)
+
+    def test_data_quality_handles_missing_column(self) -> None:
+        """``feature_quality_stats(None)`` must NOT crash. It must return
+        the fixed schema with ``skip_reason=column_absent``."""
+        module = self._data_quality_module()
+        stats = module.feature_quality_stats(None)
+        self.assertEqual(stats["skip_reason"], "column_absent")
+        self.assertEqual(stats["row_count"], 0)
+        self.assertIsNone(stats["null_rate"])
+        # Schema parity: top_repeated key still present.
+        self.assertIn("top_repeated", stats)
+        self.assertEqual(stats["top_repeated"], [])
+
+    def test_data_quality_handles_empty_group(self) -> None:
+        import pandas as pd
+        module = self._data_quality_module()
+        stats = module.feature_quality_stats(pd.Series([], dtype=float))
+        self.assertEqual(stats["skip_reason"], "group_empty")
+        self.assertEqual(stats["row_count"], 0)
+
+    def test_data_quality_top_repeated_share_correct(self) -> None:
+        """The top-repeated entries are sorted by count descending and
+        share = count / non-null-finite size."""
+        import pandas as pd
+        module = self._data_quality_module()
+        s = pd.Series([1.0, 1.0, 1.0, 2.0, 2.0, 3.0])
+        stats = module.feature_quality_stats(s)
+        self.assertEqual(stats["top_repeated"][0]["value"], 1.0)
+        self.assertEqual(stats["top_repeated"][0]["count"], 3)
+        self.assertAlmostEqual(stats["top_repeated"][0]["share"], 0.5)
+        self.assertEqual(stats["top_repeated"][1]["value"], 2.0)
+        self.assertEqual(stats["top_repeated"][1]["count"], 2)
+
+    def test_data_quality_timestamp_health_freshness(self) -> None:
+        """``recent_max_to_now_days`` must reflect the gap between the
+        most recent ``ts_event`` and the ``now_utc_ms`` argument."""
+        import pandas as pd
+        module = self._data_quality_module()
+        now_ms = 2_000_000_000_000  # arbitrary
+        # recent rows end 1 day before now.
+        recent = pd.DataFrame({
+            "ts_event": [now_ms - 86_400_000 - i for i in range(10)]
+        })
+        older = pd.DataFrame({"ts_event": [now_ms - 5 * 86_400_000 + i for i in range(10)]})
+        out = module.timestamp_health(recent, older, now_utc_ms=now_ms)
+        self.assertTrue(out["recent"]["available"])
+        self.assertTrue(out["older_window"]["available"])
+        self.assertAlmostEqual(out["recent_max_to_now_days"], 1.0, places=2)
+        # No duplicate timestamps in either group.
+        self.assertEqual(out["recent"]["duplicate_ts_count"], 0)
+        self.assertEqual(out["older_window"]["duplicate_ts_count"], 0)
+
+    def test_data_quality_timestamp_health_detects_duplicates(self) -> None:
+        import pandas as pd
+        module = self._data_quality_module()
+        now_ms = 1_700_000_000_000
+        recent = pd.DataFrame({"ts_event": [100, 200, 200, 300, 300, 300]})
+        out = module.timestamp_health(recent, pd.DataFrame({"ts_event": []}), now_utc_ms=now_ms)
+        self.assertEqual(out["recent"]["duplicate_ts_count"], 5)
+        self.assertAlmostEqual(out["recent"]["duplicate_ts_rate"], 5.0 / 6.0)
+
+    def test_data_quality_timestamp_health_missing_column(self) -> None:
+        """No ``ts_event`` column must produce ``available=False`` rather
+        than crashing."""
+        import pandas as pd
+        module = self._data_quality_module()
+        df = pd.DataFrame({"row_id": [1, 2, 3]})
+        out = module.timestamp_health(df, df, now_utc_ms=1_700_000_000_000)
+        self.assertFalse(out["recent"]["available"])
+        self.assertFalse(out["older_window"]["available"])
+        self.assertEqual(out["recent"]["reason"], "ts_event_column_missing")
+
+    def test_data_quality_assessment_status_clean(self) -> None:
+        """No DQ flags + freshness within bound + adequate recent_n =>
+        ``clean_shift_likely_real``. The summary must be descriptive, not
+        a trading claim."""
+        module = self._data_quality_module()
+        per_feature = {
+            "atr_bps": {
+                "recent_dormant": {
+                    "null_rate": 0.0, "zero_rate": 0.0,
+                    "appears_constant": False, "appears_imputed_default": False,
+                    "non_finite_rate": 0.0,
+                },
+                "older_firing_context": {
+                    "null_rate": 0.0, "zero_rate": 0.0,
+                    "appears_constant": False, "appears_imputed_default": False,
+                    "non_finite_rate": 0.0,
+                },
+            }
+        }
+        ts_health = {
+            "recent": {"available": True, "duplicate_ts_rate": 0.0},
+            "older_window": {"available": True, "duplicate_ts_rate": 0.0},
+            "recent_max_to_now_days": 0.5,
+        }
+        assess = module.determine_assessment(
+            per_feature=per_feature, ts_health=ts_health,
+            recent_n=1000, columns_present=["atr_bps"], columns_missing=[],
+        )
+        self.assertEqual(assess["data_quality_status"], "clean_shift_likely_real")
+        self.assertFalse(assess["atr_quality_warning"])
+        self.assertFalse(assess["feature_null_warning"])
+        self.assertFalse(assess["feature_constant_warning"])
+        self.assertFalse(assess["timestamp_warning"])
+        self.assertFalse(assess["recent_data_sparse_warning"])
+
+    def test_data_quality_assessment_status_imputation_branch(self) -> None:
+        """An imputed-looking atr_bps must flip the status to
+        ``possible_imputation_or_defaulting`` and set BOTH the atr-specific
+        flag and the generic constant/null flag."""
+        module = self._data_quality_module()
+        per_feature = {
+            "atr_bps": {
+                "recent_dormant": {
+                    "null_rate": 0.0, "zero_rate": 0.7,
+                    "appears_constant": False,
+                    "appears_imputed_default": True,
+                    "imputed_default_value": 0.0,
+                    "max_repeat_share": 0.7,
+                    "non_finite_rate": 0.0,
+                },
+                "older_firing_context": {
+                    "null_rate": 0.0, "zero_rate": 0.0,
+                    "appears_constant": False, "appears_imputed_default": False,
+                    "non_finite_rate": 0.0,
+                },
+            }
+        }
+        ts_health = {
+            "recent": {"available": True, "duplicate_ts_rate": 0.0},
+            "older_window": {"available": True, "duplicate_ts_rate": 0.0},
+            "recent_max_to_now_days": 0.5,
+        }
+        assess = module.determine_assessment(
+            per_feature=per_feature, ts_health=ts_health,
+            recent_n=1000, columns_present=["atr_bps"], columns_missing=[],
+        )
+        self.assertEqual(assess["data_quality_status"], "possible_imputation_or_defaulting")
+        self.assertTrue(assess["atr_quality_warning"])
+        self.assertTrue(assess["feature_constant_warning"])
+
+    def test_data_quality_assessment_status_stale_branch(self) -> None:
+        """Recent data older than the freshness cutoff must select the
+        ``possible_stale_or_sparse_recent_data`` branch even when no
+        feature flags are set."""
+        module = self._data_quality_module()
+        per_feature = {
+            "atr_bps": {
+                "recent_dormant": {
+                    "null_rate": 0.0, "zero_rate": 0.0,
+                    "appears_constant": False, "appears_imputed_default": False,
+                    "non_finite_rate": 0.0,
+                },
+                "older_firing_context": {
+                    "null_rate": 0.0, "zero_rate": 0.0,
+                    "appears_constant": False, "appears_imputed_default": False,
+                    "non_finite_rate": 0.0,
+                },
+            }
+        }
+        ts_health = {
+            "recent": {"available": True, "duplicate_ts_rate": 0.0},
+            "older_window": {"available": True, "duplicate_ts_rate": 0.0},
+            "recent_max_to_now_days": 10.0,  # > 2-day cutoff
+        }
+        assess = module.determine_assessment(
+            per_feature=per_feature, ts_health=ts_health,
+            recent_n=1000, columns_present=["atr_bps"], columns_missing=[],
+        )
+        self.assertEqual(
+            assess["data_quality_status"], "possible_stale_or_sparse_recent_data"
+        )
+        self.assertTrue(assess["timestamp_warning"])
+
+    def test_data_quality_assessment_status_insufficient_columns(self) -> None:
+        module = self._data_quality_module()
+        assess = module.determine_assessment(
+            per_feature={}, ts_health={
+                "recent": {"available": True, "duplicate_ts_rate": 0.0},
+                "older_window": {"available": True, "duplicate_ts_rate": 0.0},
+                "recent_max_to_now_days": 0.5,
+            },
+            recent_n=1000, columns_present=[],
+            columns_missing=["atr_bps", "other"],
+        )
+        self.assertEqual(assess["data_quality_status"], "insufficient_columns")
+        self.assertEqual(assess["columns_missing"], ["atr_bps", "other"])
+
+    def test_data_quality_report_schema_carries_assessment_block(self) -> None:
+        """The JSON report MUST always carry the same top-level keys, and
+        the ``data_quality_assessment`` sub-block MUST carry the same five
+        boolean flags + status + recommended next step. Downstream
+        consumers depend on this."""
+        module = self._data_quality_module()
+        thr = {"runtime_threshold": 0.80, "threshold_source": "manifest",
+               "manifest_threshold": 0.80, "artifact_threshold": 0.80,
+               "threshold_mismatch_detected": False}
+        rep = module.build_report(
+            target="reject", horizon=15,
+            active_manifest_path=Path("/tmp/m.json"),
+            manifest={"version": "v_test"},
+            model_path=Path("/tmp/rf.pkl"),
+            threshold_resolution=thr,
+            total_rows=21_000,
+            group_ranges={"recent_dormant": {"n": 1000}},
+            per_feature={"atr_bps": {"recent_dormant": {}}},
+            feature_columns_present=["atr_bps"],
+            feature_columns_missing=[],
+            timestamp_health_report={"recent": {"available": True}},
+            assessment={
+                "data_quality_status": "clean_shift_likely_real",
+                "atr_quality_warning": False,
+                "feature_null_warning": False,
+                "feature_constant_warning": False,
+                "timestamp_warning": False,
+                "recent_data_sparse_warning": False,
+                "columns_present": ["atr_bps"],
+                "columns_missing": [],
+                "recommended_next_step": "x",
+            },
+        )
+        for key in (
+            "schema_version", "audit_type", "generated_at",
+            "target", "horizon",
+            "active_manifest_path", "active_manifest_version",
+            "model_path", "deployed_threshold",
+            "threshold_source", "manifest_threshold", "artifact_threshold",
+            "threshold_mismatch_detected",
+            "total_labeled_rows", "group_ranges",
+            "feature_columns_focus", "feature_columns_present",
+            "feature_columns_missing",
+            "per_feature_quality", "timestamp_health",
+            "data_quality_assessment", "warnings", "scope_disclosure",
+        ):
+            self.assertIn(key, rep, f"missing report key: {key}")
+        self.assertEqual(rep["audit_type"], "regime_data_quality")
+        self.assertEqual(rep["schema_version"], 1)
+        # Assessment sub-block schema.
+        for k in (
+            "data_quality_status",
+            "atr_quality_warning",
+            "feature_null_warning",
+            "feature_constant_warning",
+            "timestamp_warning",
+            "recent_data_sparse_warning",
+            "columns_present",
+            "columns_missing",
+            "recommended_next_step",
+        ):
+            self.assertIn(k, rep["data_quality_assessment"], f"missing assessment key: {k}")
+
+    def test_data_quality_no_threshold_search_language_in_report(self) -> None:
+        """Report scope disclosure and every recommendation branch must
+        contain no edge/promotion/threshold-search language. This is a
+        DATA quality audit; it must not pretend to be anything else."""
+        module = self._data_quality_module()
+        forbidden = (
+            "buy", "sell", "long", "short", "promote", "deploy",
+            "retrain", "edge", "alpha", "profit", "pnl", "p&l",
+            "tradeable", "tune threshold", "threshold search",
+            "search threshold",
+        )
+        # Every recommendation branch is exhaustively probed.
+        for status_input in (
+            ("insufficient_columns", False, False, False, False, False),
+            ("possible_imputation_or_defaulting", True, False, False, False, False),
+            ("possible_imputation_or_defaulting", False, True, False, False, False),
+            ("possible_imputation_or_defaulting", False, False, True, False, False),
+            ("possible_stale_or_sparse_recent_data", False, False, False, True, False),
+            ("possible_stale_or_sparse_recent_data", False, False, False, False, True),
+            ("clean_shift_likely_real", False, False, False, False, False),
+        ):
+            status, atr, fnull, fconst, ts, sparse = status_input
+            rec = module._recommend_next_step(
+                status,
+                atr_quality_warning=atr,
+                feature_null_warning=fnull,
+                feature_constant_warning=fconst,
+                timestamp_warning=ts,
+                recent_data_sparse_warning=sparse,
+            )
+            for word in forbidden:
+                self.assertNotIn(word, rec.lower(),
+                                 f"forbidden word {word!r} in recommendation: {rec}")
+        # Scope disclosure from a built report.
+        thr = {"runtime_threshold": 0.80, "threshold_source": "manifest",
+               "manifest_threshold": 0.80, "artifact_threshold": 0.80,
+               "threshold_mismatch_detected": False}
+        rep = module.build_report(
+            target="reject", horizon=15,
+            active_manifest_path=Path("/tmp/m.json"), manifest={"version": "v"},
+            model_path=Path("/tmp/rf.pkl"), threshold_resolution=thr,
+            total_rows=1, group_ranges={}, per_feature={},
+            feature_columns_present=[], feature_columns_missing=[],
+            timestamp_health_report={}, assessment={},
+        )
+        # The scope disclosure may legitimately use "edge" in negation
+        # ("no edge claim"), so it's omitted from the scope-text check
+        # below — the per-branch recommendation check above already
+        # blocks "edge" in any operator-facing next-step language.
+        for word in ("buy", "sell", "alpha", "profit", "promote"):
+            self.assertNotIn(word, rep["scope_disclosure"].lower())
+        # And the scope disclosure must explicitly DISCLAIM edge:
+        self.assertIn("no edge claim", rep["scope_disclosure"].lower())
+
+    def test_data_quality_cli_rejects_invalid_args(self) -> None:
+        module = self._data_quality_module()
+        with self.assertRaises(SystemExit):
+            module.main(["--older-pct", "1.5"])
+        with self.assertRaises(SystemExit):
+            module.main(["--recent-n", "0"])
+        with self.assertRaises(SystemExit):
+            module.main(["--highprob-low", "-0.1"])
+        with self.assertRaises(SystemExit):
+            module.main(["--features", " , , "])
+
+    def test_data_quality_threshold_resolution_matches_attribution(self) -> None:
+        """The DQ audit must share threshold-resolution semantics with the
+        Phase 2 attribution. Behavioural equivalence is asserted by
+        running the same inputs through both and comparing outputs —
+        ``importlib.util.spec_from_file_location`` returns distinct
+        module objects even when loading the same file, so identity
+        assertions on functions wouldn't be reliable here."""
+        module = self._data_quality_module()
+        attribution = load_module(
+            "regime_health_attribution",
+            REPO_ROOT / "scripts" / "audit_regime_health_attribution.py",
+        )
+        # Threshold resolution semantics: manifest precedence,
+        # artifact fallback, mismatch flag.
+        for m, a in [(0.80, 0.80), (None, 0.65), (0.80, 0.65)]:
+            self.assertEqual(
+                module.attribution_mod.resolve_runtime_threshold(m, a),
+                attribution.resolve_runtime_threshold(m, a),
+                f"threshold resolution diverges for (manifest={m}, artifact={a})",
+            )
+        # Group selection: same row ranges.
+        import pandas as pd
+        df = pd.DataFrame({"row_id": list(range(500)), "ts_event": list(range(500))})
+        sel_dq = module.attribution_mod.select_groups(df, recent_n=50, older_pct=0.30)
+        sel_attr = attribution.select_groups(df, recent_n=50, older_pct=0.30)
+        self.assertEqual(sel_dq["recent_range"], sel_attr["recent_range"])
+        self.assertEqual(sel_dq["older_range"], sel_attr["older_range"])
+
     def test_retrain_evidence_pack_refuses_overlap_with_live_model_dir(self) -> None:
         module = load_module(
             "retrain_evidence_pack_overlap",
