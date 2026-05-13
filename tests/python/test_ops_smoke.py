@@ -13465,6 +13465,72 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(meta["from_state_source"], "invalid")
         self.assertEqual(meta["to_state"], "dormant_manual_pause")
 
+    def test_serving_state_d2_cli_invalid_prior_allows_replacement_without_force(self) -> None:
+        """The dormant_X -> dormant_Y --force guard must NOT fire for a
+        schema-invalid prior.
+
+        PR #30 review (P2) caught that ``existing.get("state")`` was being
+        consulted on the raw payload even when the loader would have
+        substituted ``dormant_data_quality`` at load time. That made
+        corrupt control-plane files harder to remediate than they should
+        be: an operator hitting ``{"state": "dormant_manual_pause"}`` on
+        disk had to pass ``--force`` even though the server never
+        honored that raw record. The fix gates the guard on
+        ``from_state_source == "file"``.
+
+        Audit-event behavior is preserved: invalid prior still emits
+        ``from_state_source="invalid"`` and ``from_state="dormant_data_quality"``.
+        """
+        self._isolated_audit_root()
+        cli = self._cli_module()
+        model_dir = Path(self.tmp) / "models_d2_invalid_prior_no_force"
+        model_dir.mkdir(parents=True, exist_ok=True)
+        # Parseable JSON but schema-invalid (missing required fields:
+        # schema_version, since_ts, reason). The raw ``state`` value
+        # *looks* like a dormant state, which is the bait the buggy
+        # guard fell for.
+        (model_dir / "serving_state.json").write_text(
+            json.dumps({"state": "dormant_manual_pause"})
+        )
+
+        rc = cli.main(
+            [
+                "--state", "dormant_audit_fail",
+                "--reason", "remediating corrupt prior, audit triggered",
+                "--expires-at", "2026-12-31T23:59:59Z",
+                "--model-dir", str(model_dir),
+                "--set-by", "ops@remediation",
+                "--now-ms", "1700004000000",
+                "--quiet",
+                # NOTE: deliberately NO --force.
+            ]
+        )
+        self.assertEqual(
+            rc, 0,
+            "invalid prior must be replaceable without --force",
+        )
+
+        # The state file now carries the new valid record.
+        data = json.loads((model_dir / "serving_state.json").read_text())
+        self.assertEqual(data["state"], "dormant_audit_fail")
+        self.assertEqual(data["reason"], "remediating corrupt prior, audit triggered")
+        self.assertEqual(data["since_ts"], 1700004000000)
+        # And the whole record validates under the stricter D1 rules.
+        sv = self._serving_state_module()
+        ok, reason = sv.validate_state_payload(data)
+        self.assertTrue(ok, f"replaced state must validate: {reason}")
+
+        # Exactly one serving_state_changed event, with from_state_source
+        # = "invalid" and the loader-equivalent substituted from_state.
+        events = self._read_audit_events("serving_state_changed")
+        self.assertEqual(len(events), 1)
+        meta = events[0]["metadata"]
+        self.assertEqual(meta["from_state_source"], "invalid")
+        self.assertEqual(meta["from_state"], "dormant_data_quality")
+        self.assertEqual(meta["to_state"], "dormant_audit_fail")
+        # Forced flag is FALSE — the test point is that no --force was needed.
+        self.assertFalse(meta["forced"])
+
     def test_serving_state_d2_cli_audit_failure_does_not_block_write(self) -> None:
         """An audit-log IO failure (here: the protocol root points at a
         path that cannot be created) must NOT corrupt the state file or

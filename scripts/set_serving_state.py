@@ -276,8 +276,20 @@ def main(argv: list[str] | None = None) -> int:
     #   dormant_X -> dormant_X (same state, refresh reason/expiry)
     # Refuse:
     #   dormant_X -> dormant_Y without --force
+    #
+    # The guard is gated on ``from_state_source == "file"`` — i.e. only a
+    # schema-valid prior the server would actually have honored counts as
+    # a "dormant state to overwrite." If the prior file is unparseable or
+    # schema-invalid, ``_apply_runtime_threshold_safety`` would substitute
+    # ``dormant_data_quality`` at load time regardless of what bytes are
+    # on disk, so the raw ``state`` field is operationally meaningless.
+    # Treating it as a real dormant state would also leave operators
+    # unable to remediate a corrupt control-plane file without --force,
+    # which is the wrong default. The audit event for the invalid case
+    # still records ``from_state_source="invalid"`` and the
+    # loader-equivalent ``from_state="dormant_data_quality"``.
     from_state, from_state_source, existing = _read_previous_state(state_path)
-    if existing is not None:
+    if existing is not None and from_state_source == "file":
         current_state = existing.get("state")
         if (
             isinstance(current_state, str)
