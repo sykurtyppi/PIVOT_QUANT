@@ -163,77 +163,35 @@ def _git_head() -> tuple[str, bool]:
     return sha, dirty
 
 
+from services import _pybin as _shared_pybin  # noqa: E402 — sibling import needs ROOT on sys.path
+
+
 def _python_version_tuple(executable: str) -> tuple[int, int, int] | None:
-    """Return (major, minor, micro) for an interpreter, or None on failure."""
-    try:
-        out = subprocess.check_output(
-            [executable, "-c", "import sys; print('%d.%d.%d' % sys.version_info[:3])"],
-            stderr=subprocess.DEVNULL,
-            timeout=10,
-        ).decode().strip()
-        parts = [int(p) for p in out.split(".")[:3]]
-        while len(parts) < 3:
-            parts.append(0)
-        return (parts[0], parts[1], parts[2])
-    except Exception:
-        return None
+    """Probe ``executable`` for ``sys.version_info[:3]``.
+
+    Thin wrapper over ``services._pybin.python_version_tuple``. Kept as a
+    module-level symbol so existing tests that monkey-patch this attribute
+    on the evidence-pack module continue to work; new code should call the
+    shared helper directly.
+    """
+    return _shared_pybin.python_version_tuple(executable)
 
 
 def resolve_training_python() -> tuple[str, str, str]:
     """Pick the interpreter used to spawn ``train_rf_artifacts.py``.
 
-    Resolution order:
-      1. ``PYTHON_BIN`` env var, if set and executable.
-      2. ``<ROOT>/.venv313/bin/python``, if present.
-      3. ``<ROOT>/.venv/bin/python``, if present.
-      4. ``sys.executable``, if its version is >= 3.10.
-      5. Otherwise SystemExit with the missing-prerequisite message.
+    Delegates to ``services._pybin.resolve_python(min_version=(3, 10))``.
+    The single source of truth for "which Python is supported across this
+    codebase" is ``services/_pybin.py``; this wrapper exists so the
+    evidence-pack module exposes a stable name for tests and callers and
+    so we don't have two parallel implementations of the resolution
+    precedence drifting apart.
 
     Returns ``(executable, version, source)`` where ``version`` is
     ``"MAJOR.MINOR.MICRO"`` and ``source`` is the label of the rule that
     matched (e.g. ``".venv/bin/python"`` or ``"PYTHON_BIN"``).
-
-    The training script (``scripts/train_rf_artifacts.py``) uses Python 3.10+
-    type syntax (``int | None``) at module level, so Python 3.9 cannot import
-    it and must be rejected here rather than failing opaquely inside the
-    subprocess.
     """
-    candidates: list[tuple[str, str]] = []
-
-    env_bin = os.environ.get("PYTHON_BIN", "").strip()
-    if env_bin:
-        candidates.append(("PYTHON_BIN", env_bin))
-
-    candidates.append((".venv313/bin/python", str(ROOT / ".venv313" / "bin" / "python")))
-    candidates.append((".venv/bin/python", str(ROOT / ".venv" / "bin" / "python")))
-    candidates.append(("sys.executable", sys.executable))
-
-    seen: set[str] = set()
-    tried: list[str] = []
-    for label, path in candidates:
-        if not path or path in seen:
-            continue
-        seen.add(path)
-        # PYTHON_BIN / venv paths must exist on disk to be usable; sys.executable
-        # always exists by definition but may still be the wrong version.
-        if label != "sys.executable" and not Path(path).is_file():
-            tried.append(f"{label}={path} (not present)")
-            continue
-        version = _python_version_tuple(path)
-        if version is None:
-            tried.append(f"{label}={path} (probe failed)")
-            continue
-        if version < (3, 10):
-            tried.append(f"{label}={path} (version {version[0]}.{version[1]}.{version[2]} < 3.10)")
-            continue
-        return path, "%d.%d.%d" % version, label
-
-    raise SystemExit(
-        "Could not resolve a Python >= 3.10 to run train_rf_artifacts.py. "
-        "Tried in order: " + "; ".join(tried) + ". "
-        "Set PYTHON_BIN, create .venv/ with a 3.10+ interpreter, or run the "
-        "evidence pack under a 3.10+ python."
-    )
+    return _shared_pybin.resolve_python(min_version=(3, 10))
 
 
 def build_provenance(active_manifest_path: Path) -> dict:
@@ -320,21 +278,25 @@ def thresholds_from_manifest(manifest: dict) -> dict:
 
 
 def _reason_for_neutralization(meta: dict) -> str:
+    """Diagnostic ``reason`` string for runtime_safety_dry_run.would_neutralize.
+
+    Uses the shared ``threshold_score_is_unsafe`` predicate and maps the
+    generic codes to this layer's external strings (``*_score`` suffix).
+    Multiple causes are joined with ``,`` so e.g. a fallback threshold
+    with a NaN score reports ``"fallback,nonfinite_score"``.
+    """
+    from ml.thresholds import threshold_score_is_unsafe
+
     parts: list[str] = []
-    if bool(meta.get("fallback")):
-        parts.append("fallback")
-    score = meta.get("score")
-    if score is None:
-        parts.append("none_score")
-    else:
-        try:
-            score_f = float(score)
-            if not math.isfinite(score_f):
-                parts.append("nonfinite_score")
-            elif score_f <= 0.0:
-                parts.append("nonpositive_score")
-        except (TypeError, ValueError):
-            parts.append("uncoercible_score")
+    _, codes = threshold_score_is_unsafe(meta.get("score"), bool(meta.get("fallback")))
+    code_map = {
+        "fallback": "fallback",
+        "none": "none_score",
+        "nonfinite": "nonfinite_score",
+        "nonpositive": "nonpositive_score",
+    }
+    for c in codes:
+        parts.append(code_map.get(c, c))
     if meta.get("objective") != "utility_bps":
         parts.append("non_utility_objective")
     return ",".join(parts) if parts else "unknown"
@@ -681,33 +643,35 @@ def _horizon_viability(
       - ``no_signal_substituted == False``
       - the runtime-safety dry-run would not neutralize this (target, horizon)
     """
+    from ml.thresholds import threshold_score_is_unsafe
+
     reasons: list[str] = []
     if row.get("objective") != "utility_bps":
         reasons.append("wrong_objective")
-    # Score must be a finite, positive number. The previous predicate
-    # ``not isinstance(score, (int, float)) or float(score) <= 0.0`` is
-    # fail-open against NaN because ``NaN <= 0.0`` is False per IEEE 754.
+    # Score must be a finite, positive number. Delegate to the shared
+    # predicate in ml.thresholds so readiness and
+    # server.ml_server.ModelRegistry._apply_runtime_threshold_safety
+    # cannot drift apart on the (score, fallback) check. ``codes`` are
+    # generic; translate to this layer's external surface (``*_utility``
+    # suffix; ``none``-coerced score also maps to ``nonpositive_utility``
+    # to preserve the legacy reason name).
+    #
     # Runtime safety (PR #12) catches NaN scores when fastapi is available,
     # but ``runtime_safety_dry_run.skipped == True`` is a supported case
-    # (dev envs without fastapi), and readiness must close the same hole
+    # (dev envs without fastapi), so readiness must close the same hole
     # at this layer rather than relying on a downstream gate that may not
-    # have run. Mirrors the predicate in
-    # ``server.ml_server.ModelRegistry._apply_runtime_threshold_safety``.
-    score = row.get("score")
-    if isinstance(score, bool) or not isinstance(score, (int, float)):
-        reasons.append("nonpositive_utility")
-    else:
-        try:
-            score_f = float(score)
-        except (TypeError, ValueError):
-            reasons.append("nonpositive_utility")
-        else:
-            if not math.isfinite(score_f):
-                reasons.append("nonfinite_utility")
-            elif score_f <= 0.0:
-                reasons.append("nonpositive_utility")
-    if bool(row.get("fallback")):
-        reasons.append("fallback")
+    # have run.
+    _, score_codes = threshold_score_is_unsafe(
+        row.get("score"), bool(row.get("fallback"))
+    )
+    readiness_code_map = {
+        "fallback": "fallback",
+        "none": "nonpositive_utility",
+        "nonfinite": "nonfinite_utility",
+        "nonpositive": "nonpositive_utility",
+    }
+    for code in score_codes:
+        reasons.append(readiness_code_map.get(code, code))
     if bool(row.get("no_signal_substituted")):
         reasons.append("no_signal_substituted")
     key = (row.get("target"), int(row.get("horizon"))) if row.get("horizon") is not None else None
@@ -864,77 +828,210 @@ def run_statistical_validation(
     return out
 
 
-def _aggregate_statistical_validation(per_horizon_results: dict) -> tuple[bool, bool | None]:
-    """Roll per-horizon statistical results up to (present, passed).
+# Recognized OOS observation source labels. Anything else (including
+# "threshold_tune_slice", None, "", "unknown") is treated as IN-SAMPLE for
+# promotion purposes. Future OOS-validation PRs MUST pick a source name from
+# this convention (the explicit set OR the ``oos_`` prefix) when they write
+# per-signal observations into the manifest; otherwise the readiness
+# classifier will refuse to count their result toward
+# ``oos_validation_passed`` / ``promotion_ready``.
+_OOS_OBSERVATION_SOURCES_EXACT = frozenset({"held_out_slice", "walk_forward_fold"})
 
-    ``present`` is True when at least one mechanically-viable horizon ran a
-    real test (status ``passed`` or ``failed``); False when every viable
-    horizon was ``insufficient_data`` (or there were none).
 
-    ``passed`` is True only when every viable horizon's test ran AND every
-    one passed. False when any ran and failed. None when coverage is
-    incomplete (some insufficient_data) or no test ran.
+def _is_oos_source(source: object) -> bool:
+    """Return True iff ``source`` names a recognized OOS observation slice.
+
+    Conservatively False for None, empty strings, and any source the
+    classifier has not been taught to trust as out-of-sample. The point of
+    this helper is to make promotion gating fail-closed against accidental
+    relabelling: a typo or a renamed slice does not become OOS just because
+    the new label is unrecognized.
     """
+    if not isinstance(source, str):
+        return False
+    s = source.strip()
+    if not s:
+        return False
+    if s in _OOS_OBSERVATION_SOURCES_EXACT:
+        return True
+    return s.startswith("oos_")
+
+
+def _aggregate_statistical_validation(per_horizon_results: dict) -> dict:
+    """Roll per-horizon statistical results into a scope-aware aggregate.
+
+    Returns a dict with:
+
+    - ``present``           — True iff any horizon ran a real test (``passed`` or ``failed``)
+    - ``passed``            — True iff every horizon ran AND every one passed; False if any
+                              ran and failed; None otherwise (coverage gap)
+    - ``in_sample_present`` — True iff at least one ran-test had an in-sample source label
+    - ``in_sample_passed``  — same rule as ``passed`` but scoped to in-sample results
+    - ``oos_present``       — same as ``in_sample_present`` for OOS
+    - ``oos_passed``        — same as ``in_sample_passed`` for OOS
+    - ``scope``             — "none" / "in_sample" / "oos" / "mixed"
+
+    The split is what makes ``classify_candidate_readiness`` able to refuse
+    promotion when the only passing evidence is in-sample (today's reality
+    while B4 OOS validation is unbuilt). Keep ``present`` / ``passed`` for
+    callers that just want the union; new callers should consume the
+    scope-split fields directly.
+    """
+    out = {
+        "present": False,
+        "passed": None,
+        "in_sample_present": False,
+        "in_sample_passed": None,
+        "oos_present": False,
+        "oos_passed": None,
+        "scope": "none",
+    }
     if not per_horizon_results:
-        return False, None
-    statuses = [r.get("status") for r in per_horizon_results.values()]
-    ran = [s for s in statuses if s in ("passed", "failed")]
-    if not ran:
-        return False, None
-    present = True
-    if any(s == "failed" for s in ran):
-        return present, False
-    # No failures among those that ran. Pass only if every viable horizon
-    # actually ran (no insufficient_data anywhere).
-    if all(s == "passed" for s in statuses):
-        return present, True
-    return present, None
+        return out
+
+    overall_ran: list[bool] = []      # True for passed, False for failed
+    in_sample_ran: list[bool] = []
+    oos_ran: list[bool] = []
+    in_sample_insufficient = False
+    oos_insufficient = False
+    unscoped_insufficient = False     # insufficient_data with no recognizable source
+
+    for res in per_horizon_results.values():
+        status = res.get("status")
+        source = res.get("score_observations_source")
+        is_oos = _is_oos_source(source)
+        if status == "passed":
+            overall_ran.append(True)
+            (oos_ran if is_oos else in_sample_ran).append(True)
+        elif status == "failed":
+            overall_ran.append(False)
+            (oos_ran if is_oos else in_sample_ran).append(False)
+        else:
+            # insufficient_data: attribute by the manifest's source label.
+            # When the manifest did record a source even though observations
+            # were missing, attribute the gap to that axis; otherwise it
+            # belongs to a generic "unscoped" bucket that counts as a coverage
+            # gap for the overall ``passed`` calculation.
+            if is_oos:
+                oos_insufficient = True
+            elif isinstance(source, str) and source.strip():
+                in_sample_insufficient = True
+            else:
+                unscoped_insufficient = True
+
+    any_insufficient = in_sample_insufficient or oos_insufficient or unscoped_insufficient
+
+    if overall_ran:
+        out["present"] = True
+        if any(not r for r in overall_ran):
+            out["passed"] = False
+        elif any_insufficient:
+            out["passed"] = None
+        else:
+            out["passed"] = True
+
+    if in_sample_ran:
+        out["in_sample_present"] = True
+        if any(not r for r in in_sample_ran):
+            out["in_sample_passed"] = False
+        elif in_sample_insufficient:
+            out["in_sample_passed"] = None
+        else:
+            out["in_sample_passed"] = True
+
+    if oos_ran:
+        out["oos_present"] = True
+        if any(not r for r in oos_ran):
+            out["oos_passed"] = False
+        elif oos_insufficient:
+            out["oos_passed"] = None
+        else:
+            out["oos_passed"] = True
+
+    if in_sample_ran and oos_ran:
+        out["scope"] = "mixed"
+    elif in_sample_ran:
+        out["scope"] = "in_sample"
+    elif oos_ran:
+        out["scope"] = "oos"
+    else:
+        out["scope"] = "none"
+
+    return out
 
 
 def _compute_promotion_disposition(
     *,
     state: str,
     has_viable: bool,
-    statistical_validation_present: bool,
-    statistical_validation_passed: object,
+    in_sample_validation_present: bool,
+    in_sample_validation_passed: object,
+    oos_validation_present: bool,
+    oos_validation_passed: object,
 ) -> tuple[bool, str]:
-    """Map (state, statistical-validation) into the promotion axis.
+    """Map (state, scope-split statistical-validation) into the promotion axis.
 
-    Promotion is a *second* axis on top of readiness. Readiness ("how did
-    training + safety look?") is necessary but not sufficient for promotion;
-    statistical validation is an independent gate. Keeping the fields
-    separate prevents future automation from reading ``partial_ready=true``
-    or ``degraded_candidate=true`` as ``promotion_ready=true``.
+    Promotion is a *second* axis on top of readiness. Readiness ("did training
+    and safety look OK?") is necessary but not sufficient. Statistical
+    validation is an independent gate, AND it is further split by scope:
+    in-sample evidence (today's reality, ``score_observations_source ==
+    "threshold_tune_slice"``) **cannot** set ``promotion_ready=True``. Only a
+    clean OOS-source validation can.
 
-    Disposition order (most-blocking first):
+    Disposition values:
 
-    - ``blocked_not_ready``                    — ``state == "not_ready"``.
-    - ``ready_full_family``                    — ``state == "full_family_ready"``
-                                                 AND statistical validation is
-                                                 present AND passed.
-    - ``hold_pending_statistical_validation``  — has at least one viable horizon
-                                                 AND statistical validation is
-                                                 missing or did not pass. This is
-                                                 where the current candidate sits
-                                                 until B3 lands.
-    - ``hold_partial_degraded``                — partial/degraded with statistical
-                                                 validation present-and-passed
-                                                 but not the full family. Reserved
-                                                 for the B3+B4 regime; not
-                                                 reachable from this PR's
-                                                 hard-coded stat-validation
-                                                 stub.
+    - ``blocked_not_ready``                  — ``state == "not_ready"``.
+    - ``ready_full_family``                  — ``state == "full_family_ready"``
+                                               AND OOS validation present and
+                                               passed. The ONLY disposition that
+                                               sets ``promotion_ready=True``.
+    - ``full_family_in_sample_validated``    — full family, in-sample present
+                                               and passed, no OOS pass yet. Not
+                                               promotable.
+    - ``partial_oos_validated``              — partial/degraded with viable
+                                               horizons, OOS validation present
+                                               and passed. Not promotable while
+                                               the family is partial.
+    - ``partial_in_sample_validated``        — partial/degraded with viable
+                                               horizons, in-sample present and
+                                               passed, no OOS pass. Not
+                                               promotable.
+    - ``hold_pending_statistical_validation`` — at least one viable horizon
+                                                but no scope has both present
+                                                AND passed (or stat validation
+                                                failed).
+
+    The old ``hold_partial_degraded`` value is no longer emitted; today's
+    in-sample-only landing for a degraded candidate now reports
+    ``partial_in_sample_validated``, and a future OOS-passing partial would
+    report ``partial_oos_validated``.
     """
-    stat_promotable = bool(
-        statistical_validation_present and statistical_validation_passed is True
+    oos_promotable = bool(oos_validation_present and oos_validation_passed is True)
+    in_sample_promotable = bool(
+        in_sample_validation_present and in_sample_validation_passed is True
     )
+
     if state == "not_ready":
         return False, "blocked_not_ready"
-    if state == "full_family_ready" and stat_promotable:
-        return True, "ready_full_family"
-    if has_viable and not stat_promotable:
+
+    if state == "full_family_ready":
+        if oos_promotable:
+            return True, "ready_full_family"
+        if in_sample_promotable:
+            return False, "full_family_in_sample_validated"
         return False, "hold_pending_statistical_validation"
-    return False, "hold_partial_degraded"
+
+    # partial_ready or degraded_candidate.
+    if has_viable:
+        if oos_promotable:
+            return False, "partial_oos_validated"
+        if in_sample_promotable:
+            return False, "partial_in_sample_validated"
+        return False, "hold_pending_statistical_validation"
+
+    # Defensive: not_ready / full_family_ready handled above; anything else
+    # without a viable horizon should not appear in practice.
+    return False, "hold_pending_statistical_validation"
 
 
 def classify_candidate_readiness(report: dict) -> dict:
@@ -1044,13 +1141,28 @@ def classify_candidate_readiness(report: dict) -> dict:
     statistical_validation_per_horizon = run_statistical_validation(
         per_horizon, viable_set=viable_set_for_validation
     )
-    statistical_validation_present, statistical_validation_passed = (
-        _aggregate_statistical_validation(statistical_validation_per_horizon)
-    )
+    sv_agg = _aggregate_statistical_validation(statistical_validation_per_horizon)
+    statistical_validation_present = bool(sv_agg["present"])
+    statistical_validation_passed = sv_agg["passed"]
+    in_sample_validation_present = bool(sv_agg["in_sample_present"])
+    in_sample_validation_passed = sv_agg["in_sample_passed"]
+    oos_validation_present = bool(sv_agg["oos_present"])
+    oos_validation_passed = sv_agg["oos_passed"]
+    validation_scope = sv_agg["scope"]
+    # OOS validation is unconditionally required for promotion today. When
+    # B4 lands and the policy moves (e.g. some horizons OOS, others
+    # walk-forward), this stays True — the field is the contract, not the
+    # implementation detail.
+    oos_validation_required = True
+
     if viable_horizons and not statistical_validation_present:
         reasons.append("statistical_validation_missing")
     if statistical_validation_present and statistical_validation_passed is False:
         reasons.append("statistical_validation_failed")
+    if viable_horizons and not oos_validation_present:
+        reasons.append("oos_validation_missing")
+    if oos_validation_present and oos_validation_passed is False:
+        reasons.append("oos_validation_failed")
     # Surface per-horizon insufficient_data so the reason list is actionable.
     for key, res in statistical_validation_per_horizon.items():
         if res.get("status") == "insufficient_data":
@@ -1091,8 +1203,10 @@ def classify_candidate_readiness(report: dict) -> dict:
     promotion_ready, promotion_disposition = _compute_promotion_disposition(
         state=state,
         has_viable=bool(viable_horizons),
-        statistical_validation_present=statistical_validation_present,
-        statistical_validation_passed=statistical_validation_passed,
+        in_sample_validation_present=in_sample_validation_present,
+        in_sample_validation_passed=in_sample_validation_passed,
+        oos_validation_present=oos_validation_present,
+        oos_validation_passed=oos_validation_passed,
     )
 
     # Dedupe reasons while preserving order.
@@ -1119,6 +1233,16 @@ def classify_candidate_readiness(report: dict) -> dict:
         "statistical_validation_present": statistical_validation_present,
         "statistical_validation_passed": statistical_validation_passed,
         "statistical_validation": statistical_validation_per_horizon,
+        # Scope-split validation axis. ``oos_validation_passed=True`` is the
+        # only path that can set ``promotion_ready=True``; in-sample-only
+        # passing evidence lands in ``full_family_in_sample_validated`` /
+        # ``partial_in_sample_validated`` per disposition.
+        "validation_scope": validation_scope,
+        "oos_validation_required": bool(oos_validation_required),
+        "oos_validation_present": bool(oos_validation_present),
+        "oos_validation_passed": oos_validation_passed,
+        "in_sample_validation_present": bool(in_sample_validation_present),
+        "in_sample_validation_passed": in_sample_validation_passed,
         "reasons": reasons_ordered,
     }
 
@@ -1305,9 +1429,17 @@ def _print_readiness_summary(readiness: dict) -> None:
     sv_present = readiness.get("statistical_validation_present")
     sv_passed = readiness.get("statistical_validation_passed")
     sv_per_horizon = readiness.get("statistical_validation") or {}
+    scope = readiness.get("validation_scope")
+    oos_required = readiness.get("oos_validation_required")
+    oos_present = readiness.get("oos_validation_present")
+    oos_passed = readiness.get("oos_validation_passed")
     print(
         f"  statistical_validation:   required={sv_required} "
-        f"present={sv_present} passed={sv_passed}"
+        f"present={sv_present} passed={sv_passed} scope={scope}"
+    )
+    print(
+        f"  oos_validation:           required={oos_required} "
+        f"present={oos_present} passed={oos_passed}"
     )
     for key, res in sv_per_horizon.items():
         status = res.get("status")

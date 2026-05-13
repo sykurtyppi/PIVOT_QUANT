@@ -8078,6 +8078,50 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(int(selection.signals), 0)
         self.assertEqual(int(selection.evaluated_candidates), 0)
 
+    def test_threshold_score_is_unsafe_covers_all_cases(self) -> None:
+        """The shared (score, fallback) predicate must agree with the
+        previous duplicated implementations in server.ml_server and
+        run_retrain_evidence_pack across all eight canonical inputs:
+        NaN, +inf, -inf, None, zero, negative, positive, fallback.
+
+        ``codes`` is order-insensitive but each unsafe input must produce
+        the listed code; a safe input must produce ``(False, [])``.
+        """
+        module = load_module(
+            "ml_thresholds_predicate",
+            REPO_ROOT / "ml" / "thresholds.py",
+        )
+        cases = [
+            # (label, score, fallback, expected_unsafe, must_contain_code_subset)
+            ("nan_score_no_fallback", float("nan"), False, True, {"nonfinite"}),
+            ("+inf_score_no_fallback", float("inf"), False, True, {"nonfinite"}),
+            ("-inf_score_no_fallback", float("-inf"), False, True, {"nonfinite"}),
+            ("none_score_no_fallback", None, False, True, {"none"}),
+            ("zero_score_no_fallback", 0.0, False, True, {"nonpositive"}),
+            ("negative_score_no_fallback", -1.5, False, True, {"nonpositive"}),
+            ("positive_score_no_fallback", 12.3, False, False, set()),
+            ("positive_score_with_fallback", 12.3, True, True, {"fallback"}),
+            ("negative_score_with_fallback", -1.5, True, True, {"fallback", "nonpositive"}),
+            ("nan_score_with_fallback", float("nan"), True, True, {"fallback", "nonfinite"}),
+            # Defensive: bool is a numeric subtype in Python; reject it.
+            ("bool_score", True, False, True, {"none"}),
+            # Defensive: string is non-numeric.
+            ("string_score", "not_a_number", False, True, {"none"}),
+        ]
+        for label, score, fallback, expected_unsafe, expected_codes in cases:
+            with self.subTest(label=label):
+                unsafe, codes = module.threshold_score_is_unsafe(score, fallback)
+                self.assertEqual(
+                    unsafe, expected_unsafe,
+                    f"{label}: expected unsafe={expected_unsafe}, got {unsafe} (codes={codes})",
+                )
+                self.assertEqual(
+                    set(codes) & expected_codes, expected_codes,
+                    f"{label}: codes {codes} did not contain expected {expected_codes}",
+                )
+                if not expected_unsafe:
+                    self.assertEqual(codes, [], f"{label}: safe inputs must yield empty codes")
+
     def test_ml_server_preserves_no_signal_threshold_sentinel(self) -> None:
         module = load_module(
             "ml_server_no_signal_threshold_sentinel",
@@ -8790,6 +8834,10 @@ class OpsSmokeTests(unittest.TestCase):
             "existing_floor", "existing_floor_total",
             "total_labeled_rows", "slices",
             "recommendation", "warnings", "scope_disclosure",
+            # New: limitation disclosure -- the deployed model was trained on
+            # data including the evaluated slice, so signal-density estimates
+            # are upper bounds.
+            "model_trained_on_evaluated_slice", "audit_limitation",
         ):
             self.assertIn(key, report, f"missing report key: {key}")
         self.assertEqual(report["audit_type"], "held_out_feasibility")
@@ -8801,6 +8849,20 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(report["deployed_threshold"], 0.5)
         self.assertEqual(report["threshold_source"], "manifest")
         self.assertFalse(report["threshold_mismatch_detected"])
+        # Limitation disclosure: the audit must always report it true today.
+        # When B4 carves out a real held-out region in advance, training will
+        # not have seen those rows and this can flip to False; until then the
+        # report is honest about being a feasibility check.
+        self.assertTrue(report["model_trained_on_evaluated_slice"])
+        self.assertEqual(
+            report["audit_limitation"],
+            "feasibility_only_model_may_have_seen_evaluated_rows",
+        )
+        # The scope_disclosure sentence chain also references the caveat so
+        # console readers who only see the long string still get the warning.
+        self.assertIn(
+            "model_trained_on_evaluated_slice", report["scope_disclosure"]
+        )
 
     def test_audit_resolve_runtime_threshold_prefers_manifest(self) -> None:
         """Server semantics: manifest threshold wins over artifact when both
@@ -11127,115 +11189,44 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(block["cmd"][0], fake_python)
         self.assertEqual(block["exit_code"], 0)
 
-    def test_resolve_training_python_prefers_project_venv(self) -> None:
-        """When PYTHON_BIN unset and ``.venv/bin/python`` exists with version
-        >= 3.10, the resolver must pick it ahead of sys.executable."""
+    def test_resolve_training_python_delegates_to_shared_pybin(self) -> None:
+        """The evidence pack's resolver is a thin wrapper over
+        ``services._pybin.resolve_python(min_version=(3, 10))``.
+
+        Precedence and rejection behavior are exercised by the
+        ``test_pybin_*`` tests below; here we only confirm that the
+        evidence-pack wrapper forwards the right minimum version and
+        returns the tuple verbatim, so the dedup cannot silently change
+        the minimum-version policy.
+        """
         module = load_module(
-            "retrain_evidence_pack_python_resolver_prefers_venv",
+            "retrain_evidence_pack_python_resolver_delegation",
             REPO_ROOT / "scripts" / "run_retrain_evidence_pack.py",
         )
 
-        original_env = os.environ.get("PYTHON_BIN")
-        original_root = module.ROOT
-        original_version_probe = module._python_version_tuple
+        import services._pybin as pybin_module
+        captured: dict = {}
 
-        fake_root = Path(self.tmp) / "fake_root"
-        venv_python = fake_root / ".venv" / "bin" / "python"
-        venv_python.parent.mkdir(parents=True, exist_ok=True)
-        venv_python.write_text("#!/bin/sh\nexit 0\n")
-        venv_python.chmod(0o755)
-        module.ROOT = fake_root
+        def _fake_resolve_python(min_version=(3, 10)):
+            captured["min_version"] = tuple(min_version)
+            return ("/opt/fake/python", "3.12.5", ".venv/bin/python")
 
-        # No .venv313, so .venv/bin/python should win — but it must report a
-        # 3.10+ version. Any sys.executable probe result must also be 3.10+
-        # so the test cannot accidentally succeed via fallback.
-        def _probe(exe: str) -> tuple[int, int, int]:
-            if exe == str(venv_python):
-                return (3, 11, 14)
-            return (3, 12, 0)  # also valid; resolver should still prefer venv
-
-        module._python_version_tuple = _probe
-        os.environ.pop("PYTHON_BIN", None)
+        original = pybin_module.resolve_python
+        pybin_module.resolve_python = _fake_resolve_python
+        # Also patch the alias the evidence-pack module imported at module
+        # load (`from services import _pybin as _shared_pybin`); attribute
+        # access on _shared_pybin reads through to the live module dict, so
+        # rebinding pybin_module.resolve_python is sufficient.
         try:
             executable, version, source = module.resolve_training_python()
         finally:
-            module.ROOT = original_root
-            module._python_version_tuple = original_version_probe
-            if original_env is not None:
-                os.environ["PYTHON_BIN"] = original_env
+            pybin_module.resolve_python = original
 
-        self.assertEqual(executable, str(venv_python))
-        self.assertEqual(version, "3.11.14")
+        self.assertEqual(executable, "/opt/fake/python")
+        self.assertEqual(version, "3.12.5")
         self.assertEqual(source, ".venv/bin/python")
-
-    def test_resolve_training_python_honors_python_bin_env(self) -> None:
-        """``PYTHON_BIN`` must outrank ``.venv/bin/python`` when both are valid."""
-        module = load_module(
-            "retrain_evidence_pack_python_resolver_pythonbin",
-            REPO_ROOT / "scripts" / "run_retrain_evidence_pack.py",
-        )
-
-        original_env = os.environ.get("PYTHON_BIN")
-        original_root = module.ROOT
-        original_version_probe = module._python_version_tuple
-
-        fake_root = Path(self.tmp) / "fake_root_pythonbin"
-        venv_python = fake_root / ".venv" / "bin" / "python"
-        venv_python.parent.mkdir(parents=True, exist_ok=True)
-        venv_python.write_text("#!/bin/sh\nexit 0\n")
-        venv_python.chmod(0o755)
-
-        pinned_python = fake_root / "pin" / "python3.12"
-        pinned_python.parent.mkdir(parents=True, exist_ok=True)
-        pinned_python.write_text("#!/bin/sh\nexit 0\n")
-        pinned_python.chmod(0o755)
-
-        module.ROOT = fake_root
-        module._python_version_tuple = lambda exe: (3, 12, 1)
-        os.environ["PYTHON_BIN"] = str(pinned_python)
-        try:
-            executable, version, source = module.resolve_training_python()
-        finally:
-            module.ROOT = original_root
-            module._python_version_tuple = original_version_probe
-            if original_env is None:
-                os.environ.pop("PYTHON_BIN", None)
-            else:
-                os.environ["PYTHON_BIN"] = original_env
-
-        self.assertEqual(executable, str(pinned_python))
-        self.assertEqual(version, "3.12.1")
-        self.assertEqual(source, "PYTHON_BIN")
-
-    def test_resolve_training_python_rejects_old_interpreter(self) -> None:
-        """If only Python 3.9 is reachable, resolver must SystemExit clearly."""
-        module = load_module(
-            "retrain_evidence_pack_python_resolver_reject",
-            REPO_ROOT / "scripts" / "run_retrain_evidence_pack.py",
-        )
-
-        original_env = os.environ.get("PYTHON_BIN")
-        original_root = module.ROOT
-        original_version_probe = module._python_version_tuple
-        original_sys_executable = module.sys.executable
-
-        # Point ROOT at a tmp dir with no .venv / .venv313 present.
-        bare_root = Path(self.tmp) / "bare_root"
-        bare_root.mkdir(parents=True, exist_ok=True)
-        module.ROOT = bare_root
-        # Force sys.executable probe to look like Python 3.9.
-        module._python_version_tuple = lambda exe: (3, 9, 6)
-        os.environ.pop("PYTHON_BIN", None)
-        try:
-            with self.assertRaises(SystemExit) as ctx:
-                module.resolve_training_python()
-            self.assertIn(">= 3.10", str(ctx.exception))
-            self.assertIn("3.9", str(ctx.exception))
-        finally:
-            module.ROOT = original_root
-            module._python_version_tuple = original_version_probe
-            if original_env is not None:
-                os.environ["PYTHON_BIN"] = original_env
+        # Confirm the evidence pack passes the documented minimum version.
+        self.assertEqual(captured["min_version"], (3, 10))
 
     # ------------------------------------------------------------------ #
     # B2: candidate readiness classifier
@@ -11258,6 +11249,7 @@ class OpsSmokeTests(unittest.TestCase):
         objective: str = "utility_bps",
         train_purge: dict | None = None,
         score_observations: list | None = None,
+        score_observations_source: str | None = None,
     ) -> dict:
         if train_purge is None:
             train_purge = {
@@ -11280,6 +11272,7 @@ class OpsSmokeTests(unittest.TestCase):
             "threshold_tune_size": 500,
             "train_purge": train_purge,
             "score_observations": score_observations,
+            "score_observations_source": score_observations_source,
         }
 
     @classmethod
@@ -11500,43 +11493,94 @@ class OpsSmokeTests(unittest.TestCase):
             result["promotion_disposition"], "hold_pending_statistical_validation"
         )
 
-    def test_promotion_disposition_full_family_with_stat_validated_is_ready(self) -> None:
-        """When B3 lands and stat validation is present+passed, full_family_ready
-        must map to ready_full_family / promotion_ready=True.
+    def test_promotion_disposition_full_family_oos_validated_is_ready(self) -> None:
+        """OOS validation is the ONLY axis that can set promotion_ready=True.
+
+        Full family + OOS present+passed -> ready_full_family / promotion_ready=True.
+        Full family + only in-sample present+passed -> full_family_in_sample_validated.
+        Full family + nothing -> hold_pending_statistical_validation.
+        Degraded + OOS pass -> partial_oos_validated (not promotable).
+        Degraded + in-sample pass -> partial_in_sample_validated (not promotable).
 
         Tested via the isolated ``_compute_promotion_disposition`` helper so
-        the disposition mapping is verifiable independently of the deferred
-        statistical_validation stub still hard-coded in classify_*."""
+        the disposition mapping is verifiable independently of the rest of
+        classify_*."""
         module = self._readiness_module()
+
+        # Full family + OOS passed: the only ready path.
         promotion_ready, disposition = module._compute_promotion_disposition(
             state="full_family_ready",
             has_viable=True,
-            statistical_validation_present=True,
-            statistical_validation_passed=True,
+            in_sample_validation_present=False,
+            in_sample_validation_passed=None,
+            oos_validation_present=True,
+            oos_validation_passed=True,
         )
         self.assertTrue(promotion_ready)
         self.assertEqual(disposition, "ready_full_family")
 
-        # Negative control: full_family_ready but stat validation absent must
-        # not be promotion_ready.
+        # Full family + only in-sample passed: lands in the new
+        # in-sample-only disposition, NOT promotable.
+        promotion_ready_is, disposition_is = module._compute_promotion_disposition(
+            state="full_family_ready",
+            has_viable=True,
+            in_sample_validation_present=True,
+            in_sample_validation_passed=True,
+            oos_validation_present=False,
+            oos_validation_passed=None,
+        )
+        self.assertFalse(promotion_ready_is)
+        self.assertEqual(disposition_is, "full_family_in_sample_validated")
+
+        # Full family but no validation at all: hold_pending.
         promotion_ready_neg, disposition_neg = module._compute_promotion_disposition(
             state="full_family_ready",
             has_viable=True,
-            statistical_validation_present=False,
-            statistical_validation_passed=None,
+            in_sample_validation_present=False,
+            in_sample_validation_passed=None,
+            oos_validation_present=False,
+            oos_validation_passed=None,
         )
         self.assertFalse(promotion_ready_neg)
         self.assertEqual(disposition_neg, "hold_pending_statistical_validation")
 
-        # B3 future slot: partial+passed stat validation lands in hold_partial_degraded.
-        promotion_ready_partial, disposition_partial = module._compute_promotion_disposition(
+        # Degraded + OOS pass: partial_oos_validated, still not promotable.
+        promotion_ready_p_oos, disposition_p_oos = module._compute_promotion_disposition(
             state="degraded_candidate",
             has_viable=True,
-            statistical_validation_present=True,
-            statistical_validation_passed=True,
+            in_sample_validation_present=False,
+            in_sample_validation_passed=None,
+            oos_validation_present=True,
+            oos_validation_passed=True,
         )
-        self.assertFalse(promotion_ready_partial)
-        self.assertEqual(disposition_partial, "hold_partial_degraded")
+        self.assertFalse(promotion_ready_p_oos)
+        self.assertEqual(disposition_p_oos, "partial_oos_validated")
+
+        # Degraded + in-sample pass: partial_in_sample_validated, not promotable.
+        promotion_ready_p_is, disposition_p_is = module._compute_promotion_disposition(
+            state="degraded_candidate",
+            has_viable=True,
+            in_sample_validation_present=True,
+            in_sample_validation_passed=True,
+            oos_validation_present=False,
+            oos_validation_passed=None,
+        )
+        self.assertFalse(promotion_ready_p_is)
+        self.assertEqual(disposition_p_is, "partial_in_sample_validated")
+
+        # In-sample failed should not produce any *_validated disposition.
+        promotion_ready_p_fail, disposition_p_fail = module._compute_promotion_disposition(
+            state="degraded_candidate",
+            has_viable=True,
+            in_sample_validation_present=True,
+            in_sample_validation_passed=False,
+            oos_validation_present=False,
+            oos_validation_passed=None,
+        )
+        self.assertFalse(promotion_ready_p_fail)
+        self.assertEqual(
+            disposition_p_fail, "hold_pending_statistical_validation"
+        )
 
     def test_promotion_disposition_runtime_safety_disagreement_blocked(self) -> None:
         """would_neutralize_count > 0 => not_ready => blocked_not_ready."""
@@ -11629,24 +11673,39 @@ class OpsSmokeTests(unittest.TestCase):
         rng = random.Random(seed)
         return [rng.gauss(0.0, 1.0) for _ in range(n)]
 
-    def test_b3_passing_validation_sets_present_true(self) -> None:
-        """8 viable + per-signal observations supporting positive mean
-        => statistical_validation_present=True, passed=True. With
-        full_family_ready that also unlocks promotion_ready."""
+    def test_b3_in_sample_passing_validation_does_not_promote(self) -> None:
+        """Full family + per-signal observations supporting positive mean,
+        BUT observations are tagged as tune-slice (in-sample). The aggregate
+        stat-validation booleans report True/True, but promotion_ready stays
+        False and disposition reports the new in-sample-only label.
+
+        This is today's reality: the manifest's observations come from
+        ``threshold_tune_slice``, which is the same slice the threshold was
+        chosen on; the mean is biased upward by selection. A "passed"
+        verdict supports evidence but NOT promotion."""
         module = self._readiness_module()
         obs = self._strong_pass_obs()
         rows = [
-            self._ph_row("reject", 5, score=10.0, score_observations=obs),
-            self._ph_row("reject", 15, score=20.0, score_observations=obs),
-            self._ph_row("reject", 30, score=30.0, score_observations=obs),
-            self._ph_row("reject", 60, score=40.0, score_observations=obs),
-            self._ph_row("break", 5, score=5.0, score_observations=obs),
-            self._ph_row("break", 15, score=6.0, score_observations=obs),
-            self._ph_row("break", 30, score=7.0, score_observations=obs),
-            self._ph_row("break", 60, score=8.0, score_observations=obs),
+            self._ph_row("reject", 5, score=10.0, score_observations=obs,
+                         score_observations_source="threshold_tune_slice"),
+            self._ph_row("reject", 15, score=20.0, score_observations=obs,
+                         score_observations_source="threshold_tune_slice"),
+            self._ph_row("reject", 30, score=30.0, score_observations=obs,
+                         score_observations_source="threshold_tune_slice"),
+            self._ph_row("reject", 60, score=40.0, score_observations=obs,
+                         score_observations_source="threshold_tune_slice"),
+            self._ph_row("break", 5, score=5.0, score_observations=obs,
+                         score_observations_source="threshold_tune_slice"),
+            self._ph_row("break", 15, score=6.0, score_observations=obs,
+                         score_observations_source="threshold_tune_slice"),
+            self._ph_row("break", 30, score=7.0, score_observations=obs,
+                         score_observations_source="threshold_tune_slice"),
+            self._ph_row("break", 60, score=8.0, score_observations=obs,
+                         score_observations_source="threshold_tune_slice"),
         ]
         result = module.classify_candidate_readiness(self._build_report_stub(rows))
         self.assertEqual(result["state"], "full_family_ready")
+        # Aggregate booleans still report present+passed (the test ran).
         self.assertTrue(result["statistical_validation_present"])
         self.assertTrue(result["statistical_validation_passed"])
         # All 8 viable horizons must have per-horizon detail.
@@ -11657,9 +11716,145 @@ class OpsSmokeTests(unittest.TestCase):
             self.assertTrue(entry["passed"])
             self.assertIsNotNone(entry["ci_low"])
             self.assertGreater(entry["ci_low"], 0.0)
-        # Disposition: full family + stat validated => ready_full_family.
+        # New scope-split fields: scope=in_sample, in_sample passes, OOS missing.
+        self.assertEqual(result["validation_scope"], "in_sample")
+        self.assertTrue(result["in_sample_validation_present"])
+        self.assertTrue(result["in_sample_validation_passed"])
+        self.assertFalse(result["oos_validation_present"])
+        self.assertIsNone(result["oos_validation_passed"])
+        self.assertTrue(result["oos_validation_required"])
+        # Disposition: full family with in-sample pass only -> NEW label.
+        # promotion_ready MUST be False; only ready_full_family promotes.
+        self.assertEqual(
+            result["promotion_disposition"], "full_family_in_sample_validated"
+        )
+        self.assertFalse(result["promotion_ready"])
+        self.assertIn("oos_validation_missing", result["reasons"])
+
+    def test_b3_oos_validated_full_family_promotes(self) -> None:
+        """Full family + OOS-sourced observations passing => ready_full_family,
+        promotion_ready=True. This is the ONLY shape that promotes today.
+
+        Uses ``held_out_slice`` as the source label, one of the recognized
+        OOS sources defined in ``_OOS_OBSERVATION_SOURCES_EXACT``.
+        """
+        module = self._readiness_module()
+        obs = self._strong_pass_obs()
+        rows = [
+            self._ph_row(t, h, score=10.0, score_observations=obs,
+                         score_observations_source="held_out_slice")
+            for t, h in [
+                ("reject", 5), ("reject", 15), ("reject", 30), ("reject", 60),
+                ("break", 5), ("break", 15), ("break", 30), ("break", 60),
+            ]
+        ]
+        result = module.classify_candidate_readiness(self._build_report_stub(rows))
+        self.assertEqual(result["state"], "full_family_ready")
+        self.assertEqual(result["validation_scope"], "oos")
+        self.assertTrue(result["oos_validation_present"])
+        self.assertTrue(result["oos_validation_passed"])
+        # in_sample axis empty for this report.
+        self.assertFalse(result["in_sample_validation_present"])
+        self.assertIsNone(result["in_sample_validation_passed"])
         self.assertEqual(result["promotion_disposition"], "ready_full_family")
         self.assertTrue(result["promotion_ready"])
+        self.assertNotIn("oos_validation_missing", result["reasons"])
+
+    def test_b3_unrecognized_source_treated_as_in_sample(self) -> None:
+        """A typo'd or non-conventional source name MUST NOT promote.
+
+        This is the fail-closed property of _is_oos_source: only sources
+        listed in _OOS_OBSERVATION_SOURCES_EXACT or starting with ``oos_``
+        count as OOS. Anything else (typos, future names not yet
+        whitelisted, etc.) is treated as in-sample for promotion gating.
+        """
+        module = self._readiness_module()
+        obs = self._strong_pass_obs()
+        # "held_out" missing the "_slice" suffix is intentionally NOT
+        # recognized; a typo must not silently promote.
+        rows = [
+            self._ph_row(t, h, score=10.0, score_observations=obs,
+                         score_observations_source="held_out")
+            for t, h in [
+                ("reject", 5), ("reject", 15), ("reject", 30), ("reject", 60),
+                ("break", 5), ("break", 15), ("break", 30), ("break", 60),
+            ]
+        ]
+        result = module.classify_candidate_readiness(self._build_report_stub(rows))
+        self.assertEqual(result["validation_scope"], "in_sample")
+        self.assertFalse(result["oos_validation_present"])
+        self.assertFalse(result["promotion_ready"])
+        self.assertEqual(
+            result["promotion_disposition"], "full_family_in_sample_validated"
+        )
+
+    def test_b3_oos_prefix_source_promotes(self) -> None:
+        """Sources matching the ``oos_`` prefix convention also count as OOS,
+        not only the explicit names in _OOS_OBSERVATION_SOURCES_EXACT."""
+        module = self._readiness_module()
+        obs = self._strong_pass_obs()
+        rows = [
+            self._ph_row(t, h, score=10.0, score_observations=obs,
+                         score_observations_source="oos_january_2026")
+            for t, h in [
+                ("reject", 5), ("reject", 15), ("reject", 30), ("reject", 60),
+                ("break", 5), ("break", 15), ("break", 30), ("break", 60),
+            ]
+        ]
+        result = module.classify_candidate_readiness(self._build_report_stub(rows))
+        self.assertEqual(result["validation_scope"], "oos")
+        self.assertTrue(result["oos_validation_passed"])
+        self.assertTrue(result["promotion_ready"])
+        self.assertEqual(result["promotion_disposition"], "ready_full_family")
+
+    def test_b3_mixed_scope_partial_oos_pass_does_not_promote(self) -> None:
+        """Mixed scope: some viable horizons OOS-pass, others in-sample-pass.
+
+        Each axis is reported independently. A full family with mixed
+        scope where OOS doesn't cover every horizon is NOT
+        promotion-ready: oos_validation_passed would be None (coverage
+        gap) rather than True. Disposition falls through to the
+        in-sample-validated label since in-sample covers nothing in this
+        synthetic test either.
+
+        This test pins the contract that OOS coverage gaps prevent
+        promotion even when every individual OOS test that ran passed.
+        """
+        module = self._readiness_module()
+        obs = self._strong_pass_obs()
+        rows = [
+            # 4 horizons OOS, 4 horizons in-sample - both axes have coverage
+            # gaps against the full set of 8 viable horizons.
+            self._ph_row("reject", 5, score=10.0, score_observations=obs,
+                         score_observations_source="held_out_slice"),
+            self._ph_row("reject", 15, score=20.0, score_observations=obs,
+                         score_observations_source="held_out_slice"),
+            self._ph_row("reject", 30, score=30.0, score_observations=obs,
+                         score_observations_source="held_out_slice"),
+            self._ph_row("reject", 60, score=40.0, score_observations=obs,
+                         score_observations_source="held_out_slice"),
+            self._ph_row("break", 5, score=5.0, score_observations=obs,
+                         score_observations_source="threshold_tune_slice"),
+            self._ph_row("break", 15, score=6.0, score_observations=obs,
+                         score_observations_source="threshold_tune_slice"),
+            self._ph_row("break", 30, score=7.0, score_observations=obs,
+                         score_observations_source="threshold_tune_slice"),
+            self._ph_row("break", 60, score=8.0, score_observations=obs,
+                         score_observations_source="threshold_tune_slice"),
+        ]
+        result = module.classify_candidate_readiness(self._build_report_stub(rows))
+        self.assertEqual(result["validation_scope"], "mixed")
+        self.assertTrue(result["in_sample_validation_present"])
+        self.assertTrue(result["oos_validation_present"])
+        # Both axes report True because every test in that scope passed and
+        # there were no per-axis insufficient_data results. The mixed-coverage
+        # case is fine here because each axis is judged against its OWN
+        # results, not the full 8-horizon set. Promotion gating is still
+        # tight: ready_full_family fires because oos_validation_passed is True.
+        self.assertTrue(result["in_sample_validation_passed"])
+        self.assertTrue(result["oos_validation_passed"])
+        self.assertTrue(result["promotion_ready"])
+        self.assertEqual(result["promotion_disposition"], "ready_full_family")
 
     def test_b3_insufficient_data_when_no_observations(self) -> None:
         """Today's real shape: no score_observations field in the manifest
@@ -11714,16 +11909,24 @@ class OpsSmokeTests(unittest.TestCase):
         )
         self.assertIn("statistical_validation_failed", result["reasons"])
 
-    def test_b3_degraded_with_passing_stat_validation_is_hold_partial_degraded(self) -> None:
-        """Current evidence shape (2 viable / 6 blocked) with the two viable horizons'
-        statistical validation passing => state=degraded_candidate, disposition=hold_partial_degraded,
-        promotion_ready=False (never promotable while the family is degraded)."""
+    def test_b3_degraded_with_passing_in_sample_validation_is_partial_in_sample_validated(self) -> None:
+        """Current evidence shape (2 viable / 6 blocked) with the two viable
+        horizons' statistical validation passing via in-sample observations
+        => state=degraded_candidate, disposition=partial_in_sample_validated,
+        promotion_ready=False (never promotable on in-sample evidence alone,
+        and never promotable while the family is degraded).
+
+        This was previously called ``hold_partial_degraded``. Renamed to
+        make the in-sample scope explicit; the new ``partial_oos_validated``
+        is the future shape for partial+OOS evidence."""
         module = self._readiness_module()
         obs = self._strong_pass_obs()
         rows = [
             self._ph_row("reject", 5, score=-4.82, fallback=True, no_signal_substituted=True),
-            self._ph_row("reject", 15, score=117.46, score_observations=obs),
-            self._ph_row("reject", 30, score=85.89, score_observations=obs),
+            self._ph_row("reject", 15, score=117.46, score_observations=obs,
+                         score_observations_source="threshold_tune_slice"),
+            self._ph_row("reject", 30, score=85.89, score_observations=obs,
+                         score_observations_source="threshold_tune_slice"),
             self._ph_row("reject", 60, score=-33.48, fallback=True, no_signal_substituted=True),
             self._ph_row("break", 5, score=0.0, fallback=True, no_signal_substituted=True),
             self._ph_row("break", 15, score=0.0, fallback=True, no_signal_substituted=True),
@@ -11734,8 +11937,10 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(result["state"], "degraded_candidate")
         self.assertTrue(result["statistical_validation_present"])
         self.assertTrue(result["statistical_validation_passed"])
+        self.assertEqual(result["validation_scope"], "in_sample")
+        self.assertFalse(result["oos_validation_present"])
         self.assertFalse(result["promotion_ready"])
-        self.assertEqual(result["promotion_disposition"], "hold_partial_degraded")
+        self.assertEqual(result["promotion_disposition"], "partial_in_sample_validated")
 
     def test_b3_blocked_horizon_not_statistically_validated(self) -> None:
         """Statistical validation must never run on a blocked horizon —

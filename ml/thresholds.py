@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -8,6 +9,59 @@ import numpy as np
 ThresholdObjective = Literal["f1", "utility_bps"]
 ThresholdTarget = Literal["reject", "break"]
 NO_SIGNAL_THRESHOLD = float(np.nextafter(1.0, 2.0))
+
+
+def threshold_score_is_unsafe(
+    score: object,
+    fallback: object,
+) -> tuple[bool, list[str]]:
+    """Return ``(is_unsafe, codes)`` for a utility-objective threshold's
+    ``(score, fallback)`` pair.
+
+    This is the single source of truth for the predicate used by:
+
+    - ``server.ml_server.ModelRegistry._apply_runtime_threshold_safety`` —
+      to decide whether to neutralize a manifest threshold at load time.
+    - ``scripts/run_retrain_evidence_pack._horizon_viability`` — to decide
+      whether a horizon is mechanically viable for readiness.
+    - ``scripts/run_retrain_evidence_pack._reason_for_neutralization`` —
+      to populate the diagnostic ``reason`` field of
+      ``runtime_safety_dry_run.would_neutralize`` entries.
+
+    ``codes`` is a list (possibly empty) of generic reason codes:
+
+    - ``"fallback"``      — selector returned a fallback threshold.
+    - ``"none"``           — score is None or a non-coercible type.
+    - ``"nonfinite"``      — score coerces to NaN, +inf, or -inf.
+    - ``"nonpositive"``    — score is a finite number <= 0.
+
+    ``is_unsafe`` is ``len(codes) > 0``. Callers translate the generic
+    codes to their preferred external-surface strings (e.g. readiness uses
+    ``"nonpositive_utility"``; the runtime-safety dry-run uses
+    ``"nonpositive_score"``) — keep those translations in the caller, not
+    the helper, so the predicate stays cheap and reusable.
+
+    The objective check (``objective == "utility_bps"``) is intentionally
+    NOT part of this helper because the call-sites treat non-utility
+    thresholds differently: the server simply skips them, while readiness
+    reports ``wrong_objective`` as a separate reason.
+    """
+    codes: list[str] = []
+    if bool(fallback):
+        codes.append("fallback")
+    if score is None or isinstance(score, bool) or not isinstance(score, (int, float)):
+        codes.append("none")
+    else:
+        try:
+            score_f = float(score)
+        except (TypeError, ValueError):
+            codes.append("none")
+        else:
+            if not math.isfinite(score_f):
+                codes.append("nonfinite")
+            elif score_f <= 0.0:
+                codes.append("nonpositive")
+    return (len(codes) > 0), codes
 
 
 @dataclass
