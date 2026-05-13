@@ -9,15 +9,9 @@ timestamp() {
   date '+%Y-%m-%d %H:%M:%S'
 }
 
-if [ -x "${ROOT_DIR}/.venv/bin/python3" ]; then
-  PYTHON="${ROOT_DIR}/.venv/bin/python3"
-elif [ -x "${ROOT_DIR}/.venv/bin/python" ]; then
-  PYTHON="${ROOT_DIR}/.venv/bin/python"
-elif command -v python3 >/dev/null 2>&1; then
-  PYTHON="$(command -v python3)"
-else
-  echo "[$(timestamp)] ERROR restore_drill: python3 not found" >> "${LOG_DIR}/restore_drill.log"
+if ! source "${ROOT_DIR}/scripts/_pybin.sh" 2>>"${LOG_DIR}/restore_drill.log"; then
+  echo "[$(timestamp)] ERROR restore_drill: no python3.10+ found" >> "${LOG_DIR}/restore_drill.log"
   exit 1
 fi
 
-exec "${PYTHON}" "${ROOT_DIR}/scripts/backup_restore_drill.py" "$@"
+exec "${PYTHON_BIN}" "${ROOT_DIR}/scripts/backup_restore_drill.py" "$@"

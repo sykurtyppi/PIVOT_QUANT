@@ -3,6 +3,16 @@ import os
 import sys
 from pathlib import Path
 
+# Guard at import time: this script and its sibling pipeline scripts use
+# 3.10+ syntax elsewhere; fail loudly with a venv hint instead of leaving
+# the operator to debug an opaque downstream TypeError.
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+from services._pybin import assert_python_310  # noqa: E402,PLC0415
+
+assert_python_310()
+
 EXPORT_DIR = Path(os.getenv("EXPORT_DIR", "data/exports"))
 DB_PATH = Path(os.getenv("DUCKDB_PATH", "data/pivot_training.duckdb"))
 PIP_INSTALL = f"{sys.executable} -m pip install"

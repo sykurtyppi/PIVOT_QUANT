@@ -96,21 +96,14 @@ tmp.replace(state_path)
 PY
 }
 
-if [ -x "${ROOT_DIR}/.venv/bin/python3" ]; then
-  PYTHON="${ROOT_DIR}/.venv/bin/python3"
-elif [ -x "${ROOT_DIR}/.venv/bin/python" ]; then
-  PYTHON="${ROOT_DIR}/.venv/bin/python"
-elif command -v python3 >/dev/null 2>&1; then
-  PYTHON="$(command -v python3)"
-else
-  echo "[$(timestamp)] ERROR daily_report_send: python3 not found" >> "${LOG_DIR}/report_delivery.log"
+# Resolve >=3.10 Python via shared helper (replaces the previous
+# resolve-then-version-check block; the helper already enforces >=3.10).
+if ! source "${ROOT_DIR}/scripts/_pybin.sh" 2>>"${LOG_DIR}/report_delivery.log"; then
+  echo "[$(timestamp)] ERROR daily_report_send: no python3.10+ found" >> "${LOG_DIR}/report_delivery.log"
   exit 1
 fi
-
-if ! PYTHON_INFO="$("${PYTHON}" -c "import sys; assert sys.version_info >= (3, 10), f'Python {sys.version.split()[0]} too old; require >=3.10'; print(f'{sys.executable} {sys.version.split()[0]}')" 2>&1)"; then
-  echo "[$(timestamp)] ERROR daily_report_send: ${PYTHON_INFO}" >> "${LOG_DIR}/report_delivery.log"
-  exit 1
-fi
+PYTHON="${PYTHON_BIN}"
+PYTHON_INFO="$("${PYTHON}" -c "import sys; print(f'{sys.executable} {sys.version.split()[0]}')")"
 
 acquire_lock
 

@@ -9890,6 +9890,217 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(result["state"], "not_ready")
         self.assertIn("no_candidate_manifest", result["reasons"])
 
+    # ------------------------------------------------------------------ #
+    # services/_pybin.py — Python-side interpreter resolver
+    # ------------------------------------------------------------------ #
+
+    def _pybin_module(self):
+        return load_module(
+            "services_pybin",
+            REPO_ROOT / "services" / "_pybin.py",
+        )
+
+    def test_pybin_python_version_tuple_probes_real_interpreter(self) -> None:
+        module = self._pybin_module()
+        version = module.python_version_tuple(sys.executable)
+        self.assertIsNotNone(version)
+        self.assertEqual(version[0], sys.version_info[0])
+        self.assertEqual(version[1], sys.version_info[1])
+
+    def test_pybin_resolve_python_honors_python_bin_env(self) -> None:
+        """``PYTHON_BIN`` must outrank ``.venv/bin/python`` when both are valid.
+        Mirrors the precedence in scripts/run_retrain_evidence_pack.py."""
+        module = self._pybin_module()
+        original_env = os.environ.get("PYTHON_BIN")
+        original_root = module.ROOT
+        original_probe = module.python_version_tuple
+
+        fake_root = Path(self.tmp) / "fake_pybin_root_a"
+        venv_py = fake_root / ".venv" / "bin" / "python"
+        venv_py.parent.mkdir(parents=True, exist_ok=True)
+        venv_py.write_text("#!/bin/sh\nexit 0\n")
+        venv_py.chmod(0o755)
+
+        pin = fake_root / "pin" / "python3.12"
+        pin.parent.mkdir(parents=True, exist_ok=True)
+        pin.write_text("#!/bin/sh\nexit 0\n")
+        pin.chmod(0o755)
+
+        module.ROOT = fake_root
+        module.python_version_tuple = lambda exe: (3, 12, 1)
+        os.environ["PYTHON_BIN"] = str(pin)
+        try:
+            exe, version, source = module.resolve_python()
+        finally:
+            module.ROOT = original_root
+            module.python_version_tuple = original_probe
+            if original_env is None:
+                os.environ.pop("PYTHON_BIN", None)
+            else:
+                os.environ["PYTHON_BIN"] = original_env
+
+        self.assertEqual(exe, str(pin))
+        self.assertEqual(source, "PYTHON_BIN")
+        self.assertEqual(version, "3.12.1")
+
+    def test_pybin_resolve_python_prefers_project_venv(self) -> None:
+        """No PYTHON_BIN, no .venv313 — .venv/bin/python wins over sys.executable."""
+        module = self._pybin_module()
+        original_env = os.environ.get("PYTHON_BIN")
+        original_root = module.ROOT
+        original_probe = module.python_version_tuple
+
+        fake_root = Path(self.tmp) / "fake_pybin_root_b"
+        venv_py = fake_root / ".venv" / "bin" / "python"
+        venv_py.parent.mkdir(parents=True, exist_ok=True)
+        venv_py.write_text("#!/bin/sh\nexit 0\n")
+        venv_py.chmod(0o755)
+
+        module.ROOT = fake_root
+        module.python_version_tuple = lambda exe: (3, 11, 14) if exe == str(venv_py) else (3, 12, 0)
+        os.environ.pop("PYTHON_BIN", None)
+        try:
+            exe, version, source = module.resolve_python()
+        finally:
+            module.ROOT = original_root
+            module.python_version_tuple = original_probe
+            if original_env is not None:
+                os.environ["PYTHON_BIN"] = original_env
+
+        self.assertEqual(exe, str(venv_py))
+        self.assertEqual(source, ".venv/bin/python")
+        self.assertEqual(version, "3.11.14")
+
+    def test_pybin_resolve_python_rejects_old_interpreter(self) -> None:
+        """When only Python 3.9 is reachable, resolver must SystemExit clearly."""
+        module = self._pybin_module()
+        original_env = os.environ.get("PYTHON_BIN")
+        original_root = module.ROOT
+        original_probe = module.python_version_tuple
+
+        bare_root = Path(self.tmp) / "bare_pybin_root"
+        bare_root.mkdir(parents=True, exist_ok=True)
+        module.ROOT = bare_root
+        module.python_version_tuple = lambda exe: (3, 9, 6)
+        os.environ.pop("PYTHON_BIN", None)
+        try:
+            with self.assertRaises(SystemExit) as ctx:
+                module.resolve_python()
+            msg = str(ctx.exception)
+            self.assertIn(">= 3.10", msg)
+            self.assertIn("3.9", msg)
+        finally:
+            module.ROOT = original_root
+            module.python_version_tuple = original_probe
+            if original_env is not None:
+                os.environ["PYTHON_BIN"] = original_env
+
+    def test_pybin_assert_python_310_passes_on_current_interpreter(self) -> None:
+        """The test runner itself is 3.10+; assert_python_310 must not raise."""
+        module = self._pybin_module()
+        module.assert_python_310()  # no raise
+
+    # ------------------------------------------------------------------ #
+    # scripts/_pybin.sh — shell-side interpreter resolver
+    # ------------------------------------------------------------------ #
+
+    def _run_pybin_sh(self, env: dict, root_dir: Path) -> tuple[int, str, str]:
+        """Source scripts/_pybin.sh in a subshell, echo PYTHON_BIN, capture.
+
+        Uses an absolute path to bash so the test can manipulate PATH/PYTHON_BIN
+        in the subshell without breaking subprocess's own bash lookup."""
+        import subprocess
+        bash_path = "/bin/bash"
+        cmd = [
+            bash_path, "-c",
+            'source "$0"/scripts/_pybin.sh && echo "PYTHON_BIN=${PYTHON_BIN}"',
+            str(REPO_ROOT),
+        ]
+        merged_env = {**os.environ, "ROOT_DIR": str(root_dir), **env}
+        result = subprocess.run(
+            cmd, env=merged_env, capture_output=True, text=True, check=False,
+            executable=bash_path,
+        )
+        return result.returncode, result.stdout, result.stderr
+
+    def test_pybin_sh_resolves_to_310_or_newer(self) -> None:
+        """On the real ROOT_DIR (which has .venv/bin/python 3.11), the helper
+        must succeed and set PYTHON_BIN to a >=3.10 interpreter."""
+        env = {k: v for k, v in os.environ.items() if k != "PYTHON_BIN"}
+        rc, out, err = self._run_pybin_sh({}, REPO_ROOT)
+        self.assertEqual(rc, 0, f"stderr: {err}")
+        self.assertIn("PYTHON_BIN=", out)
+        pybin = out.split("PYTHON_BIN=", 1)[1].strip()
+        self.assertTrue(Path(pybin).is_file(), pybin)
+        # Probe its version directly.
+        import subprocess
+        v = subprocess.check_output(
+            [pybin, "-c", "import sys; print('%d.%d' % sys.version_info[:2])"],
+            text=True,
+        ).strip()
+        major, minor = (int(x) for x in v.split("."))
+        self.assertGreaterEqual((major, minor), (3, 10), f"resolved {v}")
+
+    def test_pybin_sh_aborts_when_no_310_available(self) -> None:
+        """Point ROOT_DIR at a directory with no .venv* and unset PATH so the
+        helper cannot fall back to anything. Must exit non-zero with a clear
+        error message listing every candidate it tried."""
+        bare_root = Path(self.tmp) / "bare_pybin_sh"
+        bare_root.mkdir(parents=True, exist_ok=True)
+        # Strip PATH so `command -v python3` finds nothing; also block
+        # PYTHON_BIN so the helper has nothing valid to use.
+        env = {"PATH": "", "PYTHON_BIN": ""}
+        rc, out, err = self._run_pybin_sh(env, bare_root)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("could not resolve a Python", err)
+        self.assertIn(">= 3.10", err)
+
+    # ------------------------------------------------------------------ #
+    # A.1 — backfill_events.run_build_labels uses the resolver, not sys.executable
+    # ------------------------------------------------------------------ #
+
+    def test_backfill_run_build_labels_uses_resolver(self) -> None:
+        """``scripts/backfill_events.run_build_labels`` must spawn ``build_labels.py``
+        via the shared resolver, never via raw ``sys.executable``. Mirrors
+        the discipline established for the evidence pack training subprocess."""
+        module = load_module(
+            "backfill_events_module",
+            REPO_ROOT / "scripts" / "backfill_events.py",
+        )
+        captured = {}
+
+        def _fake_run(args, **kwargs):
+            captured["args"] = list(args)
+            class _Done:
+                returncode = 0
+            return _Done()
+
+        # Stub resolve_python on the same services._pybin import the script uses.
+        import services._pybin as pybin_module
+        original_resolve = pybin_module.resolve_python
+        pybin_module.resolve_python = lambda: ("/fake/python3.11", "3.11.14", ".venv/bin/python")
+
+        original_subprocess_run = module.__dict__.get("subprocess")
+        # backfill_events imports subprocess lazily inside run_build_labels;
+        # easiest to monkey-patch the top-level subprocess module that the
+        # function will import.
+        import subprocess as real_subprocess
+        original_real_run = real_subprocess.run
+        real_subprocess.run = _fake_run
+        try:
+            module.run_build_labels("/tmp/fake.db", [5, 15])
+        finally:
+            real_subprocess.run = original_real_run
+            pybin_module.resolve_python = original_resolve
+
+        self.assertIn("args", captured)
+        self.assertEqual(captured["args"][0], "/fake/python3.11")
+        self.assertNotEqual(captured["args"][0], sys.executable)
+        self.assertIn("scripts/build_labels.py", captured["args"])
+        self.assertIn("--horizons", captured["args"])
+        self.assertIn("5", captured["args"])
+        self.assertIn("15", captured["args"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -9,15 +9,9 @@ timestamp() {
   date '+%Y-%m-%d %H:%M:%S'
 }
 
-if [ -x "${ROOT_DIR}/.venv/bin/python3" ]; then
-  PYTHON="${ROOT_DIR}/.venv/bin/python3"
-elif [ -x "${ROOT_DIR}/.venv/bin/python" ]; then
-  PYTHON="${ROOT_DIR}/.venv/bin/python"
-elif command -v python3 >/dev/null 2>&1; then
-  PYTHON="$(command -v python3)"
-else
-  echo "[$(timestamp)] ERROR host_health: python3 not found" >> "${LOG_DIR}/host_health.log"
+if ! source "${ROOT_DIR}/scripts/_pybin.sh" 2>>"${LOG_DIR}/host_health.log"; then
+  echo "[$(timestamp)] ERROR host_health: no python3.10+ found" >> "${LOG_DIR}/host_health.log"
   exit 1
 fi
 
-exec "${PYTHON}" "${ROOT_DIR}/scripts/host_health_check.py" "$@"
+exec "${PYTHON_BIN}" "${ROOT_DIR}/scripts/host_health_check.py" "$@"

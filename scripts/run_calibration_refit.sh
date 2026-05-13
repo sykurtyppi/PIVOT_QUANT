@@ -75,12 +75,13 @@ audit_event() {
   if ! is_truthy "${AUDIT_ENABLED}"; then
     return 0
   fi
-  local runner="${PYTHON:-}"
+  local runner="${PYTHON:-${PYTHON_BIN:-}}"
   if [[ -z "${runner}" ]]; then
-    if [[ -x "${ROOT_DIR}/.venv/bin/python3" ]]; then
-      runner="${ROOT_DIR}/.venv/bin/python3"
-    elif command -v python3 >/dev/null 2>&1; then
-      runner="$(command -v python3)"
+    # Fallback path used only if PYTHON / PYTHON_BIN aren't yet set
+    # (e.g. audit_event called before the main resolver block). Re-use
+    # the shared helper to keep the >=3.10 guarantee.
+    if source "${ROOT_DIR}/scripts/_pybin.sh" 2>/dev/null; then
+      runner="${PYTHON_BIN}"
     else
       return 0
     fi
@@ -128,16 +129,11 @@ acquire_lock
 
 cd "${ROOT_DIR}"
 
-if [ -x "${ROOT_DIR}/.venv/bin/python3" ]; then
-  PYTHON="${ROOT_DIR}/.venv/bin/python3"
-elif [ -x "${ROOT_DIR}/.venv/bin/python" ]; then
-  PYTHON="${ROOT_DIR}/.venv/bin/python"
-elif command -v python3 >/dev/null 2>&1; then
-  PYTHON="$(command -v python3)"
-else
-  echo "[$(timestamp)] ERROR calibration_refit: python3 not found" | tee -a "${LOG_DIR}/calibration_refit.log"
+if ! source "${ROOT_DIR}/scripts/_pybin.sh" 2>>"${LOG_DIR}/calibration_refit.log"; then
+  echo "[$(timestamp)] ERROR calibration_refit: no python3.10+ found" | tee -a "${LOG_DIR}/calibration_refit.log"
   exit 1
 fi
+PYTHON="${PYTHON_BIN}"
 
 CALIB_DUCKDB_PATH="${DUCKDB_PATH:-${ROOT_DIR}/data/pivot_training.duckdb}"
 CALIB_MODEL_DIR="${RF_MODEL_DIR:-data/models}"

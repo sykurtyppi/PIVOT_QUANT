@@ -37,12 +37,18 @@ is_listening() {
 }
 
 resolve_python() {
-  if [[ -x "${ROOT_DIR}/.venv/bin/python3" ]]; then
-    printf '%s' "${ROOT_DIR}/.venv/bin/python3"
-    return 0
-  fi
-  if command -v python3 >/dev/null 2>&1; then
-    command -v python3
+  # Delegate to the shared helper so the >=3.10 guarantee matches every
+  # other wrapper in the project. Sourced in a subshell to keep run_all's
+  # global env untouched if the helper fails.
+  local resolved
+  resolved="$(
+    set +e
+    if source "${ROOT_DIR}/scripts/_pybin.sh" 2>/dev/null; then
+      printf '%s' "${PYTHON_BIN}"
+    fi
+  )"
+  if [[ -n "${resolved}" ]]; then
+    printf '%s' "${resolved}"
     return 0
   fi
   return 1

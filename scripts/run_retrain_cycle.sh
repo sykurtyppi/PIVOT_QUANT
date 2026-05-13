@@ -402,19 +402,16 @@ acquire_lock
 
 cd "${ROOT_DIR}"
 
-# Prefer the project venv to avoid picking up a wrong system Python.
-if [ -x "${ROOT_DIR}/.venv/bin/python3" ]; then
-  PYTHON="${ROOT_DIR}/.venv/bin/python3"
-elif [ -x "${ROOT_DIR}/.venv/bin/python" ]; then
-  PYTHON="${ROOT_DIR}/.venv/bin/python"
-elif command -v python3 >/dev/null 2>&1; then
-  PYTHON="$(command -v python3)"
-else
-  echo "[$(timestamp)] ERROR retrain: python3 not found" | tee -a "${LOG_DIR}/retrain.log"
+# Resolve >=3.10 Python via shared helper. Replaces the previous
+# duplicated resolve-then-version-check block; the helper already
+# enforces >=3.10 so the run_step probe below is now a sanity log only.
+if ! source "${ROOT_DIR}/scripts/_pybin.sh" 2>>"${LOG_DIR}/retrain.log"; then
+  echo "[$(timestamp)] ERROR retrain: no python3.10+ found" | tee -a "${LOG_DIR}/retrain.log"
   exit 1
 fi
+PYTHON="${PYTHON_BIN}"
 
-run_step "python_env_check" "${PYTHON}" -c "import sys; assert sys.version_info >= (3, 10), f'Python {sys.version.split()[0]} too old; require >=3.10'; print(sys.executable, sys.version.split()[0])"
+run_step "python_env_check" "${PYTHON}" -c "import sys; print(sys.executable, sys.version.split()[0])"
 RETRAIN_REQUIRED_MODULES=(duckdb pandas numpy joblib sklearn)
 if is_truthy "${RUN_OPS_SMOKE_ON_RETRAIN}"; then
   # Keep preflight aligned with ops smoke imports to fail fast on missing env deps.
