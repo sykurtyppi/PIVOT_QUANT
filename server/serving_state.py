@@ -73,33 +73,87 @@ def _file_signature(path: Path) -> tuple[int, int] | None:
 
 
 def validate_state_payload(payload: object) -> tuple[bool, str | None]:
-    """Return (is_valid, error_reason).
+    """Return (is_valid, error_reason) for an *on-disk* serving-state record.
 
-    The CLI uses this to refuse to write garbage; the loader uses it to
-    decide whether to honor a parsed file or fall back to
-    ``dormant_data_quality``.
+    Strict for a reason: this file is the operator control plane — an
+    incomplete record like ``{"state": "dormant_manual_pause"}`` should
+    NOT silently pause serving without recording who paused it, when, or
+    why. The loader runs every parsed file through this function and
+    falls back to ``dormant_data_quality`` on rejection. The CLI runs the
+    built payload through this function before writing so a buggy CLI
+    cannot ship a half-valid file.
+
+    Required keys (presence + type-checked):
+      - ``schema_version`` == 1 (int; reject missing / non-int / future versions)
+      - ``state`` in VALID_STATES (str)
+      - ``since_ts`` numeric, non-negative (int or float; reject bool)
+      - ``reason`` non-empty string
+
+    Optional keys (type-checked when present, including when explicitly null):
+      - ``expires_at``                  — null OR numeric non-negative
+      - ``triggering_audit``            — null OR string
+      - ``set_by``                      — null OR string
+      - ``manifest_version_when_set``   — null OR string
+
+    The synthetic ``default_missing_file`` snapshot built by the loader
+    when no file exists does NOT go through this validator — it is
+    returned directly and labeled ``source="default_missing_file"`` so
+    /health can distinguish it from a literally-active record.
     """
     if not isinstance(payload, dict):
         return False, "payload_not_object"
+
+    # schema_version: required, must be the exact supported int (1).
+    if "schema_version" not in payload:
+        return False, "schema_version_missing"
+    sv = payload.get("schema_version")
+    if isinstance(sv, bool) or not isinstance(sv, int):
+        return False, "schema_version_invalid_type"
+    if sv != SCHEMA_VERSION:
+        return False, "schema_version_unsupported"
+
+    # state: required, must be one of the recognized values.
+    if "state" not in payload:
+        return False, "state_missing"
     state = payload.get("state")
     if not isinstance(state, str) or state not in VALID_STATES:
         return False, "state_invalid"
-    # ``since_ts`` is required for any non-default record so operators
-    # can answer "since when has this been dormant?" without grepping logs.
-    if "since_ts" in payload:
-        ts = payload.get("since_ts")
-        if not isinstance(ts, (int, float)) or ts < 0:
-            return False, "since_ts_invalid"
-    expires = payload.get("expires_at")
-    if expires is not None and (
-        not isinstance(expires, (int, float)) or expires < 0
-    ):
-        return False, "expires_at_invalid"
-    # ``schema_version`` is informational; reject unknown future versions
-    # rather than blindly trusting them.
-    sv = payload.get("schema_version", SCHEMA_VERSION)
-    if not isinstance(sv, int) or sv != SCHEMA_VERSION:
-        return False, "schema_version_unsupported"
+
+    # since_ts: required, numeric non-negative. Excludes bool.
+    if "since_ts" not in payload:
+        return False, "since_ts_missing"
+    ts = payload.get("since_ts")
+    if isinstance(ts, bool) or not isinstance(ts, (int, float)):
+        return False, "since_ts_invalid_type"
+    if ts < 0:
+        return False, "since_ts_negative"
+
+    # reason: required, non-empty string.
+    if "reason" not in payload:
+        return False, "reason_missing"
+    reason = payload.get("reason")
+    if not isinstance(reason, str):
+        return False, "reason_invalid_type"
+    if not reason.strip():
+        return False, "reason_empty"
+
+    # expires_at: optional, null-or-numeric-non-negative when present.
+    if "expires_at" in payload:
+        expires = payload.get("expires_at")
+        if expires is not None:
+            if isinstance(expires, bool) or not isinstance(expires, (int, float)):
+                return False, "expires_at_invalid_type"
+            if expires < 0:
+                return False, "expires_at_negative"
+
+    # Optional string-or-null fields. Reject any other type (numbers, bools,
+    # lists, dicts) to catch accidental schema drift.
+    for key in ("triggering_audit", "set_by", "manifest_version_when_set"):
+        if key in payload:
+            value = payload.get(key)
+            if value is not None and not isinstance(value, str):
+                return False, f"{key}_invalid_type"
+
     return True, None
 
 

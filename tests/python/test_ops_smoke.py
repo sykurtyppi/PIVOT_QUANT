@@ -12788,6 +12788,250 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(state_path.read_bytes(), before_bytes)
         self.assertEqual(state_path.stat().st_mtime_ns, before_sig)
 
+    # ------------------------------------------------------------------ #
+    # D1 fixup: stricter validate_state_payload — fail-closed on
+    # incomplete operator-written control-plane files.
+    # ------------------------------------------------------------------ #
+
+    def _valid_full_payload(self, **overrides):
+        base = {
+            "schema_version": 1,
+            "state": "dormant_manual_pause",
+            "since_ts": 1700000000000,
+            "reason": "manual review pending",
+            "triggering_audit": None,
+            "set_by": "ops_user@host",
+            "manifest_version_when_set": "v415",
+            "expires_at": 1701000000000,
+        }
+        base.update(overrides)
+        return base
+
+    def test_serving_state_validator_accepts_full_payload(self) -> None:
+        module = self._serving_state_module()
+        ok, reason = module.validate_state_payload(self._valid_full_payload())
+        self.assertTrue(ok, f"full payload should validate (got reason={reason})")
+        self.assertIsNone(reason)
+
+    def test_serving_state_validator_rejects_incomplete_dormant_payload(self) -> None:
+        """The exact scenario from PR #29 review: a manual write like
+        ``{"state": "dormant_manual_pause"}`` lacks every other required
+        field. Must fail closed, not silently pause serving."""
+        module = self._serving_state_module()
+        ok, reason = module.validate_state_payload({"state": "dormant_manual_pause"})
+        self.assertFalse(ok)
+        # First missing-required field encountered drives the reason; the
+        # exact code is not asserted (operators get the loud message via
+        # /health.load_error), but it must be one of the missing-required
+        # markers so callers can grep for it.
+        self.assertIn("missing", reason or "")
+
+    def test_serving_state_validator_rejects_missing_schema_version(self) -> None:
+        module = self._serving_state_module()
+        payload = self._valid_full_payload()
+        payload.pop("schema_version")
+        ok, reason = module.validate_state_payload(payload)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "schema_version_missing")
+
+    def test_serving_state_validator_rejects_wrong_schema_version(self) -> None:
+        module = self._serving_state_module()
+        payload = self._valid_full_payload(schema_version=2)
+        ok, reason = module.validate_state_payload(payload)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "schema_version_unsupported")
+
+    def test_serving_state_validator_rejects_missing_state(self) -> None:
+        module = self._serving_state_module()
+        payload = self._valid_full_payload()
+        payload.pop("state")
+        ok, reason = module.validate_state_payload(payload)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "state_missing")
+
+    def test_serving_state_validator_rejects_missing_since_ts(self) -> None:
+        module = self._serving_state_module()
+        payload = self._valid_full_payload()
+        payload.pop("since_ts")
+        ok, reason = module.validate_state_payload(payload)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "since_ts_missing")
+
+    def test_serving_state_validator_rejects_missing_or_blank_reason(self) -> None:
+        module = self._serving_state_module()
+        # Missing reason.
+        p1 = self._valid_full_payload()
+        p1.pop("reason")
+        ok, reason = module.validate_state_payload(p1)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "reason_missing")
+        # Empty string.
+        ok, reason = module.validate_state_payload(self._valid_full_payload(reason=""))
+        self.assertFalse(ok)
+        self.assertEqual(reason, "reason_empty")
+        # Whitespace only.
+        ok, reason = module.validate_state_payload(self._valid_full_payload(reason="   "))
+        self.assertFalse(ok)
+        self.assertEqual(reason, "reason_empty")
+        # Wrong type.
+        ok, reason = module.validate_state_payload(self._valid_full_payload(reason=123))
+        self.assertFalse(ok)
+        self.assertEqual(reason, "reason_invalid_type")
+
+    def test_serving_state_validator_rejects_bad_since_ts_types(self) -> None:
+        module = self._serving_state_module()
+        # Bool subclass of int -> must be rejected.
+        ok, reason = module.validate_state_payload(self._valid_full_payload(since_ts=True))
+        self.assertFalse(ok)
+        self.assertEqual(reason, "since_ts_invalid_type")
+        # String -> rejected.
+        ok, reason = module.validate_state_payload(self._valid_full_payload(since_ts="1700000000000"))
+        self.assertFalse(ok)
+        self.assertEqual(reason, "since_ts_invalid_type")
+        # Negative -> rejected.
+        ok, reason = module.validate_state_payload(self._valid_full_payload(since_ts=-1))
+        self.assertFalse(ok)
+        self.assertEqual(reason, "since_ts_negative")
+
+    def test_serving_state_validator_rejects_bad_optional_types(self) -> None:
+        """``triggering_audit``, ``set_by``, ``manifest_version_when_set``
+        must be null or string. ``expires_at`` must be null or numeric."""
+        module = self._serving_state_module()
+        # Numeric triggering_audit -> rejected.
+        ok, reason = module.validate_state_payload(
+            self._valid_full_payload(triggering_audit=42)
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "triggering_audit_invalid_type")
+        # List set_by -> rejected.
+        ok, reason = module.validate_state_payload(
+            self._valid_full_payload(set_by=["ops"])
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "set_by_invalid_type")
+        # Dict manifest_version_when_set -> rejected.
+        ok, reason = module.validate_state_payload(
+            self._valid_full_payload(manifest_version_when_set={"v": 1})
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "manifest_version_when_set_invalid_type")
+        # String expires_at -> rejected (must be numeric).
+        ok, reason = module.validate_state_payload(
+            self._valid_full_payload(expires_at="tomorrow")
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "expires_at_invalid_type")
+        # Negative expires_at -> rejected.
+        ok, reason = module.validate_state_payload(
+            self._valid_full_payload(expires_at=-5)
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "expires_at_negative")
+        # All explicit-null optional fields are accepted (CLI emits this shape
+        # when the operator does not pass --triggering-audit / --expires-at).
+        ok, reason = module.validate_state_payload(
+            self._valid_full_payload(
+                triggering_audit=None,
+                set_by=None,
+                manifest_version_when_set=None,
+                expires_at=None,
+            )
+        )
+        self.assertTrue(ok, f"all-null optionals must validate (got reason={reason})")
+
+    def test_serving_state_loader_fail_closed_on_incomplete_file(self) -> None:
+        """Stricter validator + loader contract: an incomplete operator
+        write becomes ``dormant_data_quality`` with a visible load_error."""
+        module = self._serving_state_module()
+        state_path = Path(self.tmp) / "serving_state_incomplete.json"
+        state_path.write_text(json.dumps({"state": "dormant_manual_pause"}))
+        registry = module.ServingStateRegistry(state_path)
+        registry.load()
+        self.assertFalse(registry.is_active())
+        snap = registry.snapshot()
+        self.assertEqual(snap["state"], "dormant_data_quality")
+        self.assertEqual(snap["reason"], "serving_state_invalid")
+        self.assertEqual(snap["source"], "invalid_file")
+        self.assertIsNotNone(snap["load_error"])
+        self.assertIn("schema_invalid", str(snap["load_error"]))
+
+    def test_serving_state_cli_payload_validates_under_strict_rules(self) -> None:
+        """The CLI's built payload must still pass the tightened validator
+        — otherwise the loader would reject CLI-written files."""
+        cli = self._cli_module()
+        sv = self._serving_state_module()
+        model_dir = Path(self.tmp) / "models_strict_cli"
+        model_dir.mkdir(parents=True, exist_ok=True)
+        rc = cli.main(
+            [
+                "--state",
+                "dormant_manual_pause",
+                "--reason",
+                "regime review pending",
+                "--triggering-audit",
+                "evidence/foo/bar.json",
+                "--expires-at",
+                "2026-12-31T23:59:59Z",
+                "--model-dir",
+                str(model_dir),
+                "--set-by",
+                "ops@runner",
+                "--now-ms",
+                "1700000000000",
+                "--quiet",
+            ]
+        )
+        self.assertEqual(rc, 0)
+        data = json.loads((model_dir / "serving_state.json").read_text())
+        ok, reason = sv.validate_state_payload(data)
+        self.assertTrue(ok, f"CLI payload failed stricter validator: {reason}")
+
+    def test_serving_state_ml_server_wires_serving_state_registry(self) -> None:
+        """ml_server.py imports and instantiates a module-level
+        ``serving_state`` singleton; ``/score`` consults
+        ``serving_state.is_active()`` before answering. This is the
+        smallest test that proves the wiring exists without spinning up
+        the FastAPI surface."""
+        try:
+            ml_server = load_module(
+                "ml_server_serving_state_wiring",
+                REPO_ROOT / "server" / "ml_server.py",
+            )
+        except ModuleNotFoundError as exc:
+            # Local dev envs without fastapi cannot load ml_server.py;
+            # the CI Python Ops Smoke job covers this path.
+            self.skipTest(f"ml_server import skipped: {exc}")
+            return
+        # Class-identity check would fail under ``load_module`` (custom
+        # module name -> different class instance), so duck-type the
+        # registry instead: it exposes the read API the server uses.
+        self.assertTrue(hasattr(ml_server, "serving_state"))
+        registry = ml_server.serving_state
+        self.assertEqual(
+            type(registry).__name__, "ServingStateRegistry"
+        )
+        for attr in ("is_active", "state", "snapshot", "blocked_payload", "load"):
+            self.assertTrue(
+                callable(getattr(registry, attr, None)),
+                f"serving_state registry missing callable .{attr}",
+            )
+        # blocked_payload shape sanity (no probability / threshold leak).
+        bp = registry.blocked_payload(manifest_version="v_test")
+        for key in (
+            "signal",
+            "blocked_reason",
+            "serving_state",
+            "serving_state_reason",
+            "serving_state_since_ts",
+            "serving_state_expires_at",
+            "manifest_version",
+        ):
+            self.assertIn(key, bp)
+        self.assertIsNone(bp["signal"])
+        self.assertEqual(bp["blocked_reason"], "serving_dormant")
+        for forbidden in ("probability", "threshold", "score"):
+            self.assertNotIn(forbidden, bp)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
