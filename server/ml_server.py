@@ -105,7 +105,7 @@ import pandas as pd
 import joblib
 
 from ml.features import build_feature_row, collect_missing, FEATURE_VERSION
-from ml.thresholds import NO_SIGNAL_THRESHOLD
+from ml.thresholds import NO_SIGNAL_THRESHOLD, threshold_score_is_unsafe
 
 log = logging.getLogger("ml_server")
 _missing_threshold_warnings: set[tuple[str, int, str]] = set()
@@ -571,16 +571,13 @@ class ModelRegistry:
                 if meta.get("objective") != "utility_bps":
                     continue
                 score_raw = meta.get("score")
-                score = float(score_raw) if score_raw is not None else None
-                # NaN <= 0.0 is False per IEEE 754, so a NaN score with
-                # fallback=False would slip through the score check and leave
-                # the threshold live. Treat any non-finite score as unsafe.
-                if (
-                    bool(meta.get("fallback"))
-                    or score is None
-                    or not math.isfinite(score)
-                    or score <= 0.0
-                ):
+                # Single source of truth in ml.thresholds.threshold_score_is_unsafe
+                # so the readiness classifier and runtime safety can never drift
+                # apart on the predicate (fallback / NaN / inf / None / <=0).
+                unsafe, _codes = threshold_score_is_unsafe(
+                    score_raw, bool(meta.get("fallback"))
+                )
+                if unsafe:
                     horizon_map[int(horizon)] = NO_SIGNAL_THRESHOLD
                     log.warning(
                         "Runtime threshold safety disabled %s %sm threshold: "

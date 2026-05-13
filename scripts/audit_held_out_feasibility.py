@@ -339,12 +339,27 @@ def build_report(
         "slices": slices,
         "recommendation": recommendation,
         "warnings": list(warnings or []),
+        # Disclosure: this audit predicts signal density on a chronological
+        # tail using the deployed model. That model was trained on data
+        # that INCLUDES the rows in the evaluated tail slice — training did
+        # not carve out a held-out region in advance. The firing-density
+        # estimate is therefore an upper bound: a future model trained
+        # with the slice held out may fire less often. The audit is a
+        # FEASIBILITY check ("would there be enough signals for a real OOS
+        # test?"), not a validity claim.
+        "model_trained_on_evaluated_slice": True,
+        "audit_limitation": (
+            "feasibility_only_model_may_have_seen_evaluated_rows"
+        ),
         "scope_disclosure": (
             "read_only_audit; no training, no threshold search, no tuning, "
             "no promotion. min_signals mirrors B3 validator floor. "
             "Threshold is resolved with the same precedence used by "
             "server.ml_server.ModelRegistry: manifest first, artifact only "
-            "as fallback. Both raw values + mismatch flag are reported."
+            "as fallback. Both raw values + mismatch flag are reported. "
+            "The deployed model was trained on data including the "
+            "chronological tail it is evaluated against, so firing-density "
+            "estimates are upper bounds (see ``model_trained_on_evaluated_slice``)."
         ),
     }
 
@@ -516,6 +531,12 @@ def main(argv: list[str] | None = None) -> int:
     print(
         "[scope] read-only; no training, no threshold search, "
         "no tuning, no promotion."
+    )
+    print(
+        "[caveat] deployed model was trained on data including the evaluated "
+        "tail slice; firing-density estimates are upper bounds. This is a "
+        "FEASIBILITY check, not an OOS validity claim. See "
+        "report['audit_limitation']."
     )
     return 0
 
