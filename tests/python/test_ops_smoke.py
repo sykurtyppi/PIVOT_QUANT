@@ -9962,6 +9962,287 @@ class OpsSmokeTests(unittest.TestCase):
         out = module.classify_gamma_mode_concentration(stats)
         self.assertTrue(out["in_legitimate_enum_domain"])
 
+    # ------------------------------------------------------------------ #
+    # Phase 2D monthly_pivot availability audit
+    # ------------------------------------------------------------------ #
+
+    def _pivot_audit_module(self):
+        return load_module(
+            "monthly_pivot_availability",
+            REPO_ROOT / "scripts" / "audit_monthly_pivot_availability.py",
+        )
+
+    def test_pivot_group_null_summary_traces_to_raw(self) -> None:
+        import pandas as pd
+        module = self._pivot_audit_module()
+        df = pd.DataFrame({
+            "monthly_pivot": [400.0, None, 410.0, 0.0, 420.0, None],
+            "monthly_pivot_dist_bps": [10.0, None, 5.0, None, 7.0, None],
+        })
+        out = module.group_null_summary(df)
+        self.assertEqual(out["row_count"], 6)
+        self.assertEqual(out["monthly_pivot_null_count"], 2)
+        self.assertEqual(out["monthly_pivot_zero_count"], 1)
+        self.assertEqual(out["monthly_pivot_dist_bps_null_count"], 3)
+        self.assertEqual(out["rows_dist_null_but_raw_present_nonzero"], 0)
+        self.assertTrue(out["raw_null_explains_all_feature_nulls"])
+
+    def test_pivot_group_null_summary_detects_pipeline_discrepancy(self) -> None:
+        import pandas as pd
+        module = self._pivot_audit_module()
+        df = pd.DataFrame({
+            "monthly_pivot": [400.0, 410.0, 420.0],
+            "monthly_pivot_dist_bps": [10.0, None, 5.0],
+        })
+        out = module.group_null_summary(df)
+        self.assertEqual(out["rows_dist_null_but_raw_present_nonzero"], 1)
+        self.assertFalse(out["raw_null_explains_all_feature_nulls"])
+
+    def test_pivot_by_dimension_null_rate_clusters_correctly(self) -> None:
+        import pandas as pd
+        module = self._pivot_audit_module()
+        df = pd.DataFrame({
+            "source": ["A", "A", "A", "A", "B", "B", "C"],
+            "monthly_pivot": [1.0, None, 1.0, None, 1.0, 1.0, None],
+        })
+        out = module.by_dimension_null_rate(df, "source")
+        self.assertEqual(out[0]["value"], "A")
+        self.assertEqual(out[0]["n"], 4)
+        self.assertEqual(out[0]["nulls"], 2)
+        self.assertAlmostEqual(out[0]["null_rate"], 0.5)
+        self.assertEqual(out[1]["value"], "B")
+        self.assertAlmostEqual(out[1]["null_rate"], 0.0)
+
+    def test_pivot_by_dimension_handles_missing_columns(self) -> None:
+        import pandas as pd
+        module = self._pivot_audit_module()
+        df = pd.DataFrame({"x": [1, 2, 3]})
+        self.assertEqual(module.by_dimension_null_rate(df, "missing"), [])
+
+    def test_pivot_date_first_last_null(self) -> None:
+        import datetime as dt
+        import pandas as pd
+        module = self._pivot_audit_module()
+        df = pd.DataFrame({
+            "event_date_et": [
+                dt.date(2026, 1, 5),
+                dt.date(2026, 1, 6),
+                dt.date(2026, 1, 7),
+                dt.date(2026, 1, 8),
+            ],
+            "monthly_pivot": [None, 1.0, None, 1.0],
+        })
+        out = module.date_first_last_null(df)
+        self.assertEqual(out["first_null_date"], "2026-01-05")
+        self.assertEqual(out["last_null_date"], "2026-01-07")
+
+    def test_pivot_longest_consecutive_null_streak(self) -> None:
+        import datetime as dt
+        import pandas as pd
+        module = self._pivot_audit_module()
+        df = pd.DataFrame({
+            "event_date_et": [
+                dt.date(2026, 1, 5),
+                dt.date(2026, 1, 5),
+                dt.date(2026, 1, 6),
+                dt.date(2026, 1, 6),
+                dt.date(2026, 1, 7),
+                dt.date(2026, 1, 8),
+            ],
+            "monthly_pivot": [None, None, 1.0, None, None, None],
+        })
+        out = module.longest_consecutive_null_dates(df)
+        self.assertEqual(out["length_days"], 2)
+        self.assertEqual(out["start_date"], "2026-01-07")
+        self.assertEqual(out["end_date"], "2026-01-08")
+
+    def test_pivot_classify_status_provider_coverage_gap(self) -> None:
+        module = self._pivot_audit_module()
+        overall = {
+            "monthly_pivot_null_rate": 0.39,
+            "monthly_pivot_zero_rate": 0.0,
+            "rows_dist_null_but_raw_present_nonzero": 0,
+        }
+        by_source = [
+            {"value": "Yahoo", "n": 30000, "nulls": 22500, "null_rate": 0.75},
+            {"value": "marketdata.app", "n": 44000, "nulls": 5300, "null_rate": 0.12},
+        ]
+        by_month = [{"value": "2025-04", "n": 1000, "nulls": 0, "null_rate": 0.0}]
+        cp = {c: True for c in (
+            "monthly_pivot", "monthly_pivot_dist_bps", "event_date_et", "source"
+        )}
+        self.assertEqual(
+            module.classify_status(
+                overall_summary=overall, by_source=by_source,
+                by_month=by_month, columns_present=cp,
+            ),
+            "provider_coverage_gap",
+        )
+
+    def test_pivot_classify_status_join_or_pipeline_gap(self) -> None:
+        module = self._pivot_audit_module()
+        overall = {
+            "monthly_pivot_null_rate": 0.40,
+            "monthly_pivot_zero_rate": 0.0,
+            "rows_dist_null_but_raw_present_nonzero": 5,
+        }
+        cp = {c: True for c in (
+            "monthly_pivot", "monthly_pivot_dist_bps", "event_date_et", "source"
+        )}
+        self.assertEqual(
+            module.classify_status(
+                overall_summary=overall, by_source=[],
+                by_month=[], columns_present=cp,
+            ),
+            "join_or_pipeline_gap",
+        )
+
+    def test_pivot_classify_status_available_clean(self) -> None:
+        module = self._pivot_audit_module()
+        overall = {
+            "monthly_pivot_null_rate": 0.03,
+            "monthly_pivot_zero_rate": 0.0,
+            "rows_dist_null_but_raw_present_nonzero": 0,
+        }
+        cp = {c: True for c in (
+            "monthly_pivot", "monthly_pivot_dist_bps", "event_date_et", "source"
+        )}
+        self.assertEqual(
+            module.classify_status(
+                overall_summary=overall,
+                by_source=[{"value": "marketdata.app", "n": 1000,
+                            "nulls": 30, "null_rate": 0.03}],
+                by_month=[], columns_present=cp,
+            ),
+            "available_clean",
+        )
+
+    def test_pivot_classify_status_insufficient_visibility(self) -> None:
+        module = self._pivot_audit_module()
+        cp = {"monthly_pivot": True, "monthly_pivot_dist_bps": False,
+              "event_date_et": True, "source": True}
+        self.assertEqual(
+            module.classify_status(
+                overall_summary={}, by_source=[], by_month=[],
+                columns_present=cp,
+            ),
+            "insufficient_source_visibility",
+        )
+
+    def test_pivot_classify_status_expected_sparse_by_design(self) -> None:
+        module = self._pivot_audit_module()
+        overall = {
+            "monthly_pivot_null_rate": 0.10,
+            "monthly_pivot_zero_rate": 0.0,
+            "rows_dist_null_but_raw_present_nonzero": 0,
+        }
+        by_month = [
+            {"value": "2025-03", "n": 2240, "nulls": 2240, "null_rate": 1.0},
+            {"value": "2025-04", "n": 1608, "nulls": 0, "null_rate": 0.0},
+            {"value": "2025-05", "n": 2916, "nulls": 0, "null_rate": 0.0},
+            {"value": "2025-06", "n": 3836, "nulls": 0, "null_rate": 0.0},
+        ]
+        cp = {c: True for c in (
+            "monthly_pivot", "monthly_pivot_dist_bps", "event_date_et", "source"
+        )}
+        by_source = [
+            {"value": "marketdata.app", "n": 10000, "nulls": 2240, "null_rate": 0.22},
+        ]
+        self.assertEqual(
+            module.classify_status(
+                overall_summary=overall, by_source=by_source,
+                by_month=by_month, columns_present=cp,
+            ),
+            "expected_sparse_by_design",
+        )
+
+    def test_pivot_report_schema_stable(self) -> None:
+        module = self._pivot_audit_module()
+        rep = module.build_report(
+            symbol="SPY", target="reject", horizon=15,
+            active_manifest_path=Path("/tmp/m.json"),
+            manifest_version="v_test",
+            total_rows=100,
+            overall_summary={"monthly_pivot_null_rate": 0.3},
+            group_null_summary_block={"recent_dormant": {}, "older_window": {}},
+            by_source=[],
+            by_month=[],
+            by_level_type=[],
+            by_session=[],
+            date_first_last={"first_null_date": None, "last_null_date": None},
+            longest_null_streak={"length_days": 0, "start_date": None, "end_date": None},
+            upstream_source_summary={"providers": []},
+            status="provider_coverage_gap",
+            corrected_interpretation={"phase_2d_root_cause_classification": "provider_coverage_gap"},
+            recommended_next_step_str="x",
+        )
+        for key in (
+            "schema_version", "audit_type", "generated_at",
+            "symbol", "target", "horizon",
+            "active_manifest_path", "active_manifest_version",
+            "total_rows_inspected", "monthly_pivot_status",
+            "source_trace", "overall_summary",
+            "group_null_summary", "date_null_summary",
+            "by_source", "by_level_type", "by_session",
+            "upstream_source_summary", "corrected_interpretation",
+            "recommended_next_step", "warnings", "scope_disclosure",
+        ):
+            self.assertIn(key, rep, f"missing report key: {key}")
+        self.assertEqual(rep["audit_type"], "monthly_pivot_availability")
+        self.assertEqual(rep["schema_version"], 1)
+
+    def test_pivot_source_trace_carries_required_keys(self) -> None:
+        module = self._pivot_audit_module()
+        for k in ("monthly_pivot_producer", "monthly_pivot_storage",
+                  "monthly_pivot_dist_bps_compute"):
+            self.assertIn(k, module.SOURCE_TRACE)
+            self.assertIn("origin_file", module.SOURCE_TRACE[k])
+
+    def test_pivot_no_threshold_search_language(self) -> None:
+        module = self._pivot_audit_module()
+        forbidden = (
+            "buy", "sell", "deploy",
+            "alpha", "profit", "pnl", "p&l",
+            "threshold search", "search threshold",
+        )
+        for status in (
+            "provider_coverage_gap", "expected_sparse_by_design",
+            "join_or_pipeline_gap", "zero_value_guard_expected",
+            "available_clean", "insufficient_source_visibility",
+            "unknown",
+        ):
+            rec = module.recommend_next_step(status)
+            for word in forbidden:
+                self.assertNotIn(word, rec.lower(),
+                                 f"forbidden word {word!r} in rec for {status!r}: {rec}")
+        rep = module.build_report(
+            symbol="SPY", target="reject", horizon=15,
+            active_manifest_path=Path("/tmp/m.json"),
+            manifest_version="v",
+            total_rows=1, overall_summary={},
+            group_null_summary_block={}, by_source=[], by_month=[],
+            by_level_type=[], by_session=[],
+            date_first_last={"first_null_date": None, "last_null_date": None},
+            longest_null_streak={"length_days": 0, "start_date": None, "end_date": None},
+            upstream_source_summary={"providers": []},
+            status="provider_coverage_gap",
+            corrected_interpretation={},
+            recommended_next_step_str="x",
+        )
+        for word in ("buy", "sell", "alpha", "profit"):
+            self.assertNotIn(word, rep["scope_disclosure"].lower())
+        self.assertIn("no edge claim", rep["scope_disclosure"].lower())
+        self.assertIn("no database writes", rep["scope_disclosure"].lower())
+
+    def test_pivot_cli_rejects_invalid_args(self) -> None:
+        module = self._pivot_audit_module()
+        with self.assertRaises(SystemExit):
+            module.main(["--older-pct", "1.5"])
+        with self.assertRaises(SystemExit):
+            module.main(["--recent-n", "0"])
+        with self.assertRaises(SystemExit):
+            module.main(["--highprob-low", "1.5"])
+
     def test_retrain_evidence_pack_refuses_overlap_with_live_model_dir(self) -> None:
         module = load_module(
             "retrain_evidence_pack_overlap",
