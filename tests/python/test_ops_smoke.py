@@ -8862,6 +8862,334 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(result["skip_reason"], "slice_size_exceeds_total_rows")
         self.assertFalse(result["meets_min_signals"])
 
+    # ------------------------------------------------------------------ #
+    # Phase 2 regime-health attribution
+    # ------------------------------------------------------------------ #
+
+    def _attribution_module(self):
+        return load_module(
+            "regime_health_attribution",
+            REPO_ROOT / "scripts" / "audit_regime_health_attribution.py",
+        )
+
+    @staticmethod
+    def _attribution_stub_df(n: int):
+        import pandas as pd
+        # ``row_id`` doubles as the feature; ``ts_event`` orders rows so
+        # the audit's chronological tail picking has a well-defined order.
+        return pd.DataFrame({"row_id": list(range(n)), "ts_event": list(range(n))})
+
+    def test_attribution_select_groups_chronological_and_fixed(self) -> None:
+        """``recent_dormant`` MUST be the last ``recent_n`` rows. The older
+        window MUST be carved out of the latest ``older_pct`` *before* the
+        recent tail — never random, never the head, never overlapping."""
+        module = self._attribution_module()
+        df = self._attribution_stub_df(1000)
+        sel = module.select_groups(df, recent_n=100, older_pct=0.30)
+        self.assertEqual(sel["recent_range"], (900, 1000))
+        # latest 30% of 1000 is rows [700, 1000); minus recent [900, 1000)
+        # leaves older window [700, 900).
+        self.assertEqual(sel["older_range"], (700, 900))
+        self.assertEqual(len(sel["recent_df"]), 100)
+        self.assertEqual(len(sel["older_df"]), 200)
+        # The two row ranges must be disjoint.
+        rs, re_ = sel["recent_range"]
+        os_, oe = sel["older_range"]
+        self.assertTrue(oe <= rs, "older window must end at or before recent tail")
+
+    def test_attribution_select_groups_recent_consumes_older(self) -> None:
+        """When the recent tail covers more rows than the older-pct window,
+        the older window collapses to empty rather than going negative or
+        wrapping back to the head."""
+        module = self._attribution_module()
+        df = self._attribution_stub_df(100)
+        sel = module.select_groups(df, recent_n=80, older_pct=0.30)
+        self.assertEqual(sel["recent_range"], (20, 100))
+        # latest 30 ends at 100, but recent starts at 20 — older must end
+        # at 20 too, and start cannot go past end.
+        os_, oe = sel["older_range"]
+        self.assertLessEqual(oe, 20)
+        self.assertLessEqual(os_, oe)
+
+    def test_attribution_resolve_runtime_threshold_prefers_manifest(self) -> None:
+        module = self._attribution_module()
+        out = module.resolve_runtime_threshold(0.80, 0.65)
+        self.assertEqual(out["runtime_threshold"], 0.80)
+        self.assertEqual(out["threshold_source"], "manifest")
+        self.assertTrue(out["threshold_mismatch_detected"])
+
+    def test_attribution_resolve_runtime_threshold_falls_back(self) -> None:
+        module = self._attribution_module()
+        out = module.resolve_runtime_threshold(None, 0.65)
+        self.assertEqual(out["runtime_threshold"], 0.65)
+        self.assertEqual(out["threshold_source"], "artifact_fallback")
+        self.assertFalse(out["threshold_mismatch_detected"])
+
+    def test_attribution_threshold_tune_reference_marked_unavailable(self) -> None:
+        """The manifest only persists threshold-tune SIZE, not row IDs.
+        The audit must report the reference as unavailable, never fabricate
+        a substitute slice."""
+        module = self._attribution_module()
+        manifest = {
+            "thresholds_meta": {
+                "reject": {
+                    "15": {
+                        "threshold_tune_size": 251,
+                        "objective": "utility_bps",
+                        "fallback": True,
+                        "search_enabled": False,
+                    }
+                }
+            }
+        }
+        ref = module.threshold_tune_meta(manifest, "reject", 15)
+        self.assertFalse(ref["available"])
+        self.assertEqual(ref["threshold_tune_size"], 251)
+        self.assertEqual(ref["reason"], "row_ids_not_persisted_in_manifest")
+        self.assertEqual(ref["objective"], "utility_bps")
+
+    def test_attribution_threshold_tune_reference_handles_missing_meta(self) -> None:
+        module = self._attribution_module()
+        ref_empty = module.threshold_tune_meta({}, "reject", 15)
+        self.assertFalse(ref_empty["available"])
+        self.assertEqual(ref_empty["reason"], "threshold_tune_size_missing_or_zero")
+        ref_zero = module.threshold_tune_meta(
+            {"thresholds_meta": {"reject": {"15": {"threshold_tune_size": 0}}}},
+            "reject", 15,
+        )
+        self.assertFalse(ref_zero["available"])
+
+    def test_attribution_standardized_mean_diff_math(self) -> None:
+        """SMD = (mean_a - mean_b) / sqrt((var_a + var_b)/2)."""
+        import numpy as np
+        module = self._attribution_module()
+        a = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+        b = np.array([2.0, 3.0, 4.0, 5.0, 6.0])
+        # mean_a=3, mean_b=4, var_a=var_b=2.0, pooled=sqrt(2)
+        expected = (3.0 - 4.0) / (2.0 ** 0.5)
+        got = module.standardized_mean_diff(a, b)
+        self.assertAlmostEqual(got, expected, places=10)
+        # Zero variance both sides => None, NOT a synthetic huge effect.
+        self.assertIsNone(
+            module.standardized_mean_diff(np.array([1.0, 1.0]), np.array([1.0, 1.0]))
+        )
+        # Empty side => None.
+        self.assertIsNone(module.standardized_mean_diff(np.array([]), b))
+
+    def test_attribution_quantile_distance_max_over_grid(self) -> None:
+        """quantile_distance is max |q_a(p) - q_b(p)| over the fixed grid."""
+        import numpy as np
+        module = self._attribution_module()
+        a = np.linspace(0.0, 1.0, 1001)
+        b = a + 0.10  # uniform shift
+        qd = module.quantile_distance(a, b)
+        self.assertAlmostEqual(qd, 0.10, places=4)
+        # Empty side => None.
+        self.assertIsNone(module.quantile_distance(np.array([]), b))
+
+    def test_attribution_top_shifted_features_deterministic_ordering(self) -> None:
+        module = self._attribution_module()
+        rows = [
+            {"feature": "f_big", "standardized_mean_diff": -1.5, "quantile_distance": 0.30, "ks_statistic": 0.40},
+            {"feature": "f_tied_a", "standardized_mean_diff": 0.5, "quantile_distance": 0.10, "ks_statistic": 0.15},
+            {"feature": "f_tied_b", "standardized_mean_diff": 0.5, "quantile_distance": 0.20, "ks_statistic": 0.20},
+            {"feature": "f_none", "standardized_mean_diff": None, "quantile_distance": 0.99, "ks_statistic": None},
+        ]
+        top = module.top_shifted_features(rows, k=3)
+        self.assertEqual([r["feature"] for r in top], ["f_big", "f_tied_b", "f_tied_a"])
+        self.assertNotIn("f_none", [r["feature"] for r in top])
+
+    def test_attribution_probability_stats_signal_count_uses_runtime_threshold(self) -> None:
+        """Signal count must come from a single comparison to the passed
+        threshold — no search, no alternative thresholds tested."""
+        import numpy as np
+        module = self._attribution_module()
+        probs = np.array([0.10, 0.50, 0.79, 0.80, 0.90])
+        ps = module.probability_stats(probs, threshold=0.80)
+        self.assertEqual(ps["n"], 5)
+        # 0.80 and 0.90 are >= 0.80
+        self.assertEqual(ps["signal_count"], 2)
+        # Probability stats handle empty arrays cleanly.
+        ps0 = module.probability_stats(np.array([]), threshold=0.80)
+        self.assertEqual(ps0["n"], 0)
+        self.assertIsNone(ps0["mean"])
+
+    def test_attribution_summary_flag_logic(self) -> None:
+        """Each attribution flag must respond ONLY to the inputs that
+        define it (no cross-flag bleeding). Test the four boolean branches
+        on independent inputs."""
+        module = self._attribution_module()
+        empty_health = {"imputation_heavy_features": [], "all_null_rows": 0}
+        dirty_health = {"imputation_heavy_features": ["bad_col"], "all_null_rows": 0}
+        # Feature shift only.
+        feat_rows = [{"feature": "x", "standardized_mean_diff": 1.0,
+                      "quantile_distance": 0.5, "ks_statistic": 0.5}]
+        out = module.attribution_summary(
+            recent_prob_stats={"max": 0.78}, firing_prob_stats={"n": 5},
+            threshold=0.80, feature_rows=feat_rows,
+            recent_health=empty_health, firing_health=empty_health,
+            older_firing_available=True, tune_reference_available=False,
+        )
+        self.assertTrue(out["feature_shift_present"])
+        self.assertFalse(out["probability_compression_present"])  # 0.80-0.78<0.10
+        self.assertFalse(out["data_quality_warning"])
+        self.assertTrue(out["older_firing_context_available"])
+        self.assertFalse(out["threshold_tune_reference_available"])
+        # Compression only.
+        out2 = module.attribution_summary(
+            recent_prob_stats={"max": 0.50}, firing_prob_stats={"n": 5},
+            threshold=0.80, feature_rows=[],
+            recent_health=empty_health, firing_health=empty_health,
+            older_firing_available=True, tune_reference_available=False,
+        )
+        self.assertFalse(out2["feature_shift_present"])
+        self.assertTrue(out2["probability_compression_present"])  # gap >= 0.10
+        # DQ only.
+        out3 = module.attribution_summary(
+            recent_prob_stats={"max": 0.78}, firing_prob_stats={"n": 5},
+            threshold=0.80, feature_rows=[],
+            recent_health=dirty_health, firing_health=empty_health,
+            older_firing_available=True, tune_reference_available=False,
+        )
+        self.assertTrue(out3["data_quality_warning"])
+        self.assertFalse(out3["feature_shift_present"])
+        self.assertFalse(out3["probability_compression_present"])
+        # No older firing context => availability flag false; recommendation
+        # asks for a wider window.
+        out4 = module.attribution_summary(
+            recent_prob_stats={"max": 0.78}, firing_prob_stats={"n": 0},
+            threshold=0.80, feature_rows=[],
+            recent_health=empty_health, firing_health=empty_health,
+            older_firing_available=False, tune_reference_available=False,
+        )
+        self.assertFalse(out4["older_firing_context_available"])
+        self.assertIn("widen", out4["recommended_next_diagnostic"])
+
+    def test_attribution_report_schema_stable(self) -> None:
+        """JSON report must carry the same top-level keys regardless of
+        whether older_firing_context is empty or populated. Downstream
+        consumers (alerts, dashboards) depend on this."""
+        module = self._attribution_module()
+        thr = {"runtime_threshold": 0.80, "threshold_source": "manifest",
+               "manifest_threshold": 0.80, "artifact_threshold": 0.80,
+               "threshold_mismatch_detected": False}
+        attr = {"feature_shift_present": False, "probability_compression_present": False,
+                "data_quality_warning": False, "older_firing_context_available": False,
+                "threshold_tune_reference_available": False,
+                "strongest_shifted_features": [],
+                "recommended_next_diagnostic": "x"}
+        rep = module.build_report(
+            target="reject", horizon=15,
+            active_manifest_path=Path("/tmp/manifest_active.json"),
+            manifest={"version": "v_test"},
+            model_path=Path("/tmp/rf.pkl"),
+            threshold_resolution=thr,
+            total_rows=20_000,
+            group_ranges={
+                "total_rows": 20_000,
+                "recent_dormant": {"row_index_start": 19_000, "row_index_end": 20_000, "n": 1000},
+                "older_window": {"row_index_start": 14_000, "row_index_end": 19_000, "n": 5000,
+                                 "pct_of_total": 0.30, "window_size_unfiltered": 6000},
+            },
+            groups={
+                "recent_dormant": {}, "older_firing_context": {},
+                "older_high_probability_nonfiring": {}, "threshold_tune_reference": {},
+            },
+            feature_comparison={"recent_vs_older_firing": []},
+            attribution=attr,
+            threshold_tune_ref={"available": False, "reason": "row_ids_not_persisted_in_manifest"},
+            warnings=[],
+        )
+        for key in (
+            "schema_version", "audit_type", "generated_at",
+            "target", "horizon",
+            "active_manifest_path", "active_manifest_version",
+            "model_path", "deployed_threshold",
+            "threshold_source", "manifest_threshold", "artifact_threshold",
+            "threshold_mismatch_detected",
+            "total_labeled_rows", "group_ranges", "groups",
+            "feature_comparison", "threshold_tune_reference",
+            "attribution", "warnings", "scope_disclosure",
+        ):
+            self.assertIn(key, rep, f"missing report key: {key}")
+        self.assertEqual(rep["audit_type"], "regime_health_attribution")
+        self.assertEqual(rep["schema_version"], 1)
+        self.assertEqual(rep["target"], "reject")
+        self.assertEqual(rep["horizon"], 15)
+
+    def test_attribution_report_no_edge_claim_language(self) -> None:
+        """The scope disclosure and recommended-next text must NOT contain
+        forbidden edge/performance/trade language. This guards against
+        someone later turning a descriptive flag into a prescriptive call."""
+        module = self._attribution_module()
+        # Hit every recommendation branch.
+        recs = []
+        for fs, comp, dq, of in [
+            (False, False, False, False),
+            (True, True, False, True),
+            (True, False, False, True),
+            (False, True, False, True),
+            (False, False, True, True),
+            (False, False, False, True),
+        ]:
+            recs.append(module._recommend_next(
+                feature_shift_present=fs, compression_present=comp,
+                data_quality_warning=dq, older_firing_available=of,
+            ))
+        forbidden = (
+            "buy", "sell", "long", "short", "promote", "deploy", "retrain",
+            "edge", "alpha", "profit", "pnl", "p&l", "tradeable",
+            "tune", "calibrate",
+        )
+        for rec in recs:
+            for word in forbidden:
+                self.assertNotIn(word, rec.lower(),
+                                 f"forbidden word {word!r} in recommendation: {rec}")
+        # And the scope disclosure on a fresh build_report output.
+        thr = {"runtime_threshold": 0.80, "threshold_source": "manifest",
+               "manifest_threshold": 0.80, "artifact_threshold": 0.80,
+               "threshold_mismatch_detected": False}
+        rep = module.build_report(
+            target="reject", horizon=15,
+            active_manifest_path=Path("/tmp/m.json"), manifest={"version": "v"},
+            model_path=Path("/tmp/rf.pkl"), threshold_resolution=thr,
+            total_rows=10, group_ranges={}, groups={},
+            feature_comparison={}, attribution={},
+            threshold_tune_ref={"available": False, "reason": "x"},
+        )
+        for word in ("buy", "sell", "edge", "alpha", "profit"):
+            self.assertNotIn(word, rep["scope_disclosure"].lower())
+
+    def test_attribution_per_feature_comparison_handles_missing_older_firing(self) -> None:
+        """Empty older-firing dataframe must NOT raise. Effect sizes are
+        None on that side; the script must still produce the same per-row
+        schema so downstream consumers can iterate uniformly."""
+        import pandas as pd
+        module = self._attribution_module()
+        recent = pd.DataFrame({"x": [1.0, 2.0, 3.0], "y": [0.1, 0.2, 0.3]})
+        firing = pd.DataFrame({"x": [], "y": []})
+        rows = module.per_feature_comparison(
+            recent, firing, group_a_name="recent_dormant", group_b_name="older_firing_context",
+        )
+        self.assertEqual(len(rows), 2)
+        for r in rows:
+            self.assertIn("feature", r)
+            self.assertIn("standardized_mean_diff", r)
+            self.assertIn("quantile_distance", r)
+            self.assertIsNone(r["standardized_mean_diff"])
+            self.assertIsNone(r["quantile_distance"])
+
+    def test_attribution_cli_rejects_invalid_args(self) -> None:
+        module = self._attribution_module()
+        with self.assertRaises(SystemExit):
+            module.main(["--older-pct", "1.5"])
+        with self.assertRaises(SystemExit):
+            module.main(["--older-pct", "0"])
+        with self.assertRaises(SystemExit):
+            module.main(["--recent-n", "0"])
+        with self.assertRaises(SystemExit):
+            module.main(["--highprob-low", "1.5"])
+
     def test_retrain_evidence_pack_refuses_overlap_with_live_model_dir(self) -> None:
         module = load_module(
             "retrain_evidence_pack_overlap",
