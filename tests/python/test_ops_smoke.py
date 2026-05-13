@@ -9619,6 +9619,349 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(sel_dq["recent_range"], sel_attr["recent_range"])
         self.assertEqual(sel_dq["older_range"], sel_attr["older_range"])
 
+    # ------------------------------------------------------------------ #
+    # Phase 2C feature-pipeline health audit
+    # ------------------------------------------------------------------ #
+
+    def _pipeline_module(self):
+        return load_module(
+            "feature_pipeline_health",
+            REPO_ROOT / "scripts" / "audit_feature_pipeline_health.py",
+        )
+
+    def test_pipeline_ema_alias_verified_on_matching_rows(self) -> None:
+        import pandas as pd
+        module = self._pipeline_module()
+        raw = pd.Series([1, 1, -1, 0, 1, None, 1])
+        calc = pd.Series([1, 1, -1, 0, 1, 1, 1])
+        info = module.classify_ema_state_alias_pair(raw, calc)
+        self.assertEqual(info["checked_rows"], 6)
+        self.assertEqual(info["matched_rows"], 6)
+        self.assertEqual(info["mismatch_rows"], 0)
+        self.assertTrue(info["alias_verified_in_data"])
+        self.assertIn("alias_confirmed", info["note"])
+
+    def test_pipeline_ema_alias_fails_when_data_disagrees(self) -> None:
+        import pandas as pd
+        module = self._pipeline_module()
+        raw = pd.Series([1, 1, -1, 0])
+        calc = pd.Series([1, 1, 1, 0])
+        info = module.classify_ema_state_alias_pair(raw, calc)
+        self.assertEqual(info["mismatch_rows"], 1)
+        self.assertFalse(info["alias_verified_in_data"])
+        self.assertIn("alias_declared_but_data_disagrees", info["note"])
+
+    def test_pipeline_ema_alias_handles_absent_series(self) -> None:
+        module = self._pipeline_module()
+        info = module.classify_ema_state_alias_pair(None, None)
+        self.assertFalse(info["alias_verified_in_data"])
+        self.assertEqual(info["checked_rows"], 0)
+        self.assertEqual(info["note"], "one_or_both_series_absent")
+
+    def test_pipeline_gamma_mode_downgrade_when_value_in_domain(self) -> None:
+        module = self._pipeline_module()
+        stats = {"top_repeated": [{"value": 1.0, "count": 84, "share": 0.84}]}
+        out = module.classify_gamma_mode_concentration(stats)
+        self.assertTrue(out["in_legitimate_enum_domain"])
+        self.assertTrue(out["high_concentration"])
+        self.assertTrue(out["phase_2b_imputed_flag_should_be_downgraded"])
+        self.assertEqual(out["corrected_label"], "legitimate_enum_concentration")
+
+    def test_pipeline_gamma_mode_no_downgrade_when_value_out_of_domain(self) -> None:
+        module = self._pipeline_module()
+        stats = {"top_repeated": [{"value": 999.0, "count": 90, "share": 0.90}]}
+        out = module.classify_gamma_mode_concentration(stats)
+        self.assertFalse(out["in_legitimate_enum_domain"])
+        self.assertTrue(out["high_concentration"])
+        self.assertFalse(out["phase_2b_imputed_flag_should_be_downgraded"])
+        self.assertEqual(out["corrected_label"], "no_correction_needed")
+
+    def test_pipeline_gamma_mode_no_downgrade_when_share_too_low(self) -> None:
+        module = self._pipeline_module()
+        stats = {"top_repeated": [{"value": 1.0, "count": 30, "share": 0.30}]}
+        out = module.classify_gamma_mode_concentration(stats)
+        self.assertTrue(out["in_legitimate_enum_domain"])
+        self.assertFalse(out["high_concentration"])
+        self.assertFalse(out["phase_2b_imputed_flag_should_be_downgraded"])
+
+    def test_pipeline_monthly_pivot_null_traces_to_upstream(self) -> None:
+        import pandas as pd
+        module = self._pipeline_module()
+        df = pd.DataFrame({
+            "monthly_pivot_dist_bps": [10.0, None, 5.0, None, 7.0, None],
+            "monthly_pivot": [400.0, None, 410.0, 0.0, 420.0, None],
+        })
+        info = module.classify_monthly_pivot_null_pattern(df)
+        self.assertEqual(info["feature_null_count"], 3)
+        self.assertAlmostEqual(info["feature_null_rate"], 0.5)
+        self.assertEqual(info["rows_feature_null_but_raw_present_nonzero"], 0)
+        self.assertEqual(
+            info["classification"],
+            "upstream_pivot_availability_explains_all_nulls",
+        )
+
+    def test_pipeline_monthly_pivot_discrepancy_detected(self) -> None:
+        import pandas as pd
+        module = self._pipeline_module()
+        df = pd.DataFrame({
+            "monthly_pivot_dist_bps": [10.0, None, 5.0],
+            "monthly_pivot": [400.0, 410.0, 420.0],
+        })
+        info = module.classify_monthly_pivot_null_pattern(df)
+        self.assertEqual(info["rows_feature_null_but_raw_present_nonzero"], 1)
+        self.assertEqual(
+            info["classification"], "feature_pipeline_discrepancy_detected"
+        )
+
+    def test_pipeline_monthly_pivot_raw_column_missing(self) -> None:
+        import pandas as pd
+        module = self._pipeline_module()
+        df = pd.DataFrame({"monthly_pivot_dist_bps": [10.0, None, 5.0]})
+        info = module.classify_monthly_pivot_null_pattern(df)
+        self.assertEqual(
+            info["classification"], "raw_source_column_missing_from_view"
+        )
+
+    def test_pipeline_ts_event_duplicates_classified_as_expected(self) -> None:
+        import pandas as pd
+        module = self._pipeline_module()
+        df = pd.DataFrame({
+            "ts_event": [100, 100, 100, 200, 200, 300],
+            "event_id": ["a", "b", "c", "d", "e", "f"],
+        })
+        info = module.classify_ts_event_duplicates(df)
+        self.assertEqual(info["duplicate_ts_count"], 5)
+        self.assertEqual(info["duplicate_event_id_count"], 0)
+        self.assertEqual(info["classification"], "expected_many_events_per_bar")
+
+    def test_pipeline_ts_event_writer_duplication_detected(self) -> None:
+        import pandas as pd
+        module = self._pipeline_module()
+        df = pd.DataFrame({
+            "ts_event": [100, 100, 200],
+            "event_id": ["a", "a", "b"],
+        })
+        info = module.classify_ts_event_duplicates(df)
+        self.assertEqual(info["duplicate_event_id_count"], 2)
+        self.assertEqual(
+            info["classification"], "possible_event_writer_duplication"
+        )
+
+    def test_pipeline_ts_event_insufficient_key_columns(self) -> None:
+        import pandas as pd
+        module = self._pipeline_module()
+        df = pd.DataFrame({"ts_event": [100, 100, 200]})
+        info = module.classify_ts_event_duplicates(df)
+        self.assertEqual(info["classification"], "insufficient_key_columns")
+        self.assertFalse(info["key_column_present"])
+
+    def test_pipeline_ts_event_no_duplicates_path(self) -> None:
+        import pandas as pd
+        module = self._pipeline_module()
+        df = pd.DataFrame({
+            "ts_event": [1, 2, 3, 4],
+            "event_id": ["a", "b", "c", "d"],
+        })
+        info = module.classify_ts_event_duplicates(df)
+        self.assertEqual(info["classification"], "no_duplicate_ts")
+
+    def test_pipeline_status_clean_branch(self) -> None:
+        module = self._pipeline_module()
+        feature_reports = {
+            "ema_state": {"recent_dormant": {"skip_reason": ""}},
+        }
+        monthly = {"classification": "upstream_pivot_availability_explains_all_nulls"}
+        dup_ts = {
+            "recent_dormant": {"classification": "expected_many_events_per_bar"}
+        }
+        status = module.determine_pipeline_status(
+            feature_reports=feature_reports,
+            monthly_pivot_classification=monthly,
+            duplicate_ts_assessments=dup_ts,
+            corrected_phase_2b={},
+        )
+        self.assertEqual(status, "likely_real_regime_shift_with_feature_dq_caveats")
+
+    def test_pipeline_status_pipeline_issue_branch(self) -> None:
+        module = self._pipeline_module()
+        feature_reports = {
+            "ema_state": {"recent_dormant": {"skip_reason": ""}},
+        }
+        status1 = module.determine_pipeline_status(
+            feature_reports=feature_reports,
+            monthly_pivot_classification={"classification": "no_nulls_in_group"},
+            duplicate_ts_assessments={
+                "recent_dormant": {"classification": "possible_event_writer_duplication"}
+            },
+            corrected_phase_2b={},
+        )
+        self.assertEqual(status1, "feature_pipeline_issue_likely")
+        status2 = module.determine_pipeline_status(
+            feature_reports=feature_reports,
+            monthly_pivot_classification={
+                "classification": "feature_pipeline_discrepancy_detected"
+            },
+            duplicate_ts_assessments={
+                "recent_dormant": {"classification": "expected_many_events_per_bar"}
+            },
+            corrected_phase_2b={},
+        )
+        self.assertEqual(status2, "feature_pipeline_issue_likely")
+
+    def test_pipeline_status_insufficient_visibility_branch(self) -> None:
+        module = self._pipeline_module()
+        feature_reports = {
+            "ema_state": {"recent_dormant": {"skip_reason": "column_absent"}},
+            "ema_state_calc": {"recent_dormant": {"skip_reason": "column_absent"}},
+        }
+        status = module.determine_pipeline_status(
+            feature_reports=feature_reports,
+            monthly_pivot_classification={"classification": "no_nulls_in_group"},
+            duplicate_ts_assessments={
+                "recent_dormant": {"classification": "no_duplicate_ts"}
+            },
+            corrected_phase_2b={},
+        )
+        self.assertEqual(status, "insufficient_source_visibility")
+
+    def test_pipeline_report_schema_stable(self) -> None:
+        module = self._pipeline_module()
+        thr = {"runtime_threshold": 0.80, "threshold_source": "manifest",
+               "manifest_threshold": 0.80, "artifact_threshold": 0.80,
+               "threshold_mismatch_detected": False}
+        rep = module.build_report(
+            target="reject", horizon=15,
+            active_manifest_path=Path("/tmp/m.json"),
+            manifest={"version": "v_test"},
+            threshold_resolution=thr,
+            total_rows=21_000,
+            group_ranges={"recent_dormant": {"n": 1000}},
+            features={"ema_state": {}},
+            source_trace=module.SOURCE_TRACE,
+            timestamp_duplicate_assessment={"per_group": {}, "summary_classification": "x"},
+            corrected_phase_2b={"ema_state_and_ema_state_calc": {}},
+            feature_pipeline_status="likely_real_regime_shift_with_feature_dq_caveats",
+            recommended_next_step="x",
+        )
+        for key in (
+            "schema_version", "audit_type", "generated_at",
+            "target", "horizon",
+            "active_manifest_path", "active_manifest_version",
+            "deployed_threshold", "threshold_source",
+            "manifest_threshold", "artifact_threshold",
+            "threshold_mismatch_detected",
+            "total_labeled_rows", "group_ranges",
+            "feature_pipeline_status", "features", "source_trace",
+            "timestamp_duplicate_assessment",
+            "corrected_phase2b_interpretation",
+            "recommended_next_step", "warnings", "scope_disclosure",
+        ):
+            self.assertIn(key, rep, f"missing report key: {key}")
+        self.assertEqual(rep["audit_type"], "feature_pipeline_health")
+        self.assertEqual(rep["schema_version"], 1)
+
+    def test_pipeline_source_trace_carries_required_keys(self) -> None:
+        module = self._pipeline_module()
+        for feat, info in module.SOURCE_TRACE.items():
+            self.assertIn("origin_file", info, f"{feat} missing origin_file")
+            self.assertIn(
+                "default_or_imputation_path", info,
+                f"{feat} missing default_or_imputation_path",
+            )
+            self.assertIn("feature_kind", info, f"{feat} missing feature_kind")
+
+    def test_pipeline_no_threshold_search_language_anywhere(self) -> None:
+        module = self._pipeline_module()
+        forbidden = (
+            "buy", "sell", "promote", "deploy", "retrain",
+            "alpha", "profit", "pnl", "p&l",
+            "threshold search", "search threshold",
+        )
+        recs = [
+            module.recommend_next_step(
+                "insufficient_source_visibility",
+                monthly_pivot_recent_null_rate=None,
+                monthly_pivot_classification="",
+                ema_alias_verified=False,
+                gamma_downgraded=False,
+            ),
+            module.recommend_next_step(
+                "feature_pipeline_issue_likely",
+                monthly_pivot_recent_null_rate=0.4,
+                monthly_pivot_classification="feature_pipeline_discrepancy_detected",
+                ema_alias_verified=True,
+                gamma_downgraded=True,
+            ),
+            module.recommend_next_step(
+                "likely_real_regime_shift_with_feature_dq_caveats",
+                monthly_pivot_recent_null_rate=0.4,
+                monthly_pivot_classification="upstream_pivot_availability_explains_all_nulls",
+                ema_alias_verified=True,
+                gamma_downgraded=True,
+            ),
+            module.recommend_next_step(
+                "likely_real_regime_shift_with_feature_dq_caveats",
+                monthly_pivot_recent_null_rate=0.05,
+                monthly_pivot_classification="no_nulls_in_group",
+                ema_alias_verified=True,
+                gamma_downgraded=True,
+            ),
+            module.recommend_next_step(
+                "likely_real_regime_shift_with_feature_dq_caveats",
+                monthly_pivot_recent_null_rate=0.05,
+                monthly_pivot_classification="no_nulls_in_group",
+                ema_alias_verified=False,
+                gamma_downgraded=False,
+            ),
+        ]
+        for rec in recs:
+            for word in forbidden:
+                self.assertNotIn(word, rec.lower(),
+                                 f"forbidden word {word!r} in recommendation: {rec}")
+        thr = {"runtime_threshold": 0.80, "threshold_source": "manifest",
+               "manifest_threshold": 0.80, "artifact_threshold": 0.80,
+               "threshold_mismatch_detected": False}
+        rep = module.build_report(
+            target="reject", horizon=15,
+            active_manifest_path=Path("/tmp/m.json"),
+            manifest={"version": "v"},
+            threshold_resolution=thr,
+            total_rows=1, group_ranges={}, features={},
+            source_trace={}, timestamp_duplicate_assessment={},
+            corrected_phase_2b={},
+            feature_pipeline_status="unknown",
+            recommended_next_step="x",
+        )
+        for word in ("buy", "sell", "alpha", "profit", "promote", "retrain"):
+            self.assertNotIn(word, rep["scope_disclosure"].lower())
+        self.assertIn("no edge claim", rep["scope_disclosure"].lower())
+        self.assertIn("no database writes", rep["scope_disclosure"].lower())
+
+    def test_pipeline_cli_rejects_invalid_args(self) -> None:
+        module = self._pipeline_module()
+        with self.assertRaises(SystemExit):
+            module.main(["--older-pct", "1.5"])
+        with self.assertRaises(SystemExit):
+            module.main(["--recent-n", "0"])
+        with self.assertRaises(SystemExit):
+            module.main(["--highprob-low", "-0.1"])
+
+    def test_pipeline_value_counts_coerces_numpy_scalars(self) -> None:
+        import numpy as np
+        import pandas as pd
+        module = self._pipeline_module()
+        s_int = pd.Series(np.array([1, 1, 1, -1, -1], dtype=np.int64))
+        top = module.value_counts_top_n(s_int, n=2)
+        self.assertEqual(top[0]["value"], 1.0)
+        self.assertIsInstance(top[0]["value"], float)
+        s_float = pd.Series(np.array([0.5, 0.5, 0.5], dtype=np.float64))
+        top_f = module.value_counts_top_n(s_float, n=1)
+        self.assertEqual(top_f[0]["value"], 0.5)
+        self.assertIsInstance(top_f[0]["value"], float)
+        stats = {"top_repeated": top}
+        out = module.classify_gamma_mode_concentration(stats)
+        self.assertTrue(out["in_legitimate_enum_domain"])
+
     def test_retrain_evidence_pack_refuses_overlap_with_live_model_dir(self) -> None:
         module = load_module(
             "retrain_evidence_pack_overlap",
