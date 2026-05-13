@@ -10529,6 +10529,269 @@ class OpsSmokeTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             module.main(["--smd-min-abs", "-0.1"])
 
+    # ------------------------------------------------------------------ #
+    # Phase 2F ATR availability by provider audit
+    # ------------------------------------------------------------------ #
+
+    def _atr_audit_module(self):
+        return load_module(
+            "atr_availability_by_provider",
+            REPO_ROOT / "scripts" / "audit_atr_availability_by_provider.py",
+        )
+
+    def test_atr_compute_atr_bps_matches_runtime_formula(self) -> None:
+        import math
+        import pandas as pd
+        module = self._atr_audit_module()
+        df = pd.DataFrame({
+            "atr": [1.0, 0.0, None, 2.5, 3.0],
+            "touch_price": [500.0, 500.0, 500.0, 0.0, 750.0],
+        })
+        out = module.compute_atr_bps(df)
+        self.assertAlmostEqual(out.iloc[0], 20.0)
+        self.assertTrue(math.isnan(out.iloc[1]))
+        self.assertTrue(math.isnan(out.iloc[2]))
+        self.assertTrue(math.isnan(out.iloc[3]))
+        self.assertAlmostEqual(out.iloc[4], 40.0)
+
+    def test_atr_compute_atr_bps_handles_missing_columns(self) -> None:
+        import math
+        import pandas as pd
+        module = self._atr_audit_module()
+        df = pd.DataFrame({"atr": [1.0, 2.0]})
+        out = module.compute_atr_bps(df)
+        self.assertEqual(len(out), 2)
+        for v in out:
+            self.assertTrue(math.isnan(v))
+
+    def test_atr_availability_summary_basic(self) -> None:
+        import pandas as pd
+        module = self._atr_audit_module()
+        s = pd.Series([1.0, 2.0, 3.0, None, 0.0])
+        out = module.availability_summary(s)
+        self.assertEqual(out["n"], 5)
+        self.assertEqual(out["null_count"], 1)
+        self.assertAlmostEqual(out["null_rate"], 0.2)
+        self.assertEqual(out["zero_count"], 1)
+        self.assertAlmostEqual(out["zero_rate"], 0.2)
+        self.assertAlmostEqual(out["median"], 1.5)
+
+    def test_atr_per_provider_atr(self) -> None:
+        import pandas as pd
+        module = self._atr_audit_module()
+        df = pd.DataFrame({
+            "source": ["Yahoo"] * 4 + ["IBKR"] * 2,
+            "atr": [1.0, 1.0, None, 1.0, 1.0, 1.0],
+            "touch_price": [500, 500, 500, 500, 500, 500],
+        })
+        out = module.per_provider_atr(df)
+        by_src = {p["source"]: p for p in out}
+        self.assertEqual(by_src["Yahoo"]["n"], 4)
+        self.assertAlmostEqual(by_src["Yahoo"]["raw_atr"]["null_rate"], 0.25)
+        self.assertAlmostEqual(by_src["Yahoo"]["atr_bps_derived"]["null_rate"], 0.25)
+        self.assertEqual(by_src["IBKR"]["n"], 2)
+        self.assertAlmostEqual(by_src["IBKR"]["atr_bps_derived"]["null_rate"], 0.0)
+
+    def test_atr_classify_status_labeled_view_gap(self) -> None:
+        module = self._atr_audit_module()
+        cp = {"source": True, "atr": True, "atr_bps": False,
+              "touch_price": True}
+        overall = {"raw_atr_null_rate": 0.01,
+                   "atr_bps_null_rate_in_view": None}
+        per_provider = [
+            {"source": "marketdata.app", "n": 44000,
+             "raw_atr": {"null_rate": 0.01}},
+            {"source": "Yahoo", "n": 30000,
+             "raw_atr": {"null_rate": 0.01}},
+        ]
+        self.assertEqual(
+            module.classify_status(
+                columns_present=cp, overall_summary=overall,
+                per_provider=per_provider,
+            ),
+            "labeled_view_gap",
+        )
+
+    def test_atr_classify_status_raw_input_missing(self) -> None:
+        module = self._atr_audit_module()
+        cp = {"source": True, "atr": True, "atr_bps": False,
+              "touch_price": True}
+        overall = {"raw_atr_null_rate": 0.80}
+        per_provider = [
+            {"source": "A", "n": 1000, "raw_atr": {"null_rate": 0.80}},
+            {"source": "B", "n": 1000, "raw_atr": {"null_rate": 0.95}},
+        ]
+        self.assertEqual(
+            module.classify_status(
+                columns_present=cp, overall_summary=overall,
+                per_provider=per_provider,
+            ),
+            "raw_input_missing",
+        )
+
+    def test_atr_classify_status_provider_coverage_gap(self) -> None:
+        module = self._atr_audit_module()
+        cp = {"source": True, "atr": True, "atr_bps": False,
+              "touch_price": True}
+        overall = {"raw_atr_null_rate": 0.40}
+        per_provider = [
+            {"source": "marketdata.app", "n": 1000,
+             "raw_atr": {"null_rate": 0.01}},
+            {"source": "Yahoo", "n": 1000,
+             "raw_atr": {"null_rate": 0.80}},
+        ]
+        self.assertEqual(
+            module.classify_status(
+                columns_present=cp, overall_summary=overall,
+                per_provider=per_provider,
+            ),
+            "provider_coverage_gap",
+        )
+
+    def test_atr_classify_status_feature_join_gap(self) -> None:
+        module = self._atr_audit_module()
+        cp = {"source": True, "atr": True, "atr_bps": True,
+              "touch_price": True}
+        overall = {"raw_atr_null_rate": 0.02,
+                   "atr_bps_null_rate_in_view": 0.40}
+        per_provider = [
+            {"source": "marketdata.app", "n": 1000,
+             "raw_atr": {"null_rate": 0.02}},
+        ]
+        self.assertEqual(
+            module.classify_status(
+                columns_present=cp, overall_summary=overall,
+                per_provider=per_provider,
+            ),
+            "feature_join_gap",
+        )
+
+    def test_atr_classify_status_insufficient_visibility(self) -> None:
+        module = self._atr_audit_module()
+        cp = {"source": True, "atr": False, "atr_bps": False,
+              "touch_price": True}
+        self.assertEqual(
+            module.classify_status(
+                columns_present=cp, overall_summary={},
+                per_provider=[],
+            ),
+            "insufficient_source_visibility",
+        )
+
+    def test_atr_classify_status_available_clean(self) -> None:
+        module = self._atr_audit_module()
+        cp = {"source": True, "atr": True, "atr_bps": True,
+              "touch_price": True}
+        overall = {"raw_atr_null_rate": 0.01,
+                   "atr_bps_null_rate_in_view": 0.01}
+        per_provider = [
+            {"source": "marketdata.app", "n": 1000,
+             "raw_atr": {"null_rate": 0.01}},
+        ]
+        self.assertEqual(
+            module.classify_status(
+                columns_present=cp, overall_summary=overall,
+                per_provider=per_provider,
+            ),
+            "available_clean",
+        )
+
+    def test_atr_group_summary_recomputes_derived(self) -> None:
+        import pandas as pd
+        module = self._atr_audit_module()
+        df = pd.DataFrame({
+            "atr": [1.0, 1.0, None],
+            "touch_price": [500.0, 1000.0, 500.0],
+        })
+        out = module.group_summary(df)
+        self.assertEqual(out["n"], 3)
+        self.assertEqual(out["atr_bps_derived"]["n"], 3)
+        self.assertEqual(out["atr_bps_derived"]["null_count"], 1)
+
+    def test_atr_report_schema_stable(self) -> None:
+        module = self._atr_audit_module()
+        rep = module.build_report(
+            symbol="SPY", target="reject", horizon=15,
+            active_manifest_path=Path("/tmp/m.json"),
+            manifest_version="v411",
+            total_rows=100,
+            columns_present={"atr": True, "atr_bps": False, "source": True,
+                             "touch_price": True, "symbol": True,
+                             "event_date_et": True, "ts_event": True},
+            overall_summary={"raw_atr_null_rate": 0.01},
+            provider_summary=[],
+            by_month=[],
+            group_summary_block={"recent_dormant": {}, "older_window": {}},
+            raw_input_summary={"raw_atr_in_view": True},
+            status="labeled_view_gap",
+            corrected_interpretation={
+                "phase_2f_root_cause_classification": "labeled_view_gap",
+            },
+            recommended_next_step_str="x",
+        )
+        for key in (
+            "schema_version", "audit_type", "generated_at",
+            "symbol", "target", "horizon",
+            "active_manifest_path", "active_manifest_version",
+            "total_rows_inspected", "atr_availability_status",
+            "columns_present", "source_trace", "overall_summary",
+            "provider_summary", "by_month", "group_summary",
+            "raw_input_summary", "corrected_interpretation",
+            "recommended_next_step", "warnings", "scope_disclosure",
+        ):
+            self.assertIn(key, rep, f"missing report key: {key}")
+        self.assertEqual(rep["audit_type"], "atr_availability_by_provider")
+        self.assertEqual(rep["schema_version"], 1)
+
+    def test_atr_source_trace_required_keys(self) -> None:
+        module = self._atr_audit_module()
+        for k in ("raw_atr_producer", "view_atr_column",
+                  "atr_bps_runtime_compute"):
+            self.assertIn(k, module.SOURCE_TRACE)
+            self.assertIn("origin_file", module.SOURCE_TRACE[k])
+
+    def test_atr_no_threshold_search_language(self) -> None:
+        module = self._atr_audit_module()
+        forbidden = (
+            "buy", "sell", "promote", "deploy",
+            "alpha", "profit", "pnl",
+            "threshold search", "search threshold",
+        )
+        for status in (
+            "labeled_view_gap", "raw_input_missing",
+            "provider_coverage_gap", "feature_join_gap",
+            "available_clean", "insufficient_source_visibility",
+            "unknown",
+        ):
+            rec = module.recommend_next_step(status)
+            for word in forbidden:
+                self.assertNotIn(word, rec.lower(),
+                                 f"forbidden word {word!r} in rec for {status!r}: {rec}")
+        rep = module.build_report(
+            symbol="SPY", target="reject", horizon=15,
+            active_manifest_path=Path("/tmp/m.json"),
+            manifest_version="v",
+            total_rows=1, columns_present={},
+            overall_summary={},
+            provider_summary=[], by_month=[],
+            group_summary_block={},
+            raw_input_summary={},
+            status="labeled_view_gap",
+            corrected_interpretation={},
+            recommended_next_step_str="x",
+        )
+        for word in ("buy", "sell", "alpha", "profit", "promote"):
+            self.assertNotIn(word, rep["scope_disclosure"].lower())
+        self.assertIn("no edge claim", rep["scope_disclosure"].lower())
+        self.assertIn("no database writes", rep["scope_disclosure"].lower())
+
+    def test_atr_cli_rejects_invalid_args(self) -> None:
+        module = self._atr_audit_module()
+        with self.assertRaises(SystemExit):
+            module.main(["--older-pct", "1.5"])
+        with self.assertRaises(SystemExit):
+            module.main(["--recent-n", "0"])
+
     def test_retrain_evidence_pack_refuses_overlap_with_live_model_dir(self) -> None:
         module = load_module(
             "retrain_evidence_pack_overlap",
