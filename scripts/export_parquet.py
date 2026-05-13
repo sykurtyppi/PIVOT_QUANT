@@ -4,6 +4,16 @@ import sqlite3
 import sys
 from pathlib import Path
 
+# Guard at import time: pipeline siblings use 3.10+ syntax; abort with a
+# clear venv hint instead of letting an unrelated downstream failure mask
+# the real cause.
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+from services._pybin import assert_python_310  # noqa: E402,PLC0415
+
+assert_python_310()
+
 DEFAULT_DB = os.getenv("PIVOT_DB", "data/pivot_events.sqlite")
 OUT_DIR = Path(os.getenv("EXPORT_DIR", "data/exports"))
 PIP_INSTALL = f"{sys.executable} -m pip install"

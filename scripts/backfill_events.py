@@ -1972,7 +1972,21 @@ def build_events(
 def run_build_labels(db_path: str, horizons: list[int]):
     import subprocess
 
-    args = [sys.executable, "scripts/build_labels.py", "--incremental", "--db", db_path]
+    # Use the shared resolver instead of ``sys.executable``. If this script
+    # is itself invoked from a Python < 3.10 (e.g. via raw ``python3
+    # scripts/backfill_events.py`` on macOS where ``python3`` is Apple's
+    # CommandLineTools 3.9.6), inheriting ``sys.executable`` for the
+    # subprocess would propagate that — and ``scripts/build_labels.py``
+    # may use 3.10+ syntax. Resolve a >=3.10 interpreter explicitly.
+    from pathlib import Path
+    import sys as _sys
+    _root = Path(__file__).resolve().parents[1]
+    if str(_root) not in _sys.path:
+        _sys.path.insert(0, str(_root))
+    from services._pybin import resolve_python  # noqa: PLC0415
+
+    python_bin, _version, _source = resolve_python()
+    args = [python_bin, "scripts/build_labels.py", "--incremental", "--db", db_path]
     if horizons:
         args.extend(["--horizons", *[str(h) for h in horizons]])
     subprocess.run(args, check=False, cwd=os.getcwd())
