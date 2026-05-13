@@ -12447,6 +12447,347 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("5", captured["args"])
         self.assertIn("15", captured["args"])
 
+    # ------------------------------------------------------------------ #
+    # D1: manual serving-state gate
+    # ------------------------------------------------------------------ #
+
+    def _serving_state_module(self):
+        return load_module(
+            "server_serving_state",
+            REPO_ROOT / "server" / "serving_state.py",
+        )
+
+    def _cli_module(self):
+        return load_module(
+            "scripts_set_serving_state",
+            REPO_ROOT / "scripts" / "set_serving_state.py",
+        )
+
+    def test_serving_state_missing_file_defaults_active(self) -> None:
+        """No file -> default active with the missing-file source marker so
+        /health can distinguish "flag set to active" from "no flag set"."""
+        module = self._serving_state_module()
+        state_path = Path(self.tmp) / "data" / "models" / "serving_state.json"
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        # File intentionally absent.
+        registry = module.ServingStateRegistry(state_path)
+        registry.load()
+        self.assertTrue(registry.is_active())
+        snap = registry.snapshot()
+        self.assertEqual(snap["state"], module.STATE_ACTIVE)
+        self.assertEqual(snap["source"], "default_missing_file")
+        self.assertEqual(snap["reason"], "serving_state_missing_default_active")
+        self.assertIsNone(snap["load_error"])
+
+    def test_serving_state_valid_active_loads_from_file(self) -> None:
+        module = self._serving_state_module()
+        state_path = Path(self.tmp) / "serving_state.json"
+        payload = {
+            "schema_version": 1,
+            "state": "active",
+            "since_ts": 1700000000000,
+            "reason": "resumed after review",
+            "triggering_audit": None,
+            "set_by": "ops_user@host",
+            "manifest_version_when_set": "v415",
+            "expires_at": None,
+        }
+        state_path.write_text(json.dumps(payload))
+        registry = module.ServingStateRegistry(state_path)
+        registry.load()
+        self.assertTrue(registry.is_active())
+        snap = registry.snapshot()
+        self.assertEqual(snap["state"], "active")
+        self.assertEqual(snap["reason"], "resumed after review")
+        self.assertEqual(snap["source"], "file")
+        self.assertEqual(snap["manifest_version_when_set"], "v415")
+        self.assertIsNone(snap["load_error"])
+
+    def test_serving_state_valid_dormant_blocks(self) -> None:
+        module = self._serving_state_module()
+        state_path = Path(self.tmp) / "serving_state.json"
+        payload = {
+            "schema_version": 1,
+            "state": "dormant_manual_pause",
+            "since_ts": 1700000000000,
+            "reason": "manual review pending",
+            "triggering_audit": "evidence/regime/foo.json",
+            "set_by": "ops_user@host",
+            "manifest_version_when_set": "v415",
+            "expires_at": 1701000000000,
+        }
+        state_path.write_text(json.dumps(payload))
+        registry = module.ServingStateRegistry(state_path)
+        registry.load()
+        self.assertFalse(registry.is_active())
+        self.assertEqual(registry.state(), "dormant_manual_pause")
+        blocked = registry.blocked_payload(manifest_version="v415")
+        self.assertIsNone(blocked["signal"])
+        self.assertEqual(blocked["blocked_reason"], "serving_dormant")
+        self.assertEqual(blocked["serving_state"], "dormant_manual_pause")
+        self.assertEqual(blocked["serving_state_reason"], "manual review pending")
+        self.assertEqual(blocked["serving_state_since_ts"], 1700000000000)
+        self.assertEqual(blocked["serving_state_expires_at"], 1701000000000)
+        self.assertEqual(
+            blocked["serving_state_triggering_audit"], "evidence/regime/foo.json"
+        )
+        self.assertEqual(blocked["manifest_version"], "v415")
+        # Dormant response must NOT leak probability/threshold.
+        for forbidden in ("probability", "p", "threshold", "score"):
+            self.assertNotIn(forbidden, blocked)
+
+    def test_serving_state_invalid_json_falls_back_to_dormant_data_quality(self) -> None:
+        """Unparseable control-plane file must NOT silently allow serving."""
+        module = self._serving_state_module()
+        state_path = Path(self.tmp) / "serving_state.json"
+        state_path.write_text("{not valid json")
+        registry = module.ServingStateRegistry(state_path)
+        registry.load()
+        self.assertFalse(registry.is_active())
+        snap = registry.snapshot()
+        self.assertEqual(snap["state"], "dormant_data_quality")
+        self.assertEqual(snap["reason"], "serving_state_invalid")
+        self.assertEqual(snap["source"], "invalid_file")
+        self.assertIsNotNone(snap["load_error"])
+
+    def test_serving_state_invalid_schema_falls_back_to_dormant_data_quality(self) -> None:
+        """Valid JSON but bad schema (unknown state value) is also blocked."""
+        module = self._serving_state_module()
+        state_path = Path(self.tmp) / "serving_state.json"
+        state_path.write_text(json.dumps({"state": "totally_made_up", "schema_version": 1}))
+        registry = module.ServingStateRegistry(state_path)
+        registry.load()
+        self.assertFalse(registry.is_active())
+        snap = registry.snapshot()
+        self.assertEqual(snap["state"], "dormant_data_quality")
+        self.assertEqual(snap["source"], "invalid_file")
+        self.assertIn("state_invalid", str(snap["load_error"]))
+
+    def test_serving_state_reload_picks_up_file_changes(self) -> None:
+        """A subsequent ``load()`` after the file changes flips the cached state.
+
+        Mirrors what /reload does — atomic-swap a new serving_state.json
+        and the next signature check picks it up."""
+        module = self._serving_state_module()
+        state_path = Path(self.tmp) / "serving_state.json"
+        # Start active.
+        state_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "state": "active",
+                    "since_ts": 1700000000000,
+                    "reason": "initial",
+                }
+            )
+        )
+        registry = module.ServingStateRegistry(state_path)
+        self.assertTrue(registry.load())
+        self.assertTrue(registry.is_active())
+        # No change -> reload reports unchanged.
+        self.assertFalse(registry.load())
+        # Flip to dormant by rewriting the file with a fresh mtime/size.
+        time.sleep(0.01)  # ensure mtime_ns differs
+        state_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "state": "dormant_manual_pause",
+                    "since_ts": 1700000050000,
+                    "reason": "flipped during reload smoke",
+                }
+            )
+        )
+        self.assertTrue(registry.load())
+        self.assertFalse(registry.is_active())
+        self.assertEqual(registry.state(), "dormant_manual_pause")
+
+    def test_serving_state_cli_writes_valid_schema(self) -> None:
+        cli = self._cli_module()
+        model_dir = Path(self.tmp) / "models_cli_write"
+        model_dir.mkdir(parents=True, exist_ok=True)
+        rc = cli.main(
+            [
+                "--state",
+                "dormant_manual_pause",
+                "--reason",
+                "test pause",
+                "--expires-at",
+                "2026-05-15T12:00:00Z",
+                "--model-dir",
+                str(model_dir),
+                "--set-by",
+                "unit_test@runner",
+                "--now-ms",
+                "1700000000000",
+                "--quiet",
+            ]
+        )
+        self.assertEqual(rc, 0)
+        state_path = model_dir / "serving_state.json"
+        self.assertTrue(state_path.is_file())
+        data = json.loads(state_path.read_text())
+        self.assertEqual(data["schema_version"], 1)
+        self.assertEqual(data["state"], "dormant_manual_pause")
+        self.assertEqual(data["reason"], "test pause")
+        self.assertEqual(data["set_by"], "unit_test@runner")
+        self.assertEqual(data["since_ts"], 1700000000000)
+        # 2026-05-15T12:00:00Z -> epoch ms.
+        expected_ms = int(
+            datetime(2026, 5, 15, 12, 0, 0, tzinfo=timezone.utc).timestamp() * 1000
+        )
+        self.assertEqual(data["expires_at"], expected_ms)
+        # Validates against the shared validator.
+        sv = self._serving_state_module()
+        ok, reason = sv.validate_state_payload(data)
+        self.assertTrue(ok, f"CLI wrote schema-invalid payload: {reason}")
+
+    def test_serving_state_cli_refuses_dormant_overwrite_without_force(self) -> None:
+        cli = self._cli_module()
+        model_dir = Path(self.tmp) / "models_cli_force"
+        model_dir.mkdir(parents=True, exist_ok=True)
+        # Plant an existing dormant state.
+        existing = {
+            "schema_version": 1,
+            "state": "dormant_manual_pause",
+            "since_ts": 1700000000000,
+            "reason": "existing pause",
+            "set_by": "ops@host",
+            "manifest_version_when_set": None,
+            "expires_at": None,
+        }
+        (model_dir / "serving_state.json").write_text(json.dumps(existing))
+        # Attempt a different dormant state without --force should refuse.
+        with self.assertRaises(SystemExit) as ctx:
+            cli.main(
+                [
+                    "--state",
+                    "dormant_audit_fail",
+                    "--reason",
+                    "audit hit",
+                    "--model-dir",
+                    str(model_dir),
+                    "--quiet",
+                ]
+            )
+        self.assertIn("Refusing to overwrite", str(ctx.exception))
+        # File is unchanged.
+        current = json.loads((model_dir / "serving_state.json").read_text())
+        self.assertEqual(current["state"], "dormant_manual_pause")
+        self.assertEqual(current["reason"], "existing pause")
+        # With --force, it succeeds.
+        rc = cli.main(
+            [
+                "--state",
+                "dormant_audit_fail",
+                "--reason",
+                "audit hit",
+                "--model-dir",
+                str(model_dir),
+                "--force",
+                "--set-by",
+                "ops@host",
+                "--now-ms",
+                "1700001000000",
+                "--quiet",
+            ]
+        )
+        self.assertEqual(rc, 0)
+        current = json.loads((model_dir / "serving_state.json").read_text())
+        self.assertEqual(current["state"], "dormant_audit_fail")
+
+    def test_serving_state_cli_clear_to_active_never_requires_force(self) -> None:
+        cli = self._cli_module()
+        model_dir = Path(self.tmp) / "models_cli_clear"
+        model_dir.mkdir(parents=True, exist_ok=True)
+        existing = {
+            "schema_version": 1,
+            "state": "dormant_audit_fail",
+            "since_ts": 1700000000000,
+            "reason": "regime mismatch",
+            "set_by": "ops@host",
+            "manifest_version_when_set": "v999",
+            "expires_at": None,
+        }
+        (model_dir / "serving_state.json").write_text(json.dumps(existing))
+        rc = cli.main(
+            [
+                "--state",
+                "active",
+                "--reason",
+                "regime recovered, resuming",
+                "--model-dir",
+                str(model_dir),
+                "--set-by",
+                "ops@host",
+                "--now-ms",
+                "1700002000000",
+                "--quiet",
+            ]
+        )
+        self.assertEqual(rc, 0)
+        data = json.loads((model_dir / "serving_state.json").read_text())
+        self.assertEqual(data["state"], "active")
+        self.assertEqual(data["reason"], "regime recovered, resuming")
+
+    def test_serving_state_cli_records_manifest_version_when_present(self) -> None:
+        cli = self._cli_module()
+        model_dir = Path(self.tmp) / "models_cli_manifest"
+        model_dir.mkdir(parents=True, exist_ok=True)
+        (model_dir / "manifest_active.json").write_text(
+            json.dumps({"version": "v_test_777", "thresholds": {}, "models": {}})
+        )
+        rc = cli.main(
+            [
+                "--state",
+                "dormant_manual_pause",
+                "--reason",
+                "pause",
+                "--expires-at",
+                "2026-12-31T23:59:59Z",
+                "--model-dir",
+                str(model_dir),
+                "--set-by",
+                "ops@host",
+                "--now-ms",
+                "1700000000000",
+                "--quiet",
+            ]
+        )
+        self.assertEqual(rc, 0)
+        data = json.loads((model_dir / "serving_state.json").read_text())
+        self.assertEqual(data["manifest_version_when_set"], "v_test_777")
+
+    def test_serving_state_dormant_does_not_mutate_manifest_or_thresholds(self) -> None:
+        """The serving-state gate must be a read-only short-circuit. It
+        cannot rewrite serving_state.json, manifests, thresholds, or
+        model artifacts under any code path exercised here."""
+        module = self._serving_state_module()
+        state_path = Path(self.tmp) / "serving_state.json"
+        before_payload = {
+            "schema_version": 1,
+            "state": "dormant_manual_pause",
+            "since_ts": 1700000000000,
+            "reason": "static",
+            "set_by": "ops@host",
+            "manifest_version_when_set": "v_immutable",
+            "expires_at": None,
+        }
+        state_path.write_text(json.dumps(before_payload))
+        before_sig = state_path.stat().st_mtime_ns
+        before_bytes = state_path.read_bytes()
+
+        registry = module.ServingStateRegistry(state_path)
+        registry.load()
+        # Exercise the read API as the server would.
+        _ = registry.is_active()
+        _ = registry.state()
+        _ = registry.snapshot()
+        _ = registry.blocked_payload(manifest_version="v_test")
+        # Re-read; bytes and mtime are unchanged.
+        self.assertEqual(state_path.read_bytes(), before_bytes)
+        self.assertEqual(state_path.stat().st_mtime_ns, before_sig)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
