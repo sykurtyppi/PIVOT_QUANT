@@ -4,7 +4,13 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
-PYTHON="${PYTHON:-./.venv/bin/python3}"
+# Resolve >=3.10 Python via the shared helper. Honors PYTHON_BIN, then
+# .venv313/bin/python, then .venv/bin/python, then system python3 with a
+# version probe. The previous ``PYTHON="${PYTHON:-./.venv/bin/python3}"``
+# accepted any caller-provided PYTHON unchecked, including Apple
+# CommandLineTools 3.9.6.
+source "${ROOT_DIR}/scripts/_pybin.sh"
+PYTHON="${PYTHON_BIN}"
 LIVE_DB="${PIVOT_DB:-data/pivot_events.sqlite}"
 REPLAY_DB="${REPLAY_DB:-}"
 START_DATE="${START_DATE:-}"

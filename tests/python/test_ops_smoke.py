@@ -10066,6 +10066,67 @@ class OpsSmokeTests(unittest.TestCase):
     # A.1 — backfill_events.run_build_labels uses the resolver, not sys.executable
     # ------------------------------------------------------------------ #
 
+    # ------------------------------------------------------------------ #
+    # scripts/_pybin_exec.sh — npm exec wrapper
+    # ------------------------------------------------------------------ #
+
+    def test_pybin_exec_runs_resolved_python_with_args(self) -> None:
+        """Running ``_pybin_exec.sh -c '<inline>'`` must execute via a
+        verified >=3.10 interpreter and forward the args correctly."""
+        import subprocess
+        wrapper = REPO_ROOT / "scripts" / "_pybin_exec.sh"
+        result = subprocess.run(
+            ["/bin/bash", str(wrapper), "-c",
+             "import sys; print('%d.%d' % sys.version_info[:2])"],
+            capture_output=True, text=True, check=False,
+            env={**os.environ},
+        )
+        self.assertEqual(result.returncode, 0, msg=f"stderr: {result.stderr}")
+        major, minor = (int(x) for x in result.stdout.strip().split("."))
+        self.assertGreaterEqual((major, minor), (3, 10))
+
+    def test_pybin_exec_honors_python_bin_override(self) -> None:
+        """``PYTHON_BIN=…`` env override flows through ``_pybin_exec.sh``
+        and the spawned interpreter is the one PYTHON_BIN named (provided
+        it's a valid >=3.10)."""
+        import subprocess
+        wrapper = REPO_ROOT / "scripts" / "_pybin_exec.sh"
+        # Use the test runner's own interpreter as the override — it's
+        # guaranteed to be present and >=3.10.
+        override = sys.executable
+        result = subprocess.run(
+            ["/bin/bash", str(wrapper), "-c",
+             "import sys; print(sys.executable)"],
+            capture_output=True, text=True, check=False,
+            env={**os.environ, "PYTHON_BIN": override},
+        )
+        self.assertEqual(result.returncode, 0, msg=f"stderr: {result.stderr}")
+        self.assertEqual(result.stdout.strip(), override)
+
+    # ------------------------------------------------------------------ #
+    # scripts/run_replay_backfill.sh — replay wrapper resolver fix
+    # ------------------------------------------------------------------ #
+
+    def test_replay_backfill_sources_pybin_helper(self) -> None:
+        """``run_replay_backfill.sh`` was a P2 miss in the original sweep:
+        it previously honored ``PYTHON=`` unchecked and defaulted to
+        ``./.venv/bin/python3`` without probing version. After the fix it
+        must source ``scripts/_pybin.sh`` like every other wrapper."""
+        text = (REPO_ROOT / "scripts" / "run_replay_backfill.sh").read_text()
+        self.assertIn('source "${ROOT_DIR}/scripts/_pybin.sh"', text)
+        self.assertIn('PYTHON="${PYTHON_BIN}"', text)
+        # Old unguarded default must be gone from executable code. Strip
+        # comments first so the inline rationale-comment that mentions
+        # the old line for context doesn't cause a false positive.
+        code_only_lines = []
+        for line in text.splitlines():
+            stripped = line.lstrip()
+            if stripped.startswith("#"):
+                continue
+            code_only_lines.append(line)
+        code_only = "\n".join(code_only_lines)
+        self.assertNotIn('PYTHON="${PYTHON:-./.venv/bin/python3}"', code_only)
+
     def test_backfill_run_build_labels_uses_resolver(self) -> None:
         """``scripts/backfill_events.run_build_labels`` must spawn ``build_labels.py``
         via the shared resolver, never via raw ``sys.executable``. Mirrors
