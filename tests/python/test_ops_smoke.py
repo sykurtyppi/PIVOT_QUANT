@@ -356,6 +356,13 @@ class OpsSmokeTests(unittest.TestCase):
         original = (REPO_ROOT / "scripts" / "run_daily_report_send.sh").read_text(encoding="utf-8")
         (scripts_dir / "run_daily_report_send.sh").write_text(original, encoding="utf-8")
 
+        # The wrapper now sources scripts/_pybin.sh for >=3.10 Python
+        # resolution. The sandbox needs that helper too, otherwise the
+        # ``source`` line aborts before any work begins.
+        pybin_helper = (REPO_ROOT / "scripts" / "_pybin.sh").read_text(encoding="utf-8")
+        (scripts_dir / "_pybin.sh").write_text(pybin_helper, encoding="utf-8")
+        os.chmod(scripts_dir / "_pybin.sh", 0o755)
+
         generate_script = textwrap.dedent(
             """
             #!/usr/bin/env python3
