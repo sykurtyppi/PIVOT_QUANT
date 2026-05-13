@@ -10243,6 +10243,292 @@ class OpsSmokeTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             module.main(["--highprob-low", "1.5"])
 
+    # ------------------------------------------------------------------ #
+    # Phase 2E provider-normalized regime audit
+    # ------------------------------------------------------------------ #
+
+    def _provider_norm_module(self):
+        return load_module(
+            "provider_normalized_regime",
+            REPO_ROOT / "scripts" / "audit_provider_normalized_regime.py",
+        )
+
+    def test_provider_norm_provider_mix_for_group(self) -> None:
+        import pandas as pd
+        module = self._provider_norm_module()
+        df = pd.DataFrame({
+            "source": ["A", "A", "A", "B", "B", None],
+        })
+        out = module.provider_mix_for_group(df)
+        self.assertEqual(out[0]["source"], "A")
+        self.assertEqual(out[0]["n"], 3)
+        self.assertAlmostEqual(out[0]["share"], 0.5)
+        self.assertEqual(out[1]["source"], "B")
+        self.assertEqual(out[1]["n"], 2)
+        sources = {r["source"] for r in out}
+        self.assertIn("__null__", sources)
+
+    def test_provider_norm_provider_mix_missing_column_returns_empty(self) -> None:
+        import pandas as pd
+        module = self._provider_norm_module()
+        df = pd.DataFrame({"x": [1, 2, 3]})
+        self.assertEqual(module.provider_mix_for_group(df), [])
+
+    def test_provider_norm_within_provider_smd_basic(self) -> None:
+        import pandas as pd
+        module = self._provider_norm_module()
+        recent = pd.DataFrame({"atr_bps": list(range(100))})
+        older = pd.DataFrame({"atr_bps": list(range(100))})
+        out = module.within_provider_feature_comparison(
+            recent, older, ["atr_bps"],
+        )
+        self.assertAlmostEqual(out["atr_bps"]["smd"], 0.0, places=6)
+        recent2 = pd.DataFrame({"atr_bps": [1000 + i for i in range(100)]})
+        out2 = module.within_provider_feature_comparison(
+            recent2, older, ["atr_bps"],
+        )
+        self.assertGreater(abs(out2["atr_bps"]["smd"]), 5.0)
+
+    def test_provider_norm_feature_absent_skip(self) -> None:
+        import pandas as pd
+        module = self._provider_norm_module()
+        recent = pd.DataFrame({"x": [1, 2, 3]})
+        older = pd.DataFrame({"x": [1, 2, 3]})
+        out = module.within_provider_feature_comparison(
+            recent, older, ["atr_bps"],
+        )
+        self.assertEqual(out["atr_bps"]["skip_reason"], "feature_absent")
+        self.assertIsNone(out["atr_bps"]["smd"])
+
+    def test_provider_norm_survives_threshold_helper(self) -> None:
+        module = self._provider_norm_module()
+        comp = {"atr_bps": {"smd": -5.0, "ks": 0.7}}
+        self.assertTrue(module.survives_threshold(
+            comp, feature="atr_bps", smd_min_abs=0.5))
+        self.assertFalse(module.survives_threshold(
+            comp, feature="atr_bps", smd_min_abs=10.0))
+        self.assertFalse(module.survives_threshold(
+            {"atr_bps": {"smd": None}}, feature="atr_bps", smd_min_abs=0.5))
+        self.assertFalse(module.survives_threshold(
+            {}, feature="atr_bps", smd_min_abs=0.5))
+
+    def test_provider_norm_probability_dormancy_survives(self) -> None:
+        module = self._provider_norm_module()
+        self.assertTrue(module.probability_dormancy_survives(
+            prob_recent={"max": 0.70, "p95": 0.68, "median": 0.55},
+            prob_older={"median": 0.78, "max": 0.85},
+            threshold=0.80,
+        ))
+        self.assertFalse(module.probability_dormancy_survives(
+            prob_recent={"max": 0.70, "p95": 0.69, "median": 0.55},
+            prob_older={"median": 0.70, "max": 0.85},
+            threshold=0.80,
+        ))
+        self.assertFalse(module.probability_dormancy_survives(
+            prob_recent={"max": 0.95, "p95": 0.85, "median": 0.55},
+            prob_older={"median": 0.78, "max": 0.85},
+            threshold=0.80,
+        ))
+
+    def test_provider_norm_classify_status_survives(self) -> None:
+        module = self._provider_norm_module()
+        flags = {
+            "marketdata_app_control_available": True,
+            "atr_shift_survives_provider_control": True,
+            "gamma_mode_shift_survives_provider_control": True,
+            "probability_dormancy_survives_provider_control": False,
+            "provider_mix_warning": True,
+        }
+        providers_eval = [{"source": "marketdata.app", "included": True}]
+        cp = {"source": True}
+        self.assertEqual(
+            module.classify_status(
+                columns_present=cp, providers_evaluated=providers_eval, flags=flags,
+            ),
+            "regime_shift_survives_provider_control",
+        )
+
+    def test_provider_norm_classify_status_confounded(self) -> None:
+        module = self._provider_norm_module()
+        flags = {
+            "marketdata_app_control_available": True,
+            "atr_shift_survives_provider_control": False,
+            "gamma_mode_shift_survives_provider_control": False,
+            "probability_dormancy_survives_provider_control": False,
+            "provider_mix_warning": True,
+        }
+        providers_eval = [{"source": "marketdata.app", "included": True}]
+        cp = {"source": True}
+        self.assertEqual(
+            module.classify_status(
+                columns_present=cp, providers_evaluated=providers_eval, flags=flags,
+            ),
+            "provider_mix_confounds_prior_attribution",
+        )
+
+    def test_provider_norm_classify_status_insufficient_overlap(self) -> None:
+        module = self._provider_norm_module()
+        flags = {
+            "marketdata_app_control_available": False,
+            "atr_shift_survives_provider_control": False,
+            "gamma_mode_shift_survives_provider_control": False,
+            "probability_dormancy_survives_provider_control": False,
+            "provider_mix_warning": False,
+        }
+        providers_eval = [
+            {"source": "marketdata.app", "included": False, "exclude_reason": "insufficient_data"},
+            {"source": "Yahoo", "included": False, "exclude_reason": "insufficient_data"},
+        ]
+        cp = {"source": True}
+        self.assertEqual(
+            module.classify_status(
+                columns_present=cp, providers_evaluated=providers_eval, flags=flags,
+            ),
+            "insufficient_within_provider_overlap",
+        )
+
+    def test_provider_norm_classify_status_insufficient_visibility(self) -> None:
+        module = self._provider_norm_module()
+        flags = {k: False for k in (
+            "marketdata_app_control_available",
+            "atr_shift_survives_provider_control",
+            "gamma_mode_shift_survives_provider_control",
+            "probability_dormancy_survives_provider_control",
+            "provider_mix_warning",
+        )}
+        self.assertEqual(
+            module.classify_status(
+                columns_present={"source": False},
+                providers_evaluated=[],
+                flags=flags,
+            ),
+            "insufficient_source_visibility",
+        )
+
+    def test_provider_norm_classify_status_mixed_evidence(self) -> None:
+        module = self._provider_norm_module()
+        flags = {
+            "marketdata_app_control_available": False,
+            "atr_shift_survives_provider_control": True,
+            "gamma_mode_shift_survives_provider_control": False,
+            "probability_dormancy_survives_provider_control": False,
+            "provider_mix_warning": True,
+        }
+        providers_eval = [{"source": "Yahoo", "included": True}]
+        cp = {"source": True}
+        self.assertEqual(
+            module.classify_status(
+                columns_present=cp, providers_evaluated=providers_eval, flags=flags,
+            ),
+            "mixed_evidence",
+        )
+
+    def test_provider_norm_report_schema_stable(self) -> None:
+        module = self._provider_norm_module()
+        thr = {"runtime_threshold": 0.80, "threshold_source": "manifest",
+               "manifest_threshold": 0.80, "artifact_threshold": 0.80,
+               "threshold_mismatch_detected": False}
+        rep = module.build_report(
+            symbol="SPY", target="reject", horizon=15,
+            active_manifest_path=Path("/tmp/m.json"),
+            manifest_version="v411",
+            threshold_resolution=thr,
+            total_rows=1000,
+            provider_mix_summary={"recent_dormant": [], "older_firing_context": []},
+            within_provider_comparisons={},
+            providers_evaluated=[],
+            status="mixed_evidence",
+            flags={
+                "marketdata_app_control_available": False,
+                "atr_shift_survives_provider_control": False,
+                "gamma_mode_shift_survives_provider_control": False,
+                "probability_dormancy_survives_provider_control": False,
+                "provider_mix_warning": False,
+            },
+            min_group_rows=100, min_firing_rows=30, smd_min_abs=0.5,
+            recommended_next_step_str="x",
+        )
+        for key in (
+            "schema_version", "audit_type", "generated_at",
+            "symbol", "target", "horizon",
+            "active_manifest_path", "active_manifest_version",
+            "deployed_threshold", "threshold_source",
+            "manifest_threshold", "artifact_threshold",
+            "threshold_mismatch_detected",
+            "total_rows_inspected", "config",
+            "source_trace", "provider_mix_summary",
+            "providers_evaluated", "within_provider_comparisons",
+            "provider_normalized_status", "flags",
+            "recommended_next_step", "warnings", "scope_disclosure",
+        ):
+            self.assertIn(key, rep, f"missing report key: {key}")
+        self.assertEqual(rep["audit_type"], "provider_normalized_regime")
+        self.assertEqual(rep["schema_version"], 1)
+
+    def test_provider_norm_source_trace_carries_required_keys(self) -> None:
+        module = self._provider_norm_module()
+        for k in ("provider_column", "smd_and_ks", "threshold_resolution"):
+            self.assertIn(k, module.SOURCE_TRACE)
+            self.assertIn("origin_file", module.SOURCE_TRACE[k])
+
+    def test_provider_norm_no_threshold_search_language(self) -> None:
+        module = self._provider_norm_module()
+        forbidden = (
+            "buy", "sell", "promote", "deploy",
+            "alpha", "profit", "pnl", "p&l",
+            "threshold search", "search threshold",
+        )
+        for status in (
+            "regime_shift_survives_provider_control",
+            "provider_mix_confounds_prior_attribution",
+            "insufficient_within_provider_overlap",
+            "mixed_evidence", "insufficient_source_visibility",
+            "unknown",
+        ):
+            rec = module.recommend_next_step(status)
+            for word in forbidden:
+                self.assertNotIn(word, rec.lower(),
+                                 f"forbidden word {word!r} in rec for {status!r}: {rec}")
+        thr = {"runtime_threshold": 0.80, "threshold_source": "manifest",
+               "manifest_threshold": 0.80, "artifact_threshold": 0.80,
+               "threshold_mismatch_detected": False}
+        rep = module.build_report(
+            symbol="SPY", target="reject", horizon=15,
+            active_manifest_path=Path("/tmp/m.json"),
+            manifest_version="v",
+            threshold_resolution=thr,
+            total_rows=1,
+            provider_mix_summary={}, within_provider_comparisons={},
+            providers_evaluated=[],
+            status="mixed_evidence",
+            flags={k: False for k in (
+                "marketdata_app_control_available",
+                "atr_shift_survives_provider_control",
+                "gamma_mode_shift_survives_provider_control",
+                "probability_dormancy_survives_provider_control",
+                "provider_mix_warning",
+            )},
+            min_group_rows=100, min_firing_rows=30, smd_min_abs=0.5,
+            recommended_next_step_str="x",
+        )
+        for word in ("buy", "sell", "alpha", "profit", "promote", "retrain"):
+            self.assertNotIn(word, rep["scope_disclosure"].lower())
+        self.assertIn("no edge claim", rep["scope_disclosure"].lower())
+        self.assertIn("no database writes", rep["scope_disclosure"].lower())
+
+    def test_provider_norm_cli_rejects_invalid_args(self) -> None:
+        module = self._provider_norm_module()
+        with self.assertRaises(SystemExit):
+            module.main(["--older-pct", "1.5"])
+        with self.assertRaises(SystemExit):
+            module.main(["--recent-n", "0"])
+        with self.assertRaises(SystemExit):
+            module.main(["--min-group-rows", "0"])
+        with self.assertRaises(SystemExit):
+            module.main(["--min-firing-rows", "0"])
+        with self.assertRaises(SystemExit):
+            module.main(["--smd-min-abs", "-0.1"])
+
     def test_retrain_evidence_pack_refuses_overlap_with_live_model_dir(self) -> None:
         module = load_module(
             "retrain_evidence_pack_overlap",
