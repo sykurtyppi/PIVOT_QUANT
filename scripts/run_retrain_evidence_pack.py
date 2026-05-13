@@ -858,69 +858,106 @@ def _is_oos_source(source: object) -> bool:
 
 
 def _aggregate_statistical_validation(per_horizon_results: dict) -> dict:
-    """Roll per-horizon statistical results into a scope-aware aggregate.
+    """Roll per-horizon statistical results into a scope-aware, coverage-aware aggregate.
+
+    ``per_horizon_results`` is the output of ``run_statistical_validation`` —
+    one entry per mechanically-viable horizon, keyed ``"<target>@<horizon>m"``.
+    The number of entries IS the viable-horizon count; promotion-grade
+    coverage means an axis must cover every entry.
 
     Returns a dict with:
 
-    - ``present``           — True iff any horizon ran a real test (``passed`` or ``failed``)
-    - ``passed``            — True iff every horizon ran AND every one passed; False if any
-                              ran and failed; None otherwise (coverage gap)
-    - ``in_sample_present`` — True iff at least one ran-test had an in-sample source label
-    - ``in_sample_passed``  — same rule as ``passed`` but scoped to in-sample results
-    - ``oos_present``       — same as ``in_sample_present`` for OOS
-    - ``oos_passed``        — same as ``in_sample_passed`` for OOS
-    - ``scope``             — "none" / "in_sample" / "oos" / "mixed"
+    - ``present``                       — True iff any horizon ran a real test (passed/failed)
+    - ``passed``                        — True iff every viable horizon ran AND every one passed
+    - ``in_sample_present``             — True iff at least one in-sample-source test ran
+    - ``in_sample_passed``              — True iff in-sample tests cover EVERY viable horizon AND
+                                          every one passed; False if any failed; None otherwise
+                                          (coverage gap)
+    - ``in_sample_coverage_complete``   — True iff every viable horizon has an in-sample-source
+                                          test that ran (passed or failed; NOT insufficient_data)
+    - ``in_sample_missing_horizons``    — list of ``"target@Hm"`` keys not covered by in-sample
+    - ``oos_present``                   — True iff at least one OOS-source test ran
+    - ``oos_passed``                    — True iff OOS tests cover EVERY viable horizon AND
+                                          every one passed; False if any failed; None otherwise
+    - ``oos_coverage_complete``         — True iff every viable horizon has an OOS-source test
+                                          that ran
+    - ``oos_missing_horizons``          — list of keys not covered by OOS
+    - ``scope``                         — "none" / "in_sample" / "oos" / "mixed"
 
-    The split is what makes ``classify_candidate_readiness`` able to refuse
-    promotion when the only passing evidence is in-sample (today's reality
-    while B4 OOS validation is unbuilt). Keep ``present`` / ``passed`` for
-    callers that just want the union; new callers should consume the
-    scope-split fields directly.
+    Coverage is what gates promotion: ``oos_passed=True`` REQUIRES OOS to
+    cover every viable horizon (no in-sample-only horizons, no
+    insufficient_data anywhere). A mixed-scope candidate where 4 viable
+    horizons are OOS-passed and 4 are in-sample-passed reports
+    ``oos_coverage_complete=False`` and ``oos_passed=None``, NOT
+    ``oos_passed=True`` — so it cannot promote even though every test
+    that ran did pass. This closes the gap caught in PR #24 review:
+    promotion must reflect "OOS covers everything," not just "the OOS
+    subset succeeded."
+
+    Same coverage rule applies to ``in_sample_passed`` for symmetry.
     """
     out = {
         "present": False,
         "passed": None,
         "in_sample_present": False,
         "in_sample_passed": None,
+        "in_sample_coverage_complete": False,
+        "in_sample_missing_horizons": [],
         "oos_present": False,
         "oos_passed": None,
+        "oos_coverage_complete": False,
+        "oos_missing_horizons": [],
         "scope": "none",
     }
     if not per_horizon_results:
         return out
 
+    viable_count = len(per_horizon_results)
     overall_ran: list[bool] = []      # True for passed, False for failed
     in_sample_ran: list[bool] = []
     oos_ran: list[bool] = []
     in_sample_insufficient = False
     oos_insufficient = False
     unscoped_insufficient = False     # insufficient_data with no recognizable source
+    in_sample_missing: list[str] = []
+    oos_missing: list[str] = []
 
-    for res in per_horizon_results.values():
+    for key, res in per_horizon_results.items():
         status = res.get("status")
         source = res.get("score_observations_source")
         is_oos = _is_oos_source(source)
-        if status == "passed":
-            overall_ran.append(True)
-            (oos_ran if is_oos else in_sample_ran).append(True)
-        elif status == "failed":
-            overall_ran.append(False)
-            (oos_ran if is_oos else in_sample_ran).append(False)
+        if status in ("passed", "failed"):
+            passed_bool = status == "passed"
+            overall_ran.append(passed_bool)
+            if is_oos:
+                oos_ran.append(passed_bool)
+                # OOS-only horizon: in-sample axis does NOT cover it.
+                in_sample_missing.append(key)
+            else:
+                in_sample_ran.append(passed_bool)
+                # In-sample-only horizon: OOS axis does NOT cover it. This is
+                # the key correctness fix — under the old code, an in-sample
+                # horizon was invisible to the OOS aggregate and OOS could
+                # report "passed" while leaving in-sample-only horizons
+                # uncovered.
+                oos_missing.append(key)
         else:
-            # insufficient_data: attribute by the manifest's source label.
-            # When the manifest did record a source even though observations
-            # were missing, attribute the gap to that axis; otherwise it
-            # belongs to a generic "unscoped" bucket that counts as a coverage
-            # gap for the overall ``passed`` calculation.
+            # insufficient_data: attribute by the manifest's source label
+            # for diagnostics, but it never counts as coverage for either
+            # axis — neither test actually ran on this horizon.
             if is_oos:
                 oos_insufficient = True
             elif isinstance(source, str) and source.strip():
                 in_sample_insufficient = True
             else:
                 unscoped_insufficient = True
+            in_sample_missing.append(key)
+            oos_missing.append(key)
 
     any_insufficient = in_sample_insufficient or oos_insufficient or unscoped_insufficient
 
+    # Overall (scope-union) axis. Legacy field; downstream automation
+    # should NOT use this for promotion — use the scope-split fields below.
     if overall_ran:
         out["present"] = True
         if any(not r for r in overall_ran):
@@ -930,23 +967,37 @@ def _aggregate_statistical_validation(per_horizon_results: dict) -> dict:
         else:
             out["passed"] = True
 
+    # In-sample axis with coverage.
     if in_sample_ran:
         out["in_sample_present"] = True
+        in_sample_coverage_complete = (len(in_sample_ran) == viable_count)
+        out["in_sample_coverage_complete"] = bool(in_sample_coverage_complete)
         if any(not r for r in in_sample_ran):
             out["in_sample_passed"] = False
-        elif in_sample_insufficient:
-            out["in_sample_passed"] = None
-        else:
+        elif in_sample_coverage_complete:
             out["in_sample_passed"] = True
+        else:
+            # Some viable horizons are NOT in-sample-covered (they are OOS,
+            # insufficient_data, or unscoped). Cannot claim the in-sample
+            # axis "passed" the full viable set.
+            out["in_sample_passed"] = None
+    out["in_sample_missing_horizons"] = sorted(in_sample_missing)
 
+    # OOS axis with coverage.
     if oos_ran:
         out["oos_present"] = True
+        oos_coverage_complete = (len(oos_ran) == viable_count)
+        out["oos_coverage_complete"] = bool(oos_coverage_complete)
         if any(not r for r in oos_ran):
             out["oos_passed"] = False
-        elif oos_insufficient:
-            out["oos_passed"] = None
-        else:
+        elif oos_coverage_complete:
             out["oos_passed"] = True
+        else:
+            # OOS tests ran for some viable horizons but not all.
+            # Promotion gating MUST treat this as a coverage gap, not a
+            # pass. Disposition will surface ``hold_pending_oos_validation``.
+            out["oos_passed"] = None
+    out["oos_missing_horizons"] = sorted(oos_missing)
 
     if in_sample_ran and oos_ran:
         out["scope"] = "mixed"
@@ -983,19 +1034,33 @@ def _compute_promotion_disposition(
     - ``blocked_not_ready``                  — ``state == "not_ready"``.
     - ``ready_full_family``                  — ``state == "full_family_ready"``
                                                AND OOS validation present and
-                                               passed. The ONLY disposition that
-                                               sets ``promotion_ready=True``.
+                                               passed WITH FULL COVERAGE of
+                                               every viable horizon. The ONLY
+                                               disposition that sets
+                                               ``promotion_ready=True``.
     - ``full_family_in_sample_validated``    — full family, in-sample present
-                                               and passed, no OOS pass yet. Not
+                                               and passed WITH FULL COVERAGE,
+                                               no OOS axis activity. Not
                                                promotable.
     - ``partial_oos_validated``              — partial/degraded with viable
-                                               horizons, OOS validation present
-                                               and passed. Not promotable while
-                                               the family is partial.
+                                               horizons, OOS validation
+                                               coverage-complete and passed.
+                                               Not promotable while the family
+                                               is partial.
     - ``partial_in_sample_validated``        — partial/degraded with viable
-                                               horizons, in-sample present and
-                                               passed, no OOS pass. Not
-                                               promotable.
+                                               horizons, in-sample
+                                               coverage-complete and passed,
+                                               no OOS. Not promotable.
+    - ``hold_pending_oos_validation``        — viable horizons; the OOS axis
+                                               has at least one result but
+                                               does not cover every viable
+                                               horizon (mixed scope, or
+                                               subset-OOS with the rest as
+                                               insufficient_data). Promotion
+                                               is blocked pending complete
+                                               OOS coverage. NEW disposition
+                                               added to close the mixed-scope
+                                               loophole flagged in PR #24.
     - ``hold_pending_statistical_validation`` — at least one viable horizon
                                                 but no scope has both present
                                                 AND passed (or stat validation
@@ -1005,6 +1070,12 @@ def _compute_promotion_disposition(
     in-sample-only landing for a degraded candidate now reports
     ``partial_in_sample_validated``, and a future OOS-passing partial would
     report ``partial_oos_validated``.
+
+    Note: ``oos_validation_passed`` and ``in_sample_validation_passed`` are
+    expected to be the COVERAGE-AWARE booleans from
+    ``_aggregate_statistical_validation`` — i.e., True only when the axis
+    covers every viable horizon. This function therefore doesn't need to
+    re-check coverage; it trusts the aggregator's contract.
     """
     oos_promotable = bool(oos_validation_present and oos_validation_passed is True)
     in_sample_promotable = bool(
@@ -1019,6 +1090,11 @@ def _compute_promotion_disposition(
             return True, "ready_full_family"
         if in_sample_promotable:
             return False, "full_family_in_sample_validated"
+        if oos_validation_present:
+            # OOS started but did not pass and/or did not cover every viable
+            # horizon (mixed scope or partial OOS rollout). The right signal
+            # is "we need OOS to finish covering," not "no validation at all."
+            return False, "hold_pending_oos_validation"
         return False, "hold_pending_statistical_validation"
 
     # partial_ready or degraded_candidate.
@@ -1027,6 +1103,8 @@ def _compute_promotion_disposition(
             return False, "partial_oos_validated"
         if in_sample_promotable:
             return False, "partial_in_sample_validated"
+        if oos_validation_present:
+            return False, "hold_pending_oos_validation"
         return False, "hold_pending_statistical_validation"
 
     # Defensive: not_ready / full_family_ready handled above; anything else
@@ -1146,8 +1224,14 @@ def classify_candidate_readiness(report: dict) -> dict:
     statistical_validation_passed = sv_agg["passed"]
     in_sample_validation_present = bool(sv_agg["in_sample_present"])
     in_sample_validation_passed = sv_agg["in_sample_passed"]
+    in_sample_validation_coverage_complete = bool(
+        sv_agg["in_sample_coverage_complete"]
+    )
+    in_sample_validation_missing_horizons = list(sv_agg["in_sample_missing_horizons"])
     oos_validation_present = bool(sv_agg["oos_present"])
     oos_validation_passed = sv_agg["oos_passed"]
+    oos_validation_coverage_complete = bool(sv_agg["oos_coverage_complete"])
+    oos_validation_missing_horizons = list(sv_agg["oos_missing_horizons"])
     validation_scope = sv_agg["scope"]
     # OOS validation is unconditionally required for promotion today. When
     # B4 lands and the policy moves (e.g. some horizons OOS, others
@@ -1163,6 +1247,17 @@ def classify_candidate_readiness(report: dict) -> dict:
         reasons.append("oos_validation_missing")
     if oos_validation_present and oos_validation_passed is False:
         reasons.append("oos_validation_failed")
+    # The mixed-scope / partial-OOS case: OOS axis has at least one result
+    # but does NOT cover every viable horizon. Promotion is blocked even
+    # though every OOS test that ran may have passed.
+    if (
+        viable_horizons
+        and oos_validation_present
+        and not oos_validation_coverage_complete
+    ):
+        reasons.append("oos_validation_incomplete")
+        for key in oos_validation_missing_horizons:
+            reasons.append(f"oos_validation_missing_for:{key}")
     # Surface per-horizon insufficient_data so the reason list is actionable.
     for key, res in statistical_validation_per_horizon.items():
         if res.get("status") == "insufficient_data":
@@ -1237,12 +1332,24 @@ def classify_candidate_readiness(report: dict) -> dict:
         # only path that can set ``promotion_ready=True``; in-sample-only
         # passing evidence lands in ``full_family_in_sample_validated`` /
         # ``partial_in_sample_validated`` per disposition.
+        #
+        # ``*_coverage_complete`` says whether the axis covers EVERY viable
+        # horizon. ``*_passed=True`` already implies ``*_coverage_complete=True``
+        # by the aggregator's contract; the field is exposed separately so
+        # downstream automation can tell apart "axis hasn't started yet" from
+        # "axis started but doesn't cover the full set."
         "validation_scope": validation_scope,
         "oos_validation_required": bool(oos_validation_required),
         "oos_validation_present": bool(oos_validation_present),
         "oos_validation_passed": oos_validation_passed,
+        "oos_validation_coverage_complete": bool(oos_validation_coverage_complete),
+        "oos_validation_missing_horizons": oos_validation_missing_horizons,
         "in_sample_validation_present": bool(in_sample_validation_present),
         "in_sample_validation_passed": in_sample_validation_passed,
+        "in_sample_validation_coverage_complete": bool(
+            in_sample_validation_coverage_complete
+        ),
+        "in_sample_validation_missing_horizons": in_sample_validation_missing_horizons,
         "reasons": reasons_ordered,
     }
 
@@ -1433,14 +1540,20 @@ def _print_readiness_summary(readiness: dict) -> None:
     oos_required = readiness.get("oos_validation_required")
     oos_present = readiness.get("oos_validation_present")
     oos_passed = readiness.get("oos_validation_passed")
+    oos_complete = readiness.get("oos_validation_coverage_complete")
+    oos_missing = readiness.get("oos_validation_missing_horizons") or []
     print(
         f"  statistical_validation:   required={sv_required} "
         f"present={sv_present} passed={sv_passed} scope={scope}"
     )
     print(
         f"  oos_validation:           required={oos_required} "
-        f"present={oos_present} passed={oos_passed}"
+        f"present={oos_present} passed={oos_passed} coverage_complete={oos_complete}"
     )
+    if oos_present and not oos_complete and oos_missing:
+        print(
+            f"    oos_missing_horizons:  {', '.join(oos_missing)}"
+        )
     for key, res in sv_per_horizon.items():
         status = res.get("status")
         n = res.get("sample_size")

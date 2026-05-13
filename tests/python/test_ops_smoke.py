@@ -11582,6 +11582,34 @@ class OpsSmokeTests(unittest.TestCase):
             disposition_p_fail, "hold_pending_statistical_validation"
         )
 
+        # OOS axis started but coverage is incomplete (passed=None per the
+        # aggregator's coverage-aware contract). Disposition must surface
+        # the OOS-coverage gap, NOT collapse to the generic stat-validation
+        # hold. This is the disposition for the mixed-scope and partial-OOS
+        # cases.
+        promotion_ready_oos_gap, disposition_oos_gap = module._compute_promotion_disposition(
+            state="full_family_ready",
+            has_viable=True,
+            in_sample_validation_present=False,
+            in_sample_validation_passed=None,
+            oos_validation_present=True,
+            oos_validation_passed=None,  # coverage incomplete
+        )
+        self.assertFalse(promotion_ready_oos_gap)
+        self.assertEqual(disposition_oos_gap, "hold_pending_oos_validation")
+
+        # Same gap on a degraded candidate: still hold_pending_oos_validation.
+        promotion_ready_p_oos_gap, disposition_p_oos_gap = module._compute_promotion_disposition(
+            state="degraded_candidate",
+            has_viable=True,
+            in_sample_validation_present=False,
+            in_sample_validation_passed=None,
+            oos_validation_present=True,
+            oos_validation_passed=None,
+        )
+        self.assertFalse(promotion_ready_p_oos_gap)
+        self.assertEqual(disposition_p_oos_gap, "hold_pending_oos_validation")
+
     def test_promotion_disposition_runtime_safety_disagreement_blocked(self) -> None:
         """would_neutralize_count > 0 => not_ready => blocked_not_ready."""
         module = self._readiness_module()
@@ -11807,24 +11835,30 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertTrue(result["promotion_ready"])
         self.assertEqual(result["promotion_disposition"], "ready_full_family")
 
-    def test_b3_mixed_scope_partial_oos_pass_does_not_promote(self) -> None:
-        """Mixed scope: some viable horizons OOS-pass, others in-sample-pass.
+    def test_b3_mixed_scope_does_not_promote_due_to_oos_coverage_gap(self) -> None:
+        """Mixed scope: 4 viable horizons OOS-pass, 4 in-sample-pass.
 
-        Each axis is reported independently. A full family with mixed
-        scope where OOS doesn't cover every horizon is NOT
-        promotion-ready: oos_validation_passed would be None (coverage
-        gap) rather than True. Disposition falls through to the
-        in-sample-validated label since in-sample covers nothing in this
-        synthetic test either.
+        OOS axis covers 4 of 8 viable horizons; in-sample covers the other
+        4. Neither axis is coverage-complete against the full viable set,
+        so ``oos_validation_passed`` and ``in_sample_validation_passed``
+        must BOTH report ``None`` (coverage gap), not ``True``.
 
-        This test pins the contract that OOS coverage gaps prevent
-        promotion even when every individual OOS test that ran passed.
+        Disposition must be ``hold_pending_oos_validation`` —
+        ``oos_validation_present=True`` but coverage is incomplete, so the
+        right signal to operators is "OOS axis started, finish covering."
+        ``promotion_ready`` MUST stay False.
+
+        This was the P1 bug from PR #24 review: under the previous
+        aggregator, each axis was judged against its own subset (4 OOS
+        tests all passed → ``oos_passed=True``), which let a mixed-scope
+        candidate promote even though half the viable horizons had no OOS
+        validation. Fixed by making the aggregator coverage-aware.
         """
         module = self._readiness_module()
         obs = self._strong_pass_obs()
         rows = [
-            # 4 horizons OOS, 4 horizons in-sample - both axes have coverage
-            # gaps against the full set of 8 viable horizons.
+            # 4 horizons OOS, 4 horizons in-sample. Each axis covers only
+            # half of the viable set; promotion gating must reject this.
             self._ph_row("reject", 5, score=10.0, score_observations=obs,
                          score_observations_source="held_out_slice"),
             self._ph_row("reject", 15, score=20.0, score_observations=obs,
@@ -11846,13 +11880,93 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(result["validation_scope"], "mixed")
         self.assertTrue(result["in_sample_validation_present"])
         self.assertTrue(result["oos_validation_present"])
-        # Both axes report True because every test in that scope passed and
-        # there were no per-axis insufficient_data results. The mixed-coverage
-        # case is fine here because each axis is judged against its OWN
-        # results, not the full 8-horizon set. Promotion gating is still
-        # tight: ready_full_family fires because oos_validation_passed is True.
-        self.assertTrue(result["in_sample_validation_passed"])
+        # Coverage-complete fields surface the gap on each axis.
+        self.assertFalse(result["oos_validation_coverage_complete"])
+        self.assertFalse(result["in_sample_validation_coverage_complete"])
+        # Both passed booleans MUST be None — neither axis covers the
+        # viable set, so neither can claim a pass.
+        self.assertIsNone(result["oos_validation_passed"])
+        self.assertIsNone(result["in_sample_validation_passed"])
+        # Promotion blocked; disposition surfaces the OOS-coverage gap.
+        self.assertFalse(result["promotion_ready"])
+        self.assertEqual(
+            result["promotion_disposition"], "hold_pending_oos_validation"
+        )
+        # Reasons make the gap actionable.
+        self.assertIn("oos_validation_incomplete", result["reasons"])
+        # Each in-sample-only horizon shows up in the OOS-missing list.
+        oos_missing = result["oos_validation_missing_horizons"]
+        for key in ("break@5m", "break@15m", "break@30m", "break@60m"):
+            self.assertIn(key, oos_missing)
+        # And the converse for the in-sample axis.
+        in_sample_missing = result["in_sample_validation_missing_horizons"]
+        for key in ("reject@5m", "reject@15m", "reject@30m", "reject@60m"):
+            self.assertIn(key, in_sample_missing)
+
+    def test_b3_oos_subset_with_remaining_insufficient_does_not_promote(self) -> None:
+        """4 viable horizons have OOS observations and pass; the other 4
+        have no observations at all (insufficient_data). OOS axis covers
+        only 4 of 8 viable horizons -> coverage-incomplete, not
+        promotable.
+
+        This is the realistic 'partial B4 rollout' shape: an operator
+        captures OOS observations for some horizons but not yet all.
+        Promotion must wait for full coverage.
+        """
+        module = self._readiness_module()
+        obs = self._strong_pass_obs()
+        rows = [
+            # 4 OOS with observations.
+            self._ph_row("reject", 5, score=10.0, score_observations=obs,
+                         score_observations_source="held_out_slice"),
+            self._ph_row("reject", 15, score=20.0, score_observations=obs,
+                         score_observations_source="held_out_slice"),
+            self._ph_row("reject", 30, score=30.0, score_observations=obs,
+                         score_observations_source="held_out_slice"),
+            self._ph_row("reject", 60, score=40.0, score_observations=obs,
+                         score_observations_source="held_out_slice"),
+            # 4 viable but no observations -> insufficient_data.
+            self._ph_row("break", 5, score=5.0),
+            self._ph_row("break", 15, score=6.0),
+            self._ph_row("break", 30, score=7.0),
+            self._ph_row("break", 60, score=8.0),
+        ]
+        result = module.classify_candidate_readiness(self._build_report_stub(rows))
+        self.assertEqual(result["state"], "full_family_ready")
+        # Only OOS-source results actually ran; scope reflects that.
+        self.assertEqual(result["validation_scope"], "oos")
+        self.assertTrue(result["oos_validation_present"])
+        # 4 of 8 viable horizons covered -> coverage gap.
+        self.assertFalse(result["oos_validation_coverage_complete"])
+        self.assertIsNone(result["oos_validation_passed"])
+        self.assertFalse(result["promotion_ready"])
+        self.assertEqual(
+            result["promotion_disposition"], "hold_pending_oos_validation"
+        )
+        self.assertIn("oos_validation_incomplete", result["reasons"])
+
+    def test_b3_pure_oos_full_coverage_promotes(self) -> None:
+        """All 8 viable horizons OOS-sourced AND all pass => promotes.
+
+        Pinned here even though test_b3_oos_validated_full_family_promotes
+        also covers it — this test EXPLICITLY checks the new coverage
+        booleans so the contract ``oos_passed=True implies
+        oos_coverage_complete=True`` cannot regress."""
+        module = self._readiness_module()
+        obs = self._strong_pass_obs()
+        rows = [
+            self._ph_row(t, h, score=10.0, score_observations=obs,
+                         score_observations_source="held_out_slice")
+            for t, h in [
+                ("reject", 5), ("reject", 15), ("reject", 30), ("reject", 60),
+                ("break", 5), ("break", 15), ("break", 30), ("break", 60),
+            ]
+        ]
+        result = module.classify_candidate_readiness(self._build_report_stub(rows))
+        self.assertEqual(result["validation_scope"], "oos")
+        self.assertTrue(result["oos_validation_coverage_complete"])
         self.assertTrue(result["oos_validation_passed"])
+        self.assertEqual(result["oos_validation_missing_horizons"], [])
         self.assertTrue(result["promotion_ready"])
         self.assertEqual(result["promotion_disposition"], "ready_full_family")
 
