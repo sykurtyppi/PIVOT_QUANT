@@ -107,7 +107,10 @@ import joblib
 from ml.features import build_feature_row, collect_missing, FEATURE_VERSION
 from ml.thresholds import NO_SIGNAL_THRESHOLD, threshold_score_is_unsafe
 from server.serving_state import (
+    DEFAULT_DORMANT_LOG_MIN_INTERVAL_SEC,
+    DEFAULT_DORMANT_LOG_SAMPLE_N,
     SERVING_STATE_FILENAME,
+    ServingStateObservability,
     ServingStateRegistry,
 )
 
@@ -1334,6 +1337,78 @@ analog_engine = AnalogEngine(ML_ANALOG_DB)
 # Missing file -> default active. Unparseable file -> dormant_data_quality.
 serving_state = ServingStateRegistry(MODEL_DIR / SERVING_STATE_FILENAME)
 serving_state.load()
+
+# D2 observability. Process-local counters + sampler for predict_blocked_dormant
+# events. Reset on every server restart; the audit log is the durable record.
+# Env knobs:
+#   ML_SERVING_DORMANT_LOG_SAMPLE_N         default 100 dormant requests per
+#                                           emit per state
+#   ML_SERVING_DORMANT_LOG_MIN_INTERVAL_SEC default 60s between emits per state
+# The first dormant request after a state transition always emits, so the
+# audit trail captures the start of every dormant episode.
+ML_SERVING_DORMANT_LOG_SAMPLE_N = max(
+    1,
+    int(os.getenv("ML_SERVING_DORMANT_LOG_SAMPLE_N", str(DEFAULT_DORMANT_LOG_SAMPLE_N))),
+)
+ML_SERVING_DORMANT_LOG_MIN_INTERVAL_SEC = max(
+    0.0,
+    float(
+        os.getenv(
+            "ML_SERVING_DORMANT_LOG_MIN_INTERVAL_SEC",
+            str(DEFAULT_DORMANT_LOG_MIN_INTERVAL_SEC),
+        )
+    ),
+)
+serving_state_observability = ServingStateObservability(
+    sample_n=ML_SERVING_DORMANT_LOG_SAMPLE_N,
+    min_interval_sec=ML_SERVING_DORMANT_LOG_MIN_INTERVAL_SEC,
+)
+serving_state_observability.record_load_noop(int(time.time() * 1000))
+
+
+def _emit_predict_blocked_dormant_event(
+    *,
+    blocked: dict[str, object],
+    mode: str,
+    event_count: int,
+    request_count: int,
+    sampled_at_ms: int,
+) -> None:
+    """Emit one ``predict_blocked_dormant`` audit event.
+
+    Called only when the sampler says we should — the
+    rate-and-time gate lives in
+    ``ServingStateObservability.record_dormant_block``. Audit-log
+    failures are swallowed by ``safe_emit_audit_event``; we never
+    let observability break the serving path. Re-imports inside the
+    function so a missing research-protocol dependency at startup
+    doesn't crash the server module.
+    """
+    try:
+        from services.research_protocol.audit_logger import safe_emit_audit_event
+
+        safe_emit_audit_event(
+            event_type="predict_blocked_dormant",
+            decision="block",
+            reason=str(blocked.get("serving_state_reason") or ""),
+            metadata={
+                "serving_state": blocked.get("serving_state"),
+                "serving_state_reason": blocked.get("serving_state_reason"),
+                "serving_state_since_ts": blocked.get("serving_state_since_ts"),
+                "mode": mode,
+                "event_count": int(event_count),
+                "manifest_version": blocked.get("manifest_version"),
+                "request_count_since_last_emit": int(request_count),
+                "sampled_at_ms": int(sampled_at_ms),
+            },
+        )
+    except Exception:
+        # Belt-and-suspenders. safe_emit_audit_event already swallows
+        # transient/filesystem errors and re-raises only on developer
+        # bugs (AuditLogTamperingError). We don't want a bug in
+        # observability to bring down /score, so we catch defensively
+        # and continue.
+        log.warning("predict_blocked_dormant audit event emit failed", exc_info=True)
 _startup_error: Optional[str] = None
 _RELOAD_LOCK = threading.Lock()
 _RELOAD_STATE_LOCK = threading.Lock()
@@ -2027,8 +2102,14 @@ async def health():
         "inference_n_jobs": ML_INFERENCE_N_JOBS,
         # Serving state is the third axis (readiness != promotion != serving
         # state). Surfaced here so ops can distinguish "model is quiet" from
-        # "serving is intentionally paused." See server/serving_state.py.
-        "serving_state": serving_state.snapshot(),
+        # "serving is intentionally paused." The ``observability`` sub-block
+        # carries process-local counters that reset on restart — the durable
+        # record is the research-protocol audit log.
+        # See server/serving_state.py.
+        "serving_state": {
+            **serving_state.snapshot(),
+            "observability": serving_state_observability.counters_snapshot(),
+        },
         "prediction_log": prediction_log_state,
         "prediction_log_alerts": prediction_log_alerts,
         "regime_policy_mode": ML_REGIME_POLICY_MODE,
@@ -2150,7 +2231,17 @@ async def reload_models(force: bool = False):
         # `curl -X POST /reload` to pick up a fresh serving_state.json
         # without restarting the server. Cheap (signature-cached); never
         # raises (missing/invalid file fall back to safe defaults).
-        await asyncio.to_thread(serving_state.load, force=force)
+        # The boolean return tells the observability layer whether to
+        # count this as a transition (resets dormant-since-state-set
+        # counters and the sampler) or just a no-op refresh.
+        serving_state_changed = await asyncio.to_thread(
+            serving_state.load, force=force
+        )
+        load_now_ms = int(time.time() * 1000)
+        if serving_state_changed:
+            serving_state_observability.record_state_transition(load_now_ms)
+        else:
+            serving_state_observability.record_load_noop(load_now_ms)
         _startup_error = None
         duration_ms = (time.perf_counter() - started_at) * 1000.0
         complete_ms = int(time.time() * 1000)
@@ -3533,8 +3624,36 @@ async def score(request: Request):
         except HTTPException:
             # Even when dormant, malformed requests still get the normal
             # 4xx; otherwise clients can't distinguish "I sent garbage"
-            # from "serving is paused."
+            # from "serving is paused." Counters and audit events are
+            # only bumped on requests we ACTUALLY short-circuit.
             raise
+
+        # D2 observability. ``record_dormant_block`` bumps
+        # process-local counters AND returns the rate/time-gate decision
+        # for the sampled ``predict_blocked_dormant`` audit event.
+        # ``event_count`` is 1 for single mode, len(events) for batch —
+        # the audit line records how many request-events were short-
+        # circuited so the rate cannot be reconstructed wrong from
+        # request-line counts alone.
+        if mode == "single":
+            event_count = 1
+        elif mode == "batch":
+            event_count = len(normalized)
+        else:
+            event_count = 0
+        block_now_ms = int(time.time() * 1000)
+        request_count, should_emit = serving_state_observability.record_dormant_block(
+            block_now_ms
+        )
+        if should_emit:
+            _emit_predict_blocked_dormant_event(
+                blocked=blocked,
+                mode=mode,
+                event_count=event_count,
+                request_count=request_count,
+                sampled_at_ms=block_now_ms,
+            )
+
         if mode == "single":
             return JSONResponse(blocked)
         if mode == "batch":

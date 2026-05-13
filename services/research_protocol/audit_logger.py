@@ -62,6 +62,12 @@ EVENT_TYPES: frozenset[str] = frozenset({
     "replication_evidence_recorded",
     "trial_recorded",
     "candidate_killed",
+    # Serving-state observability (D2). These are operational, not
+    # research-protocol decisions, but live in the same audit log so all
+    # control-plane events are reviewable in one place. They have no
+    # ``candidate_id`` (see CANDIDATE_OPTIONAL_EVENT_TYPES).
+    "serving_state_changed",
+    "predict_blocked_dormant",
 })
 
 DECISIONS: frozenset[str] = frozenset({"pass", "block", "record"})
@@ -79,6 +85,10 @@ REQUIRED_EVENT_FIELDS: tuple[str, ...] = (
 # event types must carry a non-empty candidate_id.
 CANDIDATE_OPTIONAL_EVENT_TYPES: frozenset[str] = frozenset({
     "registration_rejected",
+    # D2 serving-state events have no candidate_id — they describe the
+    # active manifest's live-serving status, not a single research candidate.
+    "serving_state_changed",
+    "predict_blocked_dormant",
 })
 
 

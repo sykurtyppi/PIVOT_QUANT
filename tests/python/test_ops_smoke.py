@@ -13325,6 +13325,412 @@ class OpsSmokeTests(unittest.TestCase):
         # The stubbed scorer was called exactly once.
         self.assertEqual(called["count"], 1)
 
+    # ------------------------------------------------------------------ #
+    # D2: serving-state observability — audit events, counters, sampler.
+    # ------------------------------------------------------------------ #
+
+    def _audit_log_path(self) -> Path:
+        """Resolve the protocol-audit log location under the test root."""
+        return (
+            Path(os.environ["PIVOTQUANT_RESEARCH_PROTOCOL_ROOT"])
+            / "audit_log.jsonl"
+        )
+
+    def _read_audit_events(self, event_type: str | None = None) -> list[dict]:
+        """Read the audit-log JSONL produced under the test protocol root."""
+        path = self._audit_log_path()
+        if not path.is_file():
+            return []
+        out: list[dict] = []
+        with path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                rec = json.loads(line)
+                if event_type is None or rec.get("event_type") == event_type:
+                    out.append(rec)
+        return out
+
+    def _isolated_audit_root(self) -> str:
+        """Point the audit logger at a per-test directory under self.tmp."""
+        root = Path(self.tmp) / "protocol_audit_root"
+        root.mkdir(parents=True, exist_ok=True)
+        os.environ["PIVOTQUANT_RESEARCH_PROTOCOL_ROOT"] = str(root)
+        return str(root)
+
+    def test_serving_state_d2_cli_emits_changed_event_for_missing_prior(self) -> None:
+        """When ``serving_state.json`` does not yet exist, the CLI write must
+        emit ``serving_state_changed`` with ``from_state_source="missing"``."""
+        self._isolated_audit_root()
+        cli = self._cli_module()
+        model_dir = Path(self.tmp) / "models_d2_missing"
+        model_dir.mkdir(parents=True, exist_ok=True)
+        rc = cli.main(
+            [
+                "--state", "dormant_manual_pause",
+                "--reason", "d2 missing-prior test",
+                "--expires-at", "2026-12-31T23:59:59Z",
+                "--model-dir", str(model_dir),
+                "--set-by", "d2_test@runner",
+                "--now-ms", "1700000000000",
+                "--quiet",
+            ]
+        )
+        self.assertEqual(rc, 0)
+        events = self._read_audit_events("serving_state_changed")
+        self.assertEqual(len(events), 1, f"expected 1 event, got {len(events)}")
+        meta = events[0]["metadata"]
+        self.assertIsNone(meta["from_state"])
+        self.assertEqual(meta["from_state_source"], "missing")
+        self.assertEqual(meta["to_state"], "dormant_manual_pause")
+        self.assertEqual(meta["reason"], "d2 missing-prior test")
+        self.assertEqual(meta["set_by"], "d2_test@runner")
+        self.assertEqual(meta["since_ts"], 1700000000000)
+        self.assertEqual(meta["expires_at"], int(
+            datetime(2026, 12, 31, 23, 59, 59, tzinfo=timezone.utc).timestamp() * 1000
+        ))
+        self.assertEqual(meta["forced"], False)
+        self.assertIsInstance(meta["state_path_sha256"], str)
+        self.assertEqual(len(meta["state_path_sha256"]), 64)
+        self.assertEqual(events[0]["decision"], "record")
+        self.assertIsNone(events[0]["candidate_id"])
+
+    def test_serving_state_d2_cli_emits_changed_event_for_valid_prior(self) -> None:
+        """When a valid prior file exists, the event records
+        ``from_state_source="file"`` and the previous state value."""
+        self._isolated_audit_root()
+        cli = self._cli_module()
+        model_dir = Path(self.tmp) / "models_d2_valid_prior"
+        model_dir.mkdir(parents=True, exist_ok=True)
+        prior = {
+            "schema_version": 1,
+            "state": "dormant_manual_pause",
+            "since_ts": 1700000000000,
+            "reason": "prior pause",
+            "triggering_audit": None,
+            "set_by": "ops@old_host",
+            "manifest_version_when_set": "v_prior",
+            "expires_at": None,
+        }
+        (model_dir / "serving_state.json").write_text(json.dumps(prior))
+        rc = cli.main(
+            [
+                "--state", "active",
+                "--reason", "review complete, resuming",
+                "--model-dir", str(model_dir),
+                "--set-by", "ops@new_host",
+                "--now-ms", "1700001000000",
+                "--quiet",
+            ]
+        )
+        self.assertEqual(rc, 0)
+        events = self._read_audit_events("serving_state_changed")
+        self.assertEqual(len(events), 1)
+        meta = events[0]["metadata"]
+        self.assertEqual(meta["from_state"], "dormant_manual_pause")
+        self.assertEqual(meta["from_state_source"], "file")
+        self.assertEqual(meta["to_state"], "active")
+        self.assertEqual(meta["reason"], "review complete, resuming")
+
+    def test_serving_state_d2_cli_emits_changed_event_for_invalid_prior(self) -> None:
+        """When the prior file is unparseable, the event records
+        ``from_state_source="invalid"`` and the *loader-equivalent*
+        substituted state (``dormant_data_quality``), so the audit trail
+        matches what ml_server would have honored just before the write."""
+        self._isolated_audit_root()
+        cli = self._cli_module()
+        model_dir = Path(self.tmp) / "models_d2_invalid_prior"
+        model_dir.mkdir(parents=True, exist_ok=True)
+        # Write unparseable JSON.
+        (model_dir / "serving_state.json").write_text("{not valid json")
+        rc = cli.main(
+            [
+                "--state", "dormant_manual_pause",
+                "--reason", "replacing corrupt file",
+                "--expires-at", "2026-12-31T23:59:59Z",
+                "--model-dir", str(model_dir),
+                "--set-by", "ops@cleanup",
+                "--now-ms", "1700002000000",
+                "--quiet",
+            ]
+        )
+        self.assertEqual(rc, 0)
+        events = self._read_audit_events("serving_state_changed")
+        self.assertEqual(len(events), 1)
+        meta = events[0]["metadata"]
+        # Loader substitutes ``dormant_data_quality`` when it sees an
+        # unparseable file; the audit event mirrors that substitution.
+        self.assertEqual(meta["from_state"], "dormant_data_quality")
+        self.assertEqual(meta["from_state_source"], "invalid")
+        self.assertEqual(meta["to_state"], "dormant_manual_pause")
+
+    def test_serving_state_d2_cli_audit_failure_does_not_block_write(self) -> None:
+        """An audit-log IO failure (here: the protocol root points at a
+        path that cannot be created) must NOT corrupt the state file or
+        fail the CLI. The state write succeeds; the operator is warned
+        on stderr."""
+        # Point the audit root at a path that cannot be a directory: a
+        # regular file. _append_line will fail when it tries to mkdir.
+        bogus_path = Path(self.tmp) / "audit_root_is_a_file"
+        bogus_path.write_text("not a directory")
+        os.environ["PIVOTQUANT_RESEARCH_PROTOCOL_ROOT"] = str(bogus_path)
+
+        cli = self._cli_module()
+        model_dir = Path(self.tmp) / "models_d2_audit_fail"
+        model_dir.mkdir(parents=True, exist_ok=True)
+
+        import io
+        import contextlib
+        stderr_buf = io.StringIO()
+        with contextlib.redirect_stderr(stderr_buf):
+            rc = cli.main(
+                [
+                    "--state", "dormant_manual_pause",
+                    "--reason", "audit failure must not block write",
+                    "--expires-at", "2026-12-31T23:59:59Z",
+                    "--model-dir", str(model_dir),
+                    "--set-by", "ops@test",
+                    "--now-ms", "1700003000000",
+                    "--quiet",
+                ]
+            )
+        self.assertEqual(rc, 0, "state-write must succeed even when audit log fails")
+        # The state file was written correctly.
+        state_data = json.loads((model_dir / "serving_state.json").read_text())
+        self.assertEqual(state_data["state"], "dormant_manual_pause")
+        self.assertEqual(state_data["reason"], "audit failure must not block write")
+        # The operator was warned about the audit failure on stderr.
+        self.assertIn("serving_state_changed", stderr_buf.getvalue())
+        self.assertIn("audit", stderr_buf.getvalue().lower())
+
+    def test_serving_state_d2_observability_dormant_block_counters(self) -> None:
+        module = self._serving_state_module()
+        # With min_interval_ms=0 we can verify the rate gate in isolation.
+        o = module.ServingStateObservability(sample_n=4, min_interval_sec=0.0)
+        # First dormant always emits.
+        count, emit = o.record_dormant_block(1_000)
+        self.assertEqual(count, 1)
+        self.assertTrue(emit)
+        # Counters update.
+        snap = o.counters_snapshot()
+        self.assertEqual(snap["dormant_requests_count_in_process"], 1)
+        self.assertEqual(snap["dormant_requests_count_since_state_set"], 1)
+        self.assertEqual(snap["last_blocked_at_ms"], 1_000)
+        self.assertEqual(snap["transitions_count_in_process"], 0)
+
+        # Next 3 dormant requests don't emit (only 1 since last emit < N=4).
+        for ms in (1_001, 1_002, 1_003):
+            count, emit = o.record_dormant_block(ms)
+            self.assertFalse(emit, f"unexpected emit at ms={ms}")
+        # 4th since last emit: rate gate met (time gate is 0), so emits.
+        count, emit = o.record_dormant_block(1_004)
+        self.assertEqual(count, 4)
+        self.assertTrue(emit)
+
+        snap = o.counters_snapshot()
+        self.assertEqual(snap["dormant_requests_count_in_process"], 5)
+        self.assertEqual(snap["dormant_requests_count_since_state_set"], 5)
+        self.assertEqual(snap["last_blocked_at_ms"], 1_004)
+
+    def test_serving_state_d2_observability_time_gate(self) -> None:
+        """With a non-zero min_interval, the sampler MUST also wait the
+        time gate even after the rate gate is satisfied."""
+        module = self._serving_state_module()
+        o = module.ServingStateObservability(sample_n=2, min_interval_sec=10.0)
+        # First emit (always).
+        _, emit = o.record_dormant_block(0)
+        self.assertTrue(emit)
+        # Second emit: rate satisfied (2 since last emit) BUT time gate (10s) not met.
+        _, emit = o.record_dormant_block(0)
+        self.assertFalse(emit, "rate gate alone must not be sufficient")
+        _, emit = o.record_dormant_block(5_000)
+        self.assertFalse(emit, "5s after last emit, time gate not met")
+        # 10s later, BOTH gates satisfied: emit fires.
+        # Note: by this point we've called record_dormant_block 4 times; the
+        # sampler counter was reset on the first emit so it's now at 3.
+        _, emit = o.record_dormant_block(10_001)
+        self.assertTrue(emit)
+
+    def test_serving_state_d2_observability_transition_resets_since_state_set(self) -> None:
+        module = self._serving_state_module()
+        o = module.ServingStateObservability(sample_n=2, min_interval_sec=0.0)
+        for ms in (100, 101, 102, 103):
+            o.record_dormant_block(ms)
+        snap = o.counters_snapshot()
+        self.assertEqual(snap["dormant_requests_count_in_process"], 4)
+        self.assertEqual(snap["dormant_requests_count_since_state_set"], 4)
+        # State transition: since_state_set MUST reset, lifetime counter MUST NOT.
+        o.record_state_transition(200)
+        snap = o.counters_snapshot()
+        self.assertEqual(snap["dormant_requests_count_in_process"], 4)
+        self.assertEqual(snap["dormant_requests_count_since_state_set"], 0)
+        self.assertEqual(snap["transitions_count_in_process"], 1)
+        self.assertEqual(snap["last_loaded_at_ms"], 200)
+        # The sampler also resets: the first dormant block after the
+        # transition emits unconditionally.
+        _, emit = o.record_dormant_block(300)
+        self.assertTrue(emit)
+
+    def test_serving_state_d2_score_dormant_increments_counters_and_emits(self) -> None:
+        """End-to-end: dormant /score requests bump the counters AND emit
+        a sampled ``predict_blocked_dormant`` audit event."""
+        self._isolated_audit_root()
+        ml_server = self._load_ml_server_for_endpoint()
+        if ml_server is None:
+            return
+
+        # Reset the module-level observability to a sample_n=1 instance so
+        # every dormant request emits — keeps the test deterministic without
+        # changing production defaults.
+        sv_module = self._serving_state_module()
+        original_obs = ml_server.serving_state_observability
+        ml_server.serving_state_observability = sv_module.ServingStateObservability(
+            sample_n=1, min_interval_sec=0.0
+        )
+
+        class _StubRegistry:
+            @staticmethod
+            def snapshot():
+                return OpsSmokeTests._stub_active_registry_snapshot()
+
+        restore = self._patch_score_path(
+            ml_server,
+            _StubRegistry(),
+            self._build_dormant_serving_state(),
+        )
+        try:
+            body = json.dumps({"event": {"symbol": "SPY"}}).encode("utf-8")
+            request = self._build_stub_request(body)
+            response = asyncio.run(ml_server.score(request))
+            self.assertEqual(response.status_code, 200)
+            # Counters bumped exactly once.
+            snap = ml_server.serving_state_observability.counters_snapshot()
+            self.assertEqual(snap["dormant_requests_count_in_process"], 1)
+            self.assertEqual(snap["dormant_requests_count_since_state_set"], 1)
+            self.assertIsNotNone(snap["last_blocked_at_ms"])
+            # And the audit event fired.
+            events = self._read_audit_events("predict_blocked_dormant")
+            self.assertEqual(len(events), 1)
+            meta = events[0]["metadata"]
+            self.assertEqual(meta["serving_state"], "dormant_manual_pause")
+            self.assertEqual(meta["mode"], "single")
+            self.assertEqual(meta["event_count"], 1)
+            self.assertEqual(meta["manifest_version"], "v_dormant_endpoint_test")
+            self.assertEqual(events[0]["decision"], "block")
+
+            # A 3-event batch increments by 1 request and event_count=3.
+            batch_body = json.dumps({"events": [{}, {}, {}]}).encode("utf-8")
+            asyncio.run(ml_server.score(self._build_stub_request(batch_body)))
+            snap = ml_server.serving_state_observability.counters_snapshot()
+            self.assertEqual(snap["dormant_requests_count_in_process"], 2)
+            self.assertEqual(snap["dormant_requests_count_since_state_set"], 2)
+            events = self._read_audit_events("predict_blocked_dormant")
+            self.assertEqual(len(events), 2)
+            self.assertEqual(events[1]["metadata"]["mode"], "batch")
+            self.assertEqual(events[1]["metadata"]["event_count"], 3)
+        finally:
+            restore()
+            ml_server.serving_state_observability = original_obs
+
+    def test_serving_state_d2_score_active_does_not_bump_dormant_counters(self) -> None:
+        """The active path must leave dormant counters untouched."""
+        self._isolated_audit_root()
+        ml_server = self._load_ml_server_for_endpoint()
+        if ml_server is None:
+            return
+
+        sv_module = self._serving_state_module()
+        original_obs = ml_server.serving_state_observability
+        ml_server.serving_state_observability = sv_module.ServingStateObservability(
+            sample_n=1, min_interval_sec=0.0
+        )
+        # Capture initial counter state.
+        before = ml_server.serving_state_observability.counters_snapshot()
+
+        class _StubRegistry:
+            @staticmethod
+            def snapshot():
+                return OpsSmokeTests._stub_active_registry_snapshot()
+
+        def _stub_score_single(event, disable_analogs=False):
+            return {"ok": True}
+
+        original_score = ml_server._score_single_event_with_log
+        original_try_begin = ml_server._try_begin_score_request
+        original_finish = ml_server._finish_score_request
+        ml_server._score_single_event_with_log = _stub_score_single
+        ml_server._try_begin_score_request = lambda: True
+        ml_server._finish_score_request = lambda **kwargs: None
+
+        restore = self._patch_score_path(
+            ml_server,
+            _StubRegistry(),
+            self._build_active_serving_state(),
+        )
+        try:
+            body = json.dumps({"event": {"symbol": "SPY"}}).encode("utf-8")
+            asyncio.run(ml_server.score(self._build_stub_request(body)))
+            after = ml_server.serving_state_observability.counters_snapshot()
+            self.assertEqual(
+                after["dormant_requests_count_in_process"],
+                before["dormant_requests_count_in_process"],
+            )
+            self.assertEqual(
+                after["dormant_requests_count_since_state_set"],
+                before["dormant_requests_count_since_state_set"],
+            )
+            self.assertIsNone(after["last_blocked_at_ms"])
+            # No audit event for the active path.
+            self.assertEqual(self._read_audit_events("predict_blocked_dormant"), [])
+        finally:
+            restore()
+            ml_server._score_single_event_with_log = original_score
+            ml_server._try_begin_score_request = original_try_begin
+            ml_server._finish_score_request = original_finish
+            ml_server.serving_state_observability = original_obs
+
+    def test_serving_state_d2_health_surfaces_observability_counters(self) -> None:
+        """``/health.serving_state.observability`` must expose every
+        process-local counter field downstream automation will read.
+
+        Uses ``_build_health_response_dict`` via direct call so the test
+        doesn't have to spin up a request; the dict is the same one the
+        endpoint serializes."""
+        ml_server = self._load_ml_server_for_endpoint()
+        if ml_server is None:
+            return
+
+        sv_module = self._serving_state_module()
+        original_obs = ml_server.serving_state_observability
+        ml_server.serving_state_observability = sv_module.ServingStateObservability(
+            sample_n=1, min_interval_sec=0.0
+        )
+        try:
+            counters = ml_server.serving_state_observability.counters_snapshot()
+            for key in (
+                "transitions_count_in_process",
+                "dormant_requests_count_in_process",
+                "dormant_requests_count_since_state_set",
+                "last_blocked_at_ms",
+                "last_loaded_at_ms",
+                "dormant_log_sample_n",
+                "dormant_log_min_interval_ms",
+            ):
+                self.assertIn(key, counters)
+            # All counters start at 0 / None.
+            self.assertEqual(counters["transitions_count_in_process"], 0)
+            self.assertEqual(counters["dormant_requests_count_in_process"], 0)
+            self.assertEqual(counters["dormant_requests_count_since_state_set"], 0)
+            self.assertIsNone(counters["last_blocked_at_ms"])
+            # Increment once and confirm the snapshot reflects it.
+            ml_server.serving_state_observability.record_dormant_block(123456)
+            counters = ml_server.serving_state_observability.counters_snapshot()
+            self.assertEqual(counters["dormant_requests_count_in_process"], 1)
+            self.assertEqual(counters["last_blocked_at_ms"], 123456)
+        finally:
+            ml_server.serving_state_observability = original_obs
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
