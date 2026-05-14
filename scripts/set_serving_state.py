@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import getpass
+import hashlib
 import json
 import os
 import socket
@@ -42,6 +43,7 @@ from server.serving_state import (
     SCHEMA_VERSION,
     SERVING_STATE_FILENAME,
     STATE_ACTIVE,
+    STATE_DORMANT_DATA_QUALITY,
     VALID_STATES,
     validate_state_payload,
 )
@@ -128,6 +130,45 @@ def _existing_payload(path: Path) -> dict[str, Any] | None:
     except Exception:
         return None
     return data if isinstance(data, dict) else None
+
+
+def _read_previous_state(
+    path: Path,
+) -> tuple[str | None, str, dict[str, Any] | None]:
+    """Inspect the file BEFORE the atomic write.
+
+    Returns ``(from_state, from_state_source, parsed_payload)`` where
+    ``from_state_source`` is one of:
+      - ``"file"``      file existed, parsed cleanly, schema-valid
+      - ``"invalid"``   file existed but was unreadable or schema-invalid
+      - ``"missing"``   file did not exist
+
+    ``from_state`` is the recorded ``state`` when source == "file"; for
+    "invalid" we report what the loader would substitute
+    (``dormant_data_quality``), so the audit trail matches what
+    ml_server would actually have honored. For "missing" we report
+    ``None`` rather than ``"active"`` because the synthetic default is
+    NOT a real on-disk state.
+    """
+    if not path.is_file():
+        return None, "missing", None
+    raw_payload = _existing_payload(path)
+    if raw_payload is None:
+        # File existed but was unreadable / non-object JSON.
+        return STATE_DORMANT_DATA_QUALITY, "invalid", None
+    ok, _reason = validate_state_payload(raw_payload)
+    if not ok:
+        return STATE_DORMANT_DATA_QUALITY, "invalid", raw_payload
+    state_val = raw_payload.get("state")
+    return (state_val if isinstance(state_val, str) else None), "file", raw_payload
+
+
+def _file_sha256(path: Path) -> str | None:
+    try:
+        raw = path.read_bytes()
+    except Exception:
+        return None
+    return hashlib.sha256(raw).hexdigest()
 
 
 def build_payload(
@@ -235,8 +276,20 @@ def main(argv: list[str] | None = None) -> int:
     #   dormant_X -> dormant_X (same state, refresh reason/expiry)
     # Refuse:
     #   dormant_X -> dormant_Y without --force
-    existing = _existing_payload(state_path)
-    if existing is not None:
+    #
+    # The guard is gated on ``from_state_source == "file"`` — i.e. only a
+    # schema-valid prior the server would actually have honored counts as
+    # a "dormant state to overwrite." If the prior file is unparseable or
+    # schema-invalid, ``_apply_runtime_threshold_safety`` would substitute
+    # ``dormant_data_quality`` at load time regardless of what bytes are
+    # on disk, so the raw ``state`` field is operationally meaningless.
+    # Treating it as a real dormant state would also leave operators
+    # unable to remediate a corrupt control-plane file without --force,
+    # which is the wrong default. The audit event for the invalid case
+    # still records ``from_state_source="invalid"`` and the
+    # loader-equivalent ``from_state="dormant_data_quality"``.
+    from_state, from_state_source, existing = _read_previous_state(state_path)
+    if existing is not None and from_state_source == "file":
         current_state = existing.get("state")
         if (
             isinstance(current_state, str)
@@ -282,6 +335,56 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     atomic_write_json(state_path, payload)
+
+    # D2 audit event. Emitted AFTER the atomic write so the audit
+    # trail reflects the file that actually shipped. Use
+    # ``safe_emit_audit_event`` so audit-log IO failure does NOT
+    # block the operator's state change — serving control must not
+    # be blocked by audit-log unavailability. The CLI exit code stays
+    # 0 even on audit failure; a warning is printed to stderr so the
+    # failure is observable.
+    written_at_ms = int(time.time() * 1000)
+    state_path_sha256 = _file_sha256(state_path)
+    audit_emit_error: str | None = None
+    try:
+        from services.research_protocol.audit_logger import safe_emit_audit_event
+
+        event = safe_emit_audit_event(
+            event_type="serving_state_changed",
+            decision="record",
+            reason=str(payload["reason"]),
+            metadata={
+                "from_state": from_state,
+                "from_state_source": from_state_source,
+                "to_state": payload["state"],
+                "reason": payload["reason"],
+                "triggering_audit": payload["triggering_audit"],
+                "set_by": payload["set_by"],
+                "manifest_version_when_set": payload["manifest_version_when_set"],
+                "expires_at": payload["expires_at"],
+                "since_ts": payload["since_ts"],
+                "written_at_ms": written_at_ms,
+                "state_path": str(state_path),
+                "state_path_sha256": state_path_sha256,
+                "forced": bool(args.force),
+            },
+        )
+        if event is None:
+            audit_emit_error = "safe_emit_audit_event returned None (transient IO failure)"
+    except Exception as exc:
+        # safe_emit_audit_event re-raises AuditLogTamperingError (developer
+        # bug). Catch anything else defensively — control-plane writes
+        # must not be blocked by a regression in the audit-log path.
+        audit_emit_error = f"{type(exc).__name__}: {exc}"
+
+    if audit_emit_error:
+        print(
+            f"WARNING: serving_state_changed audit event was NOT recorded "
+            f"({audit_emit_error}). State file write succeeded; the audit "
+            f"trail is incomplete for this transition.",
+            file=sys.stderr,
+        )
+
     if not args.quiet:
         print(
             f"serving_state -> {target_state} "

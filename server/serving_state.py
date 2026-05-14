@@ -7,13 +7,25 @@ Background:
     be answering live predictions right now?" That third axis is *serving
     state*.
 
-D1 contract (this module):
+D1 contract (the registry below):
     A single file-backed flag, ``data/models/serving_state.json``, decides
     whether ``/score`` should answer normally or short-circuit with a
     structured dormant response. Operators flip the file via
     ``scripts/set_serving_state.py``; ``ml_server`` only reads it. No
     audit auto-wiring, no auto-clear, no expiry enforcement here — D3/D4
     work.
+
+D2 contract (``ServingStateObservability`` + audit events):
+    Process-local counters expose how often the dormant short-circuit
+    has fired since process start and since the current state was set;
+    ``/health`` surfaces these so ops can see "we paused 4 minutes ago,
+    blocked 1,254 requests so far." A sampled ``predict_blocked_dormant``
+    audit event fires (rate-and-time-gated) so the audit log records
+    dormant blocks without spamming under sustained dormancy. The CLI
+    emits ``serving_state_changed`` on every successful write. Both
+    event types live in the shared research-protocol audit log
+    (``reports/research_protocol/audit_log.jsonl``) — see
+    ``services/research_protocol/audit_logger.py``.
 
 Failure model:
     - Missing file              -> default ``active`` with a marker so
@@ -321,3 +333,138 @@ class ServingStateRegistry:
             "manifest_version": manifest_version,
             "manifest_version_when_set": payload.get("manifest_version_when_set"),
         }
+
+
+# --------------------------------------------------------------------------
+# D2: process-local observability counters + sampler for predict_blocked_dormant
+# --------------------------------------------------------------------------
+#
+# Process-local means: reset on every server restart, never persisted. The
+# audit log is the durable record; these counters are the live read-out for
+# /health and the rate-gate that decides when to emit the next audit line.
+
+
+DEFAULT_DORMANT_LOG_SAMPLE_N = 100
+DEFAULT_DORMANT_LOG_MIN_INTERVAL_SEC = 60.0
+
+
+class ServingStateObservability:
+    """Counters + sampler for the dormant short-circuit, decoupled from the
+    state-loading registry.
+
+    Counters:
+      - ``transitions_count_in_process``         lifetime; bumped each time
+                                                 a ``load()`` actually flips
+                                                 the cached state.
+      - ``dormant_requests_count_in_process``    lifetime; bumped on every
+                                                 dormant-short-circuited
+                                                 ``/score`` request.
+      - ``dormant_requests_count_since_state_set``  resets on transition.
+      - ``last_blocked_at_ms``                   last short-circuit timestamp.
+      - ``last_loaded_at_ms``                    last ``load()`` timestamp,
+                                                 transition or no-op.
+
+    Sampler (``record_dormant_block``):
+      Returns ``(count_since_last_emit, should_emit)``. ``should_emit`` is
+      True for the first dormant request after a state transition (so we
+      always capture the start of every dormant episode), and afterwards
+      only when BOTH the rate gate (``>= sample_n`` requests since the
+      last emit) AND the time gate (``>= min_interval_ms`` since the last
+      emit) are satisfied. Defaults are tuned for "no more than one
+      ``predict_blocked_dormant`` audit line per state per minute on a
+      busy server."
+
+    Thread safety: a single ``RLock`` guards every counter mutation. The
+    lock is short (no I/O inside) so it is safe to take on every dormant
+    request even at hundreds of req/sec.
+    """
+
+    def __init__(
+        self,
+        *,
+        sample_n: int = DEFAULT_DORMANT_LOG_SAMPLE_N,
+        min_interval_sec: float = DEFAULT_DORMANT_LOG_MIN_INTERVAL_SEC,
+    ):
+        self._sample_n = max(1, int(sample_n))
+        self._min_interval_ms = int(float(min_interval_sec) * 1000.0)
+        self._lock = threading.RLock()
+        self._transitions = 0
+        self._dormant_total = 0
+        self._dormant_since_state_set = 0
+        self._last_blocked_at_ms: int | None = None
+        self._last_loaded_at_ms: int | None = None
+        # Sampler state, scoped to the *current* state — reset on transition.
+        self._count_since_last_emit = 0
+        self._last_emit_at_ms: int | None = None
+
+    @property
+    def sample_n(self) -> int:
+        return self._sample_n
+
+    @property
+    def min_interval_ms(self) -> int:
+        return self._min_interval_ms
+
+    def record_state_transition(self, now_ms: int) -> None:
+        """Called from the load() path when the cached state actually flipped."""
+        with self._lock:
+            self._transitions += 1
+            self._dormant_since_state_set = 0
+            self._count_since_last_emit = 0
+            self._last_emit_at_ms = None
+            self._last_loaded_at_ms = int(now_ms)
+
+    def record_load_noop(self, now_ms: int) -> None:
+        """Called from the load() path when load() ran but state did not flip."""
+        with self._lock:
+            self._last_loaded_at_ms = int(now_ms)
+
+    def record_dormant_block(self, now_ms: int) -> tuple[int, bool]:
+        """Bump counters for one dormant short-circuit. Returns
+        ``(count_since_last_emit, should_emit)``. Caller is responsible for
+        actually emitting the audit event when ``should_emit`` is True.
+        """
+        now_ms = int(now_ms)
+        with self._lock:
+            self._dormant_total += 1
+            self._dormant_since_state_set += 1
+            self._count_since_last_emit += 1
+            self._last_blocked_at_ms = now_ms
+
+            count = self._count_since_last_emit
+            last_emit = self._last_emit_at_ms
+            if last_emit is None:
+                # First dormant block in this state — always capture.
+                should_emit = True
+            else:
+                rate_ok = count >= self._sample_n
+                time_ok = (now_ms - last_emit) >= self._min_interval_ms
+                should_emit = rate_ok and time_ok
+
+            if should_emit:
+                self._last_emit_at_ms = now_ms
+                # Reset the sampler counter so the next emit needs another
+                # ``sample_n`` requests on top of the time gate.
+                self._count_since_last_emit = 0
+
+            return count, should_emit
+
+    def counters_snapshot(self) -> dict[str, Any]:
+        """Return a /health-suitable dict of all counters.
+
+        Field names are stable; downstream automation reads these. The
+        values reset on process restart — documented as ``_in_process``
+        in the field names so it cannot be confused with a durable count.
+        """
+        with self._lock:
+            return {
+                "transitions_count_in_process": int(self._transitions),
+                "dormant_requests_count_in_process": int(self._dormant_total),
+                "dormant_requests_count_since_state_set": int(
+                    self._dormant_since_state_set
+                ),
+                "last_blocked_at_ms": self._last_blocked_at_ms,
+                "last_loaded_at_ms": self._last_loaded_at_ms,
+                "dormant_log_sample_n": self._sample_n,
+                "dormant_log_min_interval_ms": self._min_interval_ms,
+            }

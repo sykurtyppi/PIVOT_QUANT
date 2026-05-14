@@ -113,6 +113,14 @@ The promotion pipeline is a chain of layered policy gates, each shipped as a sep
 - `runtime_safety_dry_run.would_neutralize_count > 0` is a hard FAIL (`not_ready` / `blocked_not_ready`). Artifact/serve divergence breaks promotion reproducibility — the sha256 of the on-disk manifest must represent what actually serves.
 - **Serving state is a third axis on top of readiness and promotion.** Readiness ≠ promotion ≠ serving state. A promoted model can be paused via `data/models/serving_state.json` without losing its promoted status or changing its manifest. The serving-state gate (`server/serving_state.py`) reads the file and short-circuits `/score` with a structured dormant response when `state != "active"`. **`scripts/set_serving_state.py` is the only writer.** Audits do NOT auto-flip serving state in D1 — that's D3+. Dormancy is "stop emitting signals," not "demote the model," not "retrain," not "rewrite thresholds."
 
+### Serving-state phase status
+| Phase | Status | What it covers |
+|---|---|---|
+| D1 | **shipped** (PR #29) | Manual file-flag gate. Operator-only writes via `set_serving_state.py`. `/score` short-circuit + dormant response. `/health.serving_state` exposes current state. |
+| D2 | **in progress** | Observability only. `serving_state_changed` audit event on every CLI write. Process-local counters (`transitions_count_in_process`, `dormant_requests_count_in_process`, `dormant_requests_count_since_state_set`, `last_blocked_at_ms`, `last_loaded_at_ms`) exposed under `/health.serving_state.observability`. Sampled `predict_blocked_dormant` audit event (rate-and-time gated via `ML_SERVING_DORMANT_LOG_SAMPLE_N` default 100 + `ML_SERVING_DORMANT_LOG_MIN_INTERVAL_SEC` default 60). **No behavior change.** Both event types live in `reports/research_protocol/audit_log.jsonl`. |
+| D3 | **future** | Opt-in audit-script automation: an audit can call `set_serving_state.py` on failure via `--write-serving-state-on-fail`. Requires explicit flag + `--expires-at` + `--triggering-audit`. Subprocess boundary preserved so the CLI remains the only writer. |
+| D4 | **deferred** | Auto-clear, expiry enforcement at runtime, sticky cooldown. Only after D2+D3 have produced enough audit-log data to choose anti-flap parameters from. |
+
 ### Discipline Contract (the most important rule)
 
 This codebase has been hardened over many PRs against a specific failure mode: a previous candidate (`high_vol_trend_early_candidate`) showed 80.9% test win rate on 2025 and 41.2% on 2022 with the same frozen filter — i.e., the "edge" was a regime-favored artifact that survived six diagnostic modules and an LLM-assisted audit. Every audit script, every gate, every test in this repository is written under the assumption that the next change (human or model) is equally prone to fooling itself. Specifically:
