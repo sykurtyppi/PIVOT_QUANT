@@ -639,11 +639,24 @@ else
 fi
 
 if [[ -n "${REPORT_PATH}" ]] && [[ -f "${REPORT_PATH}" ]] && is_truthy "${NOTIFY_ON_RETRAIN}"; then
-  echo "[$(timestamp)] Sending daily report notification..." | tee -a "${LOG_DIR}/retrain.log"
-  if "${PYTHON}" scripts/send_daily_report.py --report "${REPORT_PATH}" >> "${LOG_DIR}/retrain.log" 2>&1; then
-    echo "[$(timestamp)] DONE  notify_daily_report" | tee -a "${LOG_DIR}/retrain.log"
+  # Route through run_daily_report_send.sh so the shared lock + dedupe state
+  # ({date}|close key) blocks double-sends regardless of which caller fires
+  # first.  Time-gate: skip intraday retrain cycles entirely — the LaunchAgent
+  # fires at ~21:10 local and is the preferred sender before close; after close
+  # (ET hour >= 16) the first post-close retrain cycle can send and the
+  # LaunchAgent will be deduped by the state file.  ML_REPORT_FORCE_SEND=true
+  # bypasses both the gate and the dedupe for operator overrides.
+  FORCE_NOTIFY_LC="$(printf '%s' "${ML_REPORT_FORCE_SEND:-false}" | tr '[:upper:]' '[:lower:]')"
+  ET_HOUR="$("${PYTHON}" -c "from datetime import datetime; from zoneinfo import ZoneInfo; print(datetime.now(ZoneInfo('America/New_York')).hour)")"
+  if [[ "${FORCE_NOTIFY_LC}" != "true" ]] && (( ET_HOUR < 16 )); then
+    echo "[$(timestamp)] INFO: retrain notify skipped (before 16:00 ET, hour=${ET_HOUR}; LaunchAgent handles close send)" | tee -a "${LOG_DIR}/retrain.log"
   else
-    echo "[$(timestamp)] WARN: daily report notification failed" | tee -a "${LOG_DIR}/retrain.log"
+    echo "[$(timestamp)] Sending daily report notification..." | tee -a "${LOG_DIR}/retrain.log"
+    if ML_REPORT_SCHEDULE_MODE=close bash "${ROOT_DIR}/scripts/run_daily_report_send.sh" >> "${LOG_DIR}/retrain.log" 2>&1; then
+      echo "[$(timestamp)] DONE  notify_daily_report" | tee -a "${LOG_DIR}/retrain.log"
+    else
+      echo "[$(timestamp)] WARN: daily report notification failed (see logs/report_delivery.log)" | tee -a "${LOG_DIR}/retrain.log"
+    fi
   fi
 elif [[ -n "${REPORT_PATH}" ]] && [[ -f "${REPORT_PATH}" ]]; then
   echo "[$(timestamp)] INFO: retrain notification disabled (ML_REPORT_NOTIFY_ON_RETRAIN=false)" | tee -a "${LOG_DIR}/retrain.log"
