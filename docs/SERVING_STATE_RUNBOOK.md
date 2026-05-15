@@ -124,7 +124,7 @@ Expected `/health.serving_state` after pausing:
 | `load_error` | `null` |
 
 The CLI also emits a `serving_state_changed` audit-log line — see
-section **F**.
+section **G**.
 
 ## E) Resume active ⚠️ **affects live serving**
 
