@@ -81,19 +81,32 @@ server restart. The audit log is the durable record.
 
 ## D) Pause live serving ⚠️ **affects live serving**
 
-This writes `data/models/serving_state.json`. The server reads it
-without restart on the next `POST /reload` or on the next request that
-triggers a registry refresh.
+`scripts/set_serving_state.py` writes `data/models/serving_state.json`.
+The running server **does not** auto-detect the new file — the registry
+loads `serving_state.json` only at process startup and on `POST /reload`.
+A normal `/score` request does **not** refresh the cached state. Until
+one of those two triggers fires, `/score` continues to answer with
+whatever state was cached at the previous load.
+
+The pause therefore takes effect in two steps:
+
+1. Run the CLI to write the file.
+2. Run `POST /reload` (or restart the process) so `ServingStateRegistry`
+   re-reads the file. After that, every `/score` request short-circuits
+   to the dormant response.
 
 ```bash
-# ⚠️ LIVE: pauses /score immediately.
+# ⚠️ LIVE step 1: writes the pause file. The running server does
+# NOT pick this up yet; /score still answers normally until step 2.
 .venv/bin/python scripts/set_serving_state.py \
   --state dormant_manual_pause \
   --reason "<short human reason>" \
   --triggering-audit "<optional path to evidence/.../foo.json>" \
   --expires-at "<ISO-8601 or epoch-ms — strongly encouraged>"
 
-# Then ask the server to pick up the change.
+# ⚠️ LIVE step 2: tells the server to reload serving_state.json.
+# Pause becomes effective when this returns. (Alternative: restart
+# the ml_server process.)
 curl -fsS -X POST http://127.0.0.1:5003/reload >/dev/null
 
 # Verify it took effect.
@@ -115,13 +128,20 @@ section **F**.
 
 ## E) Resume active ⚠️ **affects live serving**
 
+Same two-step shape as section D — the CLI write does not flip the
+running server on its own; `POST /reload` is what activates it.
+
 ```bash
-# ⚠️ LIVE: re-enables /score.
+# ⚠️ LIVE step 1: writes the active-state file. /score still
+# returns dormant responses until step 2.
 .venv/bin/python scripts/set_serving_state.py \
   --state active \
   --reason "<reason for resuming, e.g. regime review complete>"
 
+# ⚠️ LIVE step 2: tells the server to reload serving_state.json.
+# Once this returns, /score answers normally again.
 curl -fsS -X POST http://127.0.0.1:5003/reload >/dev/null
+
 curl -fsS http://127.0.0.1:5003/health | jq '.serving_state.state'
 # -> "active"
 ```
@@ -292,15 +312,19 @@ You'll see this in `/health.serving_state`:
 }
 ```
 
-To remediate, just write a valid file. **`--force` is NOT required**
-when the prior file is invalid:
+To remediate, just write a valid file and trigger a reload. **`--force`
+is NOT required** when the prior file is invalid:
 
 ```bash
-# ⚠️ LIVE: replaces the corrupt file with a fresh valid record.
+# ⚠️ LIVE step 1: replaces the corrupt file with a fresh valid record.
+# The server is still serving its cached dormant_data_quality state
+# until step 2 reloads.
 .venv/bin/python scripts/set_serving_state.py \
   --state active \
   --reason "remediating corrupt serving_state.json"
 
+# ⚠️ LIVE step 2: reload so the server drops its cached
+# dormant_data_quality and re-reads the fresh valid record.
 curl -fsS -X POST http://127.0.0.1:5003/reload >/dev/null
 ```
 
@@ -317,12 +341,16 @@ state file and in the `serving_state_changed` audit event so operators
 can see the intended review date, but the server does **not**
 auto-clear when `expires_at` passes.
 
-If you want the state cleared, an operator must run
+If you want the state cleared, an operator must run the same two-step
+sequence as section E (CLI write + `POST /reload`):
 
 ```bash
-# ⚠️ LIVE
+# ⚠️ LIVE step 1: writes the active-state file.
 .venv/bin/python scripts/set_serving_state.py \
   --state active --reason "expiry review complete"
+
+# ⚠️ LIVE step 2: reload so the server picks it up.
+curl -fsS -X POST http://127.0.0.1:5003/reload >/dev/null
 ```
 
 Auto-clear + runtime expiry enforcement are **D4**, deferred until
