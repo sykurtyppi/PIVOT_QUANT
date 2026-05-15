@@ -117,9 +117,11 @@ The promotion pipeline is a chain of layered policy gates, each shipped as a sep
 | Phase | Status | What it covers |
 |---|---|---|
 | D1 | **shipped** (PR #29) | Manual file-flag gate. Operator-only writes via `set_serving_state.py`. `/score` short-circuit + dormant response. `/health.serving_state` exposes current state. |
-| D2 | **in progress** | Observability only. `serving_state_changed` audit event on every CLI write. Process-local counters (`transitions_count_in_process`, `dormant_requests_count_in_process`, `dormant_requests_count_since_state_set`, `last_blocked_at_ms`, `last_loaded_at_ms`) exposed under `/health.serving_state.observability`. Sampled `predict_blocked_dormant` audit event (rate-and-time gated via `ML_SERVING_DORMANT_LOG_SAMPLE_N` default 100 + `ML_SERVING_DORMANT_LOG_MIN_INTERVAL_SEC` default 60). **No behavior change.** Both event types live in `reports/research_protocol/audit_log.jsonl`. |
+| D2 | **shipped** (PR #30) | Observability only. `serving_state_changed` audit event on every CLI write. Process-local counters (`transitions_count_in_process`, `dormant_requests_count_in_process`, `dormant_requests_count_since_state_set`, `last_blocked_at_ms`, `last_loaded_at_ms`) exposed under `/health.serving_state.observability`. Sampled `predict_blocked_dormant` audit event (rate-and-time gated via `ML_SERVING_DORMANT_LOG_SAMPLE_N` default 100 + `ML_SERVING_DORMANT_LOG_MIN_INTERVAL_SEC` default 60). **No behavior change.** Both event types live in `reports/research_protocol/audit_log.jsonl`. |
 | D3 | **future** | Opt-in audit-script automation: an audit can call `set_serving_state.py` on failure via `--write-serving-state-on-fail`. Requires explicit flag + `--expires-at` + `--triggering-audit`. Subprocess boundary preserved so the CLI remains the only writer. |
 | D4 | **deferred** | Auto-clear, expiry enforcement at runtime, sticky cooldown. Only after D2+D3 have produced enough audit-log data to choose anti-flap parameters from. |
+
+**Operator runbook:** `docs/SERVING_STATE_RUNBOOK.md` — step-by-step for inspecting `/health.serving_state`, pausing / resuming via the CLI, verifying audit events, troubleshooting invalid files, and the `--force` rules. Read it before flipping live serving state.
 
 ### Discipline Contract (the most important rule)
 
