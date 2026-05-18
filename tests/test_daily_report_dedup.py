@@ -498,38 +498,101 @@ class TestWeekendGateOrdering(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestNpmOperationalReportScriptsUseWrapper(unittest.TestCase):
-    """Static analysis test for Codex finding #2 — the operational npm report
-    script must route through the shell wrapper, not call send_daily_report.py
-    directly.  Scripts named *raw* or *manual* are the documented escape hatch
-    and are exempted."""
+    """Static analysis tests for npm report-send policy.
 
-    def test_npm_operational_report_scripts_use_wrapper(self) -> None:
-        """No ml:*report* script (excluding *raw* / *manual*) may call send_daily_report.py directly."""
+    Operational ml:*report* / ml:*send* scripts (those NOT named *raw* or
+    *manual*) must:
+      1. Not call send_daily_report.py directly.
+      2. When they invoke run_daily_report_send.sh, include
+         ML_REPORT_SCHEDULE_MODE=close so the send shares the {date}|close
+         dedup key with the LaunchAgent and retrain paths.  Without this,
+         npm sends would use {date}|manual and duplicate on the same day.
+
+    Raw/manual escape-hatch scripts are exempted from both rules provided
+    their name contains 'raw' or 'manual' AND their command includes
+    --no-dedupe-guard.
+    """
+
+    def _load_scripts(self) -> dict:
         package_json_path = REPO_ROOT / "package.json"
         self.assertTrue(package_json_path.exists(), "package.json not found at repo root")
-
         with open(package_json_path, encoding="utf-8") as fh:
-            pkg = json.load(fh)
+            return json.load(fh).get("scripts", {})
 
-        scripts: dict[str, str] = pkg.get("scripts", {})
-
-        violations: list[str] = []
+    def _operational_report_scripts(self, scripts: dict) -> dict:
+        """Return scripts that are operational (ml:*report* or ml:*send*) but
+        NOT raw/manual escape hatches."""
+        result = {}
         for name, cmd in scripts.items():
-            # Only inspect ml:*report* scripts
-            if not (name.startswith("ml:") and "report" in name):
+            if not name.startswith("ml:"):
                 continue
-            # Exempted: raw or manual escape-hatch scripts
+            if not ("report" in name or "send" in name):
+                continue
             if "raw" in name or "manual" in name:
                 continue
-            # The command must NOT reference send_daily_report.py directly
-            if "send_daily_report.py" in cmd:
+            result[name] = cmd
+        return result
+
+    def test_operational_scripts_do_not_call_sender_directly(self) -> None:
+        """No operational ml:*report*/ml:*send* script may call send_daily_report.py directly."""
+        scripts = self._load_scripts()
+        operational = self._operational_report_scripts(scripts)
+
+        violations = [
+            f"  {name!r}: {cmd!r}"
+            for name, cmd in operational.items()
+            if "send_daily_report.py" in cmd
+        ]
+        self.assertEqual(
+            violations,
+            [],
+            "Operational report/send scripts must not call send_daily_report.py directly "
+            "(route through run_daily_report_send.sh). Violations:\n" + "\n".join(violations),
+        )
+
+    def test_wrapper_scripts_include_close_schedule_mode(self) -> None:
+        """Operational scripts that invoke run_daily_report_send.sh must set
+        ML_REPORT_SCHEDULE_MODE=close so they share the {date}|close dedup key
+        with the LaunchAgent and retrain paths."""
+        scripts = self._load_scripts()
+        operational = self._operational_report_scripts(scripts)
+
+        violations = []
+        for name, cmd in operational.items():
+            if "run_daily_report_send.sh" not in cmd:
+                continue  # not a wrapper call — covered by the other test
+            if "ML_REPORT_SCHEDULE_MODE=close" not in cmd:
                 violations.append(f"  {name!r}: {cmd!r}")
 
         self.assertEqual(
             violations,
             [],
-            "Operational ml:*report* scripts must not call send_daily_report.py directly "
-            "(use run_daily_report_send.sh wrapper). Violations:\n" + "\n".join(violations),
+            "Operational scripts calling run_daily_report_send.sh must include "
+            "ML_REPORT_SCHEDULE_MODE=close to share the {date}|close dedup key. "
+            "Violations:\n" + "\n".join(violations),
+        )
+
+    def test_raw_scripts_include_no_dedupe_guard(self) -> None:
+        """Raw/manual escape-hatch scripts that call send_daily_report.py directly
+        must include --no-dedupe-guard to make their unguarded nature explicit."""
+        scripts = self._load_scripts()
+
+        violations = []
+        for name, cmd in scripts.items():
+            if not name.startswith("ml:"):
+                continue
+            if not ("raw" in name or "manual" in name):
+                continue
+            if "send_daily_report.py" not in cmd:
+                continue
+            if "--no-dedupe-guard" not in cmd:
+                violations.append(f"  {name!r}: {cmd!r}")
+
+        self.assertEqual(
+            violations,
+            [],
+            "Raw/manual scripts calling send_daily_report.py directly must include "
+            "--no-dedupe-guard. Violations:\n" + "\n".join(violations),
         )
 
 
