@@ -402,6 +402,138 @@ class TestCalendarGate(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Test: weekend gate ordering — current ET date checked before rollback
+# These tests inject ML_REPORT_FAKE_ET_DATE to simulate running on a
+# Saturday/Sunday/holiday without needing to modify the real clock.
+# ---------------------------------------------------------------------------
+
+class TestWeekendGateOrdering(unittest.TestCase):
+    """Regression tests for Codex finding #1 — the gate must fire on the real
+    current ET date before any Saturday→Friday rollback can occur."""
+
+    def _run_with_fake_date(
+        self,
+        fake_et_date: str,
+        extra_env: dict[str, str] | None = None,
+    ) -> tuple[int, bool, str]:
+        """Run wrapper with ML_REPORT_FAKE_ET_DATE set; no explicit REPORT_DATE."""
+        with tempfile.TemporaryDirectory(prefix="pivotquant_test_") as raw_tmp:
+            tmp = Path(raw_tmp)
+            env: dict[str, str] = {
+                "ML_REPORT_FAKE_ET_DATE": fake_et_date,
+                "ML_REPORT_FORCE_SEND": "false",
+            }
+            if extra_env:
+                env.update(extra_env)
+            result = _run_wrapper(env, tmp)
+            send_called = (tmp / "SEND_CALLED").exists()
+            log_path = tmp / "logs" / "report_delivery.log"
+            log_text = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
+            return result.returncode, send_called, log_text
+
+    def test_default_wrapper_saturday_no_schedule_mode_skips(self) -> None:
+        """Saturday current ET date with no REPORT_DATE or SCHEDULE_MODE must skip."""
+        # 2026-05-16 is a Saturday
+        rc, send_called, log_text = self._run_with_fake_date("2026-05-16")
+        self.assertEqual(rc, 0, "Wrapper must exit 0 on Saturday current date")
+        self.assertFalse(send_called, "send_daily_report.py must NOT be called on Saturday")
+        self.assertIn("non-trading day", log_text, "Log must mention non-trading day")
+
+    def test_default_wrapper_sunday_no_schedule_mode_skips(self) -> None:
+        """Sunday current ET date with no REPORT_DATE or SCHEDULE_MODE must skip."""
+        # 2026-05-17 is a Sunday
+        rc, send_called, log_text = self._run_with_fake_date("2026-05-17")
+        self.assertEqual(rc, 0, "Wrapper must exit 0 on Sunday current date")
+        self.assertFalse(send_called, "send_daily_report.py must NOT be called on Sunday")
+        self.assertIn("non-trading day", log_text)
+
+    def test_explicit_holiday_date_skips_without_force(self) -> None:
+        """Explicit ML_REPORT_REPORT_DATE=2026-07-04 (NYSE holiday) must skip without force."""
+        with tempfile.TemporaryDirectory(prefix="pivotquant_test_") as raw_tmp:
+            tmp = Path(raw_tmp)
+            # Use a trading-day fake date so the current-ET-date gate passes,
+            # then the explicit-date gate must catch 2026-07-04 (Saturday, holiday).
+            result = _run_wrapper(
+                {
+                    "ML_REPORT_FAKE_ET_DATE": "2026-07-02",  # Thursday — passes step-2 gate
+                    "ML_REPORT_REPORT_DATE": "2026-07-04",   # Saturday + NYSE holiday
+                    "ML_REPORT_FORCE_SEND": "false",
+                },
+                tmp,
+            )
+            send_called = (tmp / "SEND_CALLED").exists()
+            self.assertEqual(result.returncode, 0, "Must exit 0 when explicit date is a holiday")
+            self.assertFalse(send_called, "Must not send on explicit holiday date without force")
+
+    def test_explicit_holiday_date_force_sends(self) -> None:
+        """Explicit ML_REPORT_REPORT_DATE=2026-07-04, FORCE_SEND=true must proceed to send."""
+        with tempfile.TemporaryDirectory(prefix="pivotquant_test_") as raw_tmp:
+            tmp = Path(raw_tmp)
+            result = _run_wrapper(
+                {
+                    "ML_REPORT_FAKE_ET_DATE": "2026-07-04",  # Saturday + holiday
+                    "ML_REPORT_REPORT_DATE": "2026-07-04",
+                    "ML_REPORT_FORCE_SEND": "true",
+                },
+                tmp,
+            )
+            send_called = (tmp / "SEND_CALLED").exists()
+            self.assertEqual(result.returncode, 0, f"Force send should not fail. stderr={result.stderr}")
+            self.assertTrue(send_called, "send_daily_report.py MUST be called with FORCE_SEND=true")
+
+    def test_close_mode_on_saturday_skips(self) -> None:
+        """SCHEDULE_MODE=close on a Saturday current ET date must skip without force."""
+        # 2026-05-16 is Saturday
+        rc, send_called, log_text = self._run_with_fake_date(
+            "2026-05-16",
+            extra_env={"ML_REPORT_SCHEDULE_MODE": "close"},
+        )
+        self.assertEqual(rc, 0, "close mode on Saturday must exit 0")
+        self.assertFalse(send_called, "send_daily_report.py must NOT be called on Saturday in close mode")
+        self.assertIn("non-trading day", log_text)
+
+
+# ---------------------------------------------------------------------------
+# Test: npm package.json policy — ml:notify-report must go through wrapper
+# ---------------------------------------------------------------------------
+
+class TestNpmOperationalReportScriptsUseWrapper(unittest.TestCase):
+    """Static analysis test for Codex finding #2 — the operational npm report
+    script must route through the shell wrapper, not call send_daily_report.py
+    directly.  Scripts named *raw* or *manual* are the documented escape hatch
+    and are exempted."""
+
+    def test_npm_operational_report_scripts_use_wrapper(self) -> None:
+        """No ml:*report* script (excluding *raw* / *manual*) may call send_daily_report.py directly."""
+        package_json_path = REPO_ROOT / "package.json"
+        self.assertTrue(package_json_path.exists(), "package.json not found at repo root")
+
+        with open(package_json_path, encoding="utf-8") as fh:
+            pkg = json.load(fh)
+
+        scripts: dict[str, str] = pkg.get("scripts", {})
+
+        violations: list[str] = []
+        for name, cmd in scripts.items():
+            # Only inspect ml:*report* scripts
+            if not (name.startswith("ml:") and "report" in name):
+                continue
+            # Exempted: raw or manual escape-hatch scripts
+            if "raw" in name or "manual" in name:
+                continue
+            # The command must NOT reference send_daily_report.py directly
+            if "send_daily_report.py" in cmd:
+                violations.append(f"  {name!r}: {cmd!r}")
+
+        self.assertEqual(
+            violations,
+            [],
+            "Operational ml:*report* scripts must not call send_daily_report.py directly "
+            "(use run_daily_report_send.sh wrapper). Violations:\n" + "\n".join(violations),
+        )
+
+
+# ---------------------------------------------------------------------------
 # Test: send_daily_report.py direct invocation — no guard
 # ---------------------------------------------------------------------------
 

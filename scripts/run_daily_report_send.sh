@@ -110,7 +110,8 @@ acquire_lock
 PIVOT_DB_PATH="${PIVOT_DB:-${ROOT_DIR}/data/pivot_events.sqlite}"
 REPORT_OUTPUT=""
 REPORT_PATH=""
-REPORT_DATE="${ML_REPORT_REPORT_DATE:-}"
+EXPLICIT_REPORT_DATE="${ML_REPORT_REPORT_DATE:-}"
+REPORT_DATE="${EXPLICIT_REPORT_DATE}"
 REPORT_DATE_MODE="${ML_REPORT_REPORT_DATE_MODE:-auto}"
 SCHEDULE_MODE="${ML_REPORT_SCHEDULE_MODE:-}"
 SCHEDULE_MODE_EFFECTIVE="${SCHEDULE_MODE:-manual}"
@@ -119,42 +120,26 @@ FORCE_SEND_LC="$(printf '%s' "${FORCE_SEND}" | tr '[:upper:]' '[:lower:]')"
 
 echo "[$(timestamp)] START daily_report_send (${PYTHON_INFO})" >> "${LOG_DIR}/report_delivery.log"
 
-if [[ -z "${REPORT_DATE}" ]]; then
-  if [[ "${REPORT_DATE_MODE}" == "auto" && "${SCHEDULE_MODE}" == "close" ]]; then
-    REPORT_DATE_MODE="et_today"
-  fi
-  if ! REPORT_DATE="$(
-    REPORT_DATE_MODE="${REPORT_DATE_MODE}" "${PYTHON}" -c "from datetime import datetime, timedelta; from zoneinfo import ZoneInfo; import os
-mode = os.getenv('REPORT_DATE_MODE', 'auto').strip().lower()
-now = datetime.now(ZoneInfo('America/New_York'))
-if mode == 'et_today':
-    day = now.date()
-else:
-    day = now.date() if now.hour >= 16 else (now - timedelta(days=1)).date()
-while day.weekday() >= 5:
-    day = day - timedelta(days=1)
-print(day.isoformat())"
-  )"; then
-    echo "[$(timestamp)] ERROR failed to determine report date" >> "${LOG_DIR}/report_delivery.log"
-    exit 1
-  fi
-fi
-
-echo "[$(timestamp)] INFO report_date=${REPORT_DATE} schedule_mode=${SCHEDULE_MODE:-unset} date_mode=${REPORT_DATE_MODE}" >> "${LOG_DIR}/report_delivery.log"
-
-if [[ "${FORCE_SEND_LC}" != "true" ]]; then
-  if state_has_sent "${REPORT_DATE}" "${SCHEDULE_MODE_EFFECTIVE}"; then
-    echo "[$(timestamp)] INFO report already sent for report_date=${REPORT_DATE} schedule_mode=${SCHEDULE_MODE_EFFECTIVE}; skipping" >> "${LOG_DIR}/report_delivery.log"
-    exit 0
-  fi
-fi
-
 # ---------------------------------------------------------------------------
 # Trading-day gate — skip weekends and US market holidays (NYSE calendar).
 # run_daily_report_send.sh is the policy layer; send_daily_report.py is the
 # low-level primitive that has no scheduling policy of its own.  All
 # operational send paths MUST go through this wrapper so this gate applies.
 # ML_REPORT_FORCE_SEND=true bypasses the gate for operator overrides.
+#
+# ORDERING (critical — see Codex review finding #1):
+#   Step 1: Determine CURRENT_ET_DATE from the real clock (no rollback).
+#   Step 2: Gate on CURRENT_ET_DATE *before* any date rollback occurs.
+#   Step 3: Resolve REPORT_DATE (may roll back to Friday in auto mode).
+#   Step 4: Validate an explicit REPORT_DATE is also a trading day.
+#
+# This order prevents the Saturday→Friday rollback from bypassing the gate.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# ML_REPORT_FAKE_ET_DATE — TEST-ONLY.  If set to a non-empty value it is used
+# as CURRENT_ET_DATE instead of computing from the real clock.  This does NOT
+# affect REPORT_DATE resolution or any other logic.  Never set in production.
 # ---------------------------------------------------------------------------
 is_trading_day() {
   local check_date="$1"
@@ -214,9 +199,67 @@ raise SystemExit(0)
 PY
 }
 
+# Step 1: Determine CURRENT_ET_DATE — always the real current ET date, no rollback.
+# ML_REPORT_FAKE_ET_DATE may override this for tests only.
+if [[ -n "${ML_REPORT_FAKE_ET_DATE:-}" ]]; then
+  CURRENT_ET_DATE="${ML_REPORT_FAKE_ET_DATE}"
+else
+  if ! CURRENT_ET_DATE="$(
+    "${PYTHON}" -c "from datetime import datetime; from zoneinfo import ZoneInfo; print(datetime.now(ZoneInfo('America/New_York')).date().isoformat())"
+  )"; then
+    echo "[$(timestamp)] ERROR failed to determine current ET date" >> "${LOG_DIR}/report_delivery.log"
+    exit 1
+  fi
+fi
+
+# Step 2: Gate on CURRENT_ET_DATE before any date rollback.
+# This is the critical fix: on Saturday the rollback hasn't happened yet, so
+# is_trading_day(Saturday) correctly returns false and we exit before generating.
 if [[ "${FORCE_SEND_LC}" != "true" ]]; then
-  if ! is_trading_day "${REPORT_DATE}"; then
-    echo "[$(timestamp)] INFO non-trading day (${REPORT_DATE}); skipping report send (set ML_REPORT_FORCE_SEND=true to override)" >> "${LOG_DIR}/report_delivery.log"
+  if ! is_trading_day "${CURRENT_ET_DATE}"; then
+    echo "[$(timestamp)] INFO non-trading day (current ET date: ${CURRENT_ET_DATE}); skipping report send (set ML_REPORT_FORCE_SEND=true to override)" >> "${LOG_DIR}/report_delivery.log"
+    exit 0
+  fi
+fi
+
+# Step 3: Resolve REPORT_DATE using the existing logic (rollback is safe here
+# because we have already confirmed today is a trading day at Step 2).
+if [[ -z "${REPORT_DATE}" ]]; then
+  if [[ "${REPORT_DATE_MODE}" == "auto" && "${SCHEDULE_MODE}" == "close" ]]; then
+    REPORT_DATE_MODE="et_today"
+  fi
+  if ! REPORT_DATE="$(
+    REPORT_DATE_MODE="${REPORT_DATE_MODE}" "${PYTHON}" -c "from datetime import datetime, timedelta; from zoneinfo import ZoneInfo; import os
+mode = os.getenv('REPORT_DATE_MODE', 'auto').strip().lower()
+now = datetime.now(ZoneInfo('America/New_York'))
+if mode == 'et_today':
+    day = now.date()
+else:
+    day = now.date() if now.hour >= 16 else (now - timedelta(days=1)).date()
+while day.weekday() >= 5:
+    day = day - timedelta(days=1)
+print(day.isoformat())"
+  )"; then
+    echo "[$(timestamp)] ERROR failed to determine report date" >> "${LOG_DIR}/report_delivery.log"
+    exit 1
+  fi
+fi
+
+# Step 4: If an explicit ML_REPORT_REPORT_DATE was provided, also verify it is
+# a trading day. An operator who provides a nonsensical date (e.g. a holiday)
+# must use FORCE_SEND=true to proceed.
+if [[ -n "${EXPLICIT_REPORT_DATE}" && "${FORCE_SEND_LC}" != "true" ]]; then
+  if ! is_trading_day "${EXPLICIT_REPORT_DATE}"; then
+    echo "[$(timestamp)] INFO explicit report date ${EXPLICIT_REPORT_DATE} is a non-trading day; skipping (set ML_REPORT_FORCE_SEND=true to override)" >> "${LOG_DIR}/report_delivery.log"
+    exit 0
+  fi
+fi
+
+echo "[$(timestamp)] INFO current_et_date=${CURRENT_ET_DATE} report_date=${REPORT_DATE} schedule_mode=${SCHEDULE_MODE:-unset} date_mode=${REPORT_DATE_MODE}" >> "${LOG_DIR}/report_delivery.log"
+
+if [[ "${FORCE_SEND_LC}" != "true" ]]; then
+  if state_has_sent "${REPORT_DATE}" "${SCHEDULE_MODE_EFFECTIVE}"; then
+    echo "[$(timestamp)] INFO report already sent for report_date=${REPORT_DATE} schedule_mode=${SCHEDULE_MODE_EFFECTIVE}; skipping" >> "${LOG_DIR}/report_delivery.log"
     exit 0
   fi
 fi
