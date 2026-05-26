@@ -11,6 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Set
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -99,6 +100,10 @@ LIVE_COLLECTOR_WAL_AUTOCHECKPOINT = max(
 )
 INTERVAL_SEC = _interval_to_seconds(INTERVAL)
 _DEFAULT_CORS_ORIGINS = "http://127.0.0.1:3000,http://localhost:3000"
+# Proxy-first fetch: live collector tries the local Yahoo proxy before hitting
+# Yahoo's public API directly.  Matches the pattern in backfill_events.py.
+# Override via YAHOO_PROXY_URL env var; empty string disables proxy path.
+YAHOO_PROXY_URL = (os.getenv("YAHOO_PROXY_URL") or "http://127.0.0.1:3000/api/market").strip()
 
 if SOURCE not in ("auto", "ibkr", "yahoo", "marketdata"):
     raise ValueError(f"LIVE_COLLECTOR_SOURCE must be auto/ibkr/yahoo/marketdata, got: {SOURCE}")
@@ -448,9 +453,54 @@ def _score_events(events: List[Dict[str, Any]]) -> int:
     return scored
 
 
+def _fetch_market_via_proxy(
+    symbol: str,
+    interval: str,
+    range_str: str,
+    timeout: float = SCORE_TIMEOUT_SEC,
+) -> tuple[Dict[str, Any], str] | None:
+    """Try fetching OHLCV data from the local Yahoo proxy.
+
+    Returns (payload, "Yahoo") on success, or None if the proxy is unavailable
+    or returns an error.  The caller must fall back to the direct Yahoo path on
+    a None return.
+
+    Query-string format matches what backfill_events.fetch_market sends to the
+    proxy, so the same caching and retry logic in the proxy applies.
+    """
+    if not YAHOO_PROXY_URL:
+        return None
+    params = urlencode(
+        {"source": "yahoo", "symbol": symbol, "range": range_str, "interval": interval}
+    )
+    proxy_url = f"{YAHOO_PROXY_URL}?{params}"
+    try:
+        req = Request(proxy_url, headers={"User-Agent": "PivotQuantLiveCollector/1.0"})
+        with urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+        data = json.loads(raw.decode("utf-8"))
+        if not isinstance(data, dict):
+            return None
+        return data, "Yahoo"
+    except Exception as exc:
+        log.warning(
+            "Yahoo proxy unavailable for %s (%s); falling back to direct Yahoo API",
+            symbol,
+            exc,
+        )
+        return None
+
+
 def _collect_symbol(conn: sqlite3.Connection, symbol: str) -> tuple[Dict[str, Any], List[Dict[str, Any]]]:
     range_str = normalize_range_for_source(INTERVAL, RANGE_STR, SOURCE)
-    payload, resolved_source = fetch_market(symbol, INTERVAL, range_str, SOURCE)
+    if SOURCE == "yahoo" and YAHOO_PROXY_URL:
+        proxy_result = _fetch_market_via_proxy(symbol, INTERVAL, range_str)
+        if proxy_result is not None:
+            payload, resolved_source = proxy_result
+        else:
+            payload, resolved_source = fetch_market(symbol, INTERVAL, range_str, SOURCE)
+    else:
+        payload, resolved_source = fetch_market(symbol, INTERVAL, range_str, SOURCE)
     candles = parse_candles(payload)
     if not candles:
         return (
