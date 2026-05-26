@@ -1560,8 +1560,9 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(int(symbol_state.get("events_score_skipped") or 0), 1)
 
     def test_live_collector_uses_proxy_first_for_yahoo(self) -> None:
-        """_collect_symbol() must use proxy-first routing; direct Yahoo must NOT be
-        called when the proxy returns valid candle data."""
+        """_collect_symbol() must delegate to fetch_market() exactly once.
+        fetch_market() owns proxy-first routing internally; _collect_symbol() must
+        not add a second proxy attempt on top of it (no double proxy call)."""
         import sqlite3 as _sqlite3
 
         collector = load_module(
@@ -1580,13 +1581,12 @@ class OpsSmokeTests(unittest.TestCase):
             }
         ]
 
-        direct_yahoo_called: list[bool] = []
+        # Track every call to fetch_market to prove _collect_symbol() calls it
+        # exactly once — no duplicate proxy attempt wrapping the call.
+        fetch_market_calls: list[tuple] = []
 
         def _fake_fetch_market(symbol, interval, range_str, source):  # noqa: ANN001
-            # Simulate proxy-first logic: return proxy data, never hit direct Yahoo.
-            # Record any direct-Yahoo attempt so the assertion can catch it.
-            if "yahoo.com" in str(source):
-                direct_yahoo_called.append(True)
+            fetch_market_calls.append((symbol, interval, range_str, source))
             return ({"symbol": symbol, "candles": _proxy_candles}, "Yahoo")
 
         original_fetch_market = collector.fetch_market
@@ -1635,8 +1635,15 @@ class OpsSmokeTests(unittest.TestCase):
             collector.WRITE_BARS = original_write_bars
             collector.WRITE_EVENTS = original_write_events
 
-        # fetch_market was called exactly once (proxy-first, no duplicate call)
-        self.assertEqual(direct_yahoo_called, [], "Direct Yahoo URL must not be hit when proxy succeeds")
+        # _collect_symbol() must call fetch_market() exactly once — no duplicate
+        # proxy wrapping.  fetch_market() owns proxy-vs-direct selection internally.
+        self.assertEqual(
+            len(fetch_market_calls), 1,
+            "_collect_symbol() must delegate to fetch_market() exactly once; "
+            "a second call would mean a duplicate proxy attempt was added.",
+        )
+        self.assertEqual(fetch_market_calls[0][0], "SPY")
+        self.assertEqual(fetch_market_calls[0][3], "yahoo")
         self.assertEqual(result["symbol"], "SPY")
         self.assertEqual(result["source"], "Yahoo")
 
@@ -1783,6 +1790,77 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(len(fetch_market_calls), 1)
         self.assertEqual(fetch_market_calls[0][0], "SPY")
         self.assertEqual(result["source"], "Yahoo")
+
+    def test_fetch_market_auth_skip_bypasses_proxy_when_dashboard_auth_active(self) -> None:
+        """Regression: _should_skip_proxy_due_auth_requirement() causes fetch_market()
+        to bypass the local proxy entirely when dashboard auth is enabled without a
+        service token and the local bypass is not effective.
+
+        This was the true historical root cause of the live collector sending 45h of
+        direct-Yahoo requests despite the proxy being healthy: the process environment
+        had DASH_AUTH_ENABLED/DASH_AUTH_PASSWORD set, HOST bound to a non-loopback
+        address, and no YAHOO_PROXY_SERVICE_TOKEN configured.
+
+        The documented remedy: set YAHOO_PROXY_SERVICE_TOKEN (or DASH_AUTH_SERVICE_TOKEN)
+        so that fetch_market() can authenticate with the local proxy, or set
+        YAHOO_PROXY_SKIP_AUTH_REQUIRED=false to disable the auth guard entirely.
+        """
+        backfill = load_module(
+            "pq_backfill_auth_skip_regression_test",
+            REPO_ROOT / "scripts" / "backfill_events.py",
+        )
+
+        # Simulate the production auth-skip conditions:
+        #   - Dashboard auth is active (password configured)
+        #   - No service token (default in many installs)
+        #   - Local bypass is NOT effective (HOST bound to non-loopback)
+        #   - YAHOO_PROXY_SKIP_AUTH_REQUIRED is True (the default)
+        orig_proxy_url = backfill.YAHOO_PROXY_URL
+        orig_skip_auth = backfill.YAHOO_PROXY_SKIP_AUTH_REQUIRED
+        orig_service_token = backfill.YAHOO_PROXY_SERVICE_TOKEN
+        try:
+            backfill.YAHOO_PROXY_URL = "http://127.0.0.1:3000/api/market"
+            backfill.YAHOO_PROXY_SKIP_AUTH_REQUIRED = True
+            backfill.YAHOO_PROXY_SERVICE_TOKEN = ""
+
+            with patch.object(backfill, "_dashboard_auth_effective", return_value=True), \
+                 patch.object(backfill, "_dashboard_auth_local_bypass_effective", return_value=False):
+                skip = backfill._should_skip_proxy_due_auth_requirement()
+
+            self.assertTrue(
+                skip,
+                "_should_skip_proxy_due_auth_requirement() must return True when "
+                "dashboard auth is active, local bypass is inactive, and no service "
+                "token is set. This is the documented auth-skip behavior.",
+            )
+
+            # Confirm the inverse: with a service token, proxy is NOT skipped.
+            backfill.YAHOO_PROXY_SERVICE_TOKEN = "test-token"
+            with patch.object(backfill, "_dashboard_auth_effective", return_value=True), \
+                 patch.object(backfill, "_dashboard_auth_local_bypass_effective", return_value=False):
+                skip_with_token = backfill._should_skip_proxy_due_auth_requirement()
+
+            self.assertFalse(
+                skip_with_token,
+                "_should_skip_proxy_due_auth_requirement() must return False when a "
+                "service token is configured — proxy should be used.",
+            )
+
+            # Confirm the inverse: with local bypass active, proxy is NOT skipped.
+            backfill.YAHOO_PROXY_SERVICE_TOKEN = ""
+            with patch.object(backfill, "_dashboard_auth_effective", return_value=True), \
+                 patch.object(backfill, "_dashboard_auth_local_bypass_effective", return_value=True):
+                skip_with_bypass = backfill._should_skip_proxy_due_auth_requirement()
+
+            self.assertFalse(
+                skip_with_bypass,
+                "_should_skip_proxy_due_auth_requirement() must return False when "
+                "the local auth bypass is active.",
+            )
+        finally:
+            backfill.YAHOO_PROXY_URL = orig_proxy_url
+            backfill.YAHOO_PROXY_SKIP_AUTH_REQUIRED = orig_skip_auth
+            backfill.YAHOO_PROXY_SERVICE_TOKEN = orig_service_token
 
     def test_event_writer_registers_atexit_connection_cleanup(self) -> None:
         source = (REPO_ROOT / "server" / "event_writer.py").read_text(encoding="utf-8")

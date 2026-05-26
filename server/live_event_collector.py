@@ -458,9 +458,16 @@ def _score_events(events: List[Dict[str, Any]]) -> int:
 
 def _collect_symbol(conn: sqlite3.Connection, symbol: str) -> tuple[Dict[str, Any], List[Dict[str, Any]]]:
     range_str = normalize_range_for_source(INTERVAL, RANGE_STR, SOURCE)
-    # fetch_market already implements proxy-first routing for SOURCE=="yahoo":
-    # it uses backfill_events.YAHOO_PROXY_URL (same env var) and falls back to
-    # direct Yahoo on proxy failure.  No duplicate proxy attempt is needed here.
+    # fetch_market() owns proxy-first routing for SOURCE=="yahoo":
+    #   1. If YAHOO_PROXY_URL is set and the auth-skip guard does not fire, it
+    #      tries the local proxy first, then falls back to direct Yahoo on failure.
+    #   2. The auth-skip guard (_should_skip_proxy_due_auth_requirement) bypasses
+    #      the proxy entirely when dashboard auth is active, no service token is
+    #      configured, and the local bypass is not in effect.  In that case every
+    #      fetch goes to direct Yahoo regardless of proxy health.
+    #      Remedy: set YAHOO_PROXY_SERVICE_TOKEN (or DASH_AUTH_SERVICE_TOKEN) in the
+    #      environment, or set YAHOO_PROXY_SKIP_AUTH_REQUIRED=false.
+    # No additional proxy attempt should be added here — one call, one proxy try.
     payload, resolved_source = fetch_market(symbol, INTERVAL, range_str, SOURCE)
     candles = parse_candles(payload)
     if not candles:
