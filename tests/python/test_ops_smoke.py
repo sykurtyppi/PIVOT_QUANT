@@ -8663,6 +8663,141 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(skips, [])
 
     # ------------------------------------------------------------------ #
+    # NO_SIGNAL_THRESHOLD sentinel threshold validation — regression tests
+    # ------------------------------------------------------------------ #
+
+    def test_no_signal_threshold_is_above_one(self) -> None:
+        """NO_SIGNAL_THRESHOLD must be strictly above 1.0.
+
+        This pins the sentinel contract so that nobody accidentally clips
+        it to 1.0, which would break its function as an unreachable sentinel.
+        """
+        from ml.thresholds import NO_SIGNAL_THRESHOLD
+        self.assertGreater(NO_SIGNAL_THRESHOLD, 1.0)
+
+    def test_governance_accepts_no_signal_threshold(self) -> None:
+        """validate_manifest must NOT reject a threshold equal to NO_SIGNAL_THRESHOLD.
+
+        Regression test for the 2026-05-12 regression where the predicate
+        `thr > 1.0` blocked every candidate from v415 onwards.
+        """
+        module = load_module(
+            "model_governance_no_signal_accept",
+            REPO_ROOT / "scripts" / "model_governance.py",
+        )
+        from ml.thresholds import NO_SIGNAL_THRESHOLD
+        import tempfile, os as _os
+        tmp_dir = Path(tempfile.mkdtemp(prefix="pq_gov_ns_"))
+        try:
+            # Create a minimal fake model artifact so the file-existence check passes.
+            fake_model = tmp_dir / "rf_break_5m_vtest.pkl"
+            fake_model.write_bytes(b"fake")
+            manifest = {
+                "version": "vtest",
+                "models": {"break": {"5": "rf_break_5m_vtest.pkl"}},
+                "thresholds": {"break": {"5": NO_SIGNAL_THRESHOLD}},
+            }
+            gates = module.GateConfig(
+                required_targets=["break"],
+                required_horizons=[5],
+                min_trained_end_delta_ms=0,
+                max_mfe_regression_bps=1.5,
+                max_mae_worsening_bps=2.0,
+                min_total_samples=0,
+                min_positive_samples_reject=0,
+                min_positive_samples_break=0,
+                allow_feature_version_change=False,
+            )
+            errors = module.validate_manifest(manifest, tmp_dir, gates)
+            invalid_thr_errors = [e for e in errors if "invalid threshold" in e]
+            self.assertEqual(
+                invalid_thr_errors,
+                [],
+                f"NO_SIGNAL_THRESHOLD ({NO_SIGNAL_THRESHOLD!r}) must not be rejected; got: {invalid_thr_errors}",
+            )
+        finally:
+            import shutil as _shutil
+            _shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def test_governance_rejects_above_no_signal_threshold(self) -> None:
+        """validate_manifest must reject a threshold of 1.01 (above the sentinel).
+
+        Values above NO_SIGNAL_THRESHOLD are out-of-range and must remain
+        rejected even after the sentinel fix.
+        """
+        module = load_module(
+            "model_governance_above_ns_reject",
+            REPO_ROOT / "scripts" / "model_governance.py",
+        )
+        import tempfile
+        tmp_dir = Path(tempfile.mkdtemp(prefix="pq_gov_above_ns_"))
+        try:
+            fake_model = tmp_dir / "rf_break_5m_vtest.pkl"
+            fake_model.write_bytes(b"fake")
+            manifest = {
+                "version": "vtest",
+                "models": {"break": {"5": "rf_break_5m_vtest.pkl"}},
+                "thresholds": {"break": {"5": 1.01}},
+            }
+            gates = module.GateConfig(
+                required_targets=["break"],
+                required_horizons=[5],
+                min_trained_end_delta_ms=0,
+                max_mfe_regression_bps=1.5,
+                max_mae_worsening_bps=2.0,
+                min_total_samples=0,
+                min_positive_samples_reject=0,
+                min_positive_samples_break=0,
+                allow_feature_version_change=False,
+            )
+            errors = module.validate_manifest(manifest, tmp_dir, gates)
+            self.assertTrue(
+                any("invalid threshold" in e for e in errors),
+                f"Threshold 1.01 must be rejected; got errors: {errors}",
+            )
+        finally:
+            import shutil as _shutil
+            _shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def test_governance_accepts_normal_threshold(self) -> None:
+        """validate_manifest must accept a normal threshold such as 0.75."""
+        module = load_module(
+            "model_governance_normal_threshold",
+            REPO_ROOT / "scripts" / "model_governance.py",
+        )
+        import tempfile
+        tmp_dir = Path(tempfile.mkdtemp(prefix="pq_gov_normal_"))
+        try:
+            fake_model = tmp_dir / "rf_break_5m_vtest.pkl"
+            fake_model.write_bytes(b"fake")
+            manifest = {
+                "version": "vtest",
+                "models": {"break": {"5": "rf_break_5m_vtest.pkl"}},
+                "thresholds": {"break": {"5": 0.75}},
+            }
+            gates = module.GateConfig(
+                required_targets=["break"],
+                required_horizons=[5],
+                min_trained_end_delta_ms=0,
+                max_mfe_regression_bps=1.5,
+                max_mae_worsening_bps=2.0,
+                min_total_samples=0,
+                min_positive_samples_reject=0,
+                min_positive_samples_break=0,
+                allow_feature_version_change=False,
+            )
+            errors = module.validate_manifest(manifest, tmp_dir, gates)
+            invalid_thr_errors = [e for e in errors if "invalid threshold" in e]
+            self.assertEqual(
+                invalid_thr_errors,
+                [],
+                f"Normal threshold 0.75 must be accepted; got: {invalid_thr_errors}",
+            )
+        finally:
+            import shutil as _shutil
+            _shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    # ------------------------------------------------------------------ #
     # Held-out feasibility audit
     # ------------------------------------------------------------------ #
 

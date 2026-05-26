@@ -25,6 +25,31 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 
+try:
+    from ml.thresholds import NO_SIGNAL_THRESHOLD as _NO_SIGNAL_THRESHOLD
+except Exception:  # pragma: no cover – fallback if ml package not on path
+    import numpy as _np
+    _NO_SIGNAL_THRESHOLD = float(_np.nextafter(1.0, 2.0))
+
+
+def _is_valid_threshold(thr: float) -> bool:
+    """Return True iff *thr* is an acceptable threshold value.
+
+    Accepted ranges:
+    - 0.0 <= thr <= 1.0   (normal probability thresholds)
+    - thr == NO_SIGNAL_THRESHOLD  (sentinel: float(np.nextafter(1.0, 2.0)) = 1.0000000000000002)
+
+    Rejected:
+    - thr < 0.0
+    - 1.0 < thr < NO_SIGNAL_THRESHOLD  (gap between 1.0 and sentinel, unreachable in practice)
+    - thr > NO_SIGNAL_THRESHOLD        (e.g. 1.01, 2.0)
+    """
+    if 0.0 <= thr <= 1.0:
+        return True
+    if thr == _NO_SIGNAL_THRESHOLD:
+        return True
+    return False
+
 DEFAULT_MODELS_DIR = Path(os.getenv("RF_MODEL_DIR", "data/models"))
 DEFAULT_METADATA_DIR = os.getenv("RF_METADATA_DIR", "metadata_runtime").strip() or "metadata_runtime"
 DEFAULT_CANDIDATE_MANIFEST = (
@@ -460,7 +485,7 @@ def validate_manifest(
             thr = to_float(threshold)
             if thr is None:
                 errors.append(f"missing threshold for {target}:{horizon}m")
-            elif thr < 0.0 or thr > 1.0:
+            elif not _is_valid_threshold(thr):
                 errors.append(f"invalid threshold for {target}:{horizon}m ({thr})")
 
     trained_end_ts = manifest.get("trained_end_ts")
