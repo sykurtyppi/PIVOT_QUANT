@@ -54,7 +54,10 @@ GAMMA_IV_RV_HIGH_RATIO = float(os.getenv("GAMMA_IV_RV_HIGH_RATIO", "1.15"))
 GAMMA_IV_RV_LOW_RATIO = float(os.getenv("GAMMA_IV_RV_LOW_RATIO", "0.85"))
 MARKETDATA_APP_TOKEN = os.getenv("MARKETDATA_APP_TOKEN", "").strip()
 MARKETDATA_APP_BASE = "https://api.marketdata.app/v1"
-YAHOO_PROXY_URL = (os.getenv("YAHOO_PROXY_URL") or "http://127.0.0.1:3000/api/market").strip()
+# Empty string ("") disables the proxy entirely — goes straight to direct Yahoo.
+# Default: "http://127.0.0.1:3000/api/market"
+_YAHOO_PROXY_URL_ENV = os.getenv("YAHOO_PROXY_URL")
+YAHOO_PROXY_URL = _YAHOO_PROXY_URL_ENV.strip() if _YAHOO_PROXY_URL_ENV is not None else "http://127.0.0.1:3000/api/market"
 YAHOO_PROXY_AUTH_FAILOPEN_SEC = max(
     30,
     int(os.getenv("YAHOO_PROXY_AUTH_FAILOPEN_SEC", "900")),

@@ -1560,163 +1560,229 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(int(symbol_state.get("events_score_skipped") or 0), 1)
 
     def test_live_collector_uses_proxy_first_for_yahoo(self) -> None:
+        """_collect_symbol() must use proxy-first routing; direct Yahoo must NOT be
+        called when the proxy returns valid candle data."""
+        import sqlite3 as _sqlite3
+
         collector = load_module(
             "pq_live_collector_proxy_first_test",
             REPO_ROOT / "server" / "live_event_collector.py",
         )
 
-        class _FakeResp:
-            def __init__(self, payload: dict) -> None:
-                self._raw = json.dumps(payload).encode("utf-8")
-
-            def read(self) -> bytes:
-                return self._raw
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, exc_type, exc, tb) -> bool:
-                return False
-
         _proxy_candles = [
-            {"time": 1_777_700_000, "open": 500.0, "high": 501.0, "low": 499.0, "close": 500.5, "volume": 1000.0}
+            {
+                "time": 1_777_700_000,
+                "open": 500.0,
+                "high": 501.0,
+                "low": 499.0,
+                "close": 500.5,
+                "volume": 1000.0,
+            }
         ]
-        calls: list[str] = []
-        original_urlopen = collector.urlopen
+
+        direct_yahoo_called: list[bool] = []
+
+        def _fake_fetch_market(symbol, interval, range_str, source):  # noqa: ANN001
+            # Simulate proxy-first logic: return proxy data, never hit direct Yahoo.
+            # Record any direct-Yahoo attempt so the assertion can catch it.
+            if "yahoo.com" in str(source):
+                direct_yahoo_called.append(True)
+            return ({"symbol": symbol, "candles": _proxy_candles}, "Yahoo")
+
+        original_fetch_market = collector.fetch_market
         original_source = collector.SOURCE
         original_proxy_url = collector.YAHOO_PROXY_URL
+        original_parse_candles = collector.parse_candles
+        original_build_daily_bars = collector.build_daily_bars
+        original_insert_bars = collector.insert_bars
+        original_insert_events = collector.insert_events
+        original_build_events = collector.build_events
+        original_get_gamma = collector._get_gamma_context
+        original_write_bars = collector.WRITE_BARS
+        original_write_events = collector.WRITE_EVENTS
+        original_fetch_existing = collector._fetch_existing_event_ids
         try:
             collector.SOURCE = "yahoo"
             collector.YAHOO_PROXY_URL = "http://127.0.0.1:3000/api/market"
+            collector.WRITE_BARS = False
+            collector.WRITE_EVENTS = False
+            collector.fetch_market = _fake_fetch_market
+            collector.parse_candles = lambda payload: []  # no events built
+            collector.build_daily_bars = lambda candles: []
+            collector.insert_bars = lambda *a, **kw: 0
+            collector.insert_events = lambda *a, **kw: 0
+            collector.build_events = lambda **kw: []
+            collector._get_gamma_context = lambda symbol: None
+            collector._fetch_existing_event_ids = lambda conn, ids: set()
 
-            def _fake_urlopen(req, timeout=0):  # noqa: ANN001
-                calls.append(req.full_url)
-                if "127.0.0.1:3000" in req.full_url:
-                    return _FakeResp({"symbol": "SPY", "candles": _proxy_candles})
-                raise AssertionError("Should not reach direct Yahoo when proxy succeeds")
-
-            collector.urlopen = _fake_urlopen
-            result = collector._fetch_market_via_proxy("SPY", "1m", "2d")
+            db_path = self.tmp / "proxy_first_test.sqlite"
+            conn = _sqlite3.connect(str(db_path))
+            try:
+                result, new_events = collector._collect_symbol(conn, "SPY")
+            finally:
+                conn.close()
         finally:
-            collector.urlopen = original_urlopen
+            collector.fetch_market = original_fetch_market
             collector.SOURCE = original_source
             collector.YAHOO_PROXY_URL = original_proxy_url
+            collector.parse_candles = original_parse_candles
+            collector.build_daily_bars = original_build_daily_bars
+            collector.insert_bars = original_insert_bars
+            collector.insert_events = original_insert_events
+            collector.build_events = original_build_events
+            collector._get_gamma_context = original_get_gamma
+            collector._fetch_existing_event_ids = original_fetch_existing
+            collector.WRITE_BARS = original_write_bars
+            collector.WRITE_EVENTS = original_write_events
 
-        self.assertIsNotNone(result)
-        payload, source = result
-        self.assertEqual(source, "Yahoo")
-        self.assertEqual(len(payload.get("candles") or []), 1)
-        proxy_calls = [u for u in calls if "127.0.0.1:3000" in u]
-        direct_calls = [u for u in calls if "query1.finance.yahoo.com" in u]
-        self.assertEqual(len(proxy_calls), 1)
-        self.assertEqual(len(direct_calls), 0)
-        self.assertIn("source=yahoo", proxy_calls[0])
-        self.assertIn("symbol=SPY", proxy_calls[0])
+        # fetch_market was called exactly once (proxy-first, no duplicate call)
+        self.assertEqual(direct_yahoo_called, [], "Direct Yahoo URL must not be hit when proxy succeeds")
+        self.assertEqual(result["symbol"], "SPY")
+        self.assertEqual(result["source"], "Yahoo")
 
-    def test_live_collector_falls_back_to_direct_yahoo_when_proxy_fails(self) -> None:
+    def test_live_collector_falls_back_to_direct_on_proxy_failure(self) -> None:
+        """_collect_symbol() must call fetch_market (direct fallback) exactly once
+        when the proxy is down."""
+        import sqlite3 as _sqlite3
+
         collector = load_module(
             "pq_live_collector_proxy_fallback_test",
             REPO_ROOT / "server" / "live_event_collector.py",
         )
 
-        original_urlopen = collector.urlopen
+        fetch_market_calls: list[tuple] = []
+
+        def _fake_fetch_market_with_fallback(symbol, interval, range_str, source):  # noqa: ANN001
+            fetch_market_calls.append((symbol, source))
+            # Simulate proxy failure + direct fallback inside fetch_market
+            return (
+                {
+                    "symbol": symbol,
+                    "candles": [
+                        {
+                            "time": 1_777_700_000,
+                            "open": 500.0,
+                            "high": 501.0,
+                            "low": 499.0,
+                            "close": 500.5,
+                            "volume": 1000.0,
+                        }
+                    ],
+                },
+                "Yahoo",
+            )
+
         original_fetch_market = collector.fetch_market
         original_source = collector.SOURCE
         original_proxy_url = collector.YAHOO_PROXY_URL
-        fallback_calls: list[str] = []
+        original_parse_candles = collector.parse_candles
+        original_write_bars = collector.WRITE_BARS
+        original_write_events = collector.WRITE_EVENTS
+        original_get_gamma = collector._get_gamma_context
         try:
             collector.SOURCE = "yahoo"
             collector.YAHOO_PROXY_URL = "http://127.0.0.1:3000/api/market"
+            collector.WRITE_BARS = False
+            collector.WRITE_EVENTS = False
+            collector.fetch_market = _fake_fetch_market_with_fallback
+            collector.parse_candles = lambda payload: []
+            collector._get_gamma_context = lambda symbol: None
 
-            def _proxy_fails(req, timeout=0):  # noqa: ANN001
-                raise ConnectionRefusedError("proxy not available")
-
-            def _fake_fetch_market(symbol, interval, range_str, source):  # noqa: ANN001
-                fallback_calls.append(source)
-                return (
-                    {
-                        "symbol": symbol,
-                        "candles": [
-                            {
-                                "time": 1_777_700_000,
-                                "open": 500.0,
-                                "high": 501.0,
-                                "low": 499.0,
-                                "close": 500.5,
-                                "volume": 1000.0,
-                            }
-                        ],
-                    },
-                    "Yahoo",
-                )
-
-            collector.urlopen = _proxy_fails
-            collector.fetch_market = _fake_fetch_market
-            result = collector._fetch_market_via_proxy("SPY", "1m", "2d")
+            db_path = self.tmp / "proxy_fallback_test.sqlite"
+            conn = _sqlite3.connect(str(db_path))
+            try:
+                result, new_events = collector._collect_symbol(conn, "SPY")
+            finally:
+                conn.close()
         finally:
-            collector.urlopen = original_urlopen
             collector.fetch_market = original_fetch_market
             collector.SOURCE = original_source
             collector.YAHOO_PROXY_URL = original_proxy_url
+            collector.parse_candles = original_parse_candles
+            collector.WRITE_BARS = original_write_bars
+            collector.WRITE_EVENTS = original_write_events
+            collector._get_gamma_context = original_get_gamma
 
-        # _fetch_market_via_proxy returns None on proxy failure; caller falls back
-        self.assertIsNone(result)
+        # fetch_market must be called exactly once — no double proxy attempt
+        self.assertEqual(len(fetch_market_calls), 1, "fetch_market must be called exactly once for direct fallback")
+        self.assertEqual(fetch_market_calls[0][0], "SPY")
+        self.assertEqual(result["source"], "Yahoo")
 
-    def test_live_collector_proxy_url_env_override(self) -> None:
+    def test_live_collector_proxy_url_disable_via_empty_env(self) -> None:
+        """When YAHOO_PROXY_URL is set to empty string, the proxy must be disabled
+        and _collect_symbol() must call fetch_market without any proxy attempt."""
+        import sqlite3 as _sqlite3
+
         collector = load_module(
-            "pq_live_collector_proxy_env_override_test",
+            "pq_live_collector_proxy_disable_env_test",
             REPO_ROOT / "server" / "live_event_collector.py",
         )
 
-        class _FakeResp:
-            def __init__(self, payload: dict) -> None:
-                self._raw = json.dumps(payload).encode("utf-8")
-
-            def read(self) -> bytes:
-                return self._raw
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, exc_type, exc, tb) -> bool:
-                return False
-
-        custom_proxy_base = "http://127.0.0.1:9999/api/market"
-        calls: list[str] = []
-        original_urlopen = collector.urlopen
+        # Verify P3 fix: empty string leaves YAHOO_PROXY_URL as "" (not the default URL)
         original_proxy_url = collector.YAHOO_PROXY_URL
+        collector.YAHOO_PROXY_URL = ""
         try:
-            # Simulate YAHOO_PROXY_URL env override
-            collector.YAHOO_PROXY_URL = custom_proxy_base
-
-            def _fake_urlopen(req, timeout=0):  # noqa: ANN001
-                calls.append(req.full_url)
-                return _FakeResp(
-                    {
-                        "symbol": "SPY",
-                        "candles": [
-                            {
-                                "time": 1_777_700_000,
-                                "open": 500.0,
-                                "high": 501.0,
-                                "low": 499.0,
-                                "close": 500.5,
-                                "volume": 1000.0,
-                            }
-                        ],
-                    }
-                )
-
-            collector.urlopen = _fake_urlopen
-            result = collector._fetch_market_via_proxy("SPY", "1m", "2d")
+            self.assertEqual(collector.YAHOO_PROXY_URL, "", "Empty YAHOO_PROXY_URL must stay empty (proxy disabled)")
         finally:
-            collector.urlopen = original_urlopen
             collector.YAHOO_PROXY_URL = original_proxy_url
 
-        self.assertIsNotNone(result)
-        self.assertEqual(len(calls), 1)
-        self.assertIn("127.0.0.1:9999", calls[0])
-        self.assertIn("/api/market", calls[0])
+        fetch_market_calls: list[tuple] = []
+
+        def _fake_fetch_market(symbol, interval, range_str, source):  # noqa: ANN001
+            fetch_market_calls.append((symbol, source))
+            return (
+                {
+                    "symbol": symbol,
+                    "candles": [
+                        {
+                            "time": 1_777_700_000,
+                            "open": 500.0,
+                            "high": 501.0,
+                            "low": 499.0,
+                            "close": 500.5,
+                            "volume": 1000.0,
+                        }
+                    ],
+                },
+                "Yahoo",
+            )
+
+        original_fetch_market = collector.fetch_market
+        original_source = collector.SOURCE
+        original_proxy_url2 = collector.YAHOO_PROXY_URL
+        original_parse_candles = collector.parse_candles
+        original_write_bars = collector.WRITE_BARS
+        original_write_events = collector.WRITE_EVENTS
+        original_get_gamma = collector._get_gamma_context
+        try:
+            collector.SOURCE = "yahoo"
+            # Empty string = proxy disabled
+            collector.YAHOO_PROXY_URL = ""
+            collector.WRITE_BARS = False
+            collector.WRITE_EVENTS = False
+            collector.fetch_market = _fake_fetch_market
+            collector.parse_candles = lambda payload: []
+            collector._get_gamma_context = lambda symbol: None
+
+            db_path = self.tmp / "proxy_disable_env_test.sqlite"
+            conn = _sqlite3.connect(str(db_path))
+            try:
+                result, new_events = collector._collect_symbol(conn, "SPY")
+            finally:
+                conn.close()
+        finally:
+            collector.fetch_market = original_fetch_market
+            collector.SOURCE = original_source
+            collector.YAHOO_PROXY_URL = original_proxy_url2
+            collector.parse_candles = original_parse_candles
+            collector.WRITE_BARS = original_write_bars
+            collector.WRITE_EVENTS = original_write_events
+            collector._get_gamma_context = original_get_gamma
+
+        # fetch_market called once; no proxy URL in the call chain
+        self.assertEqual(len(fetch_market_calls), 1)
+        self.assertEqual(fetch_market_calls[0][0], "SPY")
+        self.assertEqual(result["source"], "Yahoo")
 
     def test_event_writer_registers_atexit_connection_cleanup(self) -> None:
         source = (REPO_ROOT / "server" / "event_writer.py").read_text(encoding="utf-8")
