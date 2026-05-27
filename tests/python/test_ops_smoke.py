@@ -1862,6 +1862,107 @@ class OpsSmokeTests(unittest.TestCase):
             backfill.YAHOO_PROXY_SKIP_AUTH_REQUIRED = orig_skip_auth
             backfill.YAHOO_PROXY_SERVICE_TOKEN = orig_service_token
 
+    def test_live_collector_startup_warns_when_auth_skip_active(self) -> None:
+        """Regression: _check_proxy_auth_config() must log CRITICAL when the
+        auth-skip guard would bypass the local proxy entirely at startup.
+
+        This ensures the 45 h silent-bypass failure mode is loud rather than
+        invisible — the collector will still start, but operators see the warning.
+        """
+        lc = load_module(
+            "pq_lc_startup_warn_test",
+            REPO_ROOT / "server" / "live_event_collector.py",
+        )
+
+        critical_calls: list[str] = []
+
+        def _fake_critical(msg: str, *args: object, **kwargs: object) -> None:
+            critical_calls.append(msg % args if args else msg)
+
+        with patch.object(lc, "_should_skip_proxy_due_auth_requirement", return_value=True), \
+             patch.object(lc.log, "critical", side_effect=_fake_critical):
+            lc._check_proxy_auth_config()
+
+        self.assertEqual(
+            len(critical_calls),
+            1,
+            "_check_proxy_auth_config() must emit exactly one log.critical when "
+            "_should_skip_proxy_due_auth_requirement() returns True.",
+        )
+        self.assertIn(
+            "auth-skip guard is ACTIVE",
+            critical_calls[0],
+            "Critical message must name the guard so operators know what to fix.",
+        )
+
+        # Guard does NOT fire when skip returns False (normal/protected state).
+        critical_calls.clear()
+        with patch.object(lc, "_should_skip_proxy_due_auth_requirement", return_value=False), \
+             patch.object(lc.log, "critical", side_effect=_fake_critical):
+            lc._check_proxy_auth_config()
+
+        self.assertEqual(
+            len(critical_calls),
+            0,
+            "_check_proxy_auth_config() must be silent when the guard is not active.",
+        )
+
+    def test_env_file_production_policy_guards_proxy(self) -> None:
+        """Static guard: .env must have Yahoo proxy protection in place when
+        DASH_AUTH_ENABLED=true.
+
+        When dashboard auth is active, at least one of the following must hold:
+          • YAHOO_PROXY_SERVICE_TOKEN (or DASH_AUTH_SERVICE_TOKEN) is non-empty, OR
+          • DASH_AUTH_LOCAL_BYPASS=true
+
+        Either condition prevents _should_skip_proxy_due_auth_requirement() from
+        firing and ensures the live collector routes through the local proxy.
+        """
+        env_path = REPO_ROOT / ".env"
+        if not env_path.exists():
+            self.skipTest(".env not present — skipping production-policy guard")
+
+        env: dict[str, str] = {}
+        for raw in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[7:]
+            if "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            key = key.strip()
+            val = val.strip()
+            # Strip matching outer quotes
+            if len(val) >= 2 and val[0] == val[-1] and val[0] in ('"', "'"):
+                val = val[1:-1]
+            env[key] = val
+
+        def _truthy(v: str) -> bool:
+            return v.strip().lower() in ("1", "true", "yes", "on")
+
+        dash_auth_enabled = _truthy(env.get("DASH_AUTH_ENABLED", ""))
+        if not dash_auth_enabled:
+            return  # auth not active — no proxy-bypass risk; nothing to assert
+
+        has_service_token = bool(
+            env.get("YAHOO_PROXY_SERVICE_TOKEN", "").strip()
+            or env.get("DASH_AUTH_SERVICE_TOKEN", "").strip()
+        )
+        has_local_bypass = _truthy(env.get("DASH_AUTH_LOCAL_BYPASS", ""))
+
+        self.assertTrue(
+            has_service_token or has_local_bypass,
+            "Production .env has DASH_AUTH_ENABLED=true but no proxy-bypass "
+            "protection is present. YAHOO_PROXY_SERVICE_TOKEN (and "
+            "DASH_AUTH_SERVICE_TOKEN) are unset, and DASH_AUTH_LOCAL_BYPASS is "
+            "not true. The live collector would silently bypass the local proxy "
+            "and use direct Yahoo on every fetch. "
+            "Add YAHOO_PROXY_SERVICE_TOKEN=<token> or DASH_AUTH_LOCAL_BYPASS=true "
+            "to .env to fix this.",
+        )
+
     def test_event_writer_registers_atexit_connection_cleanup(self) -> None:
         source = (REPO_ROOT / "server" / "event_writer.py").read_text(encoding="utf-8")
         self.assertIn("atexit.register(_close_thread_local_connection)", source)
