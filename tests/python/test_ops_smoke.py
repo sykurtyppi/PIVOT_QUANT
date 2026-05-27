@@ -8537,6 +8537,180 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(float(module._clamp_threshold(1.0)), 1.0)
         self.assertAlmostEqual(float(module._clamp_threshold(0.995)), 0.99, places=9)
 
+    def test_adjust_threshold_preserves_no_signal_sentinel(self) -> None:
+        """Regression: _adjust_threshold(NO_SIGNAL_THRESHOLD, delta) must return
+        the sentinel unchanged.
+
+        Before the fix, `1.0000000000000002 + (-0.02) = 0.98...` would be clamped
+        to 0.98 and served as a tradable threshold, reactivating signals on a
+        horizon the manifest explicitly disabled.  After the fix, any base >=
+        1.0 short-circuits and the delta is ignored.
+        """
+        module = load_module(
+            "ml_server_adjust_threshold_no_signal_test",
+            REPO_ROOT / "server" / "ml_server.py",
+        )
+
+        ns = float(module.NO_SIGNAL_THRESHOLD)
+
+        # Negative deltas that previously demoted the sentinel must be ignored.
+        for delta in (-0.02, -0.05, -0.10, -0.5, -1.0):
+            self.assertEqual(
+                float(module._adjust_threshold(ns, delta)),
+                ns,
+                f"_adjust_threshold(NO_SIGNAL, {delta}) must preserve sentinel; "
+                f"got {module._adjust_threshold(ns, delta)!r}",
+            )
+
+        # Positive deltas must also leave the sentinel unchanged (no useful
+        # semantics for "more disabled than disabled").
+        for delta in (0.01, 0.05, 0.10, 1.0):
+            self.assertEqual(
+                float(module._adjust_threshold(ns, delta)),
+                ns,
+                f"_adjust_threshold(NO_SIGNAL, +{delta}) must preserve sentinel.",
+            )
+
+        # Exactly 1.0 must also be preserved (boundary of the >=1.0 short-circuit).
+        self.assertEqual(float(module._adjust_threshold(1.0, -0.05)), 1.0)
+
+        # Normal thresholds below 1.0 must continue to adjust + clamp as before.
+        # 0.80 + (-0.02) = 0.78 (no clamp triggered).
+        self.assertAlmostEqual(
+            float(module._adjust_threshold(0.80, -0.02)), 0.78, places=9,
+        )
+        # 0.80 + 0.05 = 0.85 (no clamp triggered).
+        self.assertAlmostEqual(
+            float(module._adjust_threshold(0.80, 0.05)), 0.85, places=9,
+        )
+        # Delta cap: a delta beyond ML_REGIME_THRESHOLD_MAX_DELTA is clipped.
+        cap = float(module.ML_REGIME_THRESHOLD_MAX_DELTA)
+        self.assertAlmostEqual(
+            float(module._adjust_threshold(0.80, -cap * 10)),
+            max(0.01, min(0.99, 0.80 - cap)),
+            places=9,
+        )
+        # Clamp floor: a normal threshold pushed below 0.01 clamps to 0.01.
+        self.assertAlmostEqual(float(module._adjust_threshold(0.02, -cap)), 0.01, places=9)
+        # Normal threshold below 1.0 with a small positive delta still clamps
+        # within [0.01, 0.99].  (Note: a delta large enough to push the base
+        # above 1.0 is preserved by _clamp_threshold's existing >= 1.0
+        # short-circuit — a pre-existing behavior independent of this fix.)
+        self.assertAlmostEqual(float(module._adjust_threshold(0.90, 0.05)), 0.95, places=9)
+
+    def test_build_regime_thresholds_preserves_no_signal(self) -> None:
+        """Regression: _build_regime_thresholds must not demote NO_SIGNAL bases
+        under compression or expansion regime deltas."""
+        module = load_module(
+            "ml_server_build_regime_no_signal_test",
+            REPO_ROOT / "server" / "ml_server.py",
+        )
+        ns = float(module.NO_SIGNAL_THRESHOLD)
+        horizons = [5, 15, 30, 60]
+
+        # Mixed manifest: NO_SIGNAL on break@60, normal thresholds elsewhere.
+        baseline = {
+            "reject": {5: 0.71, 15: 0.81, 30: 0.97, 60: 0.95},
+            "break":  {5: 0.78, 15: ns,   30: 0.92, 60: ns},
+        }
+
+        for regime in ("compression", "expansion", "neutral"):
+            result = module._build_regime_thresholds(horizons, regime, baseline)
+            self.assertEqual(
+                float(result["break"][15]), ns,
+                f"regime={regime}: NO_SIGNAL break@15 was demoted to "
+                f"{result['break'][15]!r}",
+            )
+            self.assertEqual(
+                float(result["break"][60]), ns,
+                f"regime={regime}: NO_SIGNAL break@60 was demoted to "
+                f"{result['break'][60]!r}",
+            )
+            # Normal thresholds must still adjust per regime (no regression).
+            self.assertLess(float(result["reject"][5]), 1.0)
+            self.assertGreater(float(result["reject"][5]), 0.0)
+
+    def test_apply_atr_zone_overlay_preserves_no_signal(self) -> None:
+        """Regression: _apply_atr_zone_overlay must not demote NO_SIGNAL bases
+        when ultra/near zone deltas apply under compression/expansion."""
+        module = load_module(
+            "ml_server_atr_zone_no_signal_test",
+            REPO_ROOT / "server" / "ml_server.py",
+        )
+        ns = float(module.NO_SIGNAL_THRESHOLD)
+        horizons = [5, 15]
+
+        threshold_map = {
+            "reject": {5: 0.71, 15: ns},
+            "break":  {5: ns,   15: 0.85},
+        }
+
+        for regime, zone in [
+            ("compression", "ultra"),
+            ("compression", "near"),
+            ("expansion",   "ultra"),
+            ("expansion",   "near"),
+        ]:
+            overlaid, meta = module._apply_atr_zone_overlay(
+                threshold_map, horizons, regime, zone,
+            )
+            self.assertEqual(
+                float(overlaid["reject"][15]), ns,
+                f"{regime}/{zone}: NO_SIGNAL reject@15 demoted to "
+                f"{overlaid['reject'][15]!r}",
+            )
+            self.assertEqual(
+                float(overlaid["break"][5]), ns,
+                f"{regime}/{zone}: NO_SIGNAL break@5 demoted to "
+                f"{overlaid['break'][5]!r}",
+            )
+            # Normal thresholds must still be reachable (no regression).
+            self.assertLess(float(overlaid["reject"][5]), 1.0)
+            self.assertLess(float(overlaid["break"][15]), 1.0)
+
+    def test_apply_expansion_near_guardrail_preserves_no_signal_delta_strategy(self) -> None:
+        """Regression: _apply_expansion_near_guardrail with the delta/tighten
+        strategy must not demote NO_SIGNAL bases.
+
+        Scope is limited to the delta-based strategy (the explicit ``no_trade``
+        strategy intentionally hard-overwrites to 0.99 and is out of scope for
+        the runtime-delta preservation rule).
+        """
+        module = load_module(
+            "ml_server_guardrail_no_signal_test",
+            REPO_ROOT / "server" / "ml_server.py",
+        )
+        ns = float(module.NO_SIGNAL_THRESHOLD)
+        horizons = [5, 15]
+
+        threshold_map = {
+            "reject": {5: 0.71, 15: ns},
+            "break":  {5: ns,   15: 0.85},
+        }
+
+        # Force the delta-strategy code path under expansion/near.
+        with patch.object(module, "ML_REGIME_POLICY_MODE", "active"), \
+             patch.object(module, "ML_REGIME_GUARD_EXPANSION_NEAR_MODE", "active"), \
+             patch.object(module, "ML_REGIME_GUARD_EXPANSION_NEAR_STRATEGY", "tighten"):
+            guarded, meta = module._apply_expansion_near_guardrail(
+                threshold_map, horizons, "expansion", "near",
+            )
+
+        self.assertTrue(meta.get("triggered"))
+        self.assertEqual(
+            float(guarded["reject"][15]), ns,
+            f"expansion-near guardrail demoted NO_SIGNAL reject@15 to "
+            f"{guarded['reject'][15]!r}",
+        )
+        self.assertEqual(
+            float(guarded["break"][5]), ns,
+            f"expansion-near guardrail demoted NO_SIGNAL break@5 to "
+            f"{guarded['break'][5]!r}",
+        )
+        # Normal thresholds remain tradable.
+        self.assertLess(float(guarded["reject"][5]), 1.0)
+        self.assertLess(float(guarded["break"][15]), 1.0)
+
     def test_ml_server_runtime_threshold_safety_neutralizes_bad_manifest_thresholds(self) -> None:
         module = load_module(
             "ml_server_runtime_threshold_safety",
