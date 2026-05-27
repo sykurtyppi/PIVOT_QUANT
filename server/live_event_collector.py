@@ -496,10 +496,13 @@ def _collect_symbol(conn: sqlite3.Connection, symbol: str) -> tuple[Dict[str, An
     #      the 45 h live-collector proxy bypass.
     #
     # Production policy (enforced via .env loaded by run_persistent_stack.sh):
-    #   • YAHOO_PROXY_SERVICE_TOKEN is non-empty → guard cannot fire (last condition).
-    #   • DASH_AUTH_LOCAL_BYPASS=true + HOST=127.0.0.1 → redundant protection.
-    #   Both protections must remain in .env.  _check_proxy_auth_config() (called at
-    #   startup) logs CRITICAL if either protection is missing.
+    #   The guard is suppressed when ANY ONE of these holds:
+    #   • YAHOO_PROXY_SERVICE_TOKEN (or DASH_AUTH_SERVICE_TOKEN) is non-empty, OR
+    #   • DASH_AUTH_LOCAL_BYPASS=true with HOST on a loopback address.
+    #   Currently both are set in .env, giving redundant protection.  At least one
+    #   must remain.  _check_proxy_auth_config() (called at startup) logs CRITICAL
+    #   only when _should_skip_proxy_due_auth_requirement() returns True — i.e. when
+    #   ALL guard conditions pass simultaneously and the proxy would be bypassed.
     #
     # No additional proxy attempt should be added here — one call, one proxy try.
     payload, resolved_source = fetch_market(symbol, INTERVAL, range_str, SOURCE)
