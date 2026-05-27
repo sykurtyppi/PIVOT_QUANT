@@ -24,6 +24,7 @@ except ImportError:  # pragma: no cover
     migrate_connection = None  # type: ignore
 
 from backfill_events import (
+    _should_skip_proxy_due_auth_requirement,
     build_daily_bars,
     build_events,
     compute_atr,
@@ -99,9 +100,44 @@ LIVE_COLLECTOR_WAL_AUTOCHECKPOINT = max(
 )
 INTERVAL_SEC = _interval_to_seconds(INTERVAL)
 _DEFAULT_CORS_ORIGINS = "http://127.0.0.1:3000,http://localhost:3000"
+# Proxy-first fetch: live collector reads YAHOO_PROXY_URL so the module-level
+# value mirrors what backfill_events.fetch_market uses internally.  fetch_market
+# already implements proxy-first routing when YAHOO_PROXY_URL is non-empty, so
+# no duplicate proxy attempt is needed here.
+# Empty string ("") disables the proxy entirely — goes straight to direct Yahoo.
+# Default: "http://127.0.0.1:3000/api/market"
+_YAHOO_PROXY_URL_ENV = os.getenv("YAHOO_PROXY_URL")
+YAHOO_PROXY_URL = _YAHOO_PROXY_URL_ENV.strip() if _YAHOO_PROXY_URL_ENV is not None else "http://127.0.0.1:3000/api/market"
 
 if SOURCE not in ("auto", "ibkr", "yahoo", "marketdata"):
     raise ValueError(f"LIVE_COLLECTOR_SOURCE must be auto/ibkr/yahoo/marketdata, got: {SOURCE}")
+
+
+def _check_proxy_auth_config() -> None:
+    """Log CRITICAL if the Yahoo proxy auth-skip guard is active at startup.
+
+    If ``_should_skip_proxy_due_auth_requirement()`` returns True the live
+    collector will bypass the local proxy on every fetch and go straight to
+    direct Yahoo — the same silent failure mode that caused the 45 h outage.
+
+    Production protection (both must hold when DASH_AUTH_ENABLED=true):
+      • YAHOO_PROXY_SERVICE_TOKEN (or DASH_AUTH_SERVICE_TOKEN) non-empty, OR
+      • DASH_AUTH_LOCAL_BYPASS=true AND HOST is a loopback address.
+
+    This check is purely diagnostic and never blocks startup.
+    """
+    try:
+        if _should_skip_proxy_due_auth_requirement():
+            log.critical(
+                "Yahoo proxy auth-skip guard is ACTIVE: the live collector will use "
+                "direct Yahoo for every market fetch, bypassing the local proxy entirely. "
+                "This was the root cause of a 45 h live-collector proxy bypass. "
+                "To fix: set YAHOO_PROXY_SERVICE_TOKEN (or DASH_AUTH_SERVICE_TOKEN) in "
+                ".env, or set YAHOO_PROXY_SKIP_AUTH_REQUIRED=false, or ensure "
+                "DASH_AUTH_LOCAL_BYPASS=true with a loopback HOST."
+            )
+    except Exception:  # pragma: no cover — never crash startup over a diagnostic
+        pass
 
 _state_lock = threading.Lock()
 _stop_event = threading.Event()
@@ -450,6 +486,25 @@ def _score_events(events: List[Dict[str, Any]]) -> int:
 
 def _collect_symbol(conn: sqlite3.Connection, symbol: str) -> tuple[Dict[str, Any], List[Dict[str, Any]]]:
     range_str = normalize_range_for_source(INTERVAL, RANGE_STR, SOURCE)
+    # fetch_market() owns proxy-first routing for SOURCE=="yahoo":
+    #   1. If YAHOO_PROXY_URL is set and the auth-skip guard does not fire, it
+    #      tries the local proxy first, then falls back to direct Yahoo on failure.
+    #   2. The auth-skip guard (_should_skip_proxy_due_auth_requirement) bypasses
+    #      the proxy entirely when dashboard auth is active, no service token is
+    #      configured, and the local bypass is not in effect.  In that case every
+    #      fetch goes to direct Yahoo regardless of proxy health — the root cause of
+    #      the 45 h live-collector proxy bypass.
+    #
+    # Production policy (enforced via .env loaded by run_persistent_stack.sh):
+    #   The guard is suppressed when ANY ONE of these holds:
+    #   • YAHOO_PROXY_SERVICE_TOKEN (or DASH_AUTH_SERVICE_TOKEN) is non-empty, OR
+    #   • DASH_AUTH_LOCAL_BYPASS=true with HOST on a loopback address.
+    #   Currently both are set in .env, giving redundant protection.  At least one
+    #   must remain.  _check_proxy_auth_config() (called at startup) logs CRITICAL
+    #   only when _should_skip_proxy_due_auth_requirement() returns True — i.e. when
+    #   ALL guard conditions pass simultaneously and the proxy would be bypassed.
+    #
+    # No additional proxy attempt should be added here — one call, one proxy try.
     payload, resolved_source = fetch_market(symbol, INTERVAL, range_str, SOURCE)
     candles = parse_candles(payload)
     if not candles:
@@ -601,6 +656,7 @@ def main() -> None:
     if not SYMBOLS:
         raise ValueError("LIVE_COLLECTOR_SYMBOLS must include at least one symbol")
 
+    _check_proxy_auth_config()
     health_server = _run_health_server()
     log.info(
         "Live collector starting (symbols=%s interval=%s range=%s source=%s poll=%ss score_enabled=%s db=%s health=http://%s:%s/health)",

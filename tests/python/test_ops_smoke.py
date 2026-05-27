@@ -1559,6 +1559,410 @@ class OpsSmokeTests(unittest.TestCase):
         symbol_state = (snap.get("symbols") or {}).get("SPY") or {}
         self.assertEqual(int(symbol_state.get("events_score_skipped") or 0), 1)
 
+    def test_live_collector_uses_proxy_first_for_yahoo(self) -> None:
+        """_collect_symbol() must delegate to fetch_market() exactly once.
+        fetch_market() owns proxy-first routing internally; _collect_symbol() must
+        not add a second proxy attempt on top of it (no double proxy call)."""
+        import sqlite3 as _sqlite3
+
+        collector = load_module(
+            "pq_live_collector_proxy_first_test",
+            REPO_ROOT / "server" / "live_event_collector.py",
+        )
+
+        _proxy_candles = [
+            {
+                "time": 1_777_700_000,
+                "open": 500.0,
+                "high": 501.0,
+                "low": 499.0,
+                "close": 500.5,
+                "volume": 1000.0,
+            }
+        ]
+
+        # Track every call to fetch_market to prove _collect_symbol() calls it
+        # exactly once — no duplicate proxy attempt wrapping the call.
+        fetch_market_calls: list[tuple] = []
+
+        def _fake_fetch_market(symbol, interval, range_str, source):  # noqa: ANN001
+            fetch_market_calls.append((symbol, interval, range_str, source))
+            return ({"symbol": symbol, "candles": _proxy_candles}, "Yahoo")
+
+        original_fetch_market = collector.fetch_market
+        original_source = collector.SOURCE
+        original_proxy_url = collector.YAHOO_PROXY_URL
+        original_parse_candles = collector.parse_candles
+        original_build_daily_bars = collector.build_daily_bars
+        original_insert_bars = collector.insert_bars
+        original_insert_events = collector.insert_events
+        original_build_events = collector.build_events
+        original_get_gamma = collector._get_gamma_context
+        original_write_bars = collector.WRITE_BARS
+        original_write_events = collector.WRITE_EVENTS
+        original_fetch_existing = collector._fetch_existing_event_ids
+        try:
+            collector.SOURCE = "yahoo"
+            collector.YAHOO_PROXY_URL = "http://127.0.0.1:3000/api/market"
+            collector.WRITE_BARS = False
+            collector.WRITE_EVENTS = False
+            collector.fetch_market = _fake_fetch_market
+            collector.parse_candles = lambda payload: []  # no events built
+            collector.build_daily_bars = lambda candles: []
+            collector.insert_bars = lambda *a, **kw: 0
+            collector.insert_events = lambda *a, **kw: 0
+            collector.build_events = lambda **kw: []
+            collector._get_gamma_context = lambda symbol: None
+            collector._fetch_existing_event_ids = lambda conn, ids: set()
+
+            db_path = self.tmp / "proxy_first_test.sqlite"
+            conn = _sqlite3.connect(str(db_path))
+            try:
+                result, new_events = collector._collect_symbol(conn, "SPY")
+            finally:
+                conn.close()
+        finally:
+            collector.fetch_market = original_fetch_market
+            collector.SOURCE = original_source
+            collector.YAHOO_PROXY_URL = original_proxy_url
+            collector.parse_candles = original_parse_candles
+            collector.build_daily_bars = original_build_daily_bars
+            collector.insert_bars = original_insert_bars
+            collector.insert_events = original_insert_events
+            collector.build_events = original_build_events
+            collector._get_gamma_context = original_get_gamma
+            collector._fetch_existing_event_ids = original_fetch_existing
+            collector.WRITE_BARS = original_write_bars
+            collector.WRITE_EVENTS = original_write_events
+
+        # _collect_symbol() must call fetch_market() exactly once — no duplicate
+        # proxy wrapping.  fetch_market() owns proxy-vs-direct selection internally.
+        self.assertEqual(
+            len(fetch_market_calls), 1,
+            "_collect_symbol() must delegate to fetch_market() exactly once; "
+            "a second call would mean a duplicate proxy attempt was added.",
+        )
+        self.assertEqual(fetch_market_calls[0][0], "SPY")
+        self.assertEqual(fetch_market_calls[0][3], "yahoo")
+        self.assertEqual(result["symbol"], "SPY")
+        self.assertEqual(result["source"], "Yahoo")
+
+    def test_live_collector_falls_back_to_direct_on_proxy_failure(self) -> None:
+        """_collect_symbol() must call fetch_market (direct fallback) exactly once
+        when the proxy is down."""
+        import sqlite3 as _sqlite3
+
+        collector = load_module(
+            "pq_live_collector_proxy_fallback_test",
+            REPO_ROOT / "server" / "live_event_collector.py",
+        )
+
+        fetch_market_calls: list[tuple] = []
+
+        def _fake_fetch_market_with_fallback(symbol, interval, range_str, source):  # noqa: ANN001
+            fetch_market_calls.append((symbol, source))
+            # Simulate proxy failure + direct fallback inside fetch_market
+            return (
+                {
+                    "symbol": symbol,
+                    "candles": [
+                        {
+                            "time": 1_777_700_000,
+                            "open": 500.0,
+                            "high": 501.0,
+                            "low": 499.0,
+                            "close": 500.5,
+                            "volume": 1000.0,
+                        }
+                    ],
+                },
+                "Yahoo",
+            )
+
+        original_fetch_market = collector.fetch_market
+        original_source = collector.SOURCE
+        original_proxy_url = collector.YAHOO_PROXY_URL
+        original_parse_candles = collector.parse_candles
+        original_write_bars = collector.WRITE_BARS
+        original_write_events = collector.WRITE_EVENTS
+        original_get_gamma = collector._get_gamma_context
+        try:
+            collector.SOURCE = "yahoo"
+            collector.YAHOO_PROXY_URL = "http://127.0.0.1:3000/api/market"
+            collector.WRITE_BARS = False
+            collector.WRITE_EVENTS = False
+            collector.fetch_market = _fake_fetch_market_with_fallback
+            collector.parse_candles = lambda payload: []
+            collector._get_gamma_context = lambda symbol: None
+
+            db_path = self.tmp / "proxy_fallback_test.sqlite"
+            conn = _sqlite3.connect(str(db_path))
+            try:
+                result, new_events = collector._collect_symbol(conn, "SPY")
+            finally:
+                conn.close()
+        finally:
+            collector.fetch_market = original_fetch_market
+            collector.SOURCE = original_source
+            collector.YAHOO_PROXY_URL = original_proxy_url
+            collector.parse_candles = original_parse_candles
+            collector.WRITE_BARS = original_write_bars
+            collector.WRITE_EVENTS = original_write_events
+            collector._get_gamma_context = original_get_gamma
+
+        # fetch_market must be called exactly once — no double proxy attempt
+        self.assertEqual(len(fetch_market_calls), 1, "fetch_market must be called exactly once for direct fallback")
+        self.assertEqual(fetch_market_calls[0][0], "SPY")
+        self.assertEqual(result["source"], "Yahoo")
+
+    def test_live_collector_proxy_url_disable_via_empty_env(self) -> None:
+        """When YAHOO_PROXY_URL is set to empty string, the proxy must be disabled
+        and _collect_symbol() must call fetch_market without any proxy attempt."""
+        import sqlite3 as _sqlite3
+
+        collector = load_module(
+            "pq_live_collector_proxy_disable_env_test",
+            REPO_ROOT / "server" / "live_event_collector.py",
+        )
+
+        # Verify P3 fix: empty string leaves YAHOO_PROXY_URL as "" (not the default URL)
+        original_proxy_url = collector.YAHOO_PROXY_URL
+        collector.YAHOO_PROXY_URL = ""
+        try:
+            self.assertEqual(collector.YAHOO_PROXY_URL, "", "Empty YAHOO_PROXY_URL must stay empty (proxy disabled)")
+        finally:
+            collector.YAHOO_PROXY_URL = original_proxy_url
+
+        fetch_market_calls: list[tuple] = []
+
+        def _fake_fetch_market(symbol, interval, range_str, source):  # noqa: ANN001
+            fetch_market_calls.append((symbol, source))
+            return (
+                {
+                    "symbol": symbol,
+                    "candles": [
+                        {
+                            "time": 1_777_700_000,
+                            "open": 500.0,
+                            "high": 501.0,
+                            "low": 499.0,
+                            "close": 500.5,
+                            "volume": 1000.0,
+                        }
+                    ],
+                },
+                "Yahoo",
+            )
+
+        original_fetch_market = collector.fetch_market
+        original_source = collector.SOURCE
+        original_proxy_url2 = collector.YAHOO_PROXY_URL
+        original_parse_candles = collector.parse_candles
+        original_write_bars = collector.WRITE_BARS
+        original_write_events = collector.WRITE_EVENTS
+        original_get_gamma = collector._get_gamma_context
+        try:
+            collector.SOURCE = "yahoo"
+            # Empty string = proxy disabled
+            collector.YAHOO_PROXY_URL = ""
+            collector.WRITE_BARS = False
+            collector.WRITE_EVENTS = False
+            collector.fetch_market = _fake_fetch_market
+            collector.parse_candles = lambda payload: []
+            collector._get_gamma_context = lambda symbol: None
+
+            db_path = self.tmp / "proxy_disable_env_test.sqlite"
+            conn = _sqlite3.connect(str(db_path))
+            try:
+                result, new_events = collector._collect_symbol(conn, "SPY")
+            finally:
+                conn.close()
+        finally:
+            collector.fetch_market = original_fetch_market
+            collector.SOURCE = original_source
+            collector.YAHOO_PROXY_URL = original_proxy_url2
+            collector.parse_candles = original_parse_candles
+            collector.WRITE_BARS = original_write_bars
+            collector.WRITE_EVENTS = original_write_events
+            collector._get_gamma_context = original_get_gamma
+
+        # fetch_market called once; no proxy URL in the call chain
+        self.assertEqual(len(fetch_market_calls), 1)
+        self.assertEqual(fetch_market_calls[0][0], "SPY")
+        self.assertEqual(result["source"], "Yahoo")
+
+    def test_fetch_market_auth_skip_bypasses_proxy_when_dashboard_auth_active(self) -> None:
+        """Regression: _should_skip_proxy_due_auth_requirement() causes fetch_market()
+        to bypass the local proxy entirely when dashboard auth is enabled without a
+        service token and the local bypass is not effective.
+
+        This was the true historical root cause of the live collector sending 45h of
+        direct-Yahoo requests despite the proxy being healthy: the process environment
+        had DASH_AUTH_ENABLED/DASH_AUTH_PASSWORD set, HOST bound to a non-loopback
+        address, and no YAHOO_PROXY_SERVICE_TOKEN configured.
+
+        The documented remedy: set YAHOO_PROXY_SERVICE_TOKEN (or DASH_AUTH_SERVICE_TOKEN)
+        so that fetch_market() can authenticate with the local proxy, or set
+        YAHOO_PROXY_SKIP_AUTH_REQUIRED=false to disable the auth guard entirely.
+        """
+        backfill = load_module(
+            "pq_backfill_auth_skip_regression_test",
+            REPO_ROOT / "scripts" / "backfill_events.py",
+        )
+
+        # Simulate the production auth-skip conditions:
+        #   - Dashboard auth is active (password configured)
+        #   - No service token (default in many installs)
+        #   - Local bypass is NOT effective (HOST bound to non-loopback)
+        #   - YAHOO_PROXY_SKIP_AUTH_REQUIRED is True (the default)
+        orig_proxy_url = backfill.YAHOO_PROXY_URL
+        orig_skip_auth = backfill.YAHOO_PROXY_SKIP_AUTH_REQUIRED
+        orig_service_token = backfill.YAHOO_PROXY_SERVICE_TOKEN
+        try:
+            backfill.YAHOO_PROXY_URL = "http://127.0.0.1:3000/api/market"
+            backfill.YAHOO_PROXY_SKIP_AUTH_REQUIRED = True
+            backfill.YAHOO_PROXY_SERVICE_TOKEN = ""
+
+            with patch.object(backfill, "_dashboard_auth_effective", return_value=True), \
+                 patch.object(backfill, "_dashboard_auth_local_bypass_effective", return_value=False):
+                skip = backfill._should_skip_proxy_due_auth_requirement()
+
+            self.assertTrue(
+                skip,
+                "_should_skip_proxy_due_auth_requirement() must return True when "
+                "dashboard auth is active, local bypass is inactive, and no service "
+                "token is set. This is the documented auth-skip behavior.",
+            )
+
+            # Confirm the inverse: with a service token, proxy is NOT skipped.
+            backfill.YAHOO_PROXY_SERVICE_TOKEN = "test-token"
+            with patch.object(backfill, "_dashboard_auth_effective", return_value=True), \
+                 patch.object(backfill, "_dashboard_auth_local_bypass_effective", return_value=False):
+                skip_with_token = backfill._should_skip_proxy_due_auth_requirement()
+
+            self.assertFalse(
+                skip_with_token,
+                "_should_skip_proxy_due_auth_requirement() must return False when a "
+                "service token is configured — proxy should be used.",
+            )
+
+            # Confirm the inverse: with local bypass active, proxy is NOT skipped.
+            backfill.YAHOO_PROXY_SERVICE_TOKEN = ""
+            with patch.object(backfill, "_dashboard_auth_effective", return_value=True), \
+                 patch.object(backfill, "_dashboard_auth_local_bypass_effective", return_value=True):
+                skip_with_bypass = backfill._should_skip_proxy_due_auth_requirement()
+
+            self.assertFalse(
+                skip_with_bypass,
+                "_should_skip_proxy_due_auth_requirement() must return False when "
+                "the local auth bypass is active.",
+            )
+        finally:
+            backfill.YAHOO_PROXY_URL = orig_proxy_url
+            backfill.YAHOO_PROXY_SKIP_AUTH_REQUIRED = orig_skip_auth
+            backfill.YAHOO_PROXY_SERVICE_TOKEN = orig_service_token
+
+    def test_live_collector_startup_warns_when_auth_skip_active(self) -> None:
+        """Regression: _check_proxy_auth_config() must log CRITICAL when the
+        auth-skip guard would bypass the local proxy entirely at startup.
+
+        This ensures the 45 h silent-bypass failure mode is loud rather than
+        invisible — the collector will still start, but operators see the warning.
+        """
+        lc = load_module(
+            "pq_lc_startup_warn_test",
+            REPO_ROOT / "server" / "live_event_collector.py",
+        )
+
+        critical_calls: list[str] = []
+
+        def _fake_critical(msg: str, *args: object, **kwargs: object) -> None:
+            critical_calls.append(msg % args if args else msg)
+
+        with patch.object(lc, "_should_skip_proxy_due_auth_requirement", return_value=True), \
+             patch.object(lc.log, "critical", side_effect=_fake_critical):
+            lc._check_proxy_auth_config()
+
+        self.assertEqual(
+            len(critical_calls),
+            1,
+            "_check_proxy_auth_config() must emit exactly one log.critical when "
+            "_should_skip_proxy_due_auth_requirement() returns True.",
+        )
+        self.assertIn(
+            "auth-skip guard is ACTIVE",
+            critical_calls[0],
+            "Critical message must name the guard so operators know what to fix.",
+        )
+
+        # Guard does NOT fire when skip returns False (normal/protected state).
+        critical_calls.clear()
+        with patch.object(lc, "_should_skip_proxy_due_auth_requirement", return_value=False), \
+             patch.object(lc.log, "critical", side_effect=_fake_critical):
+            lc._check_proxy_auth_config()
+
+        self.assertEqual(
+            len(critical_calls),
+            0,
+            "_check_proxy_auth_config() must be silent when the guard is not active.",
+        )
+
+    def test_env_file_production_policy_guards_proxy(self) -> None:
+        """Static guard: .env must have Yahoo proxy protection in place when
+        DASH_AUTH_ENABLED=true.
+
+        When dashboard auth is active, at least one of the following must hold:
+          • YAHOO_PROXY_SERVICE_TOKEN (or DASH_AUTH_SERVICE_TOKEN) is non-empty, OR
+          • DASH_AUTH_LOCAL_BYPASS=true
+
+        Either condition prevents _should_skip_proxy_due_auth_requirement() from
+        firing and ensures the live collector routes through the local proxy.
+        """
+        env_path = REPO_ROOT / ".env"
+        if not env_path.exists():
+            self.skipTest(".env not present — skipping production-policy guard")
+
+        env: dict[str, str] = {}
+        for raw in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[7:]
+            if "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            key = key.strip()
+            val = val.strip()
+            # Strip matching outer quotes
+            if len(val) >= 2 and val[0] == val[-1] and val[0] in ('"', "'"):
+                val = val[1:-1]
+            env[key] = val
+
+        def _truthy(v: str) -> bool:
+            return v.strip().lower() in ("1", "true", "yes", "on")
+
+        dash_auth_enabled = _truthy(env.get("DASH_AUTH_ENABLED", ""))
+        if not dash_auth_enabled:
+            return  # auth not active — no proxy-bypass risk; nothing to assert
+
+        has_service_token = bool(
+            env.get("YAHOO_PROXY_SERVICE_TOKEN", "").strip()
+            or env.get("DASH_AUTH_SERVICE_TOKEN", "").strip()
+        )
+        has_local_bypass = _truthy(env.get("DASH_AUTH_LOCAL_BYPASS", ""))
+
+        self.assertTrue(
+            has_service_token or has_local_bypass,
+            "Production .env has DASH_AUTH_ENABLED=true but no proxy-bypass "
+            "protection is present. YAHOO_PROXY_SERVICE_TOKEN (and "
+            "DASH_AUTH_SERVICE_TOKEN) are unset, and DASH_AUTH_LOCAL_BYPASS is "
+            "not true. The live collector would silently bypass the local proxy "
+            "and use direct Yahoo on every fetch. "
+            "Add YAHOO_PROXY_SERVICE_TOKEN=<token> or DASH_AUTH_LOCAL_BYPASS=true "
+            "to .env to fix this.",
+        )
+
     def test_event_writer_registers_atexit_connection_cleanup(self) -> None:
         source = (REPO_ROOT / "server" / "event_writer.py").read_text(encoding="utf-8")
         self.assertIn("atexit.register(_close_thread_local_connection)", source)
