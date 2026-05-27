@@ -2503,8 +2503,18 @@ def _compute_trade_regime(event: dict, features: dict) -> dict:
 
 
 def _adjust_threshold(base: float, delta: float) -> float:
+    # Preserve the NO_SIGNAL sentinel (>= 1.0) through all runtime delta
+    # adjustments — regime, ATR-zone, and expansion-near guardrail.  A manifest
+    # threshold of NO_SIGNAL_THRESHOLD (~1.0000000000000002) means "this horizon
+    # is intentionally disabled."  Applying a negative delta would otherwise
+    # demote it to ~0.98 and reactivate signals the manifest forbade.  Routing
+    # all three delta callers through this helper means a single short-circuit
+    # here closes the bypass in every caller.
+    base_f = float(base)
+    if base_f >= 1.0:
+        return base_f
     safe_delta = max(-ML_REGIME_THRESHOLD_MAX_DELTA, min(ML_REGIME_THRESHOLD_MAX_DELTA, float(delta)))
-    return _clamp_threshold(base + safe_delta)
+    return _clamp_threshold(base_f + safe_delta)
 
 
 def _compute_atr_distance_ratio(event: dict, features: dict) -> float | None:
