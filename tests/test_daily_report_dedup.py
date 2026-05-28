@@ -157,6 +157,12 @@ def _run_wrapper(
     wrapper_copy.write_bytes(wrapper_src.read_bytes())
     wrapper_copy.chmod(0o755)
 
+    # The trading-day gate imports the shared calendar module from
+    # ${ROOT_DIR}/scripts, so it must exist in the sandbox too.
+    calendar_copy = scripts_dir / "trading_calendar.py"
+    calendar_src = REPO_ROOT / "scripts" / "trading_calendar.py"
+    calendar_copy.write_bytes(calendar_src.read_bytes())
+
     # _pybin.sh shim
     pybin = scripts_dir / "_pybin.sh"
     pybin.write_text(
@@ -297,6 +303,7 @@ class TestDedupeStateFile(unittest.TestCase):
 
             result = _run_wrapper(
                 {
+                    "ML_REPORT_FAKE_ET_DATE": report_date,
                     "ML_REPORT_REPORT_DATE": report_date,
                     "ML_REPORT_SCHEDULE_MODE": "close",
                     "ML_REPORT_FORCE_SEND": "false",
@@ -326,6 +333,7 @@ class TestCalendarGate(unittest.TestCase):
             tmp = Path(raw_tmp)
             result = _run_wrapper(
                 {
+                    "ML_REPORT_FAKE_ET_DATE": report_date,
                     "ML_REPORT_REPORT_DATE": report_date,
                     "ML_REPORT_SCHEDULE_MODE": "close",
                     "ML_REPORT_FORCE_SEND": force,
@@ -368,6 +376,7 @@ class TestCalendarGate(unittest.TestCase):
             tmp = Path(raw_tmp)
             result = _run_wrapper(
                 {
+                    "ML_REPORT_FAKE_ET_DATE": _report_date,
                     "ML_REPORT_REPORT_DATE": _report_date,
                     "ML_REPORT_SCHEDULE_MODE": "close",
                     "ML_REPORT_FORCE_SEND": "true",
@@ -389,6 +398,7 @@ class TestCalendarGate(unittest.TestCase):
             tmp = Path(raw_tmp)
             result = _run_wrapper(
                 {
+                    "ML_REPORT_FAKE_ET_DATE": "2026-05-14",
                     "ML_REPORT_REPORT_DATE": "2026-05-14",
                     "ML_REPORT_SCHEDULE_MODE": "close",
                     "ML_REPORT_FORCE_SEND": "false",
