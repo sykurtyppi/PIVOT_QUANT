@@ -2095,6 +2095,206 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(len(sessions), 1)
         self.assertEqual(len(sessions[0]["bars"]), 2)
 
+    def test_mtf_weekly_pivot_does_not_leak_in_progress_week(self) -> None:
+        """P0-1 regression: find_mtf_pivot_for_date must never return a pivot
+        computed from the ISO week that CONTAINS target_date.
+
+        The original implementation accepted any weekly entry with
+        ``date < target_date``.  When target_date sat past the last session
+        in the input, the trailing in-progress weekly accumulator (whose date
+        was the last session) would be selected as "prior weekly," leaking
+        same-week OHLC into the feature.  The fix uses ISO ``period_key``
+        comparison so the consumer can never select an entry whose period
+        equals the target's period.
+        """
+        backfill = load_module(
+            "pq_backfill_mtf_weekly_pivot_test",
+            REPO_ROOT / "scripts" / "backfill_events.py",
+        )
+
+        def _mk(d: date, o: float, h: float, l: float, c: float) -> dict:
+            return {"date": d, "open": o, "high": h, "low": l, "close": c}
+
+        def _stub_calc(h: float, l: float, c: float) -> dict:
+            return {"h": h, "l": l, "c": c}
+
+        # ISO week 21 of 2026: Mon May 18 - Fri May 22 (complete).
+        # ISO week 22 of 2026: Mon May 25 (US Memorial Day) - Wed May 27.
+        # Build sessions covering one complete week + 3 days of next week.
+        sessions = [
+            _mk(date(2026, 5, 18), 100, 105,  99, 104),
+            _mk(date(2026, 5, 19), 104, 106, 102, 105),
+            _mk(date(2026, 5, 20), 105, 108, 103, 107),
+            _mk(date(2026, 5, 21), 107, 110, 105, 109),
+            _mk(date(2026, 5, 22), 109, 112, 108, 111),  # complete W-1: H=112,L=99,C=111
+            _mk(date(2026, 5, 26), 111, 115, 110, 114),  # Mon W (Tue, Memorial Day skipped)
+            _mk(date(2026, 5, 27), 114, 118, 113, 117),  # Tue W
+        ]
+        weekly = backfill.build_weekly_sessions(sessions)
+
+        # Producer-side invariant: each entry carries period_kind + period_key.
+        self.assertEqual(len(weekly), 2)
+        self.assertEqual(weekly[0]["period_kind"], "iso_week")
+        self.assertEqual(weekly[0]["period_key"], (2026, 21))
+        self.assertEqual(weekly[1]["period_kind"], "iso_week")
+        self.assertEqual(weekly[1]["period_key"], (2026, 22))
+
+        # Consumer-side invariant: target_date AFTER last session must NOT
+        # select the in-progress entry that contains the target's period.
+        # This is the latent bug — exercised here by asking for a target
+        # past the last input session.
+        target_wed_w = date(2026, 5, 28)  # ISO week 22, NOT in sessions
+        pivot = backfill.find_mtf_pivot_for_date(weekly, target_wed_w, calc_fn=_stub_calc)
+        self.assertIsNotNone(pivot)
+        self.assertEqual(
+            (pivot["h"], pivot["l"], pivot["c"]),
+            (112, 99, 111),
+            "target in ISO week 22 must use the COMPLETED week 21, not the "
+            "in-progress week-22 partial accumulator",
+        )
+
+        # Same-week targets (in W) must also use the completed prior week.
+        for s in sessions[5:]:  # Mon W, Tue W
+            piv = backfill.find_mtf_pivot_for_date(weekly, s["date"], calc_fn=_stub_calc)
+            self.assertIsNotNone(piv)
+            self.assertEqual(
+                (piv["h"], piv["l"], piv["c"]),
+                (112, 99, 111),
+                f"target={s['date']} must use completed week 21 pivot",
+            )
+
+    def test_mtf_weekly_pivot_none_when_no_prior_completed_week(self) -> None:
+        """When the input contains only the in-progress week, no prior weekly
+        pivot exists and the function must return None."""
+        backfill = load_module(
+            "pq_backfill_mtf_weekly_no_prior_test",
+            REPO_ROOT / "scripts" / "backfill_events.py",
+        )
+
+        def _mk(d: date, o: float, h: float, l: float, c: float) -> dict:
+            return {"date": d, "open": o, "high": h, "low": l, "close": c}
+
+        sessions = [
+            _mk(date(2026, 5, 26), 111, 115, 110, 114),
+            _mk(date(2026, 5, 27), 114, 118, 113, 117),
+            _mk(date(2026, 5, 28), 117, 120, 116, 119),
+        ]
+        weekly = backfill.build_weekly_sessions(sessions)
+        self.assertEqual(len(weekly), 1)
+        self.assertEqual(weekly[0]["period_key"], (2026, 22))
+
+        for s in sessions:
+            piv = backfill.find_mtf_pivot_for_date(weekly, s["date"])
+            self.assertIsNone(
+                piv,
+                f"target={s['date']}: no prior completed week exists, must be None",
+            )
+
+        # Even a target past the last session must be None when no prior week exists.
+        piv = backfill.find_mtf_pivot_for_date(weekly, date(2026, 5, 29))
+        self.assertIsNone(piv)
+
+    def test_mtf_monthly_pivot_does_not_leak_in_progress_month(self) -> None:
+        """P0-1 regression: same look-ahead invariant for monthly pivots."""
+        backfill = load_module(
+            "pq_backfill_mtf_monthly_pivot_test",
+            REPO_ROOT / "scripts" / "backfill_events.py",
+        )
+
+        def _mk(d: date, o: float, h: float, l: float, c: float) -> dict:
+            return {"date": d, "open": o, "high": h, "low": l, "close": c}
+
+        def _stub_calc(h: float, l: float, c: float) -> dict:
+            return {"h": h, "l": l, "c": c}
+
+        # April 2026 (complete) + mid-May 2026 (in progress).
+        sessions = [
+            _mk(date(2026, 4,  1), 100, 110,  90, 105),
+            _mk(date(2026, 4, 30), 105, 115,  95, 110),  # April: H=115,L=90,C=110
+            _mk(date(2026, 5,  1), 110, 112, 108, 111),
+            _mk(date(2026, 5, 15), 111, 120, 110, 118),
+        ]
+        monthly = backfill.build_monthly_sessions(sessions)
+
+        self.assertEqual(len(monthly), 2)
+        self.assertEqual(monthly[0]["period_kind"], "cal_month")
+        self.assertEqual(monthly[0]["period_key"], (2026, 4))
+        self.assertEqual(monthly[1]["period_key"], (2026, 5))
+
+        # Mid-May target must use APRIL's completed OHLC, not May partial.
+        target_mid_may = date(2026, 5, 15)
+        pivot = backfill.find_mtf_pivot_for_date(monthly, target_mid_may, calc_fn=_stub_calc)
+        self.assertIsNotNone(pivot)
+        self.assertEqual(
+            (pivot["h"], pivot["l"], pivot["c"]),
+            (115, 90, 110),
+            "target in May must use COMPLETED April, not in-progress May partial",
+        )
+
+        # Latent bug exercise: target past the last session, still in May.
+        target_may_30 = date(2026, 5, 30)
+        pivot2 = backfill.find_mtf_pivot_for_date(monthly, target_may_30, calc_fn=_stub_calc)
+        self.assertIsNotNone(pivot2)
+        self.assertEqual((pivot2["h"], pivot2["l"], pivot2["c"]), (115, 90, 110))
+
+    def test_mtf_monthly_pivot_none_when_no_prior_completed_month(self) -> None:
+        backfill = load_module(
+            "pq_backfill_mtf_monthly_no_prior_test",
+            REPO_ROOT / "scripts" / "backfill_events.py",
+        )
+
+        def _mk(d: date, o: float, h: float, l: float, c: float) -> dict:
+            return {"date": d, "open": o, "high": h, "low": l, "close": c}
+
+        sessions = [
+            _mk(date(2026, 5,  1), 110, 112, 108, 111),
+            _mk(date(2026, 5, 15), 111, 120, 110, 118),
+        ]
+        monthly = backfill.build_monthly_sessions(sessions)
+        self.assertEqual(len(monthly), 1)
+
+        for s in sessions:
+            piv = backfill.find_mtf_pivot_for_date(monthly, s["date"])
+            self.assertIsNone(piv)
+
+    def test_mtf_prior_completed_week_is_used_when_present(self) -> None:
+        """Sanity: when a completed prior week IS available, the consumer picks
+        the most-recent completed entry — not skipped due to over-zealous
+        filtering."""
+        backfill = load_module(
+            "pq_backfill_mtf_prior_week_used_test",
+            REPO_ROOT / "scripts" / "backfill_events.py",
+        )
+
+        def _mk(d: date, o: float, h: float, l: float, c: float) -> dict:
+            return {"date": d, "open": o, "high": h, "low": l, "close": c}
+
+        def _stub_calc(h: float, l: float, c: float) -> dict:
+            return {"h": h, "l": l, "c": c}
+
+        # Two complete prior weeks, then events in a third week.
+        sessions = [
+            # ISO week 20 of 2026 (May 11-15)
+            _mk(date(2026, 5, 11), 90,  95,  88,  93),
+            _mk(date(2026, 5, 15), 93,  98,  91,  96),
+            # ISO week 21 of 2026 (May 18-22): H=112,L=99,C=111
+            _mk(date(2026, 5, 18), 100, 105,  99, 104),
+            _mk(date(2026, 5, 22), 109, 112, 108, 111),
+            # ISO week 22 of 2026 (target week)
+            _mk(date(2026, 5, 26), 111, 115, 110, 114),
+        ]
+        weekly = backfill.build_weekly_sessions(sessions)
+        self.assertEqual([w["period_key"] for w in weekly], [(2026, 20), (2026, 21), (2026, 22)])
+
+        # Mon W=22 target must select the MOST-RECENT completed prior week (21).
+        target = date(2026, 5, 26)
+        piv = backfill.find_mtf_pivot_for_date(weekly, target, calc_fn=_stub_calc)
+        self.assertEqual(
+            (piv["h"], piv["l"], piv["c"]),
+            (112, 99, 111),
+            "must use the most recent completed week (21), not the older one (20)",
+        )
+
     def test_backfill_events_reject_future_gamma_context_date(self) -> None:
         backfill = load_module(
             "pq_backfill_future_gamma_guard_test",

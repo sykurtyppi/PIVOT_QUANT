@@ -1256,85 +1256,154 @@ def volume_at_price(bars: list[dict], price: float, tolerance_bps: float = 10) -
 
 
 def build_weekly_sessions(sessions: list[dict]) -> list[dict]:
-    """Aggregate daily sessions into weekly OHLC."""
+    """Aggregate daily sessions into weekly OHLC.
+
+    Each emitted entry carries its ISO ``(year, week)`` identifier in
+    ``period_kind="iso_week"`` + ``period_key=(iso_year, iso_week)`` so
+    consumers can verify the period is strictly earlier than the target
+    event's period, not merely that its end date is earlier than the
+    target date.  This prevents an in-progress week (the trailing
+    accumulator below) from being mis-used as the "prior weekly pivot"
+    for events later in the SAME week — see find_mtf_pivot_for_date.
+
+    The trailing accumulator is still flushed unconditionally so that a
+    completed final week (sessions ending on a Friday) remains usable for
+    events in the following week; the consumer handles the
+    in-progress-vs-completed distinction via period_key.
+    """
     weekly = []
     current_week = None
-    week_sessions = []
+    week_sessions: list[dict] = []
+
+    def _flush(buf: list[dict]) -> None:
+        if not buf:
+            return
+        iso = buf[0]["date"].isocalendar()
+        weekly.append({
+            "date": buf[-1]["date"],
+            "period_kind": "iso_week",
+            "period_key": (int(iso[0]), int(iso[1])),
+            "open": buf[0]["open"],
+            "high": max(s["high"] for s in buf),
+            "low": min(s["low"] for s in buf),
+            "close": buf[-1]["close"],
+        })
 
     for session in sessions:
         iso_cal = session["date"].isocalendar()
-        week_key = (iso_cal[0], iso_cal[1])  # (year, week_number)
+        week_key = (iso_cal[0], iso_cal[1])  # (iso_year, iso_week)
         if current_week != week_key:
-            if week_sessions:
-                weekly.append({
-                    "date": week_sessions[-1]["date"],
-                    "open": week_sessions[0]["open"],
-                    "high": max(s["high"] for s in week_sessions),
-                    "low": min(s["low"] for s in week_sessions),
-                    "close": week_sessions[-1]["close"],
-                })
+            _flush(week_sessions)
             current_week = week_key
             week_sessions = [session]
         else:
             week_sessions.append(session)
 
-    if week_sessions:
-        weekly.append({
-            "date": week_sessions[-1]["date"],
-            "open": week_sessions[0]["open"],
-            "high": max(s["high"] for s in week_sessions),
-            "low": min(s["low"] for s in week_sessions),
-            "close": week_sessions[-1]["close"],
-        })
-
+    _flush(week_sessions)
     return weekly
 
 
 def build_monthly_sessions(sessions: list[dict]) -> list[dict]:
-    """Aggregate daily sessions into monthly OHLC."""
+    """Aggregate daily sessions into monthly OHLC.
+
+    Each emitted entry carries its calendar ``(year, month)`` identifier
+    in ``period_kind="cal_month"`` + ``period_key=(year, month)`` so
+    consumers can verify the period is strictly earlier than the target
+    event's period.  See ``build_weekly_sessions`` for rationale.
+    """
     monthly = []
     current_month = None
-    month_sessions = []
+    month_sessions: list[dict] = []
+
+    def _flush(buf: list[dict]) -> None:
+        if not buf:
+            return
+        first = buf[0]["date"]
+        monthly.append({
+            "date": buf[-1]["date"],
+            "period_kind": "cal_month",
+            "period_key": (int(first.year), int(first.month)),
+            "open": buf[0]["open"],
+            "high": max(s["high"] for s in buf),
+            "low": min(s["low"] for s in buf),
+            "close": buf[-1]["close"],
+        })
 
     for session in sessions:
         month_key = (session["date"].year, session["date"].month)
         if current_month != month_key:
-            if month_sessions:
-                monthly.append({
-                    "date": month_sessions[-1]["date"],
-                    "open": month_sessions[0]["open"],
-                    "high": max(s["high"] for s in month_sessions),
-                    "low": min(s["low"] for s in month_sessions),
-                    "close": month_sessions[-1]["close"],
-                })
+            _flush(month_sessions)
             current_month = month_key
             month_sessions = [session]
         else:
             month_sessions.append(session)
 
-    if month_sessions:
-        monthly.append({
-            "date": month_sessions[-1]["date"],
-            "open": month_sessions[0]["open"],
-            "high": max(s["high"] for s in month_sessions),
-            "low": min(s["low"] for s in month_sessions),
-            "close": month_sessions[-1]["close"],
-        })
-
+    _flush(month_sessions)
     return monthly
 
 
+def _target_period_key(target_date, period_kind: str):
+    """Compute the period_key for ``target_date`` under ``period_kind``.
+
+    Returns ``None`` for unknown period_kind (caller falls back to legacy
+    date comparison).
+    """
+    if period_kind == "iso_week":
+        iso = target_date.isocalendar()
+        return (int(iso[0]), int(iso[1]))
+    if period_kind == "cal_month":
+        return (int(target_date.year), int(target_date.month))
+    return None
+
+
 def find_mtf_pivot_for_date(higher_tf_sessions: list[dict], target_date, calc_fn=None):
-    """Given a list of higher-TF OHLC sessions, return the pivot set whose
-    period ended before target_date (i.e., the 'prior completed' bar)."""
+    """Return the pivot set for the most recent COMPLETED higher-TF period
+    that ended strictly before ``target_date``'s own period.
+
+    A "completed period" means an ISO week or calendar month whose
+    identifier is strictly earlier than the target_date's identifier.  The
+    in-progress period containing target_date itself is never used,
+    regardless of how much data has accumulated in it so far — this is the
+    invariant that prevents weekly/monthly pivot features from leaking
+    same-period OHLC into events (look-ahead).
+
+    Sessions emitted by ``build_weekly_sessions`` / ``build_monthly_sessions``
+    carry ``period_kind`` + ``period_key`` fields.  For backwards
+    compatibility with entries that lack those fields (legacy callers /
+    tests), the consumer falls back to a strict date comparison.  The
+    fallback path still allows the latent in-progress-period bug to fire
+    if a buggy producer is used, so production aggregators should always
+    emit the new tag fields.
+    """
     if calc_fn is None:
         calc_fn = calculate_pivots
     candidate = None
+    target_key_by_kind: dict[str, tuple] = {}
     for session in higher_tf_sessions:
-        if session["date"] < target_date:
-            candidate = session
+        period_kind = session.get("period_kind")
+        if period_kind:
+            if period_kind not in target_key_by_kind:
+                key = _target_period_key(target_date, period_kind)
+                if key is None:
+                    # Unknown period_kind: fall back to date comparison for
+                    # just this entry.
+                    if session["date"] < target_date:
+                        candidate = session
+                        continue
+                    break
+                target_key_by_kind[period_kind] = key
+            target_key = target_key_by_kind[period_kind]
+            session_key = tuple(session.get("period_key", ()))
+            if session_key and session_key < target_key:
+                candidate = session
+            else:
+                break
         else:
-            break
+            # Legacy entry without period tags: date-only comparison.
+            if session["date"] < target_date:
+                candidate = session
+            else:
+                break
     if candidate is None:
         return None
     return calc_fn(candidate["high"], candidate["low"], candidate["close"])
