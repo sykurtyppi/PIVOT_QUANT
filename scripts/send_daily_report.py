@@ -5,6 +5,20 @@ Supported channels:
   - email (SMTP)
   - iMessage (macOS Messages via osascript)
   - webhook (generic JSON POST)
+
+POLICY NOTE
+-----------
+This script is the *low-level sender primitive*.  It has no scheduling policy:
+no trading-day calendar check, no weekend/holiday skip, and no deduplification
+state-file guard.  That policy layer lives entirely in
+``scripts/run_daily_report_send.sh``.
+
+All operational send paths MUST go through ``run_daily_report_send.sh``.
+Direct invocation of this script is intentionally unguarded — it is used for
+dry-run testing and one-off operator overrides where the caller accepts full
+responsibility.  Pass ``--no-dedupe-guard`` to make this explicit in your
+invocation; the flag is accepted but has no runtime effect (the guard does not
+exist here by design).
 """
 
 from __future__ import annotations
@@ -155,6 +169,18 @@ def parse_args() -> argparse.Namespace:
         help="Optional log file path(s). If omitted, uses ML_REPORT_LOG_FILES or defaults.",
     )
     parser.add_argument("--dry-run", action="store_true", help="Print actions only.")
+    parser.add_argument(
+        "--no-dedupe-guard",
+        action="store_true",
+        dest="no_dedupe_guard",
+        default=False,
+        help=(
+            "Accepted flag that makes explicit this invocation is intentionally "
+            "unguarded (no state-file dedupe, no trading-day check).  Has no "
+            "runtime effect — this script is the low-level primitive.  Use "
+            "run_daily_report_send.sh for the policy-enforcing operational path."
+        ),
+    )
     return parser.parse_args()
 
 
