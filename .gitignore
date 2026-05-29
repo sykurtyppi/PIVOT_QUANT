@@ -57,6 +57,10 @@ __pycache__/
 # Data files (large binaries, regenerable)
 data/*.sqlite
 data/*.duckdb
+data/**/*.sqlite
+data/**/*.duckdb
+data/**/*.pkl
+data/**/*.json
 data/events.jsonl
 data/exports/
 data/models/*.pkl

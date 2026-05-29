@@ -5,15 +5,16 @@
 
 class EnhancedDataFetcher {
     constructor() {
+        const runtimeKeys = window.PIVOT_QUANT_API_KEYS || {};
         // API Configuration
         this.config = {
             finnhub: {
-                key: "d20nlk1r01qvvf1j7l9gd20nlk1r01qvvf1j7la0",
+                key: runtimeKeys.finnhub || "",
                 baseUrl: "https://finnhub.io/api/v1",
                 rateLimitPerMinute: 60
             },
             alpha: {
-                key: "IG1WEQHD1ZP1Q7X1",
+                key: runtimeKeys.alphaVantage || runtimeKeys.alpha || "",
                 baseUrl: "https://www.alphavantage.co/query",
                 rateLimitPerMinute: 5
             },
