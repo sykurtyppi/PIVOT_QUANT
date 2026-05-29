@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 PIVOT_QUANT has **two coexisting halves**:
 
-1. **JavaScript pivot-engine library** under `src/`, plus dashboard/UI/data fetcher modules at the repo root (`advanced_*.js`, `enhanced_*.js`, `alert_system.js`, etc.). Tests live in `tests/*.test.js`. This is the "institutional-grade pivot point analysis" surface described in `README.md`.
+1. **JavaScript pivot-engine library** under `src/`, plus dashboard/UI modules at the repo root (`advanced_*.js`, `alert_system.js`, etc.). Tests live in `tests/*.test.js`. This is the "institutional-grade pivot point analysis" surface described in `README.md`.
 2. **Python ML+research stack** under `server/`, `ml/`, `scripts/`, `services/`. This is the live trading-research system described in `SYSTEM.md` — data collection, training, calibration, threshold selection, governance, and serving.
 
 `SYSTEM.md` and `docs/RESEARCH_PROTOCOL*.md` are the authoritative references for the Python half. **Read both before changing anything in `scripts/`, `server/`, `ml/`, or `services/`.**
