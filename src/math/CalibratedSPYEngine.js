@@ -126,7 +126,12 @@ export class CalibratedSPYEngine {
             gammaFlip: {
                 level: `${this.targetLevels.gammaFlipLow}-${this.targetLevels.gammaFlipHigh}`,
                 strength: 0.75,
-                direction: this.targetLevels.currentPrice > this.targetLevels.ema21d ? 'bearish' : 'bullish'
+                // Convention shared with GammaFlipEngine._calculateDealerGamma:
+                // price > ema21d => 'bullish' (above the trend line),
+                // price <= ema21d => 'bearish'.  The previous mapping here was
+                // inverted, so this engine and GammaFlipEngine disagreed on the
+                // same price/EMA inputs.
+                direction: this.targetLevels.currentPrice > this.targetLevels.ema21d ? 'bullish' : 'bearish'
             },
             reversalLevels: [
                 {

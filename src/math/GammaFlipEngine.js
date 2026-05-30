@@ -91,9 +91,15 @@ export class GammaFlipEngine {
         const volatilityAdjustment = price * 0.002; // ~0.2% range
         const emaDistortion = Math.abs(price - emaLevels.ema21d) * 0.001;
 
+        // The bracket must be symmetric around `price` so that
+        // (high + low) / 2 === price exactly.  Both edges widen outward by
+        // the same factor (volatilityAdjustment + emaDistortion).  Previously
+        // the `low` branch added emaDistortion instead of subtracting,
+        // shifting the entire bracket up by emaDistortion rather than
+        // widening it symmetrically.
         return {
             high: price + volatilityAdjustment + emaDistortion,
-            low: price - volatilityAdjustment + emaDistortion,
+            low: price - volatilityAdjustment - emaDistortion,
             strength: this._calculateGammaStrength(price, emaLevels),
             direction: price > emaLevels.ema21d ? 'bullish' : 'bearish'
         };
