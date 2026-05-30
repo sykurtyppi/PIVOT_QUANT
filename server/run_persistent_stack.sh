@@ -133,6 +133,35 @@ if is_truthy "${DASH_AUTH_ENABLED:-false}"; then
   fi
 fi
 
+# ML server write-endpoint auth (defense-in-depth for non-loopback binds).
+# Mirrors the DASH_AUTH_LOCAL_BYPASS pattern above:
+#   - Loopback bind (default) => bypass=true; no token needed; every internal
+#     client (yahoo_proxy, collector, retrain/calibration scripts) keeps working.
+#   - Non-loopback bind        => bypass=false AND a token MUST be configured,
+#     or we refuse to start.  /reload deserialises pickled artifacts and is
+#     an RCE primitive; serving it unauthenticated on a public bind is a
+#     non-starter.
+# The Python side (server/ml_server.py) has the same check at request time
+# so even direct python invocation (bypassing this wrapper) fails closed.
+ML_WRITE_AUTH_LOCAL_BYPASS="${ML_WRITE_AUTH_LOCAL_BYPASS:-}"
+if [[ -z "${ML_WRITE_AUTH_LOCAL_BYPASS}" ]]; then
+  if is_loopback_bind "${ML_SERVER_BIND}"; then
+    ML_WRITE_AUTH_LOCAL_BYPASS="true"
+  else
+    ML_WRITE_AUTH_LOCAL_BYPASS="false"
+  fi
+fi
+if ! is_loopback_bind "${ML_SERVER_BIND}" && is_truthy "${ML_WRITE_AUTH_LOCAL_BYPASS}"; then
+  echo "[run_persistent_stack] ERROR: ML_WRITE_AUTH_LOCAL_BYPASS=true is not allowed when ML_SERVER_BIND is non-loopback (${ML_SERVER_BIND})."
+  exit 1
+fi
+if ! is_loopback_bind "${ML_SERVER_BIND}" && [[ -z "${ML_WRITE_AUTH_TOKEN:-}" ]]; then
+  echo "[run_persistent_stack] ERROR: ML_WRITE_AUTH_TOKEN must be set when ML_SERVER_BIND is non-loopback (${ML_SERVER_BIND}); write endpoints would otherwise be unauthenticated on a public bind."
+  exit 1
+fi
+export ML_WRITE_AUTH_LOCAL_BYPASS
+export ML_WRITE_AUTH_TOKEN
+
 if [[ -z "${ML_CORS_ORIGINS:-}" ]]; then
   origins=("http://localhost:3000" "http://127.0.0.1:3000")
   if [[ -n "${LOCAL_HOSTNAME}" ]]; then

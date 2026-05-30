@@ -25,6 +25,7 @@ from urllib.error import HTTPError, URLError
 import urllib.request
 
 import numpy as np
+from fastapi import HTTPException
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -4196,6 +4197,310 @@ class OpsSmokeTests(unittest.TestCase):
         finally:
             ml_server.registry.snapshot = original_snapshot
             ml_server._try_begin_score_request = original_try_begin
+
+    # ---------------------------------------------------------------
+    # C1 follow-up: write-endpoint auth on /reload + /score.
+    # Mirrors the dashboard's DASH_AUTH_LOCAL_BYPASS model — loopback
+    # bind keeps the existing internal clients working unchanged; a
+    # non-loopback bind without a token fails closed.
+    # ---------------------------------------------------------------
+
+    def _patch_ml_write_auth(self, ml_server, *, bypass: bool, token: str = "",
+                             misconfigured: bool = False):
+        """Snapshot and replace the ML write-auth module flags; returns
+        a callable that restores the originals (for use in try/finally)."""
+        orig_bypass = ml_server._WRITE_AUTH_BYPASS
+        orig_token = ml_server.ML_WRITE_AUTH_TOKEN
+        orig_misconfigured = ml_server._WRITE_AUTH_MISCONFIGURED
+        ml_server._WRITE_AUTH_BYPASS = bypass
+        ml_server.ML_WRITE_AUTH_TOKEN = token
+        ml_server._WRITE_AUTH_MISCONFIGURED = misconfigured
+
+        def restore() -> None:
+            ml_server._WRITE_AUTH_BYPASS = orig_bypass
+            ml_server.ML_WRITE_AUTH_TOKEN = orig_token
+            ml_server._WRITE_AUTH_MISCONFIGURED = orig_misconfigured
+
+        return restore
+
+    def test_ml_server_write_auth_is_loopback_bind_helper(self) -> None:
+        ml_server = self._load_ml_server_module()
+        # Parity with the bash is_loopback_bind() function in
+        # run_persistent_stack.sh: localhost|127.0.0.1|::1|127.* are loopback.
+        self.assertTrue(ml_server._is_loopback_bind("127.0.0.1"))
+        self.assertTrue(ml_server._is_loopback_bind("LOCALHOST"))
+        self.assertTrue(ml_server._is_loopback_bind("::1"))
+        self.assertTrue(ml_server._is_loopback_bind("127.1.2.3"))
+        self.assertFalse(ml_server._is_loopback_bind("0.0.0.0"))
+        self.assertFalse(ml_server._is_loopback_bind("192.168.1.10"))
+        self.assertFalse(ml_server._is_loopback_bind(""))
+        self.assertFalse(ml_server._is_loopback_bind(None))
+
+    def test_ml_server_write_auth_bypass_resolution(self) -> None:
+        ml_server = self._load_ml_server_module()
+        # Unset env → loopback host => True, non-loopback => False.
+        self.assertTrue(ml_server._resolve_write_auth_bypass("127.0.0.1", None))
+        self.assertTrue(ml_server._resolve_write_auth_bypass("127.0.0.1", ""))
+        self.assertFalse(ml_server._resolve_write_auth_bypass("0.0.0.0", None))
+        # Explicit env override wins in either direction.
+        self.assertFalse(ml_server._resolve_write_auth_bypass("127.0.0.1", "false"))
+        self.assertTrue(ml_server._resolve_write_auth_bypass("0.0.0.0", "true"))
+        # Unrecognised override falls back to the loopback default.
+        self.assertTrue(ml_server._resolve_write_auth_bypass("127.0.0.1", "garbled"))
+        self.assertFalse(ml_server._resolve_write_auth_bypass("0.0.0.0", "garbled"))
+
+    def test_ml_server_write_auth_dependency_bypass_allows(self) -> None:
+        ml_server = self._load_ml_server_module()
+        restore = self._patch_ml_write_auth(ml_server, bypass=True)
+        try:
+            # bypass=True must short-circuit and return None for ANY token.
+            asyncio.run(ml_server.require_write_auth(x_ml_write_token=None))
+            asyncio.run(ml_server.require_write_auth(x_ml_write_token=""))
+            asyncio.run(ml_server.require_write_auth(x_ml_write_token="anything"))
+        finally:
+            restore()
+
+    def test_ml_server_write_auth_dependency_misconfig_503(self) -> None:
+        ml_server = self._load_ml_server_module()
+        # Misconfigured=True wins over every other flag — never accept a token
+        # on a public bind that didn't get one configured.
+        restore = self._patch_ml_write_auth(
+            ml_server, bypass=False, token="present", misconfigured=True,
+        )
+        try:
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(ml_server.require_write_auth(x_ml_write_token="present"))
+            self.assertEqual(ctx.exception.status_code, 503)
+            # Token MUST NOT appear in the error detail.
+            self.assertNotIn("present", str(ctx.exception.detail))
+        finally:
+            restore()
+
+    def test_ml_server_write_auth_dependency_correct_token_passes(self) -> None:
+        ml_server = self._load_ml_server_module()
+        restore = self._patch_ml_write_auth(
+            ml_server, bypass=False, token="s3cret-token-value",
+        )
+        try:
+            asyncio.run(ml_server.require_write_auth(x_ml_write_token="s3cret-token-value"))
+        finally:
+            restore()
+
+    def test_ml_server_write_auth_dependency_wrong_token_401(self) -> None:
+        ml_server = self._load_ml_server_module()
+        restore = self._patch_ml_write_auth(
+            ml_server, bypass=False, token="s3cret-token-value",
+        )
+        try:
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(ml_server.require_write_auth(x_ml_write_token="wrong"))
+            self.assertEqual(ctx.exception.status_code, 401)
+            # Neither the submitted nor the expected token may surface.
+            detail = str(ctx.exception.detail)
+            self.assertNotIn("s3cret-token-value", detail)
+            self.assertNotIn("wrong", detail)
+        finally:
+            restore()
+
+    def test_ml_server_write_auth_dependency_missing_token_401(self) -> None:
+        ml_server = self._load_ml_server_module()
+        restore = self._patch_ml_write_auth(
+            ml_server, bypass=False, token="s3cret-token-value",
+        )
+        try:
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(ml_server.require_write_auth(x_ml_write_token=None))
+            self.assertEqual(ctx.exception.status_code, 401)
+        finally:
+            restore()
+
+    def test_ml_server_write_auth_dependency_defensive_no_token_503(self) -> None:
+        ml_server = self._load_ml_server_module()
+        # Defensive branch: bypass off and token unset, but somehow
+        # _WRITE_AUTH_MISCONFIGURED wasn't set (shouldn't happen — belt
+        # and suspenders).  Must still refuse.
+        restore = self._patch_ml_write_auth(
+            ml_server, bypass=False, token="", misconfigured=False,
+        )
+        try:
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(ml_server.require_write_auth(x_ml_write_token="anything"))
+            self.assertEqual(ctx.exception.status_code, 503)
+        finally:
+            restore()
+
+    def test_ml_server_write_auth_uses_constant_time_compare(self) -> None:
+        source = (REPO_ROOT / "server" / "ml_server.py").read_text(encoding="utf-8")
+        # Must import and use hmac.compare_digest for the token compare.
+        self.assertIn("import hmac", source)
+        self.assertIn("hmac.compare_digest", source)
+        # The token must NEVER be compared with plain == anywhere in the file.
+        self.assertNotIn("== ML_WRITE_AUTH_TOKEN", source)
+        self.assertNotIn("ML_WRITE_AUTH_TOKEN ==", source)
+        self.assertNotIn("provided == expected", source)
+
+    def test_ml_server_write_endpoints_have_auth_dependency(self) -> None:
+        source = (REPO_ROOT / "server" / "ml_server.py").read_text(encoding="utf-8")
+        # /reload and /score must declare the auth dependency on the decorator.
+        self.assertIn(
+            '@app.post("/reload", dependencies=[Depends(require_write_auth)])',
+            source,
+        )
+        self.assertIn(
+            '@app.post("/score", dependencies=[Depends(require_write_auth)])',
+            source,
+        )
+        # /health stays open — must NOT declare the auth dependency.
+        # (Match the bare GET decorator.)
+        self.assertIn('@app.get("/health")', source)
+        self.assertNotIn(
+            '@app.get("/health", dependencies=[Depends(require_write_auth)])',
+            source,
+        )
+
+    def test_ml_server_write_auth_via_asgi_reload_blocks_wrong_token(self) -> None:
+        ml_server = self._load_ml_server_module()
+        restore = self._patch_ml_write_auth(
+            ml_server, bypass=False, token="s3cret-token-value",
+        )
+        try:
+            status, payload = self._asgi_json_request(
+                ml_server.app, "POST", "/reload",
+                headers={"X-ML-Write-Token": "wrong"},
+            )
+            self.assertEqual(status, 401)
+            # Token MUST NOT be reflected in the error body.
+            self.assertNotIn("s3cret-token-value", json.dumps(payload))
+            self.assertNotIn("wrong", json.dumps(payload).lower().replace("invalid", ""))
+        finally:
+            restore()
+
+    def test_ml_server_write_auth_via_asgi_reload_blocks_missing_token(self) -> None:
+        ml_server = self._load_ml_server_module()
+        restore = self._patch_ml_write_auth(
+            ml_server, bypass=False, token="s3cret-token-value",
+        )
+        try:
+            status, _payload = self._asgi_json_request(
+                ml_server.app, "POST", "/reload",  # no headers
+            )
+            self.assertEqual(status, 401)
+        finally:
+            restore()
+
+    def test_ml_server_write_auth_via_asgi_reload_passes_with_correct_token(self) -> None:
+        ml_server = self._load_ml_server_module()
+        restore = self._patch_ml_write_auth(
+            ml_server, bypass=False, token="s3cret-token-value",
+        )
+        try:
+            status, _payload = self._asgi_json_request(
+                ml_server.app, "POST", "/reload",
+                headers={"X-ML-Write-Token": "s3cret-token-value"},
+            )
+            # The auth gate must let this through; the body status reflects
+            # the handler's own behaviour (cooldown / 200 / etc.) — we only
+            # need to prove the auth layer did NOT return 401/503.
+            self.assertNotEqual(status, 401)
+            self.assertNotEqual(status, 503)
+        finally:
+            restore()
+
+    def test_ml_server_write_auth_via_asgi_misconfig_returns_503(self) -> None:
+        ml_server = self._load_ml_server_module()
+        restore = self._patch_ml_write_auth(
+            ml_server, bypass=False, token="anything", misconfigured=True,
+        )
+        try:
+            status, payload = self._asgi_json_request(
+                ml_server.app, "POST", "/reload",
+                headers={"X-ML-Write-Token": "anything"},
+            )
+            self.assertEqual(status, 503)
+            # detail should mention auth misconfig but NEVER the token value.
+            detail = json.dumps(payload).lower()
+            self.assertIn("auth", detail)
+            self.assertNotIn("anything", json.dumps(payload))
+        finally:
+            restore()
+
+    def test_ml_server_health_stays_open_under_all_auth_configs(self) -> None:
+        ml_server = self._load_ml_server_module()
+        # /health is read-only and used by watchdogs; it must NOT be gated
+        # by the write-auth dependency in ANY config.
+        configs = [
+            dict(bypass=True, token="", misconfigured=False),         # loopback default
+            dict(bypass=False, token="t", misconfigured=False),       # token required
+            dict(bypass=False, token="", misconfigured=True),         # misconfigured
+        ]
+        for cfg in configs:
+            restore = self._patch_ml_write_auth(ml_server, **cfg)
+            try:
+                status, payload = self._asgi_json_request(ml_server.app, "GET", "/health")
+                self.assertEqual(status, 200, msg=f"/health blocked under config {cfg}")
+                # Sanity: the payload must look like the health shape.
+                self.assertIn("status", payload)
+            finally:
+                restore()
+
+    def test_ml_server_write_auth_token_never_logged_in_dependency(self) -> None:
+        source = (REPO_ROOT / "server" / "ml_server.py").read_text(encoding="utf-8")
+        # Find the require_write_auth body bounds — pin the contract that
+        # the function body never logs / echoes the user-supplied token.
+        start = source.index("async def require_write_auth(")
+        end = source.index("\n\n\n", start) if "\n\n\n" in source[start:] else len(source)
+        body = source[start:end]
+        # No log emission with the submitted or expected token value.
+        for forbidden in (
+            "log.info(x_ml_write_token",
+            "log.warning(x_ml_write_token",
+            "log.error(x_ml_write_token",
+            "log.debug(x_ml_write_token",
+            "log.info(ML_WRITE_AUTH_TOKEN",
+            "log.warning(ML_WRITE_AUTH_TOKEN",
+            "log.error(ML_WRITE_AUTH_TOKEN",
+            "log.debug(ML_WRITE_AUTH_TOKEN",
+            "log.info(expected",
+            "log.warning(expected",
+            "log.error(expected",
+            "log.debug(expected",
+            "log.info(provided",
+            "log.warning(provided",
+            "log.error(provided",
+            "log.debug(provided",
+        ):
+            self.assertNotIn(forbidden, body, msg=f"token leaks via {forbidden!r}")
+        # Error detail strings must not reflect either token.
+        # (We can't easily inspect runtime detail without running the gate,
+        # which the per-401 tests above already do; this guards the source.)
+        self.assertNotIn("detail=ML_WRITE_AUTH_TOKEN", body)
+        self.assertNotIn("detail=expected", body)
+        self.assertNotIn("detail=provided", body)
+        self.assertNotIn("detail=x_ml_write_token", body)
+
+    def test_run_persistent_stack_ml_write_auth_block_present(self) -> None:
+        script = (REPO_ROOT / "server" / "run_persistent_stack.sh").read_text(encoding="utf-8")
+        # Loopback-bypass default mirrors DASH_AUTH_LOCAL_BYPASS.
+        self.assertIn('ML_WRITE_AUTH_LOCAL_BYPASS="${ML_WRITE_AUTH_LOCAL_BYPASS:-}"', script)
+        self.assertIn('if is_loopback_bind "${ML_SERVER_BIND}"; then', script)
+        self.assertIn('ML_WRITE_AUTH_LOCAL_BYPASS="true"', script)
+        self.assertIn('ML_WRITE_AUTH_LOCAL_BYPASS="false"', script)
+        # Fail-closed: non-loopback + bypass=true => exit 1
+        self.assertIn(
+            'ERROR: ML_WRITE_AUTH_LOCAL_BYPASS=true is not allowed when ML_SERVER_BIND is non-loopback',
+            script,
+        )
+        # Fail-closed: non-loopback + no token => exit 1
+        self.assertIn(
+            'ERROR: ML_WRITE_AUTH_TOKEN must be set when ML_SERVER_BIND is non-loopback',
+            script,
+        )
+        # The shell must export both vars so the python child sees them.
+        self.assertIn("export ML_WRITE_AUTH_LOCAL_BYPASS", script)
+        self.assertIn("export ML_WRITE_AUTH_TOKEN", script)
+        # Bash syntax sanity.
+        proc = run_cmd(["bash", "-n", "server/run_persistent_stack.sh"], cwd=REPO_ROOT)
+        self.assertEqual(proc.returncode, 0, msg=f"{proc.stdout}\n{proc.stderr}")
 
     def test_ibkr_bridge_uses_timezone_aware_utc_datetimes(self) -> None:
         source = (REPO_ROOT / "server" / "ibkr_gamma_bridge.py").read_text(encoding="utf-8")
