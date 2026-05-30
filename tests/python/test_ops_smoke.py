@@ -4582,10 +4582,16 @@ class OpsSmokeTests(unittest.TestCase):
         pre_close_utc = datetime(2026, 3, 10, 19, 59, tzinfo=timezone.utc)  # 15:59 ET
         close_utc = datetime(2026, 3, 10, 20, 0, tzinfo=timezone.utc)  # 16:00 ET
         weekend_utc = datetime(2026, 3, 14, 14, 0, tzinfo=timezone.utc)  # Saturday
+        holiday_utc = datetime(2026, 11, 26, 15, 0, tzinfo=timezone.utc)  # Thanksgiving
+        halfday_pre_close_utc = datetime(2026, 11, 27, 17, 59, tzinfo=timezone.utc)  # 12:59 ET
+        halfday_close_utc = datetime(2026, 11, 27, 18, 0, tzinfo=timezone.utc)  # 13:00 ET
 
         self.assertFalse(bridge._is_market_session_closed(pre_close_utc))
         self.assertTrue(bridge._is_market_session_closed(close_utc))
         self.assertTrue(bridge._is_market_session_closed(weekend_utc))
+        self.assertTrue(bridge._is_market_session_closed(holiday_utc))
+        self.assertFalse(bridge._is_market_session_closed(halfday_pre_close_utc))
+        self.assertTrue(bridge._is_market_session_closed(halfday_close_utc))
 
     def test_alert_system_cross_and_xss_hardening_contract_present(self) -> None:
         source = (REPO_ROOT / "alert_system.js").read_text(encoding="utf-8")

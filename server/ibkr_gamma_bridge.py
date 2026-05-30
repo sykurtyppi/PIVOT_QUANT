@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import sys
 import threading
 import time
 import urllib.error
@@ -9,6 +10,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 try:
     from zoneinfo import ZoneInfo
@@ -16,6 +18,13 @@ except Exception:  # pragma: no cover
     ZoneInfo = None
 
 from ib_insync import IB, Index, Option, Stock, ContFuture
+
+ROOT = Path(__file__).resolve().parents[1]
+_SCRIPTS_DIR = str(ROOT / "scripts")
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+
+from trading_calendar import is_trading_day, session_close_et
 
 log = logging.getLogger("ibkr_gamma_bridge")
 
@@ -111,13 +120,13 @@ def _parse_retry_after_seconds(raw_value) -> float | None:
 
 
 def _is_market_session_closed(now_utc: datetime) -> bool:
-    if now_utc.weekday() >= 5:
-        return True
     if NY_TZ is None:
         # Fallback without zoneinfo: conservative close estimate.
-        return now_utc.hour >= 21
+        return now_utc.weekday() >= 5 or now_utc.hour >= 21
     now_et = now_utc.astimezone(NY_TZ)
-    return now_et.hour > 16 or (now_et.hour == 16 and now_et.minute >= 0)
+    if not is_trading_day(now_et.date()):
+        return True
+    return now_et.time() >= session_close_et(now_et.date())
 
 
 def _prune_mda_gamma_cache(now_mono=None):
