@@ -40,8 +40,12 @@ RF_CANDIDATE_MANIFEST = (
 )
 LEGACY_CANDIDATE_MANIFEST = "manifest_latest.json"
 
-# Ensure sibling scripts (migrate_db, trading_calendar) import whether this
-# file is run as a script (sys.path[0] == scripts/) or loaded by file path.
+# Ensure both repo packages (ml.*) and sibling scripts (migrate_db,
+# trading_calendar) import whether this file is run as a script
+# (sys.path[0] == scripts/) or loaded by file path.
+_ROOT_DIR = str(ROOT)
+if _ROOT_DIR not in sys.path:
+    sys.path.insert(0, _ROOT_DIR)
 _SCRIPTS_DIR = str(Path(__file__).resolve().parent)
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)

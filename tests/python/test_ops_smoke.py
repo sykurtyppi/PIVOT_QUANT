@@ -8698,6 +8698,56 @@ class OpsSmokeTests(unittest.TestCase):
         }
         self.assertIsNone(report.summarize_tradeability_blockers(clean))
 
+    def test_report_tradeability_blockers_imports_ml_package_when_run_as_script(self) -> None:
+        """generate_daily_ml_report.py must add the repo root to sys.path.
+
+        In production the file is executed as ``scripts/generate_daily_ml_report.py``,
+        so ``sys.path[0]`` is ``scripts/``.  Without adding the repo root, the
+        diagnostic import of ``ml.thresholds`` is swallowed by the defensive
+        try/except and active negative-utility horizons disappear from the
+        report.
+        """
+        module_path = REPO_ROOT / "scripts" / "generate_daily_ml_report.py"
+        old_path = list(sys.path)
+        old_modules = {
+            name: sys.modules.get(name)
+            for name in ("ml", "ml.thresholds")
+            if name in sys.modules
+        }
+        try:
+            for name in ("ml.thresholds", "ml"):
+                sys.modules.pop(name, None)
+            sys.path = [
+                p for p in sys.path
+                if p not in {"", str(REPO_ROOT), str(REPO_ROOT / "scripts")}
+            ]
+            report = load_module(
+                "generate_daily_ml_report_script_path_neg_util",
+                module_path,
+            )
+            manifest = {
+                "thresholds_meta": {
+                    "break": {
+                        "60": {
+                            "score": -0.976,
+                            "selected_utility_avg": -0.0488,
+                            "fallback": False,
+                            "guard_applied": False,
+                        }
+                    }
+                }
+            }
+            note = report.summarize_tradeability_blockers(manifest)
+        finally:
+            sys.path = old_path
+            for name in ("ml.thresholds", "ml"):
+                sys.modules.pop(name, None)
+            sys.modules.update(old_modules)
+
+        self.assertIsNotNone(note)
+        self.assertIn("active negative-utility horizons", note)
+        self.assertIn("break:60m", note)
+
     def test_train_artifacts_threshold_override_parser_and_resolver(self) -> None:
         module = load_module(
             "train_rf_artifacts_threshold_overrides",

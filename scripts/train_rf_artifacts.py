@@ -593,9 +593,9 @@ def main() -> None:
             "Aggregate utility_bps SCORE floor required for a live threshold. "
             "When threshold_meta.score <= this value and the disable flag is on, "
             "the threshold is set to no-trade.  NOTE: this is a SUM (selected_utility_sum) "
-            "comparison, not a per-signal-mean comparison; a positive sum with a few "
-            "high-edge signals can pass while a negative per-signal mean across many "
-            "signals also passes if the sum is still above this floor.  See the "
+            "comparison, not a per-signal-mean comparison; a negative aggregate and "
+            "negative per-signal mean can still pass if the sum is above a negative "
+            "configured floor.  See the "
             "diagnostic fields utility_avg_is_negative / would_disable_under_zero_mean "
             "in threshold_meta for the per-signal-mean view."
         ),
