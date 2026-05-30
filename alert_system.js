@@ -716,8 +716,6 @@ class ProfessionalAlertSystem {
     }
 
     checkAllAlerts() {
-        if (!window.enhancedDataFetcher) return;
-
         const currentPrice = this.getCurrentPrice();
         if (!Number.isFinite(currentPrice)) return;
 

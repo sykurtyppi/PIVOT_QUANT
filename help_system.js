@@ -258,29 +258,28 @@ class ProfessionalHelpSystem {
                         title: "Data Sources & APIs",
                         content: `
                             <h3>Market Data Integration</h3>
-                            <p>The calculator uses multiple data sources for maximum reliability:</p>
+                            <p>The calculator uses the local Pivot Quant data services so browser clients do not need third-party API keys.</p>
 
                             <h4>Primary Sources:</h4>
                             <ol>
-                                <li><strong>Yahoo Finance:</strong> Real-time quotes and historical data</li>
-                                <li><strong>Finnhub API:</strong> Professional market data (requires API key)</li>
-                                <li><strong>Alpha Vantage:</strong> Technical indicators and EOD data</li>
+                                <li><strong>Yahoo proxy:</strong> Local service for Yahoo market data requests</li>
+                                <li><strong>ML collector:</strong> Local event and scoring pipeline used by the live system</li>
+                                <li><strong>Historical store:</strong> Local database-backed events, labels, and reports</li>
                             </ol>
 
                             <h4>Fallback System:</h4>
-                            <p>The system automatically tries sources in order:</p>
+                            <p>Server-side services handle retry and fallback behavior:</p>
                             <ul>
-                                <li>Yahoo Finance (free, no key required)</li>
-                                <li>Finnhub (if API key configured)</li>
-                                <li>Alpha Vantage (if API key configured)</li>
-                                <li>CORS proxies for access restrictions</li>
+                                <li>Proxy-first Yahoo requests for browser and collector paths</li>
+                                <li>Direct Yahoo fallback only when the proxy is unavailable</li>
+                                <li>Local cached/persisted data for reports and model evaluation</li>
                             </ul>
 
                             <h4>Rate Limiting:</h4>
                             <ul>
-                                <li>Yahoo: 2000 requests/minute</li>
-                                <li>Finnhub: 60 requests/minute</li>
-                                <li>Alpha Vantage: 5 requests/minute</li>
+                                <li>Browser clients should not embed provider API keys</li>
+                                <li>External-provider limits are enforced in server-side integrations</li>
+                                <li>Operational health is visible through the local server and collector health endpoints</li>
                             </ul>
                         `,
                         difficulty: "Advanced"

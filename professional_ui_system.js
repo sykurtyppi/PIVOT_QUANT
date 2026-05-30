@@ -682,20 +682,7 @@ class ProfessionalUISystem {
 
             case 'error':
                 this.hideLoading();
-                this.showNotification('error', 'Data Fetch Failed', message, {
-                    persistent: false,
-                    actions: [
-                        {
-                            id: 'retry',
-                            label: 'Retry',
-                            handler: () => {
-                                if (window.enhancedDataFetcher) {
-                                    window.enhancedDataFetcher.fetchAssetData();
-                                }
-                            }
-                        }
-                    ]
-                });
+                this.showNotification('error', 'Data Fetch Failed', message, { persistent: false });
                 break;
         }
     }
