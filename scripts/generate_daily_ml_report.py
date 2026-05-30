@@ -46,7 +46,7 @@ _SCRIPTS_DIR = str(Path(__file__).resolve().parent)
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
-from trading_calendar import is_trading_day
+from trading_calendar import is_trading_day, roll_back_to_trading_day
 
 try:
     from migrate_db import migrate_connection
@@ -254,12 +254,6 @@ def ensure_daily_metrics_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def _roll_back_to_weekday(day: date) -> date:
-    while day.weekday() >= 5:
-        day -= timedelta(days=1)
-    return day
-
-
 def parse_report_date(date_arg: str | None) -> date:
     now_et = datetime.now(ET_TZ)
     if date_arg:
@@ -267,7 +261,7 @@ def parse_report_date(date_arg: str | None) -> date:
     # Default to the latest completed market day (>= 16:00 ET).
     market_close_et = dtime(16, 0)
     candidate = now_et.date() if now_et.time() >= market_close_et else (now_et - timedelta(days=1)).date()
-    return _roll_back_to_weekday(candidate)
+    return roll_back_to_trading_day(candidate)
 
 
 def day_bounds_ms(report_day: date) -> tuple[int, int]:

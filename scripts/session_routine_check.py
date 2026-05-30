@@ -26,6 +26,12 @@ DEFAULT_DB = ROOT / "data" / "pivot_events.sqlite"
 DEFAULT_OPS_STATUS_URL = "http://127.0.0.1:3000/api/ops/status"
 DEFAULT_GAMMA_URL = "http://127.0.0.1:5001/gamma?symbol=SPY&expiry=90dte&limit=10"
 
+_SCRIPTS_DIR = str(ROOT / "scripts")
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+
+from trading_calendar import is_trading_day
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="PivotQuant session routine checks.")
@@ -407,7 +413,7 @@ def main() -> int:
     if args.force_phase:
         due_phases = [args.force_phase]
     else:
-        if now_et.weekday() >= 5:
+        if not is_trading_day(now_et.date()):
             return 0
         for phase, (hour, minute) in phase_windows.items():
             if in_window(now_et, hour=hour, minute=minute, window_min=window_min):

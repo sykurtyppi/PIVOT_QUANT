@@ -10,6 +10,7 @@ here.
 Public surface:
   - ``NYSE_HOLIDAYS``     — set[date], full-closure holidays (2025–2027).
   - ``is_trading_day(d)`` — True iff ``d`` is a weekday and not a full holiday.
+  - ``roll_back_to_trading_day(d)`` — latest trading day at or before ``d``.
   - ``NYSE_HALF_DAYS``    — dict[date, time], early-close (1:00 PM ET) sessions.
   - ``is_half_day(d)``    — True iff ``d`` is a known NYSE early-close session.
   - ``session_close_et(d)`` — the regular or early close time for a trading day.
@@ -23,7 +24,7 @@ Update annually. Source: https://www.nyse.com/markets/hours-calendars
 
 from __future__ import annotations
 
-from datetime import date, time as dtime
+from datetime import date, time as dtime, timedelta
 
 # Regular NYSE cash session (Eastern Time).
 REGULAR_SESSION_OPEN_ET: dtime = dtime(9, 30)
@@ -94,6 +95,14 @@ def is_trading_day(d: date) -> bool:
     Half-days are still trading days (the market is open, just closing early).
     """
     return d.weekday() < 5 and d not in NYSE_HOLIDAYS
+
+
+def roll_back_to_trading_day(d: date) -> date:
+    """Return the latest NYSE trading day at or before ``d``."""
+    day = d
+    while not is_trading_day(day):
+        day -= timedelta(days=1)
+    return day
 
 
 def is_half_day(d: date) -> bool:
