@@ -30,6 +30,16 @@ if str(ROOT) not in sys.path:
 from ml.calibration import ProbabilityCalibrator
 from ml.features import drop_features, build_feature_row
 from ml.thresholds import NO_SIGNAL_THRESHOLD, select_threshold, utility_bps_for_target
+# Shared with scripts/train_rf_artifacts.py so refit and train apply identical
+# per-(target, horizon) min-signals overrides (no flat-vs-override drift).
+from ml.threshold_overrides import parse_threshold_overrides, resolve_threshold_override
+
+
+def _coerce_min_signals(raw_value: str) -> int:
+    value = int(raw_value)
+    if value < 1:
+        raise ValueError(f"min_signals must be >= 1, got {raw_value!r}")
+    return int(value)
 
 DEFAULT_DUCKDB = os.getenv("DUCKDB_PATH", "data/pivot_training.duckdb")
 DEFAULT_VIEW = os.getenv("DUCKDB_VIEW", "training_events_v1")
@@ -216,6 +226,16 @@ def main() -> None:
         default=int(_env_float("CALIB_REFIT_THRESHOLD_MIN_SIGNALS", 10)),
     )
     parser.add_argument(
+        "--threshold-min-signals-overrides",
+        default=os.getenv("RF_THRESHOLD_MIN_SIGNALS_OVERRIDES", "break:15=8,break:30=8,break:60=6"),
+        help=(
+            "Per target/horizon minimum signal counts, mirroring "
+            "train_rf_artifacts.py so refit re-tuning does not demand more "
+            "predicted positives than train and flip sparse heads to fallback. "
+            "Format: 'break:15=8,break:30=8,break:60=6,reject:*=10'"
+        ),
+    )
+    parser.add_argument(
         "--threshold-trade-cost-bps",
         type=float,
         default=default_trade_cost_bps,
@@ -323,8 +343,22 @@ def main() -> None:
     updated_pairs = 0
     attempted_pairs = 0
 
+    threshold_min_signals_overrides = parse_threshold_overrides(
+        args.threshold_min_signals_overrides,
+        value_cast=_coerce_min_signals,
+        option_name="--threshold-min-signals-overrides",
+    )
+
     for target, horizon, model_name in pairs:
         attempted_pairs += 1
+        effective_min_signals = int(
+            resolve_threshold_override(
+                target=target,
+                horizon=horizon,
+                base_value=int(args.threshold_min_signals),
+                overrides=threshold_min_signals_overrides,
+            )
+        )
         model_path = model_dir / model_name
         if not model_path.exists():
             results.append(PairResult(target, horizon, "skipped", f"missing model file {model_name}"))
@@ -399,7 +433,7 @@ def main() -> None:
             )
             continue
 
-        min_tune_events = int(max(args.min_threshold_events, args.threshold_min_signals)) if args.retune_thresholds else 0
+        min_tune_events = int(max(args.min_threshold_events, effective_min_signals)) if args.retune_thresholds else 0
         (
             X_calib_fit,
             y_calib_fit,
@@ -449,7 +483,7 @@ def main() -> None:
             "evaluated_candidates": 0,
             "fallback": True,
             "precision_floor": float(args.precision_floor),
-            "min_signals": int(args.threshold_min_signals),
+            "min_signals": effective_min_signals,
             "trade_cost_bps": float(args.threshold_trade_cost_bps),
             "stability_band": float(threshold_stability_band),
             "top_candidates": [],
@@ -495,7 +529,7 @@ def main() -> None:
                         y_prob,
                         objective=args.threshold_objective,
                         precision_floor=float(args.precision_floor),
-                        min_signals=int(args.threshold_min_signals),
+                        min_signals=effective_min_signals,
                         default_threshold=optimal_threshold,
                         utility_per_signal=utility_values,
                         stability_band=float(threshold_stability_band),
@@ -546,7 +580,7 @@ def main() -> None:
             "precision_floor": float(args.precision_floor),
             "retune_thresholds": bool(args.retune_thresholds),
             "threshold_objective": args.threshold_objective,
-            "threshold_min_signals": int(args.threshold_min_signals),
+            "threshold_min_signals": effective_min_signals,
             "threshold_trade_cost_bps": float(args.threshold_trade_cost_bps),
             "threshold_stability_band": float(threshold_stability_band),
             "threshold_min_utility_score": float(args.threshold_min_utility_score),
@@ -594,6 +628,7 @@ def main() -> None:
         "calib_min_fit_events": int(args.calib_min_fit_events),
         "threshold_objective": args.threshold_objective,
         "threshold_min_signals": int(args.threshold_min_signals),
+        "threshold_min_signals_overrides": args.threshold_min_signals_overrides,
         "threshold_trade_cost_bps": float(args.threshold_trade_cost_bps),
         "threshold_stability_band": float(args.threshold_stability_band),
         "results": [

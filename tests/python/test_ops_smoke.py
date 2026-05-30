@@ -747,6 +747,92 @@ class OpsSmokeTests(unittest.TestCase):
         filtered = build_labels.forward_bars_after_touch(bars, 1_000)
         self.assertEqual([int(bar["ts"]) for bar in filtered], [2_000])
 
+    def test_build_labels_normalize_bar_interval_rejects_ambiguous_grid(self) -> None:
+        # P0-A: events with no deterministic bar grid (NULL/0/invalid
+        # bar_interval_sec) must not be labeled — otherwise fetch_bars walks a
+        # heterogeneous 5/15/30/60m mix (mixed-interval label leakage).
+        build_labels = load_module(
+            "pq_build_labels_interval_guard_test",
+            REPO_ROOT / "scripts" / "build_labels.py",
+        )
+        fn = build_labels.normalize_bar_interval
+        # Ambiguous -> None (skip the row)
+        self.assertIsNone(fn(None))
+        self.assertIsNone(fn(0))
+        self.assertIsNone(fn(-5))
+        self.assertIsNone(fn("not-an-int"))
+        self.assertIsNone(fn(60.5))
+        self.assertIsNone(fn(True))   # bool must not coerce to 1
+        self.assertIsNone(fn(False))
+        # Valid grid -> positive int
+        self.assertEqual(fn(300), 300)
+        self.assertEqual(fn("900"), 900)
+        self.assertEqual(fn(60.0), 60)
+
+    def test_score_numeric_coercion_helpers_reject_bool(self) -> None:
+        # P1-B: int(True)==1 / float(True)==1.0 would silently inflate
+        # integer-coded regime votes (or_breakout / gamma_mode / regime_type).
+        ml_server = load_module(
+            "pq_ml_server_bool_coercion_test",
+            REPO_ROOT / "server" / "ml_server.py",
+        )
+        self.assertIsNone(ml_server._to_int(True))
+        self.assertIsNone(ml_server._to_int(False))
+        self.assertIsNone(ml_server._to_float(True))
+        self.assertIsNone(ml_server._to_float(False))
+        # Genuine numerics still pass through unchanged.
+        self.assertEqual(ml_server._to_int(1), 1)
+        self.assertEqual(ml_server._to_int("2"), 2)
+        self.assertEqual(ml_server._to_float(0.5), 0.5)
+        # _to_bool still accepts bools (must not regress).
+        self.assertTrue(ml_server._to_bool(True))
+        self.assertFalse(ml_server._to_bool(False))
+
+    def test_governance_numeric_coercion_helpers_reject_bool(self) -> None:
+        # P1-B sibling path: promotion-gate metric coercion must reject bool.
+        gov = load_module(
+            "pq_model_governance_bool_coercion_test",
+            REPO_ROOT / "scripts" / "model_governance.py",
+        )
+        self.assertIsNone(gov.to_int(True))
+        self.assertIsNone(gov.to_float(True))
+        self.assertEqual(gov.to_int(3), 3)
+        self.assertEqual(gov.to_float("1.5"), 1.5)
+
+    def test_refit_calibration_mirrors_train_min_signals_overrides(self) -> None:
+        # P1-C: refit must apply the same per-(target, horizon) min-signals
+        # overrides as train, sharing ml.threshold_overrides as the single
+        # source of truth (no flat-vs-override drift that flips sparse break
+        # heads to fallback).
+        refit = load_module(
+            "pq_refit_calibration_overrides_test",
+            REPO_ROOT / "scripts" / "refit_calibration.py",
+        )
+        train = load_module(
+            "pq_train_overrides_parity_test",
+            REPO_ROOT / "scripts" / "train_rf_artifacts.py",
+        )
+        # Both import the same shared callables.
+        self.assertIs(refit.parse_threshold_overrides, train._parse_threshold_overrides)
+        self.assertIs(refit.resolve_threshold_override, train._resolve_threshold_override)
+
+        spec = "break:15=8,break:30=8,break:60=6"
+        ov = refit.parse_threshold_overrides(
+            spec, value_cast=refit._coerce_min_signals,
+            option_name="--threshold-min-signals-overrides",
+        )
+        # Sparse break heads resolve to the override, not the flat base of 10.
+        self.assertEqual(
+            int(refit.resolve_threshold_override(
+                target="break", horizon=60, base_value=10, overrides=ov)),
+            6,
+        )
+        self.assertEqual(
+            int(refit.resolve_threshold_override(
+                target="reject", horizon=15, base_value=10, overrides=ov)),
+            10,  # falls back to base (no reject override in this spec)
+        )
+
     def test_build_labels_break_sustain_one_triggers_on_first_bar(self) -> None:
         build_labels = load_module(
             "pq_build_labels_sustain_test",
