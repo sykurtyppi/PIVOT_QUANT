@@ -105,6 +105,14 @@ export class QuantPivotEngine {
             const cachedResult = this._getCachedResult(cacheKey);
             if (cachedResult) {
                 this.monitor.recordCacheHit(sessionId);
+                // The early return previously skipped endSession, leaving the
+                // session in `metrics.sessions` as `status: 'active'` forever.
+                // _cleanupSessions only evicts completed sessions, so under
+                // cache-hit-heavy workloads the map grew without bound
+                // (session leak).  End the session with a cacheHit marker so
+                // it transitions to `completed` and becomes eligible for
+                // eviction.
+                this.monitor.endSession(sessionId, { success: true, cacheHit: true });
                 return cachedResult;
             }
 
@@ -354,8 +362,22 @@ export class QuantPivotEngine {
             this.cacheExpiry.delete(oldestKey);
         }
 
+        // Guard against `ttlMs` being undefined / NaN / non-finite.  When
+        // QuantPivotEngine is constructed directly with a partial config that
+        // doesn't include `defaultOptions.cacheTTL`, the caller's
+        // `calcOptions.cacheTTL` arrives here as undefined; `Date.now() +
+        // undefined === NaN`, and every later read sees `Date.now() < NaN`
+        // as false => every entry is treated as expired => silent cache
+        // death.  Fall back to the ConfigurationManager default
+        // (300_000 ms = 5 min); also clamp negatives to 0 so a misconfigured
+        // value disables caching rather than producing past-dated expiries.
+        const DEFAULT_CACHE_TTL_MS = 300_000;
+        const effectiveTtl = Number.isFinite(ttlMs)
+            ? Math.max(0, Number(ttlMs))
+            : DEFAULT_CACHE_TTL_MS;
+
         this.cache.set(key, result);
-        this.cacheExpiry.set(key, Date.now() + ttlMs);
+        this.cacheExpiry.set(key, Date.now() + effectiveTtl);
     }
 
     /**
