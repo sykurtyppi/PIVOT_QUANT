@@ -514,6 +514,21 @@ export class MathematicalModels {
      * Calculate maximum drawdown
      */
     calculateMaxDrawdown(ohlcData) {
+        // P1-D: sibling risk metrics (calculateSharpeRatio at line 728,
+        // calculateSortinoRatio at 748, calculateCalmarRatio at 767) all
+        // guard with `if (!Array.isArray(...) || length < 2) return 0;`.
+        // calculateMaxDrawdown was the sibling that was missed — previously
+        // `ohlcData[0].close` threw a TypeError on empty input.  Returning
+        // 0 isn't possible here because this function returns an object;
+        // return the zero-state structural equivalent instead.
+        if (!Array.isArray(ohlcData) || ohlcData.length < 2) {
+            return {
+                percentage: 0,
+                absolute: 0,
+                period: { start: 0, end: 0 },
+                duration: 0
+            };
+        }
         let peak = ohlcData[0].close;
         let maxDrawdown = 0;
         let maxDrawdownPeriod = { start: 0, end: 0 };
@@ -680,9 +695,23 @@ export class MathematicalModels {
     }
 
     calculateHistoricalVaR(ohlcData, confidence = 0.05) {
+        // P1-C: previously this dereferenced sortedReturns[length] when
+        // confidence === 1 (index out of bounds → undefined → NaN in the
+        // returned percentage) and threw on empty ohlcData via the
+        // currentPrice access.  Fix: guard empty input and clamp the index
+        // to [0, len-1].  The original index formula (Math.floor(len * c))
+        // is preserved exactly so the returned quantile direction / value
+        // is byte-identical for all confidence ∈ [0, 1) on non-empty input.
+        if (!Array.isArray(ohlcData) || ohlcData.length < 2) {
+            return { percentage: null, absolute: null, confidence: confidence, method: 'historical' };
+        }
         const returns = this._calculateReturns(ohlcData, 'close-to-close');
+        if (!Array.isArray(returns) || returns.length === 0) {
+            return { percentage: null, absolute: null, confidence: confidence, method: 'historical' };
+        }
         const sortedReturns = [...returns].sort((a, b) => a - b);
-        const index = Math.floor(returns.length * confidence);
+        const rawIndex = Math.floor(returns.length * confidence);
+        const index = Math.min(returns.length - 1, Math.max(0, rawIndex));
         const currentPrice = ohlcData[ohlcData.length - 1].close;
 
         const varReturn = sortedReturns[index];
@@ -696,7 +725,18 @@ export class MathematicalModels {
     }
 
     calculateMonteCarloVaR(ohlcData, confidence = 0.05, simulations = 10000) {
+        // P1-C: same edge-case hardening as calculateHistoricalVaR.
+        // Preserves the original index formula (Math.floor(sims * c)) for
+        // all confidence ∈ [0, 1) on non-empty input; clamps to valid range
+        // only at the boundary confidence=1; and rejects empty input
+        // explicitly instead of throwing on the currentPrice access.
+        if (!Array.isArray(ohlcData) || ohlcData.length < 2) {
+            return { percentage: null, absolute: null, confidence: confidence, method: 'monte_carlo', simulations: simulations };
+        }
         const returns = this._calculateReturns(ohlcData, 'close-to-close');
+        if (!Array.isArray(returns) || returns.length === 0) {
+            return { percentage: null, absolute: null, confidence: confidence, method: 'monte_carlo', simulations: simulations };
+        }
         const mean = this._calculateMean(returns);
         const stdDev = Math.sqrt(this._calculateVariance(returns));
         const currentPrice = ohlcData[ohlcData.length - 1].close;
@@ -708,7 +748,8 @@ export class MathematicalModels {
         }
 
         simulatedReturns.sort((a, b) => a - b);
-        const index = Math.floor(simulations * confidence);
+        const rawIndex = Math.floor(simulations * confidence);
+        const index = Math.min(simulations - 1, Math.max(0, rawIndex));
         const varReturn = simulatedReturns[index];
 
         return {
@@ -902,15 +943,16 @@ export class MathematicalModels {
     }
 
     // Normal distribution functions
+    // P1-A: previously this cached results by Math.round(x * 100), which
+    // collided distinct inputs (Φ(1.96) and Φ(1.9649) both keyed to 196 and
+    // returned whichever was set first).  P-values in the tails were
+    // silently quantized to ±0.01 in x — material at |x| > 2.  The _erf
+    // approximation below is cheap; removing the cache is the simplest
+    // correctness-preserving fix.  The cache.normals Map declaration on
+    // the constructor remains (unused now) to keep the cache object shape
+    // stable; the _precomputeNormalTable call still runs but is now a no-op.
     _normalCDF(x) {
-        const key = Math.round(x * 100);
-        if (this.cache.normals.has(key)) {
-            return this.cache.normals.get(key);
-        }
-
-        const result = 0.5 * (1 + this._erf(x / Math.sqrt(2)));
-        this.cache.normals.set(key, result);
-        return result;
+        return 0.5 * (1 + this._erf(x / Math.sqrt(2)));
     }
 
     _normalInverse(p) {
@@ -980,10 +1022,11 @@ export class MathematicalModels {
     }
 
     _precomputeNormalTable() {
-        for (let i = -400; i <= 400; i++) {
-            const x = i / 100;
-            this._normalCDF(x); // This will cache the result
-        }
+        // P1-A: _normalCDF no longer caches (the previous cache key
+        // Math.round(x*100) collided distinct inputs and silently quantized
+        // p-values to ±0.01).  This precompute used to populate that cache;
+        // it is now intentionally a no-op.  Kept as a method so any external
+        // caller / test setup that invokes it still works without error.
     }
 
     calculateHash(input) {
@@ -1029,11 +1072,20 @@ export class MathematicalModels {
     }
 
     _calculatePercentRank(array) {
-        const sorted = [...array].sort((a, b) => a - b);
-        return array.map(value => {
-            const index = sorted.indexOf(value);
-            return (index / (sorted.length - 1)) * 100;
-        });
+        // P1-B: previously this used sorted.indexOf(value) which returns the
+        // FIRST occurrence — so duplicates all got the same (lowest) index
+        // and percent rank.  [1,1,1,1,2] returned [0, 0, 0, 0, 100] instead
+        // of ranking the four 1's at ~37.5% each.  Length-1 also divided by
+        // zero.  Fix: delegate to _rankArray (already handles ties via
+        // midrank averaging) and convert midrank to percent in [0, 100].
+        if (!Array.isArray(array) || array.length === 0) return [];
+        if (array.length === 1) return [50]; // single value: midrank by convention
+        const ranks = this._rankArray(array);
+        const n = array.length;
+        // _rankArray returns midranks in [1, n].  Convert to percent in
+        // [0, 100] using (rank - 1) / (n - 1) * 100 — matches the original
+        // intent (min=0%, max=100%) but with correct tie-handling.
+        return ranks.map(r => ((r - 1) / (n - 1)) * 100);
     }
 
     /**
