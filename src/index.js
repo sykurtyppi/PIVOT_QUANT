@@ -102,6 +102,22 @@ import { MathematicalModels } from './math/MathematicalModels.js';
             statisticalAnalysis: false
         });
 
+        // P0-3: previously this returned `results.levels[method]` directly.
+        // If the engine substituted a default method set upstream (e.g. the
+        // requested method was silently dropped during options merge), the
+        // expected key would be missing and the caller would receive
+        // `undefined` with no indication anything went wrong.  Throwing
+        // here makes the contract explicit: a single-method API call that
+        // cannot produce that method is an error, not a silent omission.
+        if (!results || results.levels == null || results.levels[method] == null) {
+            const available = (results && results.levels && typeof results.levels === 'object')
+                ? Object.keys(results.levels)
+                : [];
+            throw new Error(
+                `calculateLevels: requested method '${method}' was not produced by the engine. `
+                + `Available methods in result: ${available.length ? available.join(', ') : '(none)'}.`
+            );
+        }
         return results.levels[method];
     }
 
