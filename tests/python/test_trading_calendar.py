@@ -19,7 +19,8 @@ import sys
 import tempfile
 import textwrap
 import unittest
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
+from unittest.mock import patch
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -96,6 +97,19 @@ class TestTradingCalendarCore(unittest.TestCase):
             trading_calendar.REGULAR_SESSION_CLOSE_ET,
         )
 
+    def test_roll_back_to_trading_day_skips_weekends_and_holidays(self) -> None:
+        # Thanksgiving 2026 is a Thursday full closure; the latest completed
+        # trading day at or before it is Wednesday.
+        self.assertEqual(
+            trading_calendar.roll_back_to_trading_day(date(2026, 11, 26)),
+            date(2026, 11, 25),
+        )
+        # Sunday rolls back to the prior Friday.
+        self.assertEqual(
+            trading_calendar.roll_back_to_trading_day(date(2026, 3, 15)),
+            date(2026, 3, 13),
+        )
+
 
 class TestCallSitesAgree(unittest.TestCase):
     """Every former call site must defer to the centralized helper."""
@@ -107,8 +121,24 @@ class TestCallSitesAgree(unittest.TestCase):
         )
         # Imported the shared function (identity), not a private copy.
         self.assertIs(mod.is_trading_day, trading_calendar.is_trading_day)
+        self.assertIs(mod.roll_back_to_trading_day, trading_calendar.roll_back_to_trading_day)
         # And the file no longer defines its own holiday list.
         self.assertFalse(hasattr(mod, "NYSE_HOLIDAYS"))
+
+    def test_generate_daily_ml_report_default_date_skips_holidays(self) -> None:
+        mod = _load_module(
+            "pq_test_generate_daily_ml_report_holiday_default",
+            SCRIPTS_DIR / "generate_daily_ml_report.py",
+        )
+
+        class _HolidayAfterCloseDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                base = datetime(2026, 11, 26, 16, 1, tzinfo=mod.ET_TZ)
+                return base if tz else base.replace(tzinfo=None)
+
+        with patch.object(mod, "datetime", _HolidayAfterCloseDateTime):
+            self.assertEqual(mod.parse_report_date(None), date(2026, 11, 25))
 
     def test_collect_gamma_history_iter_trading_days_excludes_holidays(self) -> None:
         mod = _load_module(
@@ -132,6 +162,7 @@ class TestCallSitesAgree(unittest.TestCase):
     def test_shell_wrapper_has_no_inline_holiday_list(self) -> None:
         text = (SCRIPTS_DIR / "run_daily_report_send.sh").read_text(encoding="utf-8")
         self.assertIn("from trading_calendar import is_trading_day", text)
+        self.assertIn("from trading_calendar import roll_back_to_trading_day", text)
         # The PR #32 inline copy is gone — pick a couple of dates that were
         # hardcoded and assert they no longer appear in the wrapper.
         self.assertNotIn("2026-11-26", text)
@@ -182,6 +213,19 @@ class TestCallSitesAgree(unittest.TestCase):
             self.assertEqual(proc.returncode, 0, msg=f"{proc.stdout}\n{proc.stderr}")
             log_text = (logs_dir / "report_delivery.log").read_text(encoding="utf-8")
             self.assertIn("non-trading day", log_text)
+
+    def test_health_alert_market_hours_uses_shared_half_day_close(self) -> None:
+        mod = _load_module(
+            "pq_test_health_alert_watchdog_calendar",
+            SCRIPTS_DIR / "health_alert_watchdog.py",
+        )
+
+        # 2026-11-27 is the day after Thanksgiving, a 13:00 ET early close.
+        before_halfday_close = datetime(2026, 11, 27, 17, 59, tzinfo=timezone.utc)  # 12:59 ET
+        after_halfday_close = datetime(2026, 11, 27, 18, 0, tzinfo=timezone.utc)  # 13:00 ET
+
+        self.assertTrue(mod.is_market_hours_et(before_halfday_close))
+        self.assertFalse(mod.is_market_hours_et(after_halfday_close))
 
 
 if __name__ == "__main__":

@@ -188,16 +188,23 @@ if [[ -z "${REPORT_DATE}" ]]; then
     REPORT_DATE_MODE="et_today"
   fi
   if ! REPORT_DATE="$(
-    REPORT_DATE_MODE="${REPORT_DATE_MODE}" "${PYTHON}" -c "from datetime import datetime, timedelta; from zoneinfo import ZoneInfo; import os
+    REPORT_DATE_MODE="${REPORT_DATE_MODE}" "${PYTHON}" - "${ROOT_DIR}/scripts" <<'PY'
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+import os
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from trading_calendar import roll_back_to_trading_day
+
 mode = os.getenv('REPORT_DATE_MODE', 'auto').strip().lower()
 now = datetime.now(ZoneInfo('America/New_York'))
 if mode == 'et_today':
     day = now.date()
 else:
     day = now.date() if now.hour >= 16 else (now - timedelta(days=1)).date()
-while day.weekday() >= 5:
-    day = day - timedelta(days=1)
-print(day.isoformat())"
+print(roll_back_to_trading_day(day).isoformat())
+PY
   )"; then
     echo "[$(timestamp)] ERROR failed to determine report date" >> "${LOG_DIR}/report_delivery.log"
     exit 1

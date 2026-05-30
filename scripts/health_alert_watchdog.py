@@ -17,8 +17,9 @@ import sqlite3
 import smtplib
 import socket
 import subprocess
+import sys
 import time
-from datetime import datetime, time as dt_time, timezone
+from datetime import datetime, timezone
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,12 @@ DEFAULT_ENV_FILE = ROOT / ".env"
 DEFAULT_STATE_FILE = ROOT / "logs" / "health_alert_state.json"
 DEFAULT_LOG_FILE = ROOT / "logs" / "health_alert.log"
 ET_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone.utc
+
+_SCRIPTS_DIR = str(ROOT / "scripts")
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+
+from trading_calendar import REGULAR_SESSION_OPEN_ET, is_trading_day, session_close_et
 
 
 def parse_csv(raw: str | None) -> list[str]:
@@ -78,12 +85,10 @@ def now_iso_utc() -> str:
 
 def is_market_hours_et(now_utc: datetime) -> bool:
     now_et = now_utc.astimezone(ET_TZ)
-    if now_et.weekday() >= 5:
+    if not is_trading_day(now_et.date()):
         return False
-    open_time = dt_time(hour=9, minute=30)
-    close_time = dt_time(hour=16, minute=0)
     t = now_et.time()
-    return t >= open_time and t < close_time
+    return REGULAR_SESSION_OPEN_ET <= t < session_close_et(now_et.date())
 
 
 def load_env_file(path: Path) -> None:
