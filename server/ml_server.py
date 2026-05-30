@@ -97,7 +97,9 @@ ANALOG_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone.utc
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
-from fastapi import FastAPI, HTTPException, Request
+import hmac
+
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -128,6 +130,112 @@ LEGACY_CANDIDATE_MANIFEST = "manifest_latest.json"
 HOST = os.getenv("ML_SERVER_BIND", "127.0.0.1")
 PORT = int(os.getenv("ML_SERVER_PORT", "5003"))
 STALE_MODEL_HOURS = int(os.getenv("STALE_MODEL_HOURS", "48"))
+
+
+# =============================================================================
+# Write-endpoint auth (C1 follow-up to PR #50 loopback default).
+# /reload deserialises pickled artifacts via joblib.load (an RCE primitive);
+# /score mutates registry counters and analog cache.  When the bind is
+# loopback (the default), every internal client (yahoo_proxy, collector,
+# retrain/calibration scripts, stress harness) connects via 127.0.0.1, so
+# we keep the bypass on and they keep working with zero changes.  When an
+# operator deliberately exposes the server (ML_SERVER_BIND=<lan-ip>) we
+# require a token; if no token is configured we fail closed with 503.
+#
+# Mirrors the DASH_AUTH_LOCAL_BYPASS pattern in run_persistent_stack.sh
+# (which refuses to start in the same misconfiguration at the shell layer).
+# This module-level check is defense-in-depth — even if the shell wrapper
+# is bypassed (e.g. run_ml_server.sh invoked directly), a public bind with
+# no token still cannot serve a write endpoint.
+# =============================================================================
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _is_loopback_bind(host: str) -> bool:
+    """Match the bash is_loopback_bind in run_persistent_stack.sh:
+    localhost | 127.0.0.1 | ::1 | 127.* — case-insensitive."""
+    h = (host or "").strip().lower()
+    if h in _LOOPBACK_HOSTS:
+        return True
+    return h.startswith("127.")
+
+
+def _resolve_write_auth_bypass(host: str, raw_flag: str | None) -> bool:
+    """Default the bypass per loopback status; honor an explicit override
+    string ('true'/'false' etc.) when the operator sets one."""
+    flag = (raw_flag or "").strip().lower()
+    if flag in {"1", "true", "yes", "on"}:
+        return True
+    if flag in {"0", "false", "no", "off"}:
+        return False
+    # Unset / empty / unrecognised → fall back to the loopback default.
+    return _is_loopback_bind(host)
+
+
+ML_WRITE_AUTH_TOKEN = os.getenv("ML_WRITE_AUTH_TOKEN", "")
+_BIND_IS_LOOPBACK = _is_loopback_bind(HOST)
+_WRITE_AUTH_BYPASS = _resolve_write_auth_bypass(
+    HOST, os.getenv("ML_WRITE_AUTH_LOCAL_BYPASS")
+)
+
+# Hard misconfiguration on a public bind.  Two ways to land here:
+#   (a) bypass is off and no token is configured — there is literally no
+#       way to authenticate a writer, so every write must 503.
+#   (b) ML_WRITE_AUTH_LOCAL_BYPASS is explicitly true on a non-loopback
+#       bind — i.e. someone said "skip the gate" while the gate is the
+#       only thing standing between the network and joblib.load.
+# The shell wrapper (run_persistent_stack.sh) already refuses both at
+# startup; this module-level mirror is defense-in-depth for direct python
+# invocation (e.g. running run_ml_server.sh after exporting BIND/BYPASS
+# by hand).  Arm the request-time gate to refuse every write with 503.
+_WRITE_AUTH_MISCONFIGURED = (not _BIND_IS_LOOPBACK) and (
+    (not _WRITE_AUTH_BYPASS and not ML_WRITE_AUTH_TOKEN)  # case (a)
+    or _WRITE_AUTH_BYPASS                                 # case (b)
+)
+if _WRITE_AUTH_MISCONFIGURED:
+    log.error(
+        "ML write-endpoint auth misconfigured: ML_SERVER_BIND=%s is non-loopback "
+        "and either ML_WRITE_AUTH_LOCAL_BYPASS=true or ML_WRITE_AUTH_TOKEN is unset; "
+        "/reload and /score will return 503. Set ML_WRITE_AUTH_TOKEN (and leave "
+        "ML_WRITE_AUTH_LOCAL_BYPASS unset/false), or bind to 127.0.0.1.",
+        HOST,
+    )
+
+
+async def require_write_auth(
+    x_ml_write_token: str | None = Header(default=None, alias="X-ML-Write-Token"),
+) -> None:
+    """FastAPI dependency: gate state-changing endpoints (/reload, /score).
+
+    Constant-time compare via ``hmac.compare_digest``.  Never reflects the
+    submitted or expected token in any error body or log line.  Returns
+    silently on the bypass path so internal loopback clients are unchanged.
+    """
+    if _WRITE_AUTH_MISCONFIGURED:
+        # Hard-fail every write while misconfigured — don't accept ANY
+        # token on a public bind that didn't get a token configured.
+        raise HTTPException(
+            status_code=503,
+            detail="ML write-endpoint auth is misconfigured; refusing write.",
+        )
+    if _WRITE_AUTH_BYPASS:
+        return
+    expected = ML_WRITE_AUTH_TOKEN
+    if not expected:
+        # Defensive: with bypass off and no token, the misconfig branch
+        # above should already have fired.  Belt-and-suspenders.
+        raise HTTPException(
+            status_code=503,
+            detail="ML write-endpoint auth is misconfigured; refusing write.",
+        )
+    provided = x_ml_write_token or ""
+    # hmac.compare_digest requires equal-length-or-typed inputs; encoding
+    # to bytes also avoids surrogate edge cases on str input.
+    if not provided or not hmac.compare_digest(
+        provided.encode("utf-8"), expected.encode("utf-8")
+    ):
+        raise HTTPException(status_code=401, detail="Invalid or missing write token.")
+
 ML_SHADOW_HORIZONS = {
     int(h.strip())
     for h in os.getenv("ML_SHADOW_HORIZONS", "30").split(",")
@@ -2176,7 +2284,7 @@ async def health():
     return result
 
 
-@app.post("/reload")
+@app.post("/reload", dependencies=[Depends(require_write_auth)])
 async def reload_models(force: bool = False):
     """Hot-reload model artifacts from disk without restarting the server."""
     global _startup_error
@@ -3604,7 +3712,7 @@ async def _read_score_payload(request: Request) -> object:
     return _parse_score_json_body(raw_body)
 
 
-@app.post("/score")
+@app.post("/score", dependencies=[Depends(require_write_auth)])
 async def score(request: Request):
     registry_snapshot = registry.snapshot()
     manifest = registry_snapshot.get("manifest")
