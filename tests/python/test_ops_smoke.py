@@ -4835,6 +4835,58 @@ class OpsSmokeTests(unittest.TestCase):
         proc = run_cmd(["bash", "-n", "server/run_persistent_stack.sh"], cwd=REPO_ROOT)
         self.assertEqual(proc.returncode, 0, msg=f"{proc.stdout}\n{proc.stderr}")
 
+    def test_ml_server_bind_default_is_loopback(self) -> None:
+        """C1 fix: ML_SERVER_BIND default MUST be 127.0.0.1, not 0.0.0.0.
+
+        /reload and /score are unauthenticated and /reload deserialises
+        joblib/pickle from MODEL_DIR — an RCE primitive if the port is
+        reachable from the network.  Every legitimate client connects on
+        loopback; binding to all interfaces here is a footgun with no
+        operational upside.  Pin BOTH layers (shell stack export AND
+        ml_server.py source default) and pin the sibling-services pattern
+        so a future refactor cannot quietly re-export 0.0.0.0.
+        """
+        stack_script = (REPO_ROOT / "server" / "run_persistent_stack.sh").read_text(encoding="utf-8")
+
+        # Layer 1: the env-var default exported by the stack script must be
+        # loopback.  Pin the exact line so a regex-rename or rewrite cannot
+        # silently revert it.
+        self.assertIn(
+            'export ML_SERVER_BIND="${ML_SERVER_BIND:-127.0.0.1}"',
+            stack_script,
+            msg="ML_SERVER_BIND must default to 127.0.0.1 (loopback) — see C1 fix.",
+        )
+        # Belt-and-suspenders: ensure the dangerous default has not been
+        # re-introduced anywhere in the script (catches a partial revert
+        # or a second export).
+        self.assertNotIn(
+            'export ML_SERVER_BIND="${ML_SERVER_BIND:-0.0.0.0}"',
+            stack_script,
+            msg="ML_SERVER_BIND must NOT default to 0.0.0.0 — re-introduces C1.",
+        )
+
+        # Layer 2: ml_server.py's own fallback when ML_SERVER_BIND is unset
+        # must also be loopback.  This catches the case where the script
+        # exec()s the python directly (e.g. via server/run_ml_server.sh)
+        # without going through run_persistent_stack.sh.
+        ml_source = (REPO_ROOT / "server" / "ml_server.py").read_text(encoding="utf-8")
+        self.assertIn(
+            'HOST = os.getenv("ML_SERVER_BIND", "127.0.0.1")',
+            ml_source,
+            msg="ml_server.py HOST fallback must be 127.0.0.1.",
+        )
+
+        # Sibling-pattern invariant: the three other internal services in
+        # the stack already default to loopback.  Pin the family so a
+        # future refactor that rewrites them as a group cannot drop ML
+        # from the loopback set.
+        for sibling in (
+            'export LIVE_COLLECTOR_BIND="${LIVE_COLLECTOR_BIND:-127.0.0.1}"',
+            'export EVENT_WRITER_BIND="${EVENT_WRITER_BIND:-127.0.0.1}"',
+            'export IB_BRIDGE_BIND="${IB_BRIDGE_BIND:-127.0.0.1}"',
+        ):
+            self.assertIn(sibling, stack_script)
+
     def test_run_gamma_bridge_sources_dotenv_safely(self) -> None:
         gamma_script = (REPO_ROOT / "server" / "run_gamma_bridge.sh").read_text(encoding="utf-8")
         self.assertIn('ENV_FILE="${ROOT_DIR}/.env"', gamma_script)
