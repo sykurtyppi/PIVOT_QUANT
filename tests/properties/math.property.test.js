@@ -350,10 +350,38 @@ describe('calculateMaxDrawdown — algebraic invariants', () => {
 describe('Sharpe ratio — scale invariance (cheap bonus invariant)', () => {
     const math = makeMath();
 
+    // Helper: standard deviation of an array.  Used as a degeneracy
+    // precondition below — see the test comment for why this matters.
+    function _stdev(arr) {
+        if (!arr || arr.length < 2) return 0;
+        const mean = arr.reduce((s, v) => s + v, 0) / arr.length;
+        const variance = arr.reduce((s, v) => s + (v - mean) ** 2, 0) / (arr.length - 1);
+        return Math.sqrt(variance);
+    }
+
     test('Sharpe is invariant under positive scaling of prices (when risk-free=0)', () => {
         // Both prices and risk-free rate scale identically; with rf=0,
-        // doubling all prices preserves returns, std-dev, and therefore
-        // the Sharpe ratio.
+        // scaling all prices preserves returns, std-dev, and therefore
+        // the Sharpe ratio — in real arithmetic.
+        //
+        // FLAKE FIX (post-PR #46 follow-up): the previous version only
+        // skipped non-finite Sharpe values via `Number.isFinite`.  But
+        // fast-check happily generates near-zero-variance return series
+        // (e.g. [-6.6e-15, 0, 0, ..., 5.6e-12, 0, ...]) where Sharpe is
+        // numerically a finite-but-ill-conditioned `0/0`.  In float64,
+        // cumulating from base 100 vs 285.87 with ~1e-15 returns yields
+        // different rounding in the tiny return values; dividing by the
+        // near-zero std-dev then amplifies the rounding past the
+        // absolute 1e-6 tolerance.  The result is a ~10–30% flake rate
+        // on this property — every CI run becomes a coin flip.
+        //
+        // Fix: add an explicit degeneracy precondition.  Require both
+        // the input returns AND the recomputed returns to have a std-dev
+        // above a small threshold before asserting the invariant.  The
+        // property is still mathematically correct everywhere; we just
+        // refuse to assert it where floating-point error dominates the
+        // signal we're checking.
+        const STDEV_FLOOR = 1e-4; // realistic returns ~1e-2; degenerate ~1e-15
         fc.assert(
             fc.property(
                 fc.array(
@@ -362,11 +390,19 @@ describe('Sharpe ratio — scale invariance (cheap bonus invariant)', () => {
                 ),
                 fc.double({ min: 0.5, max: 5, noNaN: true, noDefaultInfinity: true }),
                 (returns, scale) => {
+                    // Precondition 1: input returns must have meaningful variation.
+                    if (_stdev(returns) < STDEV_FLOOR) return true;
                     const a = ohlcFromReturns(100, returns);
                     const b = ohlcFromReturns(100 * scale, returns);
                     const sa = math.calculateSharpeRatio(a, 0);
                     const sb = math.calculateSharpeRatio(b, 0);
-                    if (!Number.isFinite(sa) || !Number.isFinite(sb)) return true; // skip degenerate shrinks
+                    // Precondition 2: both Sharpe values must be well-defined.
+                    if (!Number.isFinite(sa) || !Number.isFinite(sb)) return true;
+                    // Precondition 3: skip if either Sharpe is itself tiny —
+                    // the absolute 1e-6 tolerance becomes a *relative* tolerance
+                    // problem in that regime.  Skipping here keeps the property
+                    // sharp on the values it does assert.
+                    if (Math.abs(sa) < 1e-3 && Math.abs(sb) < 1e-3) return true;
                     return Math.abs(sa - sb) < 1e-6;
                 },
             ),
