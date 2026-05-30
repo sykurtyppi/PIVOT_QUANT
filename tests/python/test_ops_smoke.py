@@ -4406,6 +4406,137 @@ class OpsSmokeTests(unittest.TestCase):
         finally:
             restore()
 
+    def test_ml_server_write_auth_arming_table_at_import(self) -> None:
+        """Pin the import-time _WRITE_AUTH_MISCONFIGURED computation across
+        the four meaningful (bind, bypass, token) configurations.
+
+        This is the defense-in-depth claim of the module: the python layer
+        must catch the SAME misconfigurations the shell wrapper refuses,
+        including the explicit-bypass-on-public-bind case (someone said
+        "skip the gate" while the gate is the only thing standing between
+        the network and joblib.load).
+        """
+        configs = [
+            # (env, expected_misconfigured, expected_bypass, note)
+            (
+                {"ML_SERVER_BIND": "127.0.0.1"},
+                False, True,
+                "loopback default — back-compat for every existing internal client",
+            ),
+            (
+                {
+                    "ML_SERVER_BIND": "0.0.0.0",
+                    "ML_WRITE_AUTH_TOKEN": "valid-token-xyz",
+                    "ML_WRITE_AUTH_LOCAL_BYPASS": "false",
+                },
+                False, False,
+                "public bind + token configured + bypass off — proper opt-in",
+            ),
+            (
+                {
+                    "ML_SERVER_BIND": "0.0.0.0",
+                    "ML_WRITE_AUTH_TOKEN": "",
+                    "ML_WRITE_AUTH_LOCAL_BYPASS": "",  # auto-resolve → false on non-loopback
+                },
+                True, False,
+                "public bind + no token + no bypass — existing case, must still fire",
+            ),
+            (
+                {
+                    "ML_SERVER_BIND": "0.0.0.0",
+                    "ML_WRITE_AUTH_TOKEN": "",
+                    "ML_WRITE_AUTH_LOCAL_BYPASS": "true",  # the previously-silent fail-open
+                },
+                True, True,
+                "public bind + explicit bypass=true — the NEW case this regression pins",
+            ),
+            (
+                {
+                    "ML_SERVER_BIND": "0.0.0.0",
+                    "ML_WRITE_AUTH_TOKEN": "valid-token-xyz",
+                    "ML_WRITE_AUTH_LOCAL_BYPASS": "true",  # bypass wins, gate is off
+                },
+                True, True,
+                "public bind + bypass=true + token configured — bypass still skips the gate, so misconfig",
+            ),
+        ]
+        # Patch the import-time env, load a FRESH module each iteration so
+        # the module-level _WRITE_AUTH_MISCONFIGURED expression actually
+        # runs against the patched values.
+        for env, expected_misconfigured, expected_bypass, note in configs:
+            with patch.dict(os.environ, env, clear=False):
+                # Clear any vars not in `env` that might leak from the test
+                # process so we don't confuse the import-time defaults.
+                # We touch only the three vars the gate reads.
+                for var in (
+                    "ML_SERVER_BIND",
+                    "ML_WRITE_AUTH_TOKEN",
+                    "ML_WRITE_AUTH_LOCAL_BYPASS",
+                ):
+                    if var not in env:
+                        os.environ.pop(var, None)
+                ml_server = self._load_ml_server_module()
+                self.assertEqual(
+                    ml_server._WRITE_AUTH_MISCONFIGURED,
+                    expected_misconfigured,
+                    msg=f"_WRITE_AUTH_MISCONFIGURED mismatch [{note}] env={env}",
+                )
+                self.assertEqual(
+                    ml_server._WRITE_AUTH_BYPASS,
+                    expected_bypass,
+                    msg=f"_WRITE_AUTH_BYPASS mismatch [{note}] env={env}",
+                )
+
+    def test_ml_server_write_auth_public_bind_bypass_true_blocks_via_asgi(self) -> None:
+        """End-to-end: the previously-silent fail-open (non-loopback +
+        ML_WRITE_AUTH_LOCAL_BYPASS=true) must now reach the request-time
+        gate as a 503, not a silent 200."""
+        with patch.dict(
+            os.environ,
+            {
+                "ML_SERVER_BIND": "0.0.0.0",
+                "ML_WRITE_AUTH_TOKEN": "",
+                "ML_WRITE_AUTH_LOCAL_BYPASS": "true",
+            },
+            clear=False,
+        ):
+            ml_server = self._load_ml_server_module()
+            # Sanity: the import-time arming flag fired.
+            self.assertTrue(ml_server._WRITE_AUTH_MISCONFIGURED)
+            # And the request gate honours it for both write endpoints.
+            for method, path, payload in (
+                ("POST", "/reload", None),
+                ("POST", "/score", {"event": {"symbol": "SPY", "horizon_min": 5}}),
+            ):
+                status, body = self._asgi_json_request(
+                    ml_server.app, method, path, payload=payload,
+                    # Even a syntactically-correct-looking token must be refused.
+                    headers={"X-ML-Write-Token": "anything"},
+                )
+                self.assertEqual(
+                    status, 503,
+                    msg=f"{method} {path} did NOT 503 under misconfig (got {status}, body={body})",
+                )
+            # /health stays open under the same misconfig.
+            status, _ = self._asgi_json_request(ml_server.app, "GET", "/health")
+            self.assertEqual(status, 200)
+
+    def test_ml_server_write_auth_misconfig_log_mentions_both_triggers(self) -> None:
+        """The log.error string at import time must describe BOTH triggers
+        (no-token AND explicit-bypass-on-public-bind) so an operator
+        reading the launch log understands what to fix.  Source pin.
+        """
+        source = (REPO_ROOT / "server" / "ml_server.py").read_text(encoding="utf-8")
+        # New combined-trigger message.
+        self.assertIn("ML_WRITE_AUTH_LOCAL_BYPASS=true", source)
+        self.assertIn("ML_WRITE_AUTH_TOKEN is unset", source)
+        # The previous narrower expression must be gone — confirms the
+        # change actually folded the new trigger into the arming flag.
+        self.assertNotIn(
+            "(not _BIND_IS_LOOPBACK) and (not _WRITE_AUTH_BYPASS) and (not ML_WRITE_AUTH_TOKEN)",
+            source,
+        )
+
     def test_ml_server_write_auth_via_asgi_misconfig_returns_503(self) -> None:
         ml_server = self._load_ml_server_module()
         restore = self._patch_ml_write_auth(

@@ -178,18 +178,26 @@ _WRITE_AUTH_BYPASS = _resolve_write_auth_bypass(
     HOST, os.getenv("ML_WRITE_AUTH_LOCAL_BYPASS")
 )
 
-# Hard misconfiguration: non-loopback bind, no bypass, and no token
-# means write endpoints would be unauthenticated on a public address.
-# Log loudly at import time so the failure is observable in the launch
-# log, and arm the request-time gate to refuse every write with 503.
-_WRITE_AUTH_MISCONFIGURED = (
-    (not _BIND_IS_LOOPBACK) and (not _WRITE_AUTH_BYPASS) and (not ML_WRITE_AUTH_TOKEN)
+# Hard misconfiguration on a public bind.  Two ways to land here:
+#   (a) bypass is off and no token is configured — there is literally no
+#       way to authenticate a writer, so every write must 503.
+#   (b) ML_WRITE_AUTH_LOCAL_BYPASS is explicitly true on a non-loopback
+#       bind — i.e. someone said "skip the gate" while the gate is the
+#       only thing standing between the network and joblib.load.
+# The shell wrapper (run_persistent_stack.sh) already refuses both at
+# startup; this module-level mirror is defense-in-depth for direct python
+# invocation (e.g. running run_ml_server.sh after exporting BIND/BYPASS
+# by hand).  Arm the request-time gate to refuse every write with 503.
+_WRITE_AUTH_MISCONFIGURED = (not _BIND_IS_LOOPBACK) and (
+    (not _WRITE_AUTH_BYPASS and not ML_WRITE_AUTH_TOKEN)  # case (a)
+    or _WRITE_AUTH_BYPASS                                 # case (b)
 )
 if _WRITE_AUTH_MISCONFIGURED:
     log.error(
         "ML write-endpoint auth misconfigured: ML_SERVER_BIND=%s is non-loopback "
-        "and ML_WRITE_AUTH_TOKEN is unset; /reload and /score will return 503. "
-        "Set ML_WRITE_AUTH_TOKEN or bind to 127.0.0.1.",
+        "and either ML_WRITE_AUTH_LOCAL_BYPASS=true or ML_WRITE_AUTH_TOKEN is unset; "
+        "/reload and /score will return 503. Set ML_WRITE_AUTH_TOKEN (and leave "
+        "ML_WRITE_AUTH_LOCAL_BYPASS unset/false), or bind to 127.0.0.1.",
         HOST,
     )
 
