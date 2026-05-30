@@ -500,6 +500,66 @@ def validate_manifest(
     return errors
 
 
+def collect_utility_diagnostics(manifest: dict[str, Any]) -> list[str]:
+    """Diagnostic-only scan of a manifest's ``thresholds_meta`` for horizons
+    whose aggregate or per-signal utility is negative while still active
+    (``fallback=False``, ``guard_applied=False``).
+
+    This does NOT fail the gate.  It exists so the governance result and the
+    daily report can highlight cases like v440--v443 break/60m (score
+    ``-0.976``, ``selected_utility_avg`` ``-0.0488``, 20 signals) which the
+    current SUM gate let through because ``score > -20`` (the configured
+    floor), even though every signal had negative expected edge.
+
+    Returns a list of human-readable note strings; empty list when clean.
+    """
+    notes: list[str] = []
+    try:
+        from ml.thresholds import compute_utility_gate_diagnostics
+    except Exception:  # pragma: no cover — diagnostics must never block gates
+        return notes
+
+    if not isinstance(manifest, dict):
+        return notes
+    thresholds_meta = manifest.get("thresholds_meta")
+    if not isinstance(thresholds_meta, dict):
+        return notes
+
+    for target in ("reject", "break"):
+        target_meta = thresholds_meta.get(target)
+        if not isinstance(target_meta, dict):
+            continue
+        for horizon_raw, payload in target_meta.items():
+            if not isinstance(payload, dict):
+                continue
+            # Only flag horizons that are LIVE.  A fallback / guarded horizon
+            # is already neutralized; surfacing it again would just be noise.
+            if bool(payload.get("fallback")) or bool(payload.get("guard_applied")):
+                continue
+            diag = compute_utility_gate_diagnostics(payload)
+            flags: list[str] = []
+            if diag["utility_score_is_negative"]:
+                flags.append("score<0")
+            if diag["utility_avg_is_negative"]:
+                flags.append("avg<0")
+            if not flags:
+                continue
+            score = payload.get("score")
+            avg = payload.get("selected_utility_avg")
+            signals = payload.get("signals")
+            try:
+                horizon_label = f"{int(horizon_raw)}m"
+            except Exception:
+                horizon_label = str(horizon_raw)
+            notes.append(
+                f"{target}:{horizon_label} active with negative utility "
+                f"[{', '.join(flags)}] "
+                f"(score={score!s}, avg={avg!s}, signals={signals!s}); "
+                f"diagnostic only — current gate is SUM<=floor, not avg<=0"
+            )
+    return notes
+
+
 def evaluate_gates(
     active: dict[str, Any],
     candidate: dict[str, Any],
@@ -962,6 +1022,7 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
         return 0
 
     gate_failures, gate_skips = evaluate_gates(active, candidate, gates)
+    utility_diagnostics = collect_utility_diagnostics(candidate)
     if gate_failures and not args.force_promote:
         reason = "candidate rejected by governance gates"
         result.update(
@@ -971,6 +1032,7 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
                 "reason": reason,
                 "gate_failures": gate_failures,
                 "gate_skips": gate_skips,
+                "utility_diagnostics": utility_diagnostics,
                 "active_version": active_version,
             }
         )
@@ -1032,6 +1094,7 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
             "reason": state["last_reason"],
             "gate_failures": gate_failures,
             "gate_skips": gate_skips,
+            "utility_diagnostics": utility_diagnostics,
         }
     )
     _persist_state_and_ops(state_path, state, args.ops_db, result)

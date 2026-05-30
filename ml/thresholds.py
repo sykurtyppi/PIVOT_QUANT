@@ -64,6 +64,69 @@ def threshold_score_is_unsafe(
     return (len(codes) > 0), codes
 
 
+def compute_utility_gate_diagnostics(threshold_meta: object) -> dict[str, bool]:
+    """Compute four read-only diagnostic flags about a threshold's utility.
+
+    These flags do NOT change any gate or runtime behavior — they exist so
+    operators (via the daily report and governance gate output) can spot
+    horizons that ship live with negative aggregate or per-signal utility,
+    independent of whatever ``threshold_min_utility_score`` floor was in
+    effect at training time.  This is the P1-3 finding's diagnostic surface:
+    v440--v443 break/60m shipped with ``score=-0.976`` and
+    ``selected_utility_avg=-0.0488`` because the configured floor was
+    ``-20`` rather than ``0``; that fact is invisible from the existing
+    ``guard_applied`` field.
+
+    Inputs:
+        threshold_meta: the per-(target, horizon) dict written by
+            ``train_rf_artifacts.apply_threshold_risk_guards``.  Tolerates
+            ``None``, missing keys, booleans, and non-numeric scores.
+
+    Returns a dict with stable keys (all ``bool``):
+        ``utility_score_is_negative``     score < 0
+        ``utility_avg_is_negative``       selected_utility_avg < 0
+        ``would_disable_under_zero_sum``  score <= 0
+        ``would_disable_under_zero_mean`` selected_utility_avg <= 0
+
+    When the underlying value is missing or not a finite number, the
+    corresponding flag is ``False`` (cannot prove negativity from absence).
+    Booleans are explicitly rejected to avoid the
+    ``True``-coerces-to-``1.0`` footgun fixed in PR #42.
+    """
+    out = {
+        "utility_score_is_negative": False,
+        "utility_avg_is_negative": False,
+        "would_disable_under_zero_sum": False,
+        "would_disable_under_zero_mean": False,
+    }
+    if not isinstance(threshold_meta, dict):
+        return out
+
+    def _as_finite_float(value: object) -> float | None:
+        if value is None or isinstance(value, bool):
+            return None
+        if not isinstance(value, (int, float)):
+            return None
+        try:
+            f = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(f):
+            return None
+        return f
+
+    score = _as_finite_float(threshold_meta.get("score"))
+    avg = _as_finite_float(threshold_meta.get("selected_utility_avg"))
+
+    if score is not None:
+        out["utility_score_is_negative"] = score < 0.0
+        out["would_disable_under_zero_sum"] = score <= 0.0
+    if avg is not None:
+        out["utility_avg_is_negative"] = avg < 0.0
+        out["would_disable_under_zero_mean"] = avg <= 0.0
+    return out
+
+
 @dataclass
 class ThresholdCandidate:
     threshold: float
