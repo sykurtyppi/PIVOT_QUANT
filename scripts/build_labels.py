@@ -148,6 +148,26 @@ def label_event(
     return reject, brk, resolution
 
 
+def normalize_bar_interval(bar_interval_sec) -> int | None:
+    """Return a positive int bar interval, or None if missing/zero/invalid.
+
+    A None result means the touch event has no deterministic bar grid and
+    therefore MUST NOT be labeled: ``fetch_bars`` with ``interval_sec=None``
+    would walk a heterogeneous mix of 5/15/30/60m bars, producing a
+    supervision target that does not correspond to the interval the features
+    were built on (mixed-interval label leakage). Callers must skip such rows.
+    """
+    if bar_interval_sec is None or isinstance(bar_interval_sec, bool):
+        return None
+    try:
+        if isinstance(bar_interval_sec, float) and not bar_interval_sec.is_integer():
+            return None
+        interval = int(bar_interval_sec)
+    except (TypeError, ValueError):
+        return None
+    return interval if interval > 0 else None
+
+
 def has_sufficient_bars(
     conn: sqlite3.Connection, symbol: str, end_ts: int, interval_sec: int | None
 ) -> bool:
@@ -202,14 +222,22 @@ def main() -> None:
     events = cur.fetchall()
 
     labeled = 0
+    skipped_missing_interval = 0
     for event_id, symbol, ts_event, touch_price, level_price, touch_side, bar_interval_sec in events:
+        # P0-A guard: refuse to label an event with no known bar grid. A
+        # NULL/0/invalid bar_interval_sec would otherwise fall through to
+        # interval-agnostic bar queries (mixed-interval label leakage), so the
+        # supervision target would not match the event's feature interval.
+        interval = normalize_bar_interval(bar_interval_sec)
+        if interval is None:
+            skipped_missing_interval += 1
+            continue
         for horizon in args.horizons:
             horizon_ms = horizon * 60 * 1000
             end_ts = ts_event + horizon_ms
             if args.incremental and label_exists(conn, event_id, horizon):
                 continue
 
-            interval = bar_interval_sec or None
             if not has_sufficient_bars(conn, symbol, end_ts, interval):
                 continue
 
@@ -248,6 +276,11 @@ def main() -> None:
     conn.commit()
     conn.close()
     print(f"Built {labeled} labels")
+    if skipped_missing_interval:
+        print(
+            f"Skipped {skipped_missing_interval} events with missing/zero "
+            "bar_interval_sec (no deterministic bar grid; not labeled)"
+        )
 
 
 if __name__ == "__main__":

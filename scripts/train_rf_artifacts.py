@@ -2,7 +2,6 @@
 import argparse
 import json
 import os
-import re
 import shutil
 import sys
 import time
@@ -15,6 +14,12 @@ if str(ROOT) not in sys.path:
 from ml.calibration import ProbabilityCalibrator
 from ml.features import FEATURE_VERSION, build_feature_row, drop_features
 from ml.thresholds import NO_SIGNAL_THRESHOLD, select_threshold, utility_bps_for_target
+# Single source of truth shared with scripts/refit_calibration.py so the two
+# threshold-selecting paths cannot drift on per-(target, horizon) overrides.
+from ml.threshold_overrides import (
+    parse_threshold_overrides as _parse_threshold_overrides,
+    resolve_threshold_override as _resolve_threshold_override,
+)
 
 DEFAULT_DUCKDB = os.getenv("DUCKDB_PATH", "data/pivot_training.duckdb")
 DEFAULT_VIEW = os.getenv("DUCKDB_VIEW", "training_events_v1")
@@ -83,75 +88,6 @@ def _coerce_min_signals(raw_value: str) -> int:
     if value < 1:
         raise ValueError(f"min_signals must be >= 1, got {raw_value!r}")
     return int(value)
-
-
-def _parse_threshold_overrides(
-    raw_value: str,
-    *,
-    value_cast,
-    option_name: str,
-) -> dict[tuple[str, int | None], float | int]:
-    """Parse target/horizon override map.
-
-    Format: "break:15=8,break:30=8,break:60=6,reject:*=10"
-    Keys accept ":" "/" "_" "-" separators and optional "m" suffix.
-    """
-    parsed: dict[tuple[str, int | None], float | int] = {}
-    if raw_value is None:
-        return parsed
-
-    for token in str(raw_value).split(","):
-        item = token.strip()
-        if not item:
-            continue
-        if "=" not in item:
-            raise ValueError(
-                f"{option_name}: invalid entry {item!r}; expected '<target>:<horizon>=<value>'"
-            )
-        key_raw, value_raw = item.split("=", 1)
-        key = key_raw.strip().lower()
-        value_text = value_raw.strip()
-        if not value_text:
-            raise ValueError(f"{option_name}: missing value in entry {item!r}")
-
-        match = re.match(r"^(reject|break)\s*[:/_-]\s*([0-9]+m?|all|\*)$", key)
-        if not match:
-            raise ValueError(
-                f"{option_name}: invalid key {key_raw!r}; expected reject|break + horizon (e.g. break:15)"
-            )
-
-        target = str(match.group(1)).lower()
-        horizon_token = str(match.group(2)).lower()
-        horizon: int | None
-        if horizon_token in {"all", "*"}:
-            horizon = None
-        else:
-            horizon = int(horizon_token.rstrip("m"))
-
-        try:
-            value = value_cast(value_text)
-        except Exception as exc:
-            raise ValueError(f"{option_name}: invalid value {value_text!r} in entry {item!r}: {exc}") from exc
-
-        parsed[(target, horizon)] = value
-    return parsed
-
-
-def _resolve_threshold_override(
-    *,
-    target: str,
-    horizon: int,
-    base_value: float | int,
-    overrides: dict[tuple[str, int | None], float | int],
-) -> float | int:
-    target_key = str(target).strip().lower()
-    direct_key = (target_key, int(horizon))
-    if direct_key in overrides:
-        return overrides[direct_key]
-    wildcard_key = (target_key, None)
-    if wildcard_key in overrides:
-        return overrides[wildcard_key]
-    return base_value
 
 
 def require(module_name: str, hint: str):

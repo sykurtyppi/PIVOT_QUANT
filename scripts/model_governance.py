@@ -197,7 +197,9 @@ def resolve_candidate_manifest_path(models_dir: Path, configured_name: str) -> P
 
 
 def to_float(value: Any) -> float | None:
-    if value is None:
+    # Reject bool: a boolean coercing to 1.0/0.0 could corrupt a promotion-gate
+    # metric comparison. A bool here is always a data error.
+    if value is None or isinstance(value, bool):
         return None
     try:
         return float(value)
@@ -206,7 +208,7 @@ def to_float(value: Any) -> float | None:
 
 
 def to_int(value: Any) -> int | None:
-    if value is None:
+    if value is None or isinstance(value, bool):
         return None
     try:
         return int(value)

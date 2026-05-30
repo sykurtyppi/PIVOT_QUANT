@@ -28,7 +28,8 @@ def parse_args() -> argparse.Namespace:
 
 def _to_float(value) -> float | None:
     try:
-        if value is None:
+        # Reject bool: float(True)==1.0 would corrupt enriched gamma features.
+        if value is None or isinstance(value, bool):
             return None
         return float(value)
     except Exception:
@@ -37,7 +38,7 @@ def _to_float(value) -> float | None:
 
 def _to_int(value) -> int | None:
     try:
-        if value is None:
+        if value is None or isinstance(value, bool):
             return None
         return int(value)
     except Exception:

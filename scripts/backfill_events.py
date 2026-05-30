@@ -629,7 +629,9 @@ def parse_candles(payload: dict) -> list[dict]:
 
 def _to_float(value):
     try:
-        if value is None:
+        # Reject bool: float(True)==1.0 is finite and would slip past the
+        # isfinite guard, corrupting backfilled features fed into training.
+        if value is None or isinstance(value, bool):
             return None
         out = float(value)
         if math.isfinite(out):

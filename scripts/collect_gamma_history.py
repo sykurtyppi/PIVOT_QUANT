@@ -297,7 +297,8 @@ def fetch_marketdata_chain(
 
 def _to_float(value) -> float | None:
     try:
-        if value is None:
+        # Reject bool: float(True)==1.0 would corrupt collected gamma metrics.
+        if value is None or isinstance(value, bool):
             return None
         return float(value)
     except Exception:

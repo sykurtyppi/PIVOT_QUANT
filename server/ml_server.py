@@ -2329,7 +2329,10 @@ def _check_feature_drift(features: dict, payload: dict) -> list[str]:
 
 def _to_int(value) -> int | None:
     try:
-        if value is None:
+        # Reject bool explicitly: int(True)==1 would silently inflate
+        # integer-coded regime votes (or_breakout / gamma_mode / regime_type).
+        # Mirror serving_state.validate_state_payload and _to_bool.
+        if value is None or isinstance(value, bool):
             return None
         return int(value)
     except Exception:
@@ -2338,7 +2341,7 @@ def _to_int(value) -> int | None:
 
 def _to_float(value) -> float | None:
     try:
-        if value is None:
+        if value is None or isinstance(value, bool):
             return None
         return float(value)
     except Exception:
