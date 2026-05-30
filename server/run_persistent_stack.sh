@@ -131,6 +131,30 @@ if is_truthy "${DASH_AUTH_ENABLED:-false}"; then
     echo "[run_persistent_stack] ERROR: DASH_AUTH_LOCAL_BYPASS=true is not allowed when HOST is non-loopback (${HOST})."
     exit 1
   fi
+
+  # P1-B: the session-cookie HMAC key MUST be independent material from
+  # DASH_AUTH_PASSWORD.  Without a separate DASH_SESSION_SECRET, the
+  # password ends up signing the cookie and a weak password is also a
+  # forgeable-session key.  On a non-loopback bind we refuse to start;
+  # on loopback we warn and let yahoo_proxy.js refuse cookie mints at
+  # request time (so the operator can still log in via the dashboard's
+  # /health endpoint to see what to fix).
+  DASH_SESSION_SECRET="${DASH_SESSION_SECRET:-}"
+  DASH_SESSION_SECRET_MIN_LEN="${DASH_SESSION_SECRET_MIN_LEN:-32}"
+  if [[ -n "${DASH_AUTH_PASSWORD}" && "${DASH_SESSION_SECRET}" == "${DASH_AUTH_PASSWORD}" ]]; then
+    echo "[run_persistent_stack] ERROR: DASH_SESSION_SECRET must NOT equal DASH_AUTH_PASSWORD; they need to be independent high-entropy values."
+    exit 1
+  fi
+  if [[ "${#DASH_SESSION_SECRET}" -lt "${DASH_SESSION_SECRET_MIN_LEN}" ]]; then
+    if ! is_loopback_bind "${HOST}"; then
+      echo "[run_persistent_stack] ERROR: DASH_SESSION_SECRET length (${#DASH_SESSION_SECRET}) must be >= ${DASH_SESSION_SECRET_MIN_LEN} when HOST is non-loopback (${HOST}). Generate one with: openssl rand -hex 32"
+      exit 1
+    else
+      echo "[run_persistent_stack] WARN: DASH_SESSION_SECRET is unset or too short (len=${#DASH_SESSION_SECRET}, need >= ${DASH_SESSION_SECRET_MIN_LEN}). Dashboard auth will refuse to mint cookies until set. Generate one with: openssl rand -hex 32"
+    fi
+  fi
+  export DASH_SESSION_SECRET
+  export DASH_SESSION_SECRET_MIN_LEN
 fi
 
 # ML server write-endpoint auth (defense-in-depth for non-loopback binds).

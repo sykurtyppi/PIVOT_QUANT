@@ -350,6 +350,23 @@ function buildSecurityConfig(procEnv = process.env, fileEnv = {}) {
     'DASH_AUTH_PASSWORD',
     readSetting(procEnv, fileEnv, 'DASH_AUTH_PASS', '')
   ).trim();
+  // P1-B: the session-cookie HMAC key MUST be independent material from
+  // the human-chosen password.  Read from a dedicated env var and validate
+  // its length here so we can fail closed at mint/verify time when it's
+  // missing or weak.  No derivation from DASH_AUTH_PASSWORD — a derived
+  // key still inherits the password's entropy and is forgeable offline.
+  const sessionSecret = readSetting(procEnv, fileEnv, 'DASH_SESSION_SECRET', '').trim();
+  const sessionSecretMinLength = parsePositiveInt(
+    readSetting(procEnv, fileEnv, 'DASH_SESSION_SECRET_MIN_LEN', '32'),
+    32,
+    32
+  );
+  const sessionSecretConfigured =
+    sessionSecret.length >= sessionSecretMinLength &&
+    // Defense-in-depth: even if the operator names DASH_SESSION_SECRET
+    // identically to DASH_AUTH_PASSWORD, refuse it.  The whole point of
+    // P1-B is to keep these decoupled by construction.
+    (authPassword.length === 0 || sessionSecret !== authPassword);
   const authEnabledFlag = parseBool(readSetting(procEnv, fileEnv, 'DASH_AUTH_ENABLED', ''), false);
   const authCredentialsConfigured = authPassword.length > 0;
   const authServiceToken = readSetting(procEnv, fileEnv, 'DASH_AUTH_SERVICE_TOKEN', '').trim();
@@ -421,6 +438,12 @@ function buildSecurityConfig(procEnv = process.env, fileEnv = {}) {
   if (authEnabled && !authCookieSecure && !bindIsLoopback) {
     authPolicyIssues.push('insecure_cookie_with_non_loopback_bind');
   }
+  if (authEnabled && !sessionSecretConfigured) {
+    authPolicyIssues.push('missing_session_secret');
+  }
+  if (authEnabled && !sessionSecretConfigured && !bindIsLoopback) {
+    authPolicyIssues.push('missing_session_secret_with_non_loopback_bind');
+  }
 
   return {
     authEnabled,
@@ -431,6 +454,9 @@ function buildSecurityConfig(procEnv = process.env, fileEnv = {}) {
     authPasswordMinLength,
     authPasswordStrongEnough,
     authPasswordPolicyEnforced,
+    sessionSecret,
+    sessionSecretConfigured,
+    sessionSecretMinLength,
     authCookieName: readSetting(procEnv, fileEnv, 'DASH_AUTH_COOKIE_NAME', 'pq_dash_auth').trim() || 'pq_dash_auth',
     authCookieTtlSec: Math.max(
       300,
@@ -552,6 +578,12 @@ function createSessionToken(secret, ttlSec) {
 function hasValidSession(req) {
   if (!SECURITY.authEnabled) return true;
   if (!SECURITY.authCredentialsConfigured) return false;
+  // P1-B: refuse every session check if the independent signing secret
+  // is missing or too short.  This is fail-closed: a cookie signed with
+  // ANY key (including a previously-valid one) must be rejected here so
+  // there is no path by which DASH_AUTH_PASSWORD becomes the signing
+  // key by accident.
+  if (!SECURITY.sessionSecretConfigured) return false;
   const cookies = parseCookies(req);
   const token = cookies[SECURITY.authCookieName];
   const parts = parseTokenParts(token);
@@ -559,7 +591,7 @@ function hasValidSession(req) {
   const nowMs = Date.now();
   const now = Math.floor(nowMs / 1000);
   if (parts.exp < now) return false;
-  const expectedSig = signPayload(parts.payload, SECURITY.authPassword);
+  const expectedSig = signPayload(parts.payload, SECURITY.sessionSecret);
   const valid = safeEqual(parts.sig, expectedSig);
   if (valid) {
     upsertAuthSession(req, parts, nowMs);
@@ -1095,7 +1127,20 @@ async function handleAuthRoutes(req, res, url) {
       return true;
     }
     clearAuthLoginFailures(req);
-    const token = createSessionToken(SECURITY.authPassword, SECURITY.authCookieTtlSec);
+    // P1-B: refuse to mint a session if the independent signing secret
+    // is not configured.  Returning 503 (not 401) signals a server-side
+    // misconfiguration rather than a credential problem.  Never echo the
+    // expected secret or the submitted password in the error body.
+    if (!SECURITY.sessionSecretConfigured) {
+      sendLoginPage(
+        res,
+        nextPath,
+        'Server misconfigured: DASH_SESSION_SECRET is missing or too short. Contact the operator.',
+        503
+      );
+      return true;
+    }
+    const token = createSessionToken(SECURITY.sessionSecret, SECURITY.authCookieTtlSec);
     const tokenParts = parseTokenParts(token);
     recordAuthLoginSuccess(req, tokenParts);
     setSessionCookieHeaders(res, req, token);
@@ -2934,6 +2979,11 @@ const server = http.createServer(async (req, res) => {
       auth_password_policy_enforced: SECURITY.authPasswordPolicyEnforced,
       auth_password_strong_enough: SECURITY.authPasswordStrongEnough,
       auth_password_min_length: SECURITY.authPasswordMinLength,
+      // P1-B observability: report whether the independent session-signing
+      // secret is configured.  Booleans + min-length only — the secret
+      // value itself MUST NEVER appear in any response or log line.
+      auth_session_secret_configured: SECURITY.sessionSecretConfigured,
+      auth_session_secret_min_length: SECURITY.sessionSecretMinLength,
       auth_local_bypass: SECURITY.authBypassLocal,
       auth_cookie_secure: SECURITY.authCookieSecure,
       auth_bind_host: SECURITY.bindHost,
@@ -3536,6 +3586,34 @@ server.listen(PORT, HOST, () => {
     /* eslint-disable-next-line no-console */
     console.warn(
       `[security] weak DASH_AUTH_PASSWORD detected (len=${SECURITY.authPassword.length}). Recommended length is >=${SECURITY.authPasswordMinLength}.`
+    );
+  }
+  // P1-B: refuse to keep running on a non-loopback bind without the
+  // independent session-signing secret.  The shell wrapper makes the
+  // same check at startup; this is defense-in-depth for direct invocation
+  // (npm run dash, node server/yahoo_proxy.js).  The secret value itself
+  // is never logged — only the configured/length booleans.
+  if (
+    SECURITY.authEnabled &&
+    !SECURITY.bindIsLoopback &&
+    !SECURITY.sessionSecretConfigured
+  ) {
+    /* eslint-disable-next-line no-console */
+    console.error(
+      `[security] FATAL: DASH_SESSION_SECRET must be set to >=${SECURITY.authSessionSecretMinLength || SECURITY.sessionSecretMinLength} chars and differ from DASH_AUTH_PASSWORD when HOST is non-loopback (${SECURITY.bindHost}). Generate one with: openssl rand -hex 32`
+    );
+    process.exit(1);
+  }
+  // Loopback + auth enabled but no secret: stay up so the operator can
+  // see and fix the config, but every cookie mint/verify will refuse.
+  if (
+    SECURITY.authEnabled &&
+    SECURITY.bindIsLoopback &&
+    !SECURITY.sessionSecretConfigured
+  ) {
+    /* eslint-disable-next-line no-console */
+    console.warn(
+      `[security] DASH_SESSION_SECRET is missing or too short (need >=${SECURITY.sessionSecretMinLength} chars AND distinct from DASH_AUTH_PASSWORD). Login will return 503 until this is fixed. Generate one with: openssl rand -hex 32`
     );
   }
   if (SECURITY.authEnabled && SECURITY.authPolicyIssues.length > 0) {
