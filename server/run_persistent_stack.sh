@@ -63,7 +63,16 @@ LAN_IP="$(detect_lan_ip || true)"
 
 export HOST="${HOST:-0.0.0.0}"
 export PORT="${PORT:-3000}"
-export ML_SERVER_BIND="${ML_SERVER_BIND:-0.0.0.0}"
+# ML server: bind to loopback by default.  /reload and /score are
+# unauthenticated and /reload deserialises joblib/pickle from MODEL_DIR
+# (an RCE primitive if reachable from the network).  Every legitimate
+# client (yahoo_proxy, live_event_collector, retrain/calibration scripts,
+# health probes) connects via http://127.0.0.1:5003, so loopback breaks
+# nothing.  Match the LIVE_COLLECTOR/EVENT_WRITER/IB_BRIDGE pattern below.
+# Operators who need a non-loopback bind can still opt in by exporting
+# ML_SERVER_BIND deliberately; that path SHOULD also get a write-endpoint
+# token (tracked as a follow-up PR — auth is out of scope for this fix).
+export ML_SERVER_BIND="${ML_SERVER_BIND:-127.0.0.1}"
 export ML_SERVER_PORT="${ML_SERVER_PORT:-5003}"
 export STARTUP_TIMEOUT_SEC="${STARTUP_TIMEOUT_SEC:-120}"
 export LIVE_COLLECTOR_ENABLED="${LIVE_COLLECTOR_ENABLED:-1}"
