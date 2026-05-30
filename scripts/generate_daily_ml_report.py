@@ -40,6 +40,14 @@ RF_CANDIDATE_MANIFEST = (
 )
 LEGACY_CANDIDATE_MANIFEST = "manifest_latest.json"
 
+# Ensure sibling scripts (migrate_db, trading_calendar) import whether this
+# file is run as a script (sys.path[0] == scripts/) or loaded by file path.
+_SCRIPTS_DIR = str(Path(__file__).resolve().parent)
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+
+from trading_calendar import is_trading_day
+
 try:
     from migrate_db import migrate_connection
 except ImportError:  # pragma: no cover
@@ -110,45 +118,6 @@ ANALOG_PROMOTION_REQUIRE_BOTH_TARGETS = _env_bool(
 ANALOG_PROMOTION_USE_SHRUNK = _env_bool(
     "ML_ANALOG_PROMOTION_USE_SHRUNK", True
 )
-
-# NYSE full-closure holidays (update annually).
-# Source: https://www.nyse.com/markets/hours-calendars
-NYSE_HOLIDAYS: set[date] = {
-    # 2025
-    date(2025, 1, 1),   # New Year's Day
-    date(2025, 1, 20),  # MLK Day
-    date(2025, 2, 17),  # Presidents' Day
-    date(2025, 4, 18),  # Good Friday
-    date(2025, 5, 26),  # Memorial Day
-    date(2025, 6, 19),  # Juneteenth
-    date(2025, 7, 4),   # Independence Day
-    date(2025, 9, 1),   # Labor Day
-    date(2025, 11, 27), # Thanksgiving
-    date(2025, 12, 25), # Christmas Day
-    # 2026
-    date(2026, 1, 1),   # New Year's Day
-    date(2026, 1, 19),  # MLK Day
-    date(2026, 2, 16),  # Presidents' Day
-    date(2026, 4, 3),   # Good Friday
-    date(2026, 5, 25),  # Memorial Day
-    date(2026, 6, 19),  # Juneteenth
-    date(2026, 7, 3),   # Independence Day (observed)
-    date(2026, 9, 7),   # Labor Day
-    date(2026, 11, 26), # Thanksgiving
-    date(2026, 12, 25), # Christmas Day
-    # 2027 (pre-loaded for EOY runs)
-    date(2027, 1, 1),   # New Year's Day
-    date(2027, 1, 18),  # MLK Day
-    date(2027, 2, 15),  # Presidents' Day
-    date(2027, 3, 26),  # Good Friday
-    date(2027, 5, 31),  # Memorial Day
-    date(2027, 6, 18),  # Juneteenth (observed)
-    date(2027, 7, 5),   # Independence Day (observed)
-    date(2027, 9, 6),   # Labor Day
-    date(2027, 11, 25), # Thanksgiving
-    date(2027, 12, 24), # Christmas Day (observed)
-}
-
 
 @dataclass
 class MetricBundle:
@@ -1558,7 +1527,7 @@ def compute_session_staleness_hours(start_ms: int | float | None, end_ms: int | 
     total_seconds = 0.0
     day = start_dt.date()
     while day <= end_dt.date():
-        if day.weekday() < 5 and day not in NYSE_HOLIDAYS:
+        if is_trading_day(day):
             session_start = datetime.combine(day, REGULAR_SESSION_OPEN_ET, tzinfo=ET_TZ)
             session_end = datetime.combine(day, REGULAR_SESSION_CLOSE_ET, tzinfo=ET_TZ)
             segment_start = max(session_start, start_dt)

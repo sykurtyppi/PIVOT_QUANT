@@ -143,59 +143,18 @@ echo "[$(timestamp)] START daily_report_send (${PYTHON_INFO})" >> "${LOG_DIR}/re
 # ---------------------------------------------------------------------------
 is_trading_day() {
   local check_date="$1"
-  # NYSE holidays 2025-2027 (hardcoded; update when adding a new year).
-  # Format: YYYY-MM-DD
-  "${PYTHON}" - "${check_date}" <<'PY'
+  # Delegate to the single source of truth: scripts/trading_calendar.py.
+  # argv[1] = scripts dir (prepended to sys.path so the import resolves),
+  # argv[2] = the date to check.
+  "${PYTHON}" - "${ROOT_DIR}/scripts" "${check_date}" <<'PY'
 import sys
 from datetime import date
 
-check = date.fromisoformat(sys.argv[1])
+sys.path.insert(0, sys.argv[1])
+from trading_calendar import is_trading_day
 
-# Weekend check
-if check.weekday() >= 5:
-    raise SystemExit(1)
-
-# NYSE holidays 2025–2027
-NYSE_HOLIDAYS = {
-    # 2025
-    "2025-01-01",  # New Year's Day
-    "2025-01-20",  # MLK Day
-    "2025-02-17",  # Presidents' Day
-    "2025-04-18",  # Good Friday
-    "2025-05-26",  # Memorial Day
-    "2025-06-19",  # Juneteenth
-    "2025-07-04",  # Independence Day
-    "2025-09-01",  # Labor Day
-    "2025-11-27",  # Thanksgiving
-    "2025-12-25",  # Christmas
-    # 2026
-    "2026-01-01",  # New Year's Day
-    "2026-01-19",  # MLK Day
-    "2026-02-16",  # Presidents' Day
-    "2026-04-03",  # Good Friday
-    "2026-05-25",  # Memorial Day
-    "2026-06-19",  # Juneteenth
-    "2026-07-03",  # Independence Day (observed, Fri)
-    "2026-09-07",  # Labor Day
-    "2026-11-26",  # Thanksgiving
-    "2026-12-25",  # Christmas
-    # 2027
-    "2027-01-01",  # New Year's Day
-    "2027-01-18",  # MLK Day
-    "2027-02-15",  # Presidents' Day
-    "2027-03-26",  # Good Friday
-    "2027-05-31",  # Memorial Day
-    "2027-06-18",  # Juneteenth (observed, Fri)
-    "2027-07-05",  # Independence Day (observed, Mon)
-    "2027-09-06",  # Labor Day
-    "2027-11-25",  # Thanksgiving
-    "2027-12-24",  # Christmas (observed, Fri)
-}
-
-if check.isoformat() in NYSE_HOLIDAYS:
-    raise SystemExit(1)
-
-raise SystemExit(0)
+check = date.fromisoformat(sys.argv[2])
+raise SystemExit(0 if is_trading_day(check) else 1)
 PY
 }
 

@@ -95,6 +95,14 @@ GAMMA_COMPUTE_FALLBACK_MAX_IV_ITERS = max(
     int(os.getenv("GAMMA_COMPUTE_FALLBACK_MAX_IV_ITERS", "80")),
 )
 
+# Ensure sibling scripts import whether run as a script (sys.path[0] ==
+# scripts/) or loaded by file path.
+_SCRIPTS_DIR = str(Path(__file__).resolve().parent)
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+
+from trading_calendar import is_trading_day
+
 try:
     from migrate_db import migrate_connection
 except Exception:  # pragma: no cover
@@ -108,7 +116,7 @@ def parse_yyyy_mm_dd(raw: str) -> date:
 def iter_trading_days(start_date: date, end_date: date) -> Iterable[date]:
     cur = start_date
     while cur <= end_date:
-        if cur.weekday() < 5:
+        if is_trading_day(cur):
             yield cur
         cur += timedelta(days=1)
 

@@ -356,6 +356,11 @@ class OpsSmokeTests(unittest.TestCase):
         original = (REPO_ROOT / "scripts" / "run_daily_report_send.sh").read_text(encoding="utf-8")
         (scripts_dir / "run_daily_report_send.sh").write_text(original, encoding="utf-8")
 
+        # The trading-day gate imports scripts/trading_calendar.py from
+        # ${ROOT_DIR}/scripts, so the sandbox needs a copy.
+        calendar_src = (REPO_ROOT / "scripts" / "trading_calendar.py").read_text(encoding="utf-8")
+        (scripts_dir / "trading_calendar.py").write_text(calendar_src, encoding="utf-8")
+
         # The wrapper now sources scripts/_pybin.sh for >=3.10 Python
         # resolution. The sandbox needs that helper too, otherwise the
         # ``source`` line aborts before any work begins.
@@ -417,6 +422,7 @@ class OpsSmokeTests(unittest.TestCase):
 
         report_date = "2026-02-18"
         env = {
+            "ML_REPORT_FAKE_ET_DATE": report_date,
             "ML_REPORT_NOTIFY_CHANNELS": "none",
             "ML_REPORT_REPORT_DATE": report_date,
             "ML_REPORT_SCHEDULE_MODE": "close",
