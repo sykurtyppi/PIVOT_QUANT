@@ -433,6 +433,18 @@ def apply_threshold_risk_guards(
     threshold_meta["guard_reason"] = ";".join(reasons)
     threshold_meta["guard_no_trade_threshold"] = float(guarded_threshold)
 
+    # P1-3 diagnostics (read-only flags).  These do NOT change the gate
+    # decision.  They surface "would this horizon survive a zero-sum / zero-
+    # mean utility floor?" so operators can spot horizons that ship live with
+    # negative aggregate or per-signal edge under the current configured
+    # floor (which may be negative, e.g. RF_THRESHOLD_MIN_UTILITY_SCORE=-20).
+    # See ml/thresholds.py::compute_utility_gate_diagnostics for semantics.
+    try:
+        from ml.thresholds import compute_utility_gate_diagnostics as _diag
+        threshold_meta.update(_diag(threshold_meta))
+    except Exception:  # pragma: no cover — diagnostics must never break training
+        pass
+
     if reasons:
         threshold_meta["fallback"] = True
         return guarded_threshold, threshold_meta
@@ -578,8 +590,14 @@ def main() -> None:
         type=float,
         default=_env_float("RF_THRESHOLD_MIN_UTILITY_SCORE", 0.0),
         help=(
-            "Minimum utility_bps score required for a live threshold. "
-            "When score <= this value and guard is enabled, threshold is set to no-trade."
+            "Aggregate utility_bps SCORE floor required for a live threshold. "
+            "When threshold_meta.score <= this value and the disable flag is on, "
+            "the threshold is set to no-trade.  NOTE: this is a SUM (selected_utility_sum) "
+            "comparison, not a per-signal-mean comparison; a negative aggregate and "
+            "negative per-signal mean can still pass if the sum is above a negative "
+            "configured floor.  See the "
+            "diagnostic fields utility_avg_is_negative / would_disable_under_zero_mean "
+            "in threshold_meta for the per-signal-mean view."
         ),
     )
     parser.add_argument(
@@ -593,13 +611,26 @@ def main() -> None:
         dest="threshold_disable_on_nonpositive_utility",
         action="store_true",
         default=_env_bool("RF_THRESHOLD_DISABLE_ON_NONPOSITIVE_UTILITY", True),
-        help="Disable thresholds whose selected utility_bps score is <= threshold-min-utility-score.",
+        help=(
+            "Disable thresholds whose selected utility_bps SCORE is "
+            "<= --threshold-min-utility-score.  The flag name is historical: "
+            "the implementation is 'disable when score <= configured floor', "
+            "and the floor can be negative (e.g. -20), so this flag does NOT "
+            "guarantee 'no nonpositive score ships live'.  Use the "
+            "utility_score_is_negative / utility_avg_is_negative diagnostic "
+            "fields in threshold_meta to detect that case explicitly."
+        ),
     )
     parser.add_argument(
         "--no-threshold-disable-on-nonpositive-utility",
         dest="threshold_disable_on_nonpositive_utility",
         action="store_false",
-        help="Allow non-positive selected utility_bps thresholds.",
+        help=(
+            "Allow utility thresholds with score below the configured "
+            "--threshold-min-utility-score floor.  Same caveat as the "
+            "enabling flag: 'nonpositive' is historical wording, the actual "
+            "comparison is against the configured floor."
+        ),
     )
     parser.add_argument(
         "--threshold-disable-on-fallback",

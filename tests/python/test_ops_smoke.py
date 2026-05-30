@@ -8464,6 +8464,290 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("non_positive_utility", str(meta.get("guard_reason")))
         self.assertTrue(bool(meta.get("fallback")))
 
+    def test_compute_utility_gate_diagnostics_flags_negative_score_and_avg(self) -> None:
+        """P1-3 diagnostic: the v440 break/60m scenario must light up all 4 flags.
+
+        score=-0.976, selected_utility_avg=-0.0488 — both negative — must
+        produce both 'is_negative' AND both 'would_disable_under_zero_*' flags.
+        """
+        from ml.thresholds import compute_utility_gate_diagnostics
+
+        meta = {
+            "score": -0.976,
+            "selected_utility_avg": -0.0488,
+            "fallback": False,
+            "guard_applied": False,
+            "signals": 20,
+        }
+        d = compute_utility_gate_diagnostics(meta)
+        self.assertTrue(d["utility_score_is_negative"])
+        self.assertTrue(d["utility_avg_is_negative"])
+        self.assertTrue(d["would_disable_under_zero_sum"])
+        self.assertTrue(d["would_disable_under_zero_mean"])
+
+    def test_compute_utility_gate_diagnostics_clean_positive_case(self) -> None:
+        """A normal positive-utility horizon must NOT trigger any flag."""
+        from ml.thresholds import compute_utility_gate_diagnostics
+
+        meta = {
+            "score": 174.21,
+            "selected_utility_avg": 1.613,
+            "fallback": False,
+            "guard_applied": False,
+            "signals": 108,
+        }
+        d = compute_utility_gate_diagnostics(meta)
+        self.assertFalse(d["utility_score_is_negative"])
+        self.assertFalse(d["utility_avg_is_negative"])
+        self.assertFalse(d["would_disable_under_zero_sum"])
+        self.assertFalse(d["would_disable_under_zero_mean"])
+
+    def test_compute_utility_gate_diagnostics_handles_missing_and_bool(self) -> None:
+        """None / missing keys / boolean inputs must not crash; all flags False."""
+        from ml.thresholds import compute_utility_gate_diagnostics
+
+        # Missing fields
+        self.assertEqual(
+            compute_utility_gate_diagnostics({}),
+            {
+                "utility_score_is_negative": False,
+                "utility_avg_is_negative": False,
+                "would_disable_under_zero_sum": False,
+                "would_disable_under_zero_mean": False,
+            },
+        )
+        # None inputs
+        self.assertEqual(
+            compute_utility_gate_diagnostics({"score": None, "selected_utility_avg": None}),
+            {
+                "utility_score_is_negative": False,
+                "utility_avg_is_negative": False,
+                "would_disable_under_zero_sum": False,
+                "would_disable_under_zero_mean": False,
+            },
+        )
+        # Boolean: must be rejected as non-numeric (don't coerce True->1.0).
+        d = compute_utility_gate_diagnostics({"score": True, "selected_utility_avg": False})
+        self.assertFalse(d["utility_score_is_negative"])
+        self.assertFalse(d["would_disable_under_zero_sum"])
+        # NaN / inf: not finite, cannot conclude negativity
+        d = compute_utility_gate_diagnostics({"score": float("nan"), "selected_utility_avg": float("-inf")})
+        self.assertFalse(d["utility_score_is_negative"])
+        self.assertFalse(d["utility_avg_is_negative"])
+
+    def test_compute_utility_gate_diagnostics_zero_boundary(self) -> None:
+        """At score=0 / avg=0 exactly: 'is_negative' is False but 'would_disable_under_zero_*' is True (<=0)."""
+        from ml.thresholds import compute_utility_gate_diagnostics
+
+        d = compute_utility_gate_diagnostics({"score": 0.0, "selected_utility_avg": 0.0})
+        self.assertFalse(d["utility_score_is_negative"])
+        self.assertFalse(d["utility_avg_is_negative"])
+        self.assertTrue(d["would_disable_under_zero_sum"])
+        self.assertTrue(d["would_disable_under_zero_mean"])
+
+    def test_apply_threshold_risk_guards_persists_diagnostics_no_behavior_change(self) -> None:
+        """The guard must:
+          * add the 4 diagnostic flags to threshold_meta (new in this PR),
+          * NOT change its gate decision because of them.
+
+        Pin the v440 break/60m scenario: score=-0.976, configured floor=-20,
+        guard MUST stay inactive (matches the actual v440 manifest behavior),
+        AND the new diagnostic flags MUST surface the negative utility.
+        """
+        module = load_module(
+            "train_rf_artifacts_diagnostic_persist",
+            REPO_ROOT / "scripts" / "train_rf_artifacts.py",
+        )
+        threshold, meta = module.apply_threshold_risk_guards(
+            objective="utility_bps",
+            threshold=0.62,
+            threshold_meta={
+                "score": -0.976,
+                "selected_utility_avg": -0.0488,
+                "fallback": False,
+                "signals": 20,
+            },
+            no_trade_threshold=1.0,
+            min_utility_score=-20.0,  # the production floor that let v440 through
+            disable_on_nonpositive_utility=True,
+            disable_on_fallback=True,
+        )
+        # Behavior unchanged: 0.62 (not no_trade) because -0.976 > -20.
+        self.assertAlmostEqual(float(threshold), 0.62, places=9)
+        self.assertFalse(bool(meta.get("guard_applied")))
+        self.assertFalse(bool(meta.get("fallback")))
+        # New diagnostics: present and true (negative utility surfaced).
+        self.assertTrue(meta.get("utility_score_is_negative"))
+        self.assertTrue(meta.get("utility_avg_is_negative"))
+        self.assertTrue(meta.get("would_disable_under_zero_sum"))
+        self.assertTrue(meta.get("would_disable_under_zero_mean"))
+
+    def test_apply_threshold_risk_guards_clean_horizon_diagnostics_all_false(self) -> None:
+        """A clean positive horizon: behavior unchanged AND all diagnostic flags False."""
+        module = load_module(
+            "train_rf_artifacts_diagnostic_clean",
+            REPO_ROOT / "scripts" / "train_rf_artifacts.py",
+        )
+        threshold, meta = module.apply_threshold_risk_guards(
+            objective="utility_bps",
+            threshold=0.81,
+            threshold_meta={
+                "score": 174.21,
+                "selected_utility_avg": 1.613,
+                "fallback": False,
+                "signals": 108,
+            },
+            no_trade_threshold=1.0,
+            min_utility_score=0.0,
+            disable_on_nonpositive_utility=True,
+            disable_on_fallback=True,
+        )
+        self.assertAlmostEqual(float(threshold), 0.81, places=9)
+        self.assertFalse(bool(meta.get("guard_applied")))
+        self.assertFalse(meta.get("utility_score_is_negative"))
+        self.assertFalse(meta.get("utility_avg_is_negative"))
+        self.assertFalse(meta.get("would_disable_under_zero_sum"))
+        self.assertFalse(meta.get("would_disable_under_zero_mean"))
+
+    def test_governance_collect_utility_diagnostics_flags_v440_break_60m(self) -> None:
+        """collect_utility_diagnostics must emit a note for an active negative-utility horizon
+        and stay silent for a clean manifest."""
+        gov = load_module(
+            "model_governance_utility_diag",
+            REPO_ROOT / "scripts" / "model_governance.py",
+        )
+
+        # v440 break/60m shape: active, negative score and avg.
+        bad_manifest = {
+            "thresholds_meta": {
+                "reject": {
+                    "5": {"score": 50.0, "selected_utility_avg": 1.0, "fallback": False, "guard_applied": False},
+                },
+                "break": {
+                    "60": {
+                        "score": -0.976,
+                        "selected_utility_avg": -0.0488,
+                        "fallback": False,
+                        "guard_applied": False,
+                        "signals": 20,
+                    }
+                },
+            }
+        }
+        notes = gov.collect_utility_diagnostics(bad_manifest)
+        self.assertEqual(len(notes), 1)
+        self.assertIn("break:60m", notes[0])
+        self.assertIn("score<0", notes[0])
+        self.assertIn("avg<0", notes[0])
+        self.assertIn("diagnostic only", notes[0])
+
+        # Clean manifest: empty list.
+        clean_manifest = {
+            "thresholds_meta": {
+                "reject": {
+                    "15": {"score": 174.21, "selected_utility_avg": 1.613, "fallback": False, "guard_applied": False},
+                }
+            }
+        }
+        self.assertEqual(gov.collect_utility_diagnostics(clean_manifest), [])
+
+        # Already-fallback / already-guarded horizons must NOT be re-flagged.
+        already_neutralized = {
+            "thresholds_meta": {
+                "break": {
+                    "15": {"score": -50.0, "selected_utility_avg": -2.0, "fallback": True, "guard_applied": True},
+                }
+            }
+        }
+        self.assertEqual(gov.collect_utility_diagnostics(already_neutralized), [])
+
+    def test_report_tradeability_blockers_flags_negative_utility_horizons(self) -> None:
+        """The daily-report blockers note must mention active negative-utility
+        horizons alongside the existing guard/fallback notes (P1-3 surface)."""
+        report = load_module(
+            "generate_daily_ml_report_blockers_neg_util",
+            REPO_ROOT / "scripts" / "generate_daily_ml_report.py",
+        )
+
+        manifest = {
+            "thresholds_meta": {
+                "reject": {
+                    "5": {"score": 50.0, "selected_utility_avg": 1.0, "fallback": False, "guard_applied": False},
+                },
+                "break": {
+                    "60": {
+                        "score": -0.976,
+                        "selected_utility_avg": -0.0488,
+                        "fallback": False,
+                        "guard_applied": False,
+                        "signals": 20,
+                    }
+                },
+            }
+        }
+        note = report.summarize_tradeability_blockers(manifest)
+        self.assertIsNotNone(note)
+        self.assertIn("active negative-utility horizons", note)
+        self.assertIn("break:60m", note)
+
+        # Clean manifest: returns None (no blockers).
+        clean = {
+            "thresholds_meta": {
+                "reject": {"5": {"score": 50.0, "selected_utility_avg": 1.0, "fallback": False, "guard_applied": False}},
+            }
+        }
+        self.assertIsNone(report.summarize_tradeability_blockers(clean))
+
+    def test_report_tradeability_blockers_imports_ml_package_when_run_as_script(self) -> None:
+        """generate_daily_ml_report.py must add the repo root to sys.path.
+
+        In production the file is executed as ``scripts/generate_daily_ml_report.py``,
+        so ``sys.path[0]`` is ``scripts/``.  Without adding the repo root, the
+        diagnostic import of ``ml.thresholds`` is swallowed by the defensive
+        try/except and active negative-utility horizons disappear from the
+        report.
+        """
+        module_path = REPO_ROOT / "scripts" / "generate_daily_ml_report.py"
+        old_path = list(sys.path)
+        old_modules = {
+            name: sys.modules.get(name)
+            for name in ("ml", "ml.thresholds")
+            if name in sys.modules
+        }
+        try:
+            for name in ("ml.thresholds", "ml"):
+                sys.modules.pop(name, None)
+            sys.path = [
+                p for p in sys.path
+                if p not in {"", str(REPO_ROOT), str(REPO_ROOT / "scripts")}
+            ]
+            report = load_module(
+                "generate_daily_ml_report_script_path_neg_util",
+                module_path,
+            )
+            manifest = {
+                "thresholds_meta": {
+                    "break": {
+                        "60": {
+                            "score": -0.976,
+                            "selected_utility_avg": -0.0488,
+                            "fallback": False,
+                            "guard_applied": False,
+                        }
+                    }
+                }
+            }
+            note = report.summarize_tradeability_blockers(manifest)
+        finally:
+            sys.path = old_path
+            for name in ("ml.thresholds", "ml"):
+                sys.modules.pop(name, None)
+            sys.modules.update(old_modules)
+
+        self.assertIsNotNone(note)
+        self.assertIn("active negative-utility horizons", note)
+        self.assertIn("break:60m", note)
+
     def test_train_artifacts_threshold_override_parser_and_resolver(self) -> None:
         module = load_module(
             "train_rf_artifacts_threshold_overrides",

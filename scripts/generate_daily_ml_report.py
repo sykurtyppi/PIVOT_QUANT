@@ -40,8 +40,12 @@ RF_CANDIDATE_MANIFEST = (
 )
 LEGACY_CANDIDATE_MANIFEST = "manifest_latest.json"
 
-# Ensure sibling scripts (migrate_db, trading_calendar) import whether this
-# file is run as a script (sys.path[0] == scripts/) or loaded by file path.
+# Ensure both repo packages (ml.*) and sibling scripts (migrate_db,
+# trading_calendar) import whether this file is run as a script
+# (sys.path[0] == scripts/) or loaded by file path.
+_ROOT_DIR = str(ROOT)
+if _ROOT_DIR not in sys.path:
+    sys.path.insert(0, _ROOT_DIR)
 _SCRIPTS_DIR = str(Path(__file__).resolve().parent)
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
@@ -1603,6 +1607,15 @@ def summarize_tradeability_blockers(manifest: dict[str, Any]) -> str | None:
     break_meta = thresholds_meta.get("break")
     reject_guarded: list[int] = []
     break_fallback: list[int] = []
+    # P1-3 diagnostic: live horizons whose aggregate score or per-signal mean
+    # utility is negative.  These are NOT blocked by the current SUM gate when
+    # the configured floor is negative (e.g. -20), but operators should see
+    # them flagged.  Source of truth lives in ml.thresholds.
+    try:
+        from ml.thresholds import compute_utility_gate_diagnostics as _diag
+    except Exception:  # pragma: no cover
+        _diag = None  # type: ignore
+    negative_utility: list[tuple[str, int, str]] = []  # (target, horizon, flag_str)
 
     if isinstance(reject_meta, dict):
         for horizon_raw, payload in reject_meta.items():
@@ -1623,6 +1636,30 @@ def summarize_tradeability_blockers(manifest: dict[str, Any]) -> str | None:
                 except Exception:
                     continue
 
+    # Scan both targets for active negative-utility horizons.
+    if _diag is not None:
+        for target, target_meta in (("reject", reject_meta), ("break", break_meta)):
+            if not isinstance(target_meta, dict):
+                continue
+            for horizon_raw, payload in target_meta.items():
+                if not isinstance(payload, dict):
+                    continue
+                if bool(payload.get("fallback")) or bool(payload.get("guard_applied")):
+                    continue  # already covered above
+                d = _diag(payload)
+                flags = []
+                if d.get("utility_score_is_negative"):
+                    flags.append("score<0")
+                if d.get("utility_avg_is_negative"):
+                    flags.append("avg<0")
+                if not flags:
+                    continue
+                try:
+                    horizon_int = int(horizon_raw)
+                except Exception:
+                    continue
+                negative_utility.append((target, horizon_int, "+".join(flags)))
+
     notes: list[str] = []
     if reject_guarded:
         ordered = ", ".join(f"{h}m" for h in sorted(set(reject_guarded)))
@@ -1630,6 +1667,15 @@ def summarize_tradeability_blockers(manifest: dict[str, Any]) -> str | None:
     if break_fallback:
         ordered = ", ".join(f"{h}m" for h in sorted(set(break_fallback)))
         notes.append(f"break thresholds on fallback ({ordered})")
+    if negative_utility:
+        # Stable ordering, dedup
+        ordered = ", ".join(
+            f"{t}:{h}m({flags})"
+            for t, h, flags in sorted(set(negative_utility), key=lambda x: (x[0], x[1]))
+        )
+        notes.append(
+            f"active negative-utility horizons (diagnostic): {ordered}"
+        )
     if not notes:
         return None
     return "; ".join(notes)
