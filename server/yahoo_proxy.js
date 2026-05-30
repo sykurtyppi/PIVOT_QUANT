@@ -90,8 +90,16 @@ const WRITE_ENDPOINTS = new Set(['/api/ml/reload', '/api/ml/score', '/api/events
 // P0-1: accept only a true site-relative path.  Reject 'protocol-relative'
 // values ('//evil.com/...') and back-slash escapes ('/\evil.com') which some
 // browsers normalize as authority components, opening a phishing redirect.
+//
+// Also reject any control character (U+0000..U+001F, U+007F) anywhere in the
+// string.  Browsers strip TAB/LF/CR from URLs per the WHATWG URL spec, so a
+// value like '/\t/evil.com' (reachable via ?next=%2F%09%2Fevil.com — Node's
+// header validation allows TAB in a Location value) would collapse to
+// '//evil.com' on the client and re-introduce the open redirect.  Stripping
+// these before the prefix checks closes the class.
 function safeNextPath(raw) {
   if (typeof raw !== 'string' || raw.length === 0) return '/';
+  if (/[\x00-\x1f\x7f]/.test(raw)) return '/';
   if (!raw.startsWith('/')) return '/';
   if (raw.startsWith('//')) return '/';
   if (raw.startsWith('/\\')) return '/';
@@ -129,7 +137,13 @@ function isSameOriginPost(req) {
   const host = String(req?.headers?.host || '').toLowerCase();
   if (!host) return true; // cannot compare without a Host; allow
   const origin = req.headers.origin;
-  if (origin && origin !== 'null') {
+  if (origin) {
+    // The string 'null' is the WHATWG opaque origin: sandboxed iframes,
+    // data:/blob: documents, some file:// loads.  It is NEVER same-origin
+    // with us, so it must block — and we must NOT fall through to Referer
+    // (the attacker controls neither, but absence-of-Referer would otherwise
+    // pass through to the final 'no headers = allow' branch).
+    if (origin === 'null') return false;
     try {
       return new URL(origin).host.toLowerCase() === host;
     } catch (_e) {

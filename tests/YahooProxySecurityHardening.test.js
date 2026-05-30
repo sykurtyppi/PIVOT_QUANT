@@ -107,6 +107,43 @@ describe('P0-1: safeNextPath blocks open-redirect vectors', () => {
         expect(safeNextPath('/api/whatever?x=1')).toBe('/api/whatever?x=1');
         expect(safeNextPath('/')).toBe('/');
     });
+
+    // Follow-up review (PR #49): browsers strip TAB/LF/CR from URLs per the
+    // WHATWG URL spec.  Node's header validation allows TAB in a Location
+    // value, so a path like '/\t/evil.com' (reachable via
+    // ?next=%2F%09%2Fevil.com — searchParams.get('next') decodes it) ships
+    // out and collapses to '//evil.com' client-side.  Reject anything with
+    // a control char before the prefix checks.
+    test('control-character bypass: tab/CR/LF before the second slash is reduced to /', () => {
+        expect(safeNextPath('/\t/evil.com')).toBe('/');
+        expect(safeNextPath('/\r/evil.com')).toBe('/');
+        expect(safeNextPath('/\n/evil.com')).toBe('/');
+        expect(safeNextPath('/\t\t//evil.com')).toBe('/');
+        // Leading control char (before the slash) — already blocked by the
+        // leading-slash check, but pin it here so future refactors can't
+        // accidentally re-open the path.
+        expect(safeNextPath('\t//evil.com')).toBe('/');
+        expect(safeNextPath('\r\n//evil.com')).toBe('/');
+    });
+    test('control-character bypass: any C0 control or DEL anywhere is reduced to /', () => {
+        // Pin the whole C0 + DEL class so future regex shrinks are caught.
+        expect(safeNextPath('/abc\x00def')).toBe('/');     // NUL
+        expect(safeNextPath('/abc\x1fdef')).toBe('/');     // US (last C0)
+        expect(safeNextPath('/abc\x7fdef')).toBe('/');     // DEL
+        // U+0080+ are NOT in our reject class (they're not C0 controls and
+        // are not stripped by URL normalization); legitimate UTF-8 paths
+        // with non-ASCII chars must still pass.
+        expect(safeNextPath('/café')).toBe('/café');
+    });
+    test('Node URLSearchParams round-trip: %09 in the query decodes to TAB and is blocked', () => {
+        // End-to-end repro of the reviewer's reachability claim: production
+        // calls url.searchParams.get('next'), which percent-decodes %09.
+        // Result must hit the control-char guard.
+        const u = new URL('http://localhost/auth/login?next=%2F%09%2Fevil.com');
+        const decoded = u.searchParams.get('next');
+        expect(decoded).toBe('/\t/evil.com');             // sanity: %09 → TAB
+        expect(safeNextPath(decoded)).toBe('/');          // blocked
+    });
 });
 
 describe('P1-A: range/interval allowlist', () => {
@@ -181,12 +218,25 @@ describe('P1-C: isSameOriginPost (CSRF defense-in-depth)', () => {
         });
         expect(isSameOriginPost(req2)).toBe(false);
     });
-    test('"null" Origin (file:// / sandboxed iframe) is treated as absent', () => {
-        // When Origin is the literal string 'null', we ignore it and fall
-        // back to Referer.  No Referer + null Origin => allow (assumed
-        // server-to-server caller).
+    test('"null" Origin (file:// / sandboxed iframe / data: doc) is BLOCKED', () => {
+        // Follow-up review (PR #49): the WHATWG opaque-origin sentinel
+        // 'null' is NEVER same-origin with us.  A sandboxed iframe attacker
+        // controls neither Origin nor Referer; if we fell through to the
+        // 'neither header present = allow' branch when origin === 'null'
+        // and no Referer, the gate would silently pass.  Block instead.
         const req = makeReq({ host: 'app.example:3000', origin: 'null' });
-        expect(isSameOriginPost(req)).toBe(true);
+        expect(isSameOriginPost(req)).toBe(false);
+    });
+    test('"null" Origin blocks even when a matching Referer is also sent', () => {
+        // Belt-and-suspenders: an attacker who sets Referer to our own host
+        // but originates from an opaque origin must still be blocked.
+        // Origin takes precedence over Referer; opaque Origin → block.
+        const req = makeReq({
+            host: 'app.example:3000',
+            origin: 'null',
+            referer: 'https://app.example:3000/dashboard',
+        });
+        expect(isSameOriginPost(req)).toBe(false);
     });
     test('no Origin AND no Referer → allow (server-to-server caller)', () => {
         const req = makeReq({ host: 'app.example:3000' });
