@@ -57,7 +57,7 @@ bash server/run_persistent_stack.sh               # persistent 24/7 (with caffei
 bash scripts/run_retrain_cycle.sh                 # backfill → labels → export → duckdb → train → governance → reload → daily report
 .venv/bin/python scripts/run_retrain_evidence_pack.py --out-dir /tmp/pq_evidence_$(date +%s) --report evidence/retrain_$(date +%s).json
 .venv/bin/python scripts/audit_held_out_feasibility.py --target reject --horizon 15
-.venv/bin/python scripts/audit_regime_health.py --target reject --horizon 15
+.venv/bin/python scripts/audit_regime_health_attribution.py --target reject --horizon 15
 ```
 
 ### CI
@@ -91,7 +91,7 @@ yahoo_proxy (:3000) → live_event_collector (:5004) → SQLite (data/pivot_even
 - **`server/serving_state.py`** — third-axis serving-state registry. Reads `<RF_MODEL_DIR>/serving_state.json`; written by `scripts/set_serving_state.py`. Missing file → default `active`. Unparseable / schema-invalid file → `dormant_data_quality` (fail-closed). `ServingStateRegistry.is_active()` is what `/score` consults; `snapshot()` powers the `serving_state` block in `/health`. D1 is manual-only — no audit auto-wiring, no auto-clear, no expiry enforcement.
 - **`scripts/train_rf_artifacts.py`** — orchestrates the train→calibrate→threshold-select pipeline. Writes `manifest_runtime_latest.json` (candidate) into `--out-dir`. Capture-only fields in `thresholds_meta[target][horizon]`: `score_observations`, `score_observations_source` (always `"threshold_tune_slice"`), `signals_on_tune_slice`, `train_purge` diagnostic. Post-hoc `apply_threshold_risk_guards()` can substitute to `NO_SIGNAL_THRESHOLD`; when it does, `score_observations` is cleared so the manifest's observations always refer to the threshold that ships.
 - **`scripts/run_retrain_evidence_pack.py`** — the evidence-pack engine. Runs `train_rf_artifacts.py` into an isolated `--out-dir`, then emits a structured JSON report under `evidence/`. Top-level `candidate_readiness` block classifies the candidate into one of four states (`full_family_ready` / `partial_ready` / `degraded_candidate` / `not_ready`) and emits a `promotion_disposition` (one of `ready_full_family`, `full_family_in_sample_validated`, `partial_oos_validated`, `partial_in_sample_validated`, `hold_pending_oos_validation`, `hold_pending_statistical_validation`, `blocked_not_ready`). **`promotion_ready=True` requires `oos_validation_passed=True`, which in turn requires `oos_validation_coverage_complete=True` (OOS covers every mechanically-viable horizon).** In-sample (`threshold_tune_slice`) evidence is real but cannot promote; it lands in `full_family_in_sample_validated` / `partial_in_sample_validated`. Mixed-scope candidates (some horizons OOS, others in-sample) land in `hold_pending_oos_validation` because OOS coverage is incomplete. Statistical validation runs only on mechanically-viable horizons via bootstrap CI + one-sample sign-flip permutation. The scope of each validation result comes from `score_observations_source`; recognized OOS sources are `held_out_slice`, `walk_forward_fold`, or anything matching the `oos_` prefix — anything else (including typos) is treated as in-sample.
-- **`scripts/audit_held_out_feasibility.py`** / **`scripts/audit_regime_health.py`** — read-only diagnostic scripts that mirror serving threshold semantics and report fixed chronological buckets without picking favorable slices.
+- **`scripts/audit_held_out_feasibility.py`** / **`scripts/audit_regime_health_attribution.py`** / **`scripts/audit_regime_data_quality.py`** — read-only diagnostic scripts that mirror serving threshold semantics (manifest-first, artifact fallback) and report fixed chronological slices/groups without picking favorable slices.
 - **`services/research_protocol/`** — the protocol-enforcement subsystem. `registration.py`, `kill_list.py`, `protocol_guard.py`, `validation_ladder.py`, `statistical_guard.py`, `replication_guard.py`, `audit_logger.py`, `trial_budget.py`. See `docs/RESEARCH_PROTOCOL_ENFORCEMENT.md`.
 
 ### Evidence-Pack Chain (read this before extending it)
@@ -128,7 +128,7 @@ The promotion pipeline is a chain of layered policy gates, each shipped as a sep
 This codebase has been hardened over many PRs against a specific failure mode: a previous candidate (`high_vol_trend_early_candidate`) showed 80.9% test win rate on 2025 and 41.2% on 2022 with the same frozen filter — i.e., the "edge" was a regime-favored artifact that survived six diagnostic modules and an LLM-assisted audit. Every audit script, every gate, every test in this repository is written under the assumption that the next change (human or model) is equally prone to fooling itself. Specifically:
 
 - **Never fabricate significance.** If raw per-signal observations aren't available, the validator must report `insufficient_data` — not a hand-waved p-value from aggregate scores.
-- **Slice sizes are fixed up front.** Audits report several chronological tail slices; they don't pick the most favorable one. See `audit_held_out_feasibility.py:PCT_SLICES`/`ROW_SLICES` and `audit_regime_health.py:PCT_BUCKETS`/`ROW_BUCKETS`.
+- **Slice sizes are fixed up front.** Audits report several chronological tail slices; they don't pick the most favorable one. See `audit_held_out_feasibility.py:PCT_SLICES`/`ROW_SLICES` and `audit_regime_health_attribution.py:DEFAULT_RECENT_N`/`DEFAULT_OLDER_PCT`.
 - **Report dimensions independently.** A diagnostic does not pick a single "cause" — it produces a multi-dimensional picture and lets the reader synthesize.
 - **In-sample evidence must be labeled.** When evidence comes from the same slice that selected a parameter (e.g. `score_observations` from the threshold-tune slice), the manifest records the source via `score_observations_source: "threshold_tune_slice"` so downstream readers cannot mistake it for OOS.
 - **Threshold resolution = manifest first, artifact fallback.** Any audit that compares against "the deployed threshold" must use this precedence and surface a mismatch flag.
@@ -172,7 +172,7 @@ Several paths can substitute or override the deployed threshold. When debugging 
 - `ml.thresholds.select_threshold(enforce_min_score=, enforce_no_fallback=)` — strict-selector flags that emit the sentinel.
 - `RF_THRESHOLD_NO_TRADE_THRESHOLD`, `RF_THRESHOLD_DISABLE_ON_NONPOSITIVE_UTILITY`, `RF_THRESHOLD_DISABLE_ON_FALLBACK` env vars.
 
-A real "model dormant" investigation requires running `scripts/audit_regime_health.py` AND inspecting the manifest's `thresholds_meta` for guard reasons.
+A real "model dormant" investigation requires running `scripts/audit_regime_health_attribution.py` AND inspecting the manifest's `thresholds_meta` for guard reasons.
 
 ## Symbol Policy
 
