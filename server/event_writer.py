@@ -1,4 +1,6 @@
+import hmac
 import json
+import logging
 import os
 import sys
 import sqlite3
@@ -43,6 +45,88 @@ EVENT_WRITER_WAL_AUTOCHECKPOINT = max(
 NY_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone.utc
 RTH_OPEN = time(9, 30)
 RTH_CLOSE = time(16, 0)
+
+log = logging.getLogger("event_writer")
+
+
+# =============================================================================
+# Write-endpoint auth — direct port of the ml_server PR #51 pattern.
+# /events and /bars persist attacker-controllable rows into pivot_events.sqlite.
+# Loopback bind (the default) keeps existing clients working with zero changes;
+# a non-loopback bind requires a token and refuses to start without one.
+# Includes the PR #51 amend: on a non-loopback bind, BOTH (no-token) and
+# (explicit bypass=true) are misconfigurations — every write returns 503.
+# =============================================================================
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _is_loopback_bind(host: str) -> bool:
+    """Match the bash is_loopback_bind in run_persistent_stack.sh:
+    localhost | 127.0.0.1 | ::1 | 127.* — case-insensitive."""
+    h = (host or "").strip().lower()
+    if h in _LOOPBACK_HOSTS:
+        return True
+    return h.startswith("127.")
+
+
+def _resolve_write_auth_bypass(host: str, raw_flag: str | None) -> bool:
+    """Default the bypass per loopback status; honour an explicit override
+    string ('true'/'false' etc.) when the operator sets one."""
+    flag = (raw_flag or "").strip().lower()
+    if flag in {"1", "true", "yes", "on"}:
+        return True
+    if flag in {"0", "false", "no", "off"}:
+        return False
+    # Unset / empty / unrecognised → fall back to the loopback default.
+    return _is_loopback_bind(host)
+
+
+EVENT_WRITER_AUTH_TOKEN = os.getenv("EVENT_WRITER_AUTH_TOKEN", "")
+_BIND_IS_LOOPBACK = _is_loopback_bind(HOST)
+_WRITE_AUTH_BYPASS = _resolve_write_auth_bypass(
+    HOST, os.getenv("EVENT_WRITER_AUTH_LOCAL_BYPASS")
+)
+
+# Hard misconfiguration on a public bind.  Two ways to land here:
+#   (a) bypass off + no token configured — no way to authenticate a writer.
+#   (b) explicit bypass=true on a non-loopback bind — gate is off where it
+#       must be on.  The shell wrapper refuses both at startup; this module
+#       mirror is defense-in-depth for direct python invocation.
+_WRITE_AUTH_MISCONFIGURED = (not _BIND_IS_LOOPBACK) and (
+    (not _WRITE_AUTH_BYPASS and not EVENT_WRITER_AUTH_TOKEN)  # case (a)
+    or _WRITE_AUTH_BYPASS                                    # case (b)
+)
+if _WRITE_AUTH_MISCONFIGURED:
+    log.error(
+        "Event-writer write-endpoint auth misconfigured: EVENT_WRITER_BIND=%s is "
+        "non-loopback and either EVENT_WRITER_AUTH_LOCAL_BYPASS=true or "
+        "EVENT_WRITER_AUTH_TOKEN is unset; /events and /bars will return 503. "
+        "Set EVENT_WRITER_AUTH_TOKEN (and leave EVENT_WRITER_AUTH_LOCAL_BYPASS "
+        "unset/false), or bind to 127.0.0.1.",
+        HOST,
+    )
+
+
+def _check_write_auth(provided_token: str | None) -> tuple[int, str] | None:
+    """Return (status, message) on rejection; return None to allow the write.
+
+    Token value never appears in the returned message or in any log line.
+    """
+    if _WRITE_AUTH_MISCONFIGURED:
+        return (503, "Event-writer write-endpoint auth is misconfigured; refusing write.")
+    if _WRITE_AUTH_BYPASS:
+        return None
+    expected = EVENT_WRITER_AUTH_TOKEN
+    if not expected:
+        # Defensive: bypass off and token unset should already be
+        # misconfigured=True above.  Belt-and-suspenders.
+        return (503, "Event-writer write-endpoint auth is misconfigured; refusing write.")
+    provided = (provided_token or "").strip()
+    if not provided or not hmac.compare_digest(
+        provided.encode("utf-8"), expected.encode("utf-8")
+    ):
+        return (401, "Invalid or missing write token.")
+    return None
 
 
 def _parse_allowed_origins() -> list[str]:
@@ -412,6 +496,16 @@ class WriterHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
+        # Auth gate BEFORE reading/parsing the body: a write must be
+        # authorised before we even allocate buffers for the request.
+        # Header name mirrors the ml_server X-ML-Write-Token convention.
+        # Token value never reflected in the error body, never logged.
+        if parsed.path in ("/events", "/bars"):
+            reject = _check_write_auth(self.headers.get("X-Event-Writer-Token"))
+            if reject is not None:
+                status, message = reject
+                self._send_json(status, {"error": message})
+                return
         length = int(self.headers.get("Content-Length", "0"))
         if length > MAX_BODY_BYTES:
             self._send_json(413, {"error": f"Request body too large (max {MAX_BODY_BYTES} bytes)"})
