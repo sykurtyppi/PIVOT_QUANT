@@ -61,16 +61,47 @@ MIN_SIGNALS = 30
 PCT_SLICES = (0.05, 0.10, 0.20, 0.30)
 ROW_SLICES = (250, 500, 1000)
 
-# Conservative floors mirroring existing train/calib/tune sizes observed in
-# the most recent evidence reports (~20020 train + ~878 calib_fit + ~585 tune
-# for reject@15m). The audit refuses to flag a slice "feasible" if carving
-# it would push remaining rows below this combined floor.
+# ── Stable-model floor, re-derived for SPY-only (2026-05-31) ──
+# The previous floor (train=20000) simply mirrored v450's observed training
+# size — but that size was inflated by ~2,600 contaminating SPX rows
+# (CRITICAL-3). SPY-only is ~20,563 rows at h=15, BELOW that old floor. Rather
+# than lower the floor to make a held-out carve "fit", we re-derive it from a
+# minimum-samples-for-a-stable-model basis and report "insufficient data" when
+# SPY-only cannot support it. Rationale per component (RF: 300 trees, depth 12,
+# min_samples_leaf=5, ~35 features; isotonic calibration; utility threshold):
+#   * train (RF fit): ~85x the feature count (~35) -> 3,000. Enough to populate
+#     leaves (min_samples_leaf=5, up to ~4k leaves) with stable splits.
+#   * calib_fit (isotonic): isotonic is non-parametric and overfits on small N;
+#     800 gives a stable monotone fit.
+#   * tune (utility threshold): needs >=~100 FIRED signals for a stable
+#     threshold; at the lowest reject fire-rate (~12% @ h=15) that is
+#     100/0.12 ~= 850 rows.
+# This is the minimum to be STABLE, not the v450 size. It is intentionally NOT
+# tuned to make the budget fit.
 EXISTING_FLOOR = {
-    "train": 20_000,
-    "calib_fit": 850,
-    "tune": 580,
+    "train": 3_000,
+    "calib_fit": 800,
+    "tune": 850,
 }
 EXISTING_FLOOR_TOTAL = sum(EXISTING_FLOOR.values())
+
+# Walk-forward OOS budget (must match ml/walk_forward_oos defaults / the harness
+# config used at retrain). Fold 0 needs (min_train fit + calib_window) before
+# the earliest test window, plus n_folds disjoint test windows at the tail.
+WALK_FORWARD = {
+    "n_folds": 5,
+    "test_window": 1_000,
+    "min_train": 4_000,     # pipeline-fit rows before fold 0's test window
+    "calib_window": 2_000,  # calib_fit + tune per fold, pre-test
+}
+WALK_FORWARD_REQUIRED_ROWS = (
+    WALK_FORWARD["min_train"]
+    + WALK_FORWARD["calib_window"]
+    + WALK_FORWARD["n_folds"] * WALK_FORWARD["test_window"]
+)
+# Minimum FIRED OOS signals (pooled across folds) for a powered OOS test.
+# 30 is the hard floor (MIN_SIGNALS); 100 is the "adequately powered" target.
+WALK_FORWARD_MIN_OOS_SIGNALS_TARGET = 100
 
 
 # ------------------------------------------------------------------ #
@@ -164,21 +195,58 @@ def resolve_runtime_threshold(
     }
 
 
-def load_labeled_events(duckdb_path: Path, view: str, horizon: int, target: str):
-    """Read all labeled events for the (target, horizon), ordered by ts_event."""
+def load_labeled_events(
+    duckdb_path: Path, view: str, horizon: int, target: str, symbol: str | None = "SPY"
+):
+    """Read labeled events for the (target, horizon), scoped to ``symbol``.
+
+    CRITICAL-3 consistency: the training view is NOT symbol-scoped, so foreign
+    symbols (SPX) leak in. The feasibility audit MUST count the same SPY-only
+    population the corrected training uses — otherwise the row budget is
+    overstated by the contaminating rows.
+    """
     duckdb = _require("duckdb", "python3 -m pip install duckdb")
     con = duckdb.connect(str(duckdb_path), read_only=True)
     try:
-        df = con.execute(
-            f"SELECT * FROM {view} WHERE horizon_min = ? ORDER BY ts_event",
-            [horizon],
-        ).df()
+        sym = (symbol or "").strip()
+        if sym:
+            df = con.execute(
+                f"SELECT * FROM {view} WHERE horizon_min = ? AND symbol = ? ORDER BY ts_event",
+                [horizon, sym],
+            ).df()
+        else:
+            df = con.execute(
+                f"SELECT * FROM {view} WHERE horizon_min = ? ORDER BY ts_event",
+                [horizon],
+            ).df()
     finally:
         con.close()
     if target not in df.columns:
         raise SystemExit(f"Training view missing target column {target!r}")
     sub = df[df[target].notna()].copy()
     return sub
+
+
+def assess_walk_forward_feasibility(total_rows: int) -> dict:
+    """Can SPY-only data support an adequately-powered walk-forward OOS run?
+
+    Reports insufficiency rather than relaxing windows. The signal-count target
+    is only an estimate here (the deployed fire-rate is model-dependent); the
+    authoritative per-fold power gate lives in ml/walk_forward_oos.
+    """
+    enough_rows = total_rows >= WALK_FORWARD_REQUIRED_ROWS
+    return {
+        "walk_forward_config": dict(WALK_FORWARD),
+        "walk_forward_required_rows": int(WALK_FORWARD_REQUIRED_ROWS),
+        "total_rows": int(total_rows),
+        "rows_sufficient_for_walk_forward": bool(enough_rows),
+        "min_oos_signals_target": int(WALK_FORWARD_MIN_OOS_SIGNALS_TARGET),
+        "verdict": (
+            "walk_forward_oos_feasible"
+            if enough_rows
+            else "insufficient_data_for_walk_forward_oos"
+        ),
+    }
 
 
 # ------------------------------------------------------------------ #
@@ -311,6 +379,8 @@ def build_report(
     total_rows: int,
     slices: list[dict],
     recommendation: str,
+    symbol: str = "SPY",
+    walk_forward_assessment: dict | None = None,
     warnings: list[str] | None = None,
 ) -> dict:
     return {
@@ -333,8 +403,11 @@ def build_report(
             threshold_resolution["threshold_mismatch_detected"]
         ),
         "min_signals_floor": int(MIN_SIGNALS),
+        "symbol": symbol,
         "existing_floor": dict(EXISTING_FLOOR),
         "existing_floor_total": int(EXISTING_FLOOR_TOTAL),
+        "existing_floor_basis": "min_samples_for_stable_model_spy_only_2026_05_31",
+        "walk_forward_feasibility": walk_forward_assessment or {},
         "total_labeled_rows": int(total_rows),
         "slices": slices,
         "recommendation": recommendation,
@@ -374,6 +447,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--models-dir", default=str(DEFAULT_MODELS_DIR))
     parser.add_argument("--duckdb", default=str(DEFAULT_DUCKDB))
     parser.add_argument("--view", default=DEFAULT_VIEW)
+    parser.add_argument(
+        "--symbol",
+        default="SPY",
+        help="Symbol scope for the row budget (CRITICAL-3). Empty = all symbols.",
+    )
     parser.add_argument("--report", default="")
     args = parser.parse_args(argv)
 
@@ -416,7 +494,9 @@ def main(argv: list[str] | None = None) -> int:
     if not feature_columns:
         raise SystemExit("Model artifact missing feature_columns")
 
-    sub = load_labeled_events(duckdb_path, args.view, args.horizon, args.target)
+    sub = load_labeled_events(
+        duckdb_path, args.view, args.horizon, args.target, symbol=args.symbol
+    )
     total_rows = int(len(sub))
 
     slices: list[dict] = []
@@ -445,8 +525,15 @@ def main(argv: list[str] | None = None) -> int:
         slices.append(result)
 
     recommendation = determine_recommendation(total_rows=total_rows, slices=slices)
+    walk_forward_assessment = assess_walk_forward_feasibility(total_rows)
 
     warnings: list[str] = []
+    if not walk_forward_assessment["rows_sufficient_for_walk_forward"]:
+        warnings.append(
+            f"insufficient_data_for_walk_forward_oos: have {total_rows} "
+            f"{args.symbol or 'all-symbol'} rows, need "
+            f">= {WALK_FORWARD_REQUIRED_ROWS}"
+        )
     if threshold_resolution["threshold_mismatch_detected"]:
         warnings.append(
             f"threshold_mismatch:manifest={threshold_resolution['manifest_threshold']} "
@@ -467,6 +554,8 @@ def main(argv: list[str] | None = None) -> int:
         total_rows=total_rows,
         slices=slices,
         recommendation=recommendation,
+        symbol=args.symbol,
+        walk_forward_assessment=walk_forward_assessment,
         warnings=warnings,
     )
 
@@ -502,9 +591,21 @@ def main(argv: list[str] | None = None) -> int:
             "Runtime would serve the manifest value; the artifact value is "
             "ignored at serve time."
         )
+    print(f"Symbol scope:                {args.symbol or 'ALL'}")
     print(f"Total labeled rows:          {total_rows}")
-    print(f"Existing slices floor total: {EXISTING_FLOOR_TOTAL}")
+    print(
+        f"Stable-model floor total:    {EXISTING_FLOOR_TOTAL} "
+        f"(train={EXISTING_FLOOR['train']} calib_fit={EXISTING_FLOOR['calib_fit']} "
+        f"tune={EXISTING_FLOOR['tune']}; min-samples-for-stable-model basis)"
+    )
     print(f"min_signals floor (B3):      {MIN_SIGNALS}")
+    print(
+        f"Walk-forward required rows:  {WALK_FORWARD_REQUIRED_ROWS} "
+        f"(min_train {WALK_FORWARD['min_train']} + calib_window "
+        f"{WALK_FORWARD['calib_window']} + {WALK_FORWARD['n_folds']}x"
+        f"{WALK_FORWARD['test_window']})"
+    )
+    print(f"Walk-forward verdict:        {walk_forward_assessment['verdict']}")
     print()
     header = (
         f"{'slice':<22} {'rows':>6} {'usable':>7} {'signals':>8} "
