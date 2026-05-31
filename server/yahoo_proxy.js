@@ -80,6 +80,88 @@ const authAuditState = {
   lastLockoutAtMs: 0,
 };
 const WRITE_ENDPOINTS = new Set(['/api/ml/reload', '/api/ml/score', '/api/events', '/api/bars']);
+
+// =============================================================================
+// Security helpers (audit follow-up: P0-1 open redirect, P1-A param injection,
+// P1-C CSRF on write endpoints, P1-H redirect SSRF).  All are surgical guards;
+// no behavior change on the happy path.
+// =============================================================================
+
+// P0-1: accept only a true site-relative path.  Reject 'protocol-relative'
+// values ('//evil.com/...') and back-slash escapes ('/\evil.com') which some
+// browsers normalize as authority components, opening a phishing redirect.
+//
+// Also reject any control character (U+0000..U+001F, U+007F) anywhere in the
+// string.  Browsers strip TAB/LF/CR from URLs per the WHATWG URL spec, so a
+// value like '/\t/evil.com' (reachable via ?next=%2F%09%2Fevil.com — Node's
+// header validation allows TAB in a Location value) would collapse to
+// '//evil.com' on the client and re-introduce the open redirect.  Stripping
+// these before the prefix checks closes the class.
+function safeNextPath(raw) {
+  if (typeof raw !== 'string' || raw.length === 0) return '/';
+  if (/[\x00-\x1f\x7f]/.test(raw)) return '/';
+  if (!raw.startsWith('/')) return '/';
+  if (raw.startsWith('//')) return '/';
+  if (raw.startsWith('/\\')) return '/';
+  return raw;
+}
+
+// P1-A: Yahoo Finance accepts a small fixed enum for chart range and
+// interval.  Allowlist them at the boundary so callers cannot inject extra
+// URL syntax (an `&`, `#`, CRLF, etc.) into the upstream URL builder.
+const ALLOWED_YAHOO_RANGES = new Set([
+  '1d', '5d', '1mo', '3mo', '6mo', '1y', '2y', '5y', '10y', 'ytd', 'max',
+]);
+const ALLOWED_YAHOO_INTERVALS = new Set([
+  '1m', '2m', '5m', '15m', '30m', '60m', '90m', '1h', '1d', '5d', '1wk', '1mo', '3mo',
+]);
+function validateYahooRange(raw, fallback = '3mo') {
+  if (typeof raw !== 'string') return fallback;
+  const trimmed = raw.trim();
+  return ALLOWED_YAHOO_RANGES.has(trimmed) ? trimmed : fallback;
+}
+function validateYahooInterval(raw, fallback = '1d') {
+  if (typeof raw !== 'string') return fallback;
+  const trimmed = raw.trim();
+  return ALLOWED_YAHOO_INTERVALS.has(trimmed) ? trimmed : fallback;
+}
+
+// P1-C: defense-in-depth Origin/Referer check for state-changing requests.
+// Browsers always send `Origin` on POSTs (independent of Referrer-Policy:
+// no-referrer which we set elsewhere).  Server-to-server callers (e.g. the
+// retrain pipeline) typically send neither header — we allow that path
+// because the service-token / loopback / SameSite=Lax cookie defenses still
+// apply.  This guard is meant to close the remaining gap when
+// DASH_WRITE_ENDPOINTS_LOCAL_ONLY=false.
+function isSameOriginPost(req) {
+  const host = String(req?.headers?.host || '').toLowerCase();
+  if (!host) return true; // cannot compare without a Host; allow
+  const origin = req.headers.origin;
+  if (origin) {
+    // The string 'null' is the WHATWG opaque origin: sandboxed iframes,
+    // data:/blob: documents, some file:// loads.  It is NEVER same-origin
+    // with us, so it must block — and we must NOT fall through to Referer
+    // (the attacker controls neither, but absence-of-Referer would otherwise
+    // pass through to the final 'no headers = allow' branch).
+    if (origin === 'null') return false;
+    try {
+      return new URL(origin).host.toLowerCase() === host;
+    } catch (_e) {
+      return false; // malformed Origin = block
+    }
+  }
+  const referer = req.headers.referer || req.headers.referrer;
+  if (referer) {
+    try {
+      return new URL(referer).host.toLowerCase() === host;
+    } catch (_e) {
+      return false;
+    }
+  }
+  // Neither header present: assume non-browser caller (server-to-server,
+  // curl, our own retrain scripts).  Other defenses still apply.
+  return true;
+}
 const RESPONSE_SECURITY_HEADERS = Object.freeze({
   'X-Content-Type-Options': 'nosniff',
   'X-Frame-Options': 'DENY',
@@ -964,7 +1046,7 @@ async function handleAuthRoutes(req, res, url) {
   }
   if (url.pathname === '/auth/login') {
     if (req.method === 'GET') {
-      const nextPath = url.searchParams.get('next') || '/';
+      const nextPath = safeNextPath(url.searchParams.get('next'));
       sendLoginPage(res, nextPath);
       return true;
     }
@@ -979,7 +1061,7 @@ async function handleAuthRoutes(req, res, url) {
     }
     const body = await readBody(req, 8 * 1024);
     const form = parseFormBody(body);
-    const nextPath = form.next && form.next.startsWith('/') ? form.next : '/';
+    const nextPath = safeNextPath(form.next);
     const throttleState = getAuthLoginThrottleState(req);
     if (throttleState.locked) {
       recordAuthLockoutResponse();
@@ -1636,8 +1718,23 @@ async function fetchYahooGammaFallback({ symbol, expiryMode = '90dte', limit = 6
   };
 }
 
-function fetchJson(url) {
+// P1-H: redirects are now BOUNDED (default 3 hops) and must stay on the
+// same host as the originating URL.  A hostile upstream returning
+// `Location: https://attacker/...` would previously have caused the
+// proxy to GET arbitrary external URLs on the dashboard's behalf — a
+// real SSRF surface.  The same-host invariant matches how Yahoo's chart
+// API actually behaves (any 3xx redirects within the *.yahoo.com domain
+// it originated from).
+const FETCH_JSON_MAX_REDIRECTS = 3;
+function fetchJson(url, redirectsLeft = FETCH_JSON_MAX_REDIRECTS) {
   return new Promise((resolve, reject) => {
+    let originHost;
+    try {
+      originHost = new URL(url).host.toLowerCase();
+    } catch (_e) {
+      reject({ statusCode: 0, message: `Malformed URL: ${url}` });
+      return;
+    }
     const req = https.get(
       url,
       {
@@ -1664,7 +1761,25 @@ function fetchJson(url) {
           }
 
           if (status >= 300 && status < 400 && res.headers.location) {
-            fetchJson(res.headers.location)
+            if (redirectsLeft <= 0) {
+              reject({ statusCode: status, message: 'Too many redirects' });
+              return;
+            }
+            let target;
+            try {
+              target = new URL(res.headers.location, url);
+            } catch (_e) {
+              reject({ statusCode: status, message: 'Malformed redirect target' });
+              return;
+            }
+            if (target.host.toLowerCase() !== originHost) {
+              reject({
+                statusCode: status,
+                message: `Cross-host redirect blocked (${originHost} -> ${target.host})`,
+              });
+              return;
+            }
+            fetchJson(target.toString(), redirectsLeft - 1)
               .then(resolve)
               .catch(reject);
             return;
@@ -2919,6 +3034,22 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // P1-C: defense-in-depth CSRF check on write endpoints.  Existing
+  // protections are SameSite=Lax (browser-side) and writeEndpointsLocalOnly
+  // (server-side).  When the local-only knob is flipped off — e.g. for
+  // multi-host operator workflows — neither cookie SameSite nor a Referer
+  // strip via Referrer-Policy: no-referrer (also set by this server) would
+  // prevent a cross-origin form-POST.  Browser-initiated POSTs reliably
+  // send `Origin`; server-to-server callers send neither header and are
+  // allowed through (the auth/service-token layer still gates them).
+  if (WRITE_ENDPOINTS.has(url.pathname) && req.method === 'POST' && !isSameOriginPost(req)) {
+    sendJson(res, 403, {
+      error: 'Forbidden',
+      message: 'Cross-origin write requests are not permitted.',
+    });
+    return;
+  }
+
   if (url.pathname === '/api/market') {
     if (!methodAllowed(req, 'GET')) {
       methodNotAllowed(res, 'GET');
@@ -2927,8 +3058,13 @@ const server = http.createServer(async (req, res) => {
     try {
       const source = (url.searchParams.get('source') || 'yahoo').toLowerCase();
       const symbol = url.searchParams.get('symbol');
-      const range = url.searchParams.get('range') || '3mo';
-      const interval = url.searchParams.get('interval') || '1d';
+      // P1-A: validate `range` and `interval` against a strict allowlist.
+      // The Yahoo URL builder (getYahooData) used to interpolate these
+      // values un-encoded, letting an authenticated client inject extra
+      // query params via e.g. `range=3mo%26evil=...`.  Allowlisting at the
+      // boundary is the correct fix for an enum-typed parameter.
+      const range = validateYahooRange(url.searchParams.get('range'), '3mo');
+      const interval = validateYahooInterval(url.searchParams.get('interval'), '1d');
 
       if (source === 'ibkr') {
         const marketUrl = `http://127.0.0.1:5001/market?symbol=${encodeURIComponent(
@@ -3011,8 +3147,11 @@ const server = http.createServer(async (req, res) => {
     }
     try {
       const symbol = url.searchParams.get('symbol') || 'SPX';
-      const interval = url.searchParams.get('interval') || '1d';
-      const range = url.searchParams.get('range') || '3mo';
+      // P1-A: same allowlist applied here for defense-in-depth.  The IBKR
+      // bridge already encodes its params, but allowlisting at the boundary
+      // means downstream rejects fast on garbage values instead of forwarding.
+      const interval = validateYahooInterval(url.searchParams.get('interval'), '1d');
+      const range = validateYahooRange(url.searchParams.get('range'), '3mo');
       const ibUrl = `http://127.0.0.1:5001/market?symbol=${encodeURIComponent(
         symbol
       )}&interval=${encodeURIComponent(interval)}&range=${encodeURIComponent(range)}`;
