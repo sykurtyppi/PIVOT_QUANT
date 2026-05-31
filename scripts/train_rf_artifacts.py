@@ -672,6 +672,37 @@ def main() -> None:
         default=DEFAULT_METADATA_DIR,
         help="Directory for runtime metadata manifests (absolute or relative to --out-dir)",
     )
+    # ── Data-quality filters ─────────────────────────────────────────────────
+    parser.add_argument(
+        "--filter-unresolved",
+        dest="filter_unresolved",
+        action="store_true",
+        default=_env_bool("RF_FILTER_UNRESOLVED_EVENTS", True),
+        help=(
+            "Drop events where resolution_min IS NULL (timeout / ambiguous outcome). "
+            "These are labeled reject=0 by default but represent unknown outcomes, "
+            "not genuine non-rejections. Including them inflates the apparent negative "
+            "class and causes negative corr_pos in the calibration tune window."
+        ),
+    )
+    parser.add_argument(
+        "--no-filter-unresolved",
+        dest="filter_unresolved",
+        action="store_false",
+        help="Include unresolved (timeout) events in training. Not recommended.",
+    )
+    parser.add_argument(
+        "--ema-max-price",
+        type=float,
+        default=_env_float("RF_EMA_MAX_PRICE", 1000.0),
+        help=(
+            "Drop events where ema9 > this value. Catches futures-price bar data "
+            "(e.g. ES at ~6700) accidentally joined to SPY pivot events. "
+            "Default 1000 is safe for SPY (typically 500-700 range)."
+        ),
+    )
+    # ────────────────────────────────────────────────────────────────────────
+
     parser.add_argument("--version", default=None)
     parser.add_argument(
         "--candidate-manifest",
@@ -733,6 +764,8 @@ def main() -> None:
         "gamma_context": _gamma_context_metadata(),
         "trained_end_ts": None,
         "train_embargo_minutes": float(train_embargo_minutes),
+        "filter_unresolved_events": bool(args.filter_unresolved),
+        "ema_max_price": float(args.ema_max_price),
     }
     trained_end_ts_max = None
     latest_aliases: list[tuple[Path, Path]] = []
@@ -745,6 +778,38 @@ def main() -> None:
 
         df = ensure_event_date(df)
         df = df.sort_values("ts_event")
+
+        # ── Data-quality filters ──────────────────────────────────────────
+        # CRITICAL-1: Drop timeout/unresolved events.
+        # Events with resolution_min=NULL have not clearly rejected or broken
+        # within the horizon window. They are stored as reject=0 by default,
+        # making them false negatives that corrupt the training prior and flip
+        # corr_pos negative in the calibration tune window.
+        if args.filter_unresolved and "resolution_min" in df.columns:
+            n_before = len(df)
+            df = df[df["resolution_min"].notna()].copy()
+            n_dropped = n_before - len(df)
+            if n_dropped > 0:
+                print(
+                    f"[data-quality] horizon={horizon}m: dropped {n_dropped} unresolved "
+                    f"(timeout) events ({100*n_dropped/n_before:.1f}% of {n_before} rows)"
+                )
+
+        # CRITICAL-3: Drop futures-price contaminated bar data.
+        # When the bar-data join incorrectly pulls ES/NQ futures OHLC (ema9~6700)
+        # instead of SPY (ema9~600), derived features like price_vs_ema21_bps and
+        # atr_bps are wildly out of range and confuse the RF split decisions.
+        if "ema9" in df.columns:
+            ema_max = float(args.ema_max_price)
+            contaminated = df["ema9"].notna() & (df["ema9"] > ema_max)
+            n_contam = int(contaminated.sum())
+            if n_contam > 0:
+                df = df[~contaminated].copy()
+                print(
+                    f"[data-quality] horizon={horizon}m: dropped {n_contam} rows with "
+                    f"ema9 > {ema_max:.0f} (futures price contamination)"
+                )
+        # ─────────────────────────────────────────────────────────────────
         if not df.empty:
             horizon_end_ts = int(df["ts_event"].max())
             if trained_end_ts_max is None or horizon_end_ts > trained_end_ts_max:
