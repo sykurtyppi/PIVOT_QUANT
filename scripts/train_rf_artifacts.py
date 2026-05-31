@@ -779,6 +779,17 @@ def main() -> None:
         df = ensure_event_date(df)
         df = df.sort_values("ts_event")
 
+        # ── Temporal scope: capture raw end-ts BEFORE quality filters ─────
+        # trained_end_ts represents the furthest-forward data we considered,
+        # not the furthest-forward event that survived filtering.  Unresolved
+        # events at the tail have the most-recent timestamps and would shrink
+        # trained_end_ts if measured post-filter, causing governance to
+        # incorrectly conclude the model covers less time than it actually does.
+        if not df.empty and "ts_event" in df.columns:
+            raw_end_ts = int(df["ts_event"].max())
+            if trained_end_ts_max is None or raw_end_ts > trained_end_ts_max:
+                trained_end_ts_max = raw_end_ts
+
         # ── Data-quality filters ──────────────────────────────────────────
         # CRITICAL-1: Drop timeout/unresolved events.
         # Events with resolution_min=NULL have not clearly rejected or broken
@@ -809,12 +820,6 @@ def main() -> None:
                     f"[data-quality] horizon={horizon}m: dropped {n_contam} rows with "
                     f"ema9 > {ema_max:.0f} (futures price contamination)"
                 )
-        # ─────────────────────────────────────────────────────────────────
-        if not df.empty:
-            horizon_end_ts = int(df["ts_event"].max())
-            if trained_end_ts_max is None or horizon_end_ts > trained_end_ts_max:
-                trained_end_ts_max = horizon_end_ts
-
         label_cols = {
             "event_id",
             "ts_event",
