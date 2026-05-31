@@ -4346,6 +4346,284 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("snapshot_models = registry_snapshot.get(\"models\")", score_block)
         self.assertIn("snapshot_thresholds = registry_snapshot.get(\"thresholds\")", score_block)
 
+    # ------------------------------------------------------------------ #
+    # Regime-health diagnostic (Phase 1)
+    # ------------------------------------------------------------------ #
+
+    def _regime_module(self):
+        return load_module(
+            "regime_health_diagnostic",
+            REPO_ROOT / "scripts" / "audit_regime_health.py",
+        )
+
+    @staticmethod
+    def _regime_stub_df(n: int):
+        import pandas as pd
+        return pd.DataFrame({"row_id": list(range(n))})
+
+    class _RegimeStubModel:
+        """``predict_proba`` builds the positive-class column from a
+        caller-supplied callable. Records inputs."""
+        def __init__(self, probs_fn):
+            self._probs_fn = probs_fn
+            self.last_X = None
+            self.call_count = 0
+
+        def predict_proba(self, X):
+            import numpy as np
+            self.call_count += 1
+            self.last_X = X
+            n = len(X)
+            arr = np.zeros((n, 2), dtype=float)
+            arr[:, 1] = self._probs_fn(X)
+            arr[:, 0] = 1.0 - arr[:, 1]
+            return arr
+
+    def test_regime_compute_bucket_uses_chronological_tail(self) -> None:
+        """``compute_bucket`` must score ``df.iloc[-N:]`` — the latest N rows."""
+        module = self._regime_module()
+        df = self._regime_stub_df(100)
+        seen_idx: list[list[int]] = []
+
+        def _probs(X):
+            seen_idx.append(list(X.index))
+            return [0.0] * len(X)
+
+        model = self._RegimeStubModel(_probs)
+        import ml.features as features_mod
+        orig = features_mod.build_feature_row
+        features_mod.build_feature_row = lambda row: {"row_id": row.get("row_id")}
+        try:
+            module.compute_bucket(
+                df, 15,
+                model_obj=model, feature_columns=["row_id"],
+                threshold=0.8,
+            )
+        finally:
+            features_mod.build_feature_row = orig
+
+        self.assertEqual(seen_idx[-1], list(range(85, 100)))
+
+    def test_regime_compute_bucket_uses_fixed_threshold_no_search(self) -> None:
+        """Signal count must come from a SINGLE comparison against the
+        passed threshold; ``predict_proba`` is called exactly once."""
+        module = self._regime_module()
+        df = self._regime_stub_df(20)
+
+        def _probs(X):
+            n = len(X)
+            return [0.9 if i < 4 else 0.3 for i in range(n)]
+
+        model = self._RegimeStubModel(_probs)
+        import ml.features as features_mod
+        orig = features_mod.build_feature_row
+        features_mod.build_feature_row = lambda row: {"row_id": row.get("row_id")}
+        try:
+            result = module.compute_bucket(
+                df, 20,
+                model_obj=model, feature_columns=["row_id"],
+                threshold=0.85,
+            )
+        finally:
+            features_mod.build_feature_row = orig
+
+        self.assertEqual(model.call_count, 1)
+        self.assertEqual(result["signal_count"], 4)
+        self.assertAlmostEqual(result["signal_rate"], 0.2, places=6)
+
+    def test_regime_resolve_runtime_threshold_prefers_manifest(self) -> None:
+        """Server semantics: manifest threshold wins over artifact."""
+        module = self._regime_module()
+        out = module.resolve_runtime_threshold(0.80, 0.80)
+        self.assertEqual(out["runtime_threshold"], 0.80)
+        self.assertEqual(out["threshold_source"], "manifest")
+        self.assertFalse(out["threshold_mismatch_detected"])
+
+    def test_regime_resolve_runtime_threshold_flags_mismatch(self) -> None:
+        """Critical case: manifest substituted to no-signal sentinel while
+        the artifact still has the original threshold."""
+        module = self._regime_module()
+        sentinel = 1.0000000000000002
+        out = module.resolve_runtime_threshold(sentinel, 0.80)
+        self.assertEqual(out["runtime_threshold"], sentinel)
+        self.assertTrue(out["threshold_mismatch_detected"])
+
+    def test_regime_proximity_stats_math(self) -> None:
+        """Within-window counts: a probability ``p`` is "within w below"
+        iff ``threshold - w <= p < threshold``. The boundary at threshold
+        is NOT included (events at threshold are firing, not near it)."""
+        module = self._regime_module()
+        # threshold = 0.80
+        # probs:    0.79   0.78   0.75   0.70   0.50   0.81 (firing)
+        probs = [0.79, 0.78, 0.75, 0.70, 0.50, 0.81]
+        out = module.proximity_stats(probs, 0.80, windows=(0.01, 0.02, 0.05))
+        self.assertEqual(out["within_windows"]["within_0.01_below"], 1)  # 0.79
+        self.assertEqual(out["within_windows"]["within_0.02_below"], 2)  # 0.79, 0.78
+        self.assertEqual(out["within_windows"]["within_0.05_below"], 3)  # +0.75
+        # Closest below: 0.79 (0.81 is at/above threshold, excluded).
+        self.assertAlmostEqual(out["closest_prob_below_threshold"], 0.79, places=9)
+        # max_prob is the absolute max regardless of side.
+        self.assertAlmostEqual(out["max_prob"], 0.81, places=9)
+        # gap = threshold - max_prob; negative when above firing.
+        self.assertAlmostEqual(out["max_prob_gap_to_threshold"], -0.01, places=9)
+
+    def test_regime_probability_summary_schema(self) -> None:
+        """Quantile summary keys are stable across inputs."""
+        module = self._regime_module()
+        for probs in ([0.5] * 50, [0.1, 0.2, 0.3], [0.99]):
+            out = module.probability_summary(probs)
+            for key in (
+                "min", "mean", "median", "max",
+                "p10", "p25", "p75", "p90", "p95", "p99",
+            ):
+                self.assertIn(key, out, f"missing quantile key: {key}")
+
+    def test_regime_bucket_flags_dormant_and_clustered_low(self) -> None:
+        """Per-bucket flag heuristics fire correctly:
+        - dormant: signal_count < 1
+        - probabilities_clustered_low: max_prob is >= 0.10 below threshold
+        - near_threshold_tail_present: >= 5 events within 0.05 below threshold
+        """
+        module = self._regime_module()
+        # All probabilities far below threshold => dormant + clustered_low.
+        flags = module.bucket_flags([0.3] * 20, 0.80, signal_count=0)
+        self.assertTrue(flags["dormant"])
+        self.assertTrue(flags["probabilities_clustered_low"])
+        self.assertFalse(flags["near_threshold_tail_present"])
+
+        # Probabilities clumped just below threshold => near tail but
+        # NOT clustered_low.
+        flags2 = module.bucket_flags([0.77] * 20, 0.80, signal_count=0)
+        self.assertTrue(flags2["dormant"])
+        self.assertTrue(flags2["near_threshold_tail_present"])
+        self.assertFalse(flags2["probabilities_clustered_low"])
+
+        # At least one firing => not dormant.
+        flags3 = module.bucket_flags([0.3, 0.85], 0.80, signal_count=1)
+        self.assertFalse(flags3["dormant"])
+
+    def test_regime_diagnostic_status_recent_dormancy_confirmed(self) -> None:
+        """Two of the three smallest buckets dormant + clustered low =>
+        ``recent_dormancy_confirmed``."""
+        module = self._regime_module()
+        buckets = [
+            {"available_rows": 250, "flags": {"dormant": True,
+                "probabilities_clustered_low": True,
+                "near_threshold_tail_present": False}},
+            {"available_rows": 500, "flags": {"dormant": True,
+                "probabilities_clustered_low": True,
+                "near_threshold_tail_present": False}},
+            {"available_rows": 1000, "flags": {"dormant": True,
+                "probabilities_clustered_low": False,
+                "near_threshold_tail_present": False}},
+            {"available_rows": 4000, "flags": {"dormant": False,
+                "probabilities_clustered_low": False,
+                "near_threshold_tail_present": False}},
+        ]
+        self.assertEqual(
+            module.determine_diagnostic_status(buckets),
+            "recent_dormancy_confirmed",
+        )
+
+    def test_regime_diagnostic_status_near_threshold_tail(self) -> None:
+        """Dormant on the small buckets BUT with a near-threshold tail and
+        no clustered-low signature => ``near_threshold_tail``."""
+        module = self._regime_module()
+        buckets = [
+            {"available_rows": 250, "flags": {"dormant": True,
+                "probabilities_clustered_low": False,
+                "near_threshold_tail_present": True}},
+            {"available_rows": 500, "flags": {"dormant": True,
+                "probabilities_clustered_low": False,
+                "near_threshold_tail_present": True}},
+            {"available_rows": 1000, "flags": {"dormant": False,
+                "probabilities_clustered_low": False,
+                "near_threshold_tail_present": False}},
+        ]
+        self.assertEqual(
+            module.determine_diagnostic_status(buckets),
+            "near_threshold_tail",
+        )
+
+    def test_regime_diagnostic_status_not_dormant(self) -> None:
+        module = self._regime_module()
+        buckets = [
+            {"available_rows": 250, "flags": {"dormant": False,
+                "probabilities_clustered_low": False,
+                "near_threshold_tail_present": False}},
+            {"available_rows": 500, "flags": {"dormant": False,
+                "probabilities_clustered_low": False,
+                "near_threshold_tail_present": False}},
+        ]
+        self.assertEqual(
+            module.determine_diagnostic_status(buckets),
+            "not_dormant",
+        )
+
+    def test_regime_diagnostic_status_insufficient_data(self) -> None:
+        """All buckets skipped => insufficient_data."""
+        module = self._regime_module()
+        buckets = [
+            {"available_rows": 0, "skip_reason": "bucket_size_exceeds_total_rows",
+             "flags": {"dormant": False, "probabilities_clustered_low": False,
+                       "near_threshold_tail_present": False}},
+        ]
+        self.assertEqual(
+            module.determine_diagnostic_status(buckets),
+            "insufficient_data",
+        )
+
+    def test_regime_compute_bucket_handles_oversized_request(self) -> None:
+        """Bucket size larger than data => clean skip, not crash."""
+        module = self._regime_module()
+        df = self._regime_stub_df(50)
+        model = self._RegimeStubModel(lambda X: [0.0] * len(X))
+        result = module.compute_bucket(
+            df, 200,
+            model_obj=model, feature_columns=["row_id"],
+            threshold=0.5,
+        )
+        self.assertEqual(result["skip_reason"], "bucket_size_exceeds_total_rows")
+        self.assertIsNone(result["signal_count"])
+
+    def test_regime_report_schema_stable(self) -> None:
+        """The JSON report carries the same top-level keys regardless of
+        diagnostic_status branch."""
+        module = self._regime_module()
+        threshold_resolution = {
+            "runtime_threshold": 0.8,
+            "threshold_source": "manifest",
+            "manifest_threshold": 0.8,
+            "artifact_threshold": 0.8,
+            "threshold_mismatch_detected": False,
+        }
+        report = module.build_report(
+            target="reject", horizon=15,
+            active_manifest_path=Path("/tmp/manifest_active.json"),
+            manifest={"version": "v999"},
+            model_path=Path("/tmp/rf_reject_15m_v999.pkl"),
+            threshold_resolution=threshold_resolution,
+            total_rows=21_500,
+            buckets=[{"flags": {"dormant": True,
+                                "probabilities_clustered_low": True,
+                                "near_threshold_tail_present": False},
+                      "available_rows": 250, "skip_reason": ""}],
+            diagnostic_status="recent_dormancy_confirmed",
+        )
+        for key in (
+            "schema_version", "audit_type", "generated_at",
+            "target", "horizon",
+            "active_manifest_path", "active_manifest_version",
+            "model_path", "deployed_threshold",
+            "threshold_source", "manifest_threshold", "artifact_threshold",
+            "threshold_mismatch_detected",
+            "total_labeled_rows", "buckets",
+            "diagnostic_status", "warnings", "scope_disclosure",
+        ):
+            self.assertIn(key, report, f"missing report key: {key}")
+        self.assertEqual(report["audit_type"], "regime_health")
+        self.assertEqual(report["schema_version"], 1)
+
     def test_ml_server_logs_missing_threshold_fallbacks(self) -> None:
         ml_server = load_module(
             "pq_ml_server_missing_threshold_warning_test",
