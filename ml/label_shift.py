@@ -56,16 +56,19 @@ def rolling_class_rate(
     min_rows: int = 20,
 ) -> float | None:
     """Query SQLite for the empirical class-1 rate for `target` over the last
-    `window_days` days, restricted to *resolved* events only.
+    `window_days` days, measured on the FULL labeled population.
 
-    Only events with a non-NULL ``resolution_min`` in ``event_labels`` are
-    counted.  This ensures pi_current is measured on the same population as
-    pi_train (which also filters unresolved events via RF_FILTER_UNRESOLVED_EVENTS),
-    preventing over-correction when unresolved/timeout events are present.
+    pi_current MUST be measured on the same population the model was trained on.
+    Training keeps unresolved (resolution_min IS NULL) events as reject=0/break=0
+    negatives (CRITICAL-1 reverted 2026-05-31), so pi_train reflects the full
+    population. We therefore count ALL labeled events here — resolved AND
+    unresolved chops — to keep pi_current consistent with pi_train. Filtering to
+    resolved-only here would make pi_current systematically higher than pi_train
+    and over-correct (the exact circular mismatch the adversarial audit found).
 
     `target` must be either "reject" or "break".
-    Returns None when there are fewer than `min_rows` resolved labeled rows,
-    to avoid noisy corrections from tiny samples.
+    Returns None when there are fewer than `min_rows` labeled rows, to avoid
+    noisy corrections from tiny samples.
     """
     import sqlite3
     import time
@@ -80,11 +83,11 @@ def rolling_class_rate(
         con = sqlite3.connect(db_path, timeout=5)
         try:
             # Join prediction_log (for ts_prediction timestamp) with
-            # event_labels (for labels and resolution_min).
-            # prediction_log has one row per event (not per horizon), so we
-            # join on event_id only and filter horizon_min from event_labels.
-            # Only include resolved events so pi_current matches the training
-            # distribution (which filters unresolved via RF_FILTER_UNRESOLVED_EVENTS).
+            # event_labels (for labels). prediction_log has one row per event
+            # (not per horizon), so we join on event_id only and filter
+            # horizon_min from event_labels. We do NOT filter resolution_min:
+            # unresolved chops are real negatives in the full population that
+            # pi_train also includes.
             cur = con.execute(
                 f"""
                 SELECT COUNT(*)                                           AS total,
@@ -94,7 +97,6 @@ def rolling_class_rate(
                        ON  el.event_id    = pl.event_id
                 WHERE  el.horizon_min           = ?
                   AND  el.{col}                 IS NOT NULL
-                  AND  el.resolution_min        IS NOT NULL
                   AND  pl.ts_prediction         >= ?
                 """,
                 (horizon, cutoff_ms),
