@@ -450,7 +450,7 @@ run_step "backfill" "${PYTHON}" scripts/backfill_events.py --symbols "${RETRAIN_
 run_step "build_labels"    "${PYTHON}" scripts/build_labels.py --horizons 5 15 30 60 --incremental
 run_step "export_parquet"  "${PYTHON}" scripts/export_parquet.py
 run_step "duckdb_view"     "${PYTHON}" scripts/build_duckdb_view.py
-echo "[$(timestamp)] INFO train_artifacts config calib_days=${RETRAIN_RF_CALIB_DAYS}" | tee -a "${LOG_DIR}/retrain.log"
+echo "[$(timestamp)] INFO train_artifacts config calib_days=${RETRAIN_RF_CALIB_DAYS} calib_mode=${RF_CALIB_MODE:-recent_days} time_decay=${RF_TIME_DECAY_ENABLED:-false} half_life=${RF_TIME_DECAY_HALF_LIFE_DAYS:-45} symbol=${RF_TRAIN_SYMBOL:-SPY} filter_unresolved=${RF_FILTER_UNRESOLVED_EVENTS:-false} drop_low_coverage_unresolved=${RF_DROP_LOW_COVERAGE_UNRESOLVED:-false}" | tee -a "${LOG_DIR}/retrain.log"
 run_step "train_artifacts" "${PYTHON}" scripts/train_rf_artifacts.py --calib-days "${RETRAIN_RF_CALIB_DAYS}"
 threshold_summary_output="$(log_threshold_guard_summary)"
 if [[ -n "${threshold_summary_output}" ]]; then

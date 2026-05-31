@@ -111,6 +111,20 @@ DEFAULT_THRESHOLD_UTILITY_TARGETS = os.getenv(
 DEFAULT_THRESHOLD_UTILITY_MIN_SCORE = float(
     os.getenv("MODEL_GOV_THRESHOLD_UTILITY_MIN_SCORE", "0.0")
 )
+# OOS-validation precondition (closes the promotion hole the adversarial audit
+# found: v450 was promoted via `evaluate --min-trained-end-delta-ms 0` with only
+# in-sample (threshold_tune_slice) evidence). A candidate may not be promoted
+# unless a run_retrain_evidence_pack.py report for THIS candidate version shows
+# oos_validation_passed=True AND promotion_ready=True. This precondition is NOT
+# bypassed by --force-promote; the only escape is the explicit, loud
+# --allow-unvalidated-promotion (for emergencies, recorded in history).
+DEFAULT_REQUIRE_OOS_VALIDATION = os.getenv(
+    "MODEL_GOV_REQUIRE_OOS_VALIDATION", "true"
+).strip().lower() in {"1", "true", "yes", "y", "on"}
+DEFAULT_ALLOW_UNVALIDATED_PROMOTION = os.getenv(
+    "MODEL_GOV_ALLOW_UNVALIDATED_PROMOTION", "false"
+).strip().lower() in {"1", "true", "yes", "y", "on"}
+DEFAULT_EVIDENCE_REPORT = os.getenv("MODEL_GOV_EVIDENCE_REPORT", "").strip()
 DEFAULT_DB = os.getenv("PIVOT_DB", str(ROOT / "data" / "pivot_events.sqlite"))
 STATE_SCHEMA_VERSION = 1
 MAX_HISTORY = 200
@@ -856,6 +870,83 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def check_oos_validation(
+    candidate_version: str,
+    evidence_report_path: str | None,
+) -> tuple[bool, str, dict[str, Any]]:
+    """Verify an OOS-validated evidence report exists for ``candidate_version``.
+
+    The promotion path must go through ``run_retrain_evidence_pack.py``, which
+    writes ``candidate_readiness`` (with ``oos_validation_passed`` /
+    ``promotion_ready``) to a report JSON. Promotion is only allowed when that
+    report (a) is for this exact candidate version and (b) shows both flags True.
+    In-sample-only evidence (source=``threshold_tune_slice`` →
+    ``oos_validation_passed`` not True) is rejected here.
+
+    Returns ``(ok, reason, detail)``.
+    """
+    detail: dict[str, Any] = {"evidence_report": evidence_report_path or ""}
+    path_str = (evidence_report_path or "").strip()
+    if not path_str:
+        return (
+            False,
+            "no_evidence_report_supplied (run scripts/run_retrain_evidence_pack.py "
+            "and pass --evidence-report)",
+            detail,
+        )
+    report_path = Path(path_str)
+    if not report_path.is_file():
+        return (False, f"evidence_report_not_found:{report_path}", detail)
+    try:
+        report = load_json(report_path)
+    except Exception as exc:  # noqa: BLE001
+        return (False, f"evidence_report_unreadable:{exc}", detail)
+    if not isinstance(report, dict):
+        return (False, "evidence_report_not_a_json_object", detail)
+
+    # Tie the report to THIS candidate version.
+    cand_manifest = report.get("candidate_manifest")
+    report_version = None
+    if isinstance(cand_manifest, dict):
+        report_version = cand_manifest.get("version")
+    if report_version is None:
+        report_version = report.get("candidate_version")
+    detail["report_candidate_version"] = report_version
+    detail["expected_candidate_version"] = candidate_version
+    if str(report_version) != str(candidate_version):
+        return (
+            False,
+            f"evidence_report_version_mismatch (report={report_version} "
+            f"candidate={candidate_version})",
+            detail,
+        )
+
+    readiness = report.get("candidate_readiness")
+    if not isinstance(readiness, dict):
+        return (False, "evidence_report_missing_candidate_readiness", detail)
+    oos_passed = readiness.get("oos_validation_passed")
+    promotion_ready = readiness.get("promotion_ready")
+    disposition = readiness.get("promotion_disposition")
+    detail["oos_validation_passed"] = oos_passed
+    detail["promotion_ready"] = promotion_ready
+    detail["promotion_disposition"] = disposition
+    if oos_passed is not True:
+        return (
+            False,
+            f"oos_validation_not_passed (oos_validation_passed={oos_passed!r}, "
+            f"disposition={disposition!r}); in-sample-only evidence cannot promote",
+            detail,
+        )
+    if promotion_ready is not True:
+        return (
+            False,
+            f"candidate_not_promotion_ready (promotion_ready={promotion_ready!r}, "
+            f"disposition={disposition!r})",
+            detail,
+        )
+    return (True, "oos_validation_passed", detail)
+
+
 def cmd_evaluate(args: argparse.Namespace) -> int:
     models_dir = Path(args.models_dir)
     metadata_dir = _resolve_metadata_dir(models_dir, args.metadata_dir)
@@ -1059,6 +1150,62 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
         print(json.dumps(result))
         return 0
 
+    # ── OOS-validation precondition (hard gate; closes the promotion hole) ──
+    # Checked AFTER the standard gates and INDEPENDENTLY of --force-promote.
+    # --force-promote bypasses the statistical gates above, but it does NOT
+    # bypass OOS validation. The only escape is the explicit, loud
+    # --allow-unvalidated-promotion (recorded in history with forced flags).
+    require_oos = bool(getattr(args, "require_oos_validation", True))
+    allow_unvalidated = bool(getattr(args, "allow_unvalidated_promotion", False))
+    oos_ok, oos_reason, oos_detail = check_oos_validation(
+        candidate_version, getattr(args, "evidence_report", "")
+    )
+    if require_oos and not oos_ok and not allow_unvalidated:
+        reason = "candidate blocked: OOS validation required"
+        result.update(
+            {
+                "action": "rejected",
+                "promoted": False,
+                "reason": reason,
+                "gate_failures": [f"oos_validation_required: {oos_reason}"],
+                "gate_skips": gate_skips,
+                "oos_validation": oos_detail,
+                "utility_diagnostics": utility_diagnostics,
+                "active_version": active_version,
+            }
+        )
+        state.update(
+            {
+                "candidate_version": candidate_version,
+                "active_version": active_version,
+                "last_action": "rejected",
+                "last_reason": reason + ": " + oos_reason,
+                "last_checked_at_ms": now_ms(),
+            }
+        )
+        push_history(
+            state,
+            {
+                "ts_ms": now_ms(),
+                "action": "rejected",
+                "candidate_version": candidate_version,
+                "active_version": active_version,
+                "reason": state["last_reason"],
+                "oos_validation": oos_detail,
+            },
+        )
+        _persist_state_and_ops(state_path, state, args.ops_db, result)
+        print(json.dumps(result))
+        return 0
+    oos_validation_bypassed = require_oos and not oos_ok and allow_unvalidated
+    if oos_validation_bypassed:
+        print(
+            "WARNING: promoting WITHOUT OOS validation "
+            f"(--allow-unvalidated-promotion). candidate={candidate_version} "
+            f"reason={oos_reason}",
+            file=sys.stderr,
+        )
+
     if active_path.exists():
         atomic_copy(active_path, prev_path)
     atomic_copy(candidate_path, active_path)
@@ -1084,6 +1231,8 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
             "previous_active_version": active_version,
             "reason": state["last_reason"],
             "forced": bool(args.force_promote),
+            "oos_validation_bypassed": bool(oos_validation_bypassed),
+            "oos_validation": oos_detail,
         },
     )
     result.update(
@@ -1095,6 +1244,8 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
             "gate_failures": gate_failures,
             "gate_skips": gate_skips,
             "utility_diagnostics": utility_diagnostics,
+            "oos_validation": oos_detail,
+            "oos_validation_bypassed": bool(oos_validation_bypassed),
         }
     )
     _persist_state_and_ops(state_path, state, args.ops_db, result)
@@ -1309,6 +1460,39 @@ def build_parser() -> argparse.ArgumentParser:
         help="Minimum acceptable threshold utility score for configured targets/horizons.",
     )
     eval_cmd.add_argument("--force-promote", action="store_true", default=False)
+    # ── OOS-validation precondition (promotion-hole guard) ──
+    eval_cmd.add_argument(
+        "--evidence-report",
+        default=DEFAULT_EVIDENCE_REPORT,
+        help=(
+            "Path to a run_retrain_evidence_pack.py report JSON for THIS candidate. "
+            "Promotion requires candidate_readiness.oos_validation_passed=True and "
+            "promotion_ready=True for the matching candidate version."
+        ),
+    )
+    eval_cmd.add_argument(
+        "--require-oos-validation",
+        dest="require_oos_validation",
+        action="store_true",
+        default=DEFAULT_REQUIRE_OOS_VALIDATION,
+        help="Require an OOS-validated evidence report before promotion (default on).",
+    )
+    eval_cmd.add_argument(
+        "--no-require-oos-validation",
+        dest="require_oos_validation",
+        action="store_false",
+        help="Disable the OOS-validation precondition (NOT recommended).",
+    )
+    eval_cmd.add_argument(
+        "--allow-unvalidated-promotion",
+        dest="allow_unvalidated_promotion",
+        action="store_true",
+        default=DEFAULT_ALLOW_UNVALIDATED_PROMOTION,
+        help=(
+            "Explicit, loud emergency override that promotes WITHOUT OOS validation. "
+            "Separate from --force-promote (which does NOT bypass OOS validation)."
+        ),
+    )
     eval_cmd.set_defaults(func=cmd_evaluate)
 
     rollback_cmd = sub.add_parser("rollback", help="Rollback active manifest")

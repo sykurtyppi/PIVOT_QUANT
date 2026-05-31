@@ -107,6 +107,7 @@ import pandas as pd
 import joblib
 
 from ml.features import build_feature_row, collect_missing, FEATURE_VERSION
+from ml.label_shift import correct_prior_shift, rolling_class_rate
 from ml.thresholds import NO_SIGNAL_THRESHOLD, threshold_score_is_unsafe
 from server.serving_state import (
     DEFAULT_DORMANT_LOG_MIN_INTERVAL_SEC,
@@ -395,6 +396,9 @@ PREDICTION_LOG_ALERT_DROPPED_TOTAL = max(
 ML_RELOAD_MIN_INTERVAL_SEC = max(
     0.0, float(os.getenv("ML_RELOAD_MIN_INTERVAL_SEC", "1.5"))
 )
+RF_LABEL_SHIFT_CORRECTION_ENABLED = _env_bool("RF_LABEL_SHIFT_CORRECTION_ENABLED", False)
+RF_PRIOR_WINDOW_DAYS = max(5, int(os.getenv("RF_PRIOR_WINDOW_DAYS", "20")))
+RF_PRIOR_MIN_ROWS = max(10, int(os.getenv("RF_PRIOR_MIN_ROWS", "30")))
 ML_ANALOG_ENABLED = _env_bool("ML_ANALOG_ENABLED", True)
 ML_ANALOG_DB = Path(os.getenv("ML_ANALOG_DB", str(PREDICTION_LOG_DB)))
 ML_ANALOG_K = max(3, int(os.getenv("ML_ANALOG_K", "20")))
@@ -2957,6 +2961,25 @@ def _score_event(event: dict):
             if model is None:
                 continue
             prob = extract_prob(model, df)
+
+            # ── Label-shift correction (prior-shift at inference time) ──
+            if RF_LABEL_SHIFT_CORRECTION_ENABLED and prob is not None:
+                horizon_stats_ls = stats.get(str(horizon), {}).get(target, {})
+                pi_train = horizon_stats_ls.get(f"{target}_rate")
+                if pi_train is not None:
+                    pi_current = rolling_class_rate(
+                        str(PREDICTION_LOG_DB),
+                        target=target,
+                        horizon=horizon,
+                        window_days=RF_PRIOR_WINDOW_DAYS,
+                        min_rows=RF_PRIOR_MIN_ROWS,
+                    )
+                    if pi_current is not None:
+                        scores[f"prob_{target}_{horizon}m_raw"] = prob
+                        prob = correct_prior_shift(prob, pi_train, pi_current)
+                        scores[f"label_shift_pi_train_{target}_{horizon}m"] = pi_train
+                        scores[f"label_shift_pi_current_{target}_{horizon}m"] = pi_current
+
             scores[f"prob_{target}_{horizon}m"] = prob
 
             # Store the threshold used for this model

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -144,17 +146,131 @@ def build_pipeline(numeric_cols, categorical_cols, args):
     return Pipeline(steps=[("prep", preprocessor), ("rf", rf)])
 
 
-def load_dataframe(db_path: str, view: str, horizon: int):
+def load_dataframe(db_path: str, view: str, horizon: int, symbol: str | None = None):
+    """Load labeled events for a horizon, scoped to ``symbol`` when provided.
+
+    CRITICAL-3 fix: the training view is not symbol-scoped (export_parquet.py /
+    build_duckdb_view.py select all symbols), so foreign-symbol rows leak in.
+    Filtering here at the dataframe boundary is the authoritative guard.
+    """
     duckdb = require("duckdb", "python3 -m pip install duckdb")
     con = duckdb.connect(db_path, read_only=True)
     try:
-        df = con.execute(
-            f"SELECT * FROM {view} WHERE horizon_min = ? ORDER BY ts_event",
-            [horizon],
-        ).df()
+        sym = (symbol or "").strip()
+        if sym:
+            df = con.execute(
+                f"SELECT * FROM {view} WHERE horizon_min = ? AND symbol = ? ORDER BY ts_event",
+                [horizon, sym],
+            ).df()
+        else:
+            df = con.execute(
+                f"SELECT * FROM {view} WHERE horizon_min = ? ORDER BY ts_event",
+                [horizon],
+            ).df()
     finally:
         con.close()
     return df
+
+
+def apply_quality_filters(
+    df,
+    *,
+    horizon: int,
+    symbol: str | None,
+    filter_unresolved: bool,
+    drop_low_coverage_unresolved: bool,
+    unresolved_min_coverage: float,
+    coverage_column: str,
+    verbose: bool = False,
+):
+    """Apply data-quality filters to a horizon's training frame.
+
+    Pure (no I/O beyond optional prints); returns ``(filtered_df, info)``.
+
+    Policy (post adversarial-audit 2026-05-31):
+      * CRITICAL-3: drop foreign-symbol rows (belt-and-suspenders; load_dataframe
+        already scopes by symbol, but the training view is not symbol-scoped).
+      * CRITICAL-1 REVERTED: unresolved (resolution_min IS NULL) rows are KEPT as
+        observed reject=0/break=0 negatives by default. ``filter_unresolved=True``
+        is EXPERIMENTAL / NOT-FOR-PROMOTION (recreates the train/serve mismatch).
+      * Item-3 partial coverage: when keeping unresolved rows, drop only those
+        below ``unresolved_min_coverage`` IF ``coverage_column`` is present;
+        otherwise keep them and record the count (never silent).
+    """
+    def _log(msg: str) -> None:
+        if verbose:
+            print(msg)
+
+    n_foreign = 0
+    sym = (symbol or "").strip()
+    if sym and "symbol" in df.columns:
+        foreign = df["symbol"].astype(str) != str(sym)
+        n_foreign = int(foreign.sum())
+        if n_foreign > 0:
+            df = df[~foreign].copy()
+            _log(
+                f"[data-quality] horizon={horizon}m: dropped {n_foreign} foreign-symbol "
+                f"rows (expected only {sym}); check export_parquet/build_duckdb_view"
+            )
+
+    has_res = "resolution_min" in df.columns
+    n_unresolved = int(df["resolution_min"].isna().sum()) if has_res else 0
+    n_low_cov_dropped = 0
+    cov_col = str(coverage_column or "")
+    cov_available = bool(cov_col) and cov_col in df.columns
+    experimental_filter_applied = False
+
+    if filter_unresolved and has_res:
+        n_before = len(df)
+        df = df[df["resolution_min"].notna()].copy()
+        n_dropped = n_before - len(df)
+        experimental_filter_applied = True
+        if n_dropped > 0:
+            _log(
+                f"[data-quality][EXPERIMENTAL] horizon={horizon}m: dropped {n_dropped} "
+                f"unresolved events ({100*n_dropped/max(1,n_before):.1f}% of {n_before}). "
+                f"NOT-FOR-PROMOTION: creates train/serve prior mismatch."
+            )
+    elif has_res:
+        if drop_low_coverage_unresolved and cov_available:
+            unresolved_mask = df["resolution_min"].isna()
+            low_cov = unresolved_mask & (
+                df[cov_col].fillna(0.0) < float(unresolved_min_coverage)
+            )
+            n_low_cov_dropped = int(low_cov.sum())
+            if n_low_cov_dropped > 0:
+                df = df[~low_cov].copy()
+                _log(
+                    f"[data-quality] horizon={horizon}m: dropped {n_low_cov_dropped} "
+                    f"unresolved rows below {unresolved_min_coverage:.0%} bar coverage"
+                )
+        elif drop_low_coverage_unresolved and not cov_available:
+            _log(
+                f"[data-quality] horizon={horizon}m: --drop-low-coverage-unresolved set but "
+                f"coverage column '{cov_col}' absent from view; leaving {n_unresolved} "
+                f"unresolved rows in as negatives (see build_labels.py follow-up)."
+            )
+        else:
+            _log(
+                f"[data-quality] horizon={horizon}m: kept {n_unresolved} unresolved "
+                f"(chop) rows as negatives; coverage_column_present={cov_available}"
+            )
+
+    info = {
+        "foreign_symbol_rows_dropped": int(n_foreign),
+        "experimental_filter_unresolved_applied": bool(experimental_filter_applied),
+        "unresolved_handling": {
+            "unresolved_rows_kept": int(max(0, n_unresolved - n_low_cov_dropped))
+            if not experimental_filter_applied
+            else 0,
+            "unresolved_rows_total": int(n_unresolved),
+            "low_coverage_dropped": int(n_low_cov_dropped),
+            "coverage_column_present": bool(cov_available),
+            "coverage_floor": float(unresolved_min_coverage),
+            "experimental_filter_unresolved_applied": bool(experimental_filter_applied),
+        },
+    }
+    return df, info
 
 
 def ensure_event_date(df):
@@ -672,6 +788,78 @@ def main() -> None:
         default=DEFAULT_METADATA_DIR,
         help="Directory for runtime metadata manifests (absolute or relative to --out-dir)",
     )
+    # ── Data-quality filters ─────────────────────────────────────────────────
+    # CRITICAL-3 fix: scope training to a single symbol. The export/view path
+    # (export_parquet.py + build_duckdb_view.py) does NOT filter by symbol, so
+    # foreign-symbol rows (e.g. SPX index touches collected Nov-2025..Feb-2026,
+    # ema9 ~6600 vs SPY ~666) leak into training_events_v1. Symbol scoping is
+    # the correct fix; the previous ema9>1000 heuristic was a brittle band-aid.
+    parser.add_argument(
+        "--symbol",
+        dest="symbol",
+        default=os.getenv("RF_TRAIN_SYMBOL", "SPY"),
+        help=(
+            "Restrict training to rows for this symbol (default SPY). The training "
+            "view is not symbol-scoped, so this is the authoritative cross-symbol "
+            "contamination guard. Set empty string to disable (not recommended)."
+        ),
+    )
+    # CRITICAL-1 REVERTED: unresolved (resolution_min IS NULL) events are
+    # FULLY-OBSERVED reject=0/break=0 chops (the adversarial audit proved 0 of
+    # 14,030 h=5 / 8,807 h=15 are right-censored). They are real negatives the
+    # live model faces, NOT label noise. Dropping them inverted full-population
+    # utility to -8,785 bps and broke calibration (ECE 0.28-0.54). Default is now
+    # OFF. The flag remains for experiments ONLY and any model trained with it
+    # MUST NOT be promoted (it fails full-population OOS by construction).
+    parser.add_argument(
+        "--filter-unresolved",
+        dest="filter_unresolved",
+        action="store_true",
+        default=_env_bool("RF_FILTER_UNRESOLVED_EVENTS", False),
+        help=(
+            "[EXPERIMENTAL / NOT-FOR-PROMOTION] Drop events where resolution_min "
+            "IS NULL. These are observed reject=0 chops, not unknown outcomes; "
+            "removing them creates a train/serve prior mismatch that degrades the "
+            "live model. Default OFF. See adversarial audit 2026-05-31."
+        ),
+    )
+    parser.add_argument(
+        "--no-filter-unresolved",
+        dest="filter_unresolved",
+        action="store_false",
+        help="Keep unresolved (timeout/chop) events as negatives (default behavior).",
+    )
+    # Item-3: partial-coverage unresolved rows. An unresolved row whose horizon
+    # window has <coverage bar data could be hiding a reject/break in the gap, so
+    # it is a less-certain negative than a fully-covered chop. We do NOT silently
+    # treat these as clean negatives. Exclusion requires a per-event coverage
+    # signal (column named by --coverage-column) which the training view does not
+    # yet carry; until build_labels.py persists it, this filter is a documented
+    # no-op and the count of unresolved rows is recorded in the manifest instead.
+    parser.add_argument(
+        "--drop-low-coverage-unresolved",
+        dest="drop_low_coverage_unresolved",
+        action="store_true",
+        default=_env_bool("RF_DROP_LOW_COVERAGE_UNRESOLVED", False),
+        help=(
+            "Drop unresolved rows whose bar coverage < --unresolved-min-coverage. "
+            "Requires the coverage column (--coverage-column) in the view; no-op "
+            "with a recorded manifest flag when the column is absent."
+        ),
+    )
+    parser.add_argument(
+        "--unresolved-min-coverage",
+        type=float,
+        default=_env_float("RF_UNRESOLVED_MIN_COVERAGE", 0.8),
+        help="Minimum horizon bar coverage for an unresolved row to count as a clean negative (default 0.8).",
+    )
+    parser.add_argument(
+        "--coverage-column",
+        default=os.getenv("RF_COVERAGE_COLUMN", "bar_coverage"),
+        help="Name of the per-event bar-coverage column in the training view, if present.",
+    )
+    # ────────────────────────────────────────────────────────────────────────
+
     parser.add_argument("--version", default=None)
     parser.add_argument(
         "--candidate-manifest",
@@ -733,23 +921,49 @@ def main() -> None:
         "gamma_context": _gamma_context_metadata(),
         "trained_end_ts": None,
         "train_embargo_minutes": float(train_embargo_minutes),
+        # CRITICAL-1 reverted: default False (unresolved chops kept as negatives).
+        # True here means an experimental, NOT-FOR-PROMOTION run.
+        "filter_unresolved_events": bool(args.filter_unresolved),
+        # CRITICAL-3 fix: symbol scoping replaces the ema9>1000 heuristic.
+        "training_symbol": str(args.symbol or ""),
+        "drop_low_coverage_unresolved": bool(args.drop_low_coverage_unresolved),
+        "unresolved_min_coverage": float(args.unresolved_min_coverage),
     }
     trained_end_ts_max = None
     latest_aliases: list[tuple[Path, Path]] = []
 
     for horizon in horizons:
-        df = load_dataframe(args.db, args.view, horizon)
+        df = load_dataframe(args.db, args.view, horizon, symbol=args.symbol)
         if df.empty:
             print(f"No rows for horizon {horizon}m. Skipping.")
             continue
 
         df = ensure_event_date(df)
         df = df.sort_values("ts_event")
-        if not df.empty:
-            horizon_end_ts = int(df["ts_event"].max())
-            if trained_end_ts_max is None or horizon_end_ts > trained_end_ts_max:
-                trained_end_ts_max = horizon_end_ts
 
+        # ── Temporal scope: capture raw end-ts BEFORE quality filters ─────
+        # trained_end_ts represents the furthest-forward data we considered,
+        # not the furthest-forward event that survived filtering.  Unresolved
+        # events at the tail have the most-recent timestamps and would shrink
+        # trained_end_ts if measured post-filter, causing governance to
+        # incorrectly conclude the model covers less time than it actually does.
+        if not df.empty and "ts_event" in df.columns:
+            raw_end_ts = int(df["ts_event"].max())
+            if trained_end_ts_max is None or raw_end_ts > trained_end_ts_max:
+                trained_end_ts_max = raw_end_ts
+
+        # ── Data-quality filters (pure, testable) ─────────────────────────
+        df, dq_info = apply_quality_filters(
+            df,
+            horizon=horizon,
+            symbol=args.symbol,
+            filter_unresolved=bool(args.filter_unresolved),
+            drop_low_coverage_unresolved=bool(args.drop_low_coverage_unresolved),
+            unresolved_min_coverage=float(args.unresolved_min_coverage),
+            coverage_column=str(args.coverage_column or ""),
+            verbose=True,
+        )
+        manifest.setdefault("unresolved_handling", {})[str(horizon)] = dq_info["unresolved_handling"]
         label_cols = {
             "event_id",
             "ts_event",
