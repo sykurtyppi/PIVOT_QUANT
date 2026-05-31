@@ -2086,6 +2086,295 @@ class OpsSmokeTests(unittest.TestCase):
             event_writer._THREAD_LOCAL.conn = None
             event_writer._THREAD_LOCAL.conn_db_path = None
 
+    # ---------------------------------------------------------------
+    # event_writer write-endpoint auth (H1 follow-up to PR #51).
+    # Mirrors the ML_WRITE_AUTH_* test matrix exactly — loopback default
+    # keeps yahoo_proxy.js's /api/events + /api/bars proxies working
+    # with zero changes; a non-loopback bind requires a token and fails
+    # closed both at the shell wrapper and in this module.
+    # ---------------------------------------------------------------
+
+    def _load_event_writer_module(self):
+        return load_module(
+            f"pq_event_writer_runtime_{time.time_ns()}",
+            REPO_ROOT / "server" / "event_writer.py",
+        )
+
+    def _patch_event_writer_auth(self, ew, *, bypass: bool, token: str = "",
+                                 misconfigured: bool = False):
+        orig_bypass = ew._WRITE_AUTH_BYPASS
+        orig_token = ew.EVENT_WRITER_AUTH_TOKEN
+        orig_misconfigured = ew._WRITE_AUTH_MISCONFIGURED
+        ew._WRITE_AUTH_BYPASS = bypass
+        ew.EVENT_WRITER_AUTH_TOKEN = token
+        ew._WRITE_AUTH_MISCONFIGURED = misconfigured
+
+        def restore() -> None:
+            ew._WRITE_AUTH_BYPASS = orig_bypass
+            ew.EVENT_WRITER_AUTH_TOKEN = orig_token
+            ew._WRITE_AUTH_MISCONFIGURED = orig_misconfigured
+
+        return restore
+
+    def test_event_writer_is_loopback_bind_helper(self) -> None:
+        ew = self._load_event_writer_module()
+        self.assertTrue(ew._is_loopback_bind("127.0.0.1"))
+        self.assertTrue(ew._is_loopback_bind("LOCALHOST"))
+        self.assertTrue(ew._is_loopback_bind("::1"))
+        self.assertTrue(ew._is_loopback_bind("127.5.6.7"))
+        self.assertFalse(ew._is_loopback_bind("0.0.0.0"))
+        self.assertFalse(ew._is_loopback_bind("192.168.1.10"))
+        self.assertFalse(ew._is_loopback_bind(""))
+        self.assertFalse(ew._is_loopback_bind(None))
+
+    def test_event_writer_bypass_resolution(self) -> None:
+        ew = self._load_event_writer_module()
+        self.assertTrue(ew._resolve_write_auth_bypass("127.0.0.1", None))
+        self.assertTrue(ew._resolve_write_auth_bypass("127.0.0.1", ""))
+        self.assertFalse(ew._resolve_write_auth_bypass("0.0.0.0", None))
+        self.assertFalse(ew._resolve_write_auth_bypass("127.0.0.1", "false"))
+        self.assertTrue(ew._resolve_write_auth_bypass("0.0.0.0", "true"))
+        self.assertTrue(ew._resolve_write_auth_bypass("127.0.0.1", "garbled"))
+        self.assertFalse(ew._resolve_write_auth_bypass("0.0.0.0", "garbled"))
+
+    def test_event_writer_auth_arming_table_at_import(self) -> None:
+        """Pin _WRITE_AUTH_MISCONFIGURED across the five meaningful configs.
+
+        Carries forward the PR #51 amend: on a non-loopback bind, BOTH
+        the no-token case AND the explicit bypass=true case must arm
+        misconfig.  Catches the previously-silent fail-open class.
+        """
+        configs = [
+            (
+                {"EVENT_WRITER_BIND": "127.0.0.1"},
+                False, True,
+                "loopback default — back-compat for the proxy clients",
+            ),
+            (
+                {
+                    "EVENT_WRITER_BIND": "0.0.0.0",
+                    "EVENT_WRITER_AUTH_TOKEN": "valid-token-xyz",
+                    "EVENT_WRITER_AUTH_LOCAL_BYPASS": "false",
+                },
+                False, False,
+                "public bind + token + bypass off — proper opt-in",
+            ),
+            (
+                {
+                    "EVENT_WRITER_BIND": "0.0.0.0",
+                    "EVENT_WRITER_AUTH_TOKEN": "",
+                    "EVENT_WRITER_AUTH_LOCAL_BYPASS": "",
+                },
+                True, False,
+                "public bind + no token + no bypass — must fire",
+            ),
+            (
+                {
+                    "EVENT_WRITER_BIND": "0.0.0.0",
+                    "EVENT_WRITER_AUTH_TOKEN": "",
+                    "EVENT_WRITER_AUTH_LOCAL_BYPASS": "true",
+                },
+                True, True,
+                "public bind + bypass=true + no token — fail-open class",
+            ),
+            (
+                {
+                    "EVENT_WRITER_BIND": "0.0.0.0",
+                    "EVENT_WRITER_AUTH_TOKEN": "valid-token-xyz",
+                    "EVENT_WRITER_AUTH_LOCAL_BYPASS": "true",
+                },
+                True, True,
+                "public bind + bypass=true + token — bypass wins, gate is off",
+            ),
+        ]
+        for env, expected_misconfig, expected_bypass, note in configs:
+            with patch.dict(os.environ, env, clear=False):
+                for var in (
+                    "EVENT_WRITER_BIND",
+                    "EVENT_WRITER_AUTH_TOKEN",
+                    "EVENT_WRITER_AUTH_LOCAL_BYPASS",
+                ):
+                    if var not in env:
+                        os.environ.pop(var, None)
+                ew = self._load_event_writer_module()
+                self.assertEqual(
+                    ew._WRITE_AUTH_MISCONFIGURED, expected_misconfig,
+                    msg=f"_WRITE_AUTH_MISCONFIGURED mismatch [{note}] env={env}",
+                )
+                self.assertEqual(
+                    ew._WRITE_AUTH_BYPASS, expected_bypass,
+                    msg=f"_WRITE_AUTH_BYPASS mismatch [{note}] env={env}",
+                )
+
+    def test_event_writer_check_write_auth_bypass_allows(self) -> None:
+        ew = self._load_event_writer_module()
+        restore = self._patch_event_writer_auth(ew, bypass=True)
+        try:
+            # bypass=true → None (allow) regardless of header value.
+            self.assertIsNone(ew._check_write_auth(None))
+            self.assertIsNone(ew._check_write_auth(""))
+            self.assertIsNone(ew._check_write_auth("anything"))
+        finally:
+            restore()
+
+    def test_event_writer_check_write_auth_misconfig_503(self) -> None:
+        ew = self._load_event_writer_module()
+        restore = self._patch_event_writer_auth(
+            ew, bypass=False, token="present", misconfigured=True,
+        )
+        try:
+            result = ew._check_write_auth("present")
+            self.assertIsNotNone(result)
+            status, message = result
+            self.assertEqual(status, 503)
+            # Token never reflected in the error message.
+            self.assertNotIn("present", message)
+        finally:
+            restore()
+
+    def test_event_writer_check_write_auth_correct_token_passes(self) -> None:
+        ew = self._load_event_writer_module()
+        restore = self._patch_event_writer_auth(
+            ew, bypass=False, token="s3cret-token-value",
+        )
+        try:
+            self.assertIsNone(ew._check_write_auth("s3cret-token-value"))
+        finally:
+            restore()
+
+    def test_event_writer_check_write_auth_wrong_token_401(self) -> None:
+        ew = self._load_event_writer_module()
+        restore = self._patch_event_writer_auth(
+            ew, bypass=False, token="s3cret-token-value",
+        )
+        try:
+            result = ew._check_write_auth("wrong")
+            self.assertIsNotNone(result)
+            status, message = result
+            self.assertEqual(status, 401)
+            self.assertNotIn("s3cret-token-value", message)
+            self.assertNotIn("wrong", message)
+        finally:
+            restore()
+
+    def test_event_writer_check_write_auth_missing_token_401(self) -> None:
+        ew = self._load_event_writer_module()
+        restore = self._patch_event_writer_auth(
+            ew, bypass=False, token="s3cret-token-value",
+        )
+        try:
+            result = ew._check_write_auth(None)
+            self.assertIsNotNone(result)
+            self.assertEqual(result[0], 401)
+        finally:
+            restore()
+
+    def test_event_writer_check_write_auth_defensive_no_token_503(self) -> None:
+        ew = self._load_event_writer_module()
+        # bypass off + token unset + misconfigured=False (shouldn't normally
+        # happen — the import-time arming should have set it).  Belt-and-
+        # suspenders: still refuse.
+        restore = self._patch_event_writer_auth(
+            ew, bypass=False, token="", misconfigured=False,
+        )
+        try:
+            result = ew._check_write_auth("anything")
+            self.assertIsNotNone(result)
+            self.assertEqual(result[0], 503)
+        finally:
+            restore()
+
+    def test_event_writer_uses_constant_time_compare(self) -> None:
+        source = (REPO_ROOT / "server" / "event_writer.py").read_text(encoding="utf-8")
+        self.assertIn("import hmac", source)
+        self.assertIn("hmac.compare_digest", source)
+        # Token must NEVER be compared with plain == anywhere in the file.
+        self.assertNotIn("== EVENT_WRITER_AUTH_TOKEN", source)
+        self.assertNotIn("EVENT_WRITER_AUTH_TOKEN ==", source)
+
+    def test_event_writer_write_endpoints_gated_in_do_post(self) -> None:
+        source = (REPO_ROOT / "server" / "event_writer.py").read_text(encoding="utf-8")
+        # The gate must sit at the TOP of do_POST, gating /events and /bars,
+        # BEFORE the body is read.  Pin the exact contract.
+        self.assertIn('if parsed.path in ("/events", "/bars"):', source)
+        self.assertIn(
+            'reject = _check_write_auth(self.headers.get("X-Event-Writer-Token"))',
+            source,
+        )
+        # The check must come BEFORE the Content-Length / body read.
+        gate_idx = source.index("reject = _check_write_auth(")
+        body_idx = source.index('self.rfile.read(length)')
+        self.assertLess(
+            gate_idx, body_idx,
+            msg="auth gate must run BEFORE reading the request body",
+        )
+
+    def test_event_writer_get_handlers_remain_open(self) -> None:
+        source = (REPO_ROOT / "server" / "event_writer.py").read_text(encoding="utf-8")
+        # /health, /, /daily-candles are all under do_GET — assert do_GET
+        # has no auth gate added to it.
+        do_get_start = source.index("def do_GET(self):")
+        do_post_start = source.index("def do_POST(self):")
+        do_get_body = source[do_get_start:do_post_start]
+        self.assertNotIn("_check_write_auth", do_get_body)
+        self.assertNotIn("X-Event-Writer-Token", do_get_body)
+        # /health, /, /daily-candles still routed by name.
+        self.assertIn('"/health"', do_get_body)
+        self.assertIn('"/daily-candles"', do_get_body)
+
+    def test_event_writer_auth_token_never_logged(self) -> None:
+        source = (REPO_ROOT / "server" / "event_writer.py").read_text(encoding="utf-8")
+        # Find _check_write_auth body bounds and confirm no logging of
+        # user-supplied or expected token values within it.
+        start = source.index("def _check_write_auth(")
+        end = source.index("\n\n\n", start) if "\n\n\n" in source[start:] else len(source)
+        body = source[start:end]
+        for forbidden in (
+            "log.info(provided",
+            "log.warning(provided",
+            "log.error(provided",
+            "log.debug(provided",
+            "log.info(expected",
+            "log.warning(expected",
+            "log.error(expected",
+            "log.debug(expected",
+            "log.info(provided_token",
+            "log.warning(provided_token",
+            "log.error(provided_token",
+            "log.debug(provided_token",
+            "log.info(EVENT_WRITER_AUTH_TOKEN",
+            "log.warning(EVENT_WRITER_AUTH_TOKEN",
+            "log.error(EVENT_WRITER_AUTH_TOKEN",
+            "log.debug(EVENT_WRITER_AUTH_TOKEN",
+        ):
+            self.assertNotIn(forbidden, body, msg=f"token leaks via {forbidden!r}")
+
+    def test_event_writer_auth_misconfig_log_mentions_both_triggers(self) -> None:
+        source = (REPO_ROOT / "server" / "event_writer.py").read_text(encoding="utf-8")
+        # Mirror PR #51's expectation: the misconfig log describes both the
+        # no-token AND the explicit-bypass-on-public-bind triggers so an
+        # operator reading the launch log knows what to fix.
+        self.assertIn("EVENT_WRITER_AUTH_LOCAL_BYPASS=true", source)
+        self.assertIn("EVENT_WRITER_AUTH_TOKEN is unset", source)
+
+    def test_run_persistent_stack_event_writer_auth_block_present(self) -> None:
+        script = (REPO_ROOT / "server" / "run_persistent_stack.sh").read_text(encoding="utf-8")
+        self.assertIn('EVENT_WRITER_AUTH_LOCAL_BYPASS="${EVENT_WRITER_AUTH_LOCAL_BYPASS:-}"', script)
+        self.assertIn('if is_loopback_bind "${EVENT_WRITER_BIND}"; then', script)
+        self.assertIn(
+            'ERROR: EVENT_WRITER_AUTH_LOCAL_BYPASS=true is not allowed when EVENT_WRITER_BIND is non-loopback',
+            script,
+        )
+        self.assertIn(
+            'ERROR: EVENT_WRITER_AUTH_TOKEN must be set when EVENT_WRITER_BIND is non-loopback',
+            script,
+        )
+        self.assertIn("export EVENT_WRITER_AUTH_LOCAL_BYPASS", script)
+        self.assertIn("export EVENT_WRITER_AUTH_TOKEN", script)
+        # Bash syntax sanity.
+        proc = run_cmd(["bash", "-n", "server/run_persistent_stack.sh"], cwd=REPO_ROOT)
+        self.assertEqual(proc.returncode, 0, msg=f"{proc.stdout}\n{proc.stderr}")
+
     def test_backfill_gamma_context_falls_back_to_snapshots(self) -> None:
         backfill = load_module(
             "pq_backfill_gamma_snapshot_fallback_test",

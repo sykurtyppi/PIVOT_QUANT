@@ -186,6 +186,32 @@ fi
 export ML_WRITE_AUTH_LOCAL_BYPASS
 export ML_WRITE_AUTH_TOKEN
 
+# Event-writer write-endpoint auth (defense-in-depth for non-loopback binds).
+# Mirrors the ML_WRITE_AUTH pattern above.  POST /events and POST /bars
+# persist attacker-controllable rows into pivot_events.sqlite; an
+# unauthenticated public bind would expose touch_events/bar_data to
+# arbitrary local-network writes.  The python side (server/event_writer.py)
+# has the same check at request time so direct python invocation also
+# fails closed.
+EVENT_WRITER_AUTH_LOCAL_BYPASS="${EVENT_WRITER_AUTH_LOCAL_BYPASS:-}"
+if [[ -z "${EVENT_WRITER_AUTH_LOCAL_BYPASS}" ]]; then
+  if is_loopback_bind "${EVENT_WRITER_BIND}"; then
+    EVENT_WRITER_AUTH_LOCAL_BYPASS="true"
+  else
+    EVENT_WRITER_AUTH_LOCAL_BYPASS="false"
+  fi
+fi
+if ! is_loopback_bind "${EVENT_WRITER_BIND}" && is_truthy "${EVENT_WRITER_AUTH_LOCAL_BYPASS}"; then
+  echo "[run_persistent_stack] ERROR: EVENT_WRITER_AUTH_LOCAL_BYPASS=true is not allowed when EVENT_WRITER_BIND is non-loopback (${EVENT_WRITER_BIND})."
+  exit 1
+fi
+if ! is_loopback_bind "${EVENT_WRITER_BIND}" && [[ -z "${EVENT_WRITER_AUTH_TOKEN:-}" ]]; then
+  echo "[run_persistent_stack] ERROR: EVENT_WRITER_AUTH_TOKEN must be set when EVENT_WRITER_BIND is non-loopback (${EVENT_WRITER_BIND}); /events and /bars would otherwise be unauthenticated on a public bind."
+  exit 1
+fi
+export EVENT_WRITER_AUTH_LOCAL_BYPASS
+export EVENT_WRITER_AUTH_TOKEN
+
 if [[ -z "${ML_CORS_ORIGINS:-}" ]]; then
   origins=("http://localhost:3000" "http://127.0.0.1:3000")
   if [[ -n "${LOCAL_HOSTNAME}" ]]; then
