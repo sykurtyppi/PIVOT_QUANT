@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
 from ml.calibration import ProbabilityCalibrator
 from ml.features import FEATURE_VERSION, build_feature_row, drop_features
 from ml.thresholds import NO_SIGNAL_THRESHOLD, select_threshold, utility_bps_for_target
+from ml.walk_forward_oos import run_walk_forward_oos
 # Single source of truth shared with scripts/refit_calibration.py so the two
 # threshold-selecting paths cannot drift on per-(target, horizon) overrides.
 from ml.threshold_overrides import (
@@ -788,6 +789,50 @@ def main() -> None:
         default=DEFAULT_METADATA_DIR,
         help="Directory for runtime metadata manifests (absolute or relative to --out-dir)",
     )
+    # ── Walk-forward OOS validation harness ──────────────────────────────────
+    # Emits per-signal utility observations on FUTURE test windows (source=
+    # walk_forward_fold) so run_retrain_evidence_pack can populate the OOS
+    # axis. Default OFF: it is ~K× slower (re-fits per fold) and is only needed
+    # on the gated promotion-validation retrain, not routine training. The
+    # gated path enables it via RF_WALK_FORWARD_OOS=true. It is PURELY ADDITIVE
+    # to the manifest — it never changes the shipped model or threshold.
+    parser.add_argument(
+        "--walk-forward-oos",
+        dest="walk_forward_oos",
+        action="store_true",
+        default=_env_bool("RF_WALK_FORWARD_OOS", False),
+        help="Run the walk-forward OOS harness and emit oos_score_observations (additive).",
+    )
+    parser.add_argument(
+        "--no-walk-forward-oos",
+        dest="walk_forward_oos",
+        action="store_false",
+        help="Disable the walk-forward OOS harness (default).",
+    )
+    parser.add_argument(
+        "--oos-folds",
+        type=int,
+        default=int(_env_float("RF_OOS_FOLDS", 5)),
+        help="Number of expanding walk-forward folds (default 5).",
+    )
+    parser.add_argument(
+        "--oos-test-window",
+        type=int,
+        default=int(_env_float("RF_OOS_TEST_WINDOW", 1000)),
+        help="Rows per fold test window (default 1000).",
+    )
+    parser.add_argument(
+        "--oos-min-train",
+        type=int,
+        default=int(_env_float("RF_OOS_MIN_TRAIN", 4000)),
+        help="Minimum pipeline-fit rows required before fold 0's test window.",
+    )
+    parser.add_argument(
+        "--oos-calib-window",
+        type=int,
+        default=int(_env_float("RF_OOS_CALIB_WINDOW", 2000)),
+        help="Rows reserved (per fold) for calibrator-fit + threshold-tune, pre-test.",
+    )
     # ── Data-quality filters ─────────────────────────────────────────────────
     # CRITICAL-3 fix: scope training to a single symbol. The export/view path
     # (export_parquet.py + build_duckdb_view.py) does NOT filter by symbol, so
@@ -1264,6 +1309,88 @@ def main() -> None:
             if bool(threshold_meta.get("guard_applied")):
                 threshold_meta["score_observations"] = None
                 threshold_meta["signals_on_tune_slice"] = 0
+
+            # ── Walk-forward OOS observations (additive; never changes the
+            # shipped model/threshold). Re-fits per fold on pre-test data only;
+            # the harness enforces the anti-leak invariant internally. ──
+            if bool(getattr(args, "walk_forward_oos", False)):
+                def _wf_model():
+                    return build_pipeline(numeric_cols, categorical_cols, args)
+
+                def _wf_calibrate(_model, _Xcf, _ycf):
+                    _method = choose_calibration(args.calibration, len(_Xcf))
+                    return ProbabilityCalibrator(_model, _method).fit(_Xcf, _ycf)
+
+                def _wf_select_threshold(_y, _p, _util):
+                    return select_threshold(
+                        _y,
+                        _p,
+                        objective=args.threshold_objective,
+                        precision_floor=float(threshold_precision_floor),
+                        min_signals=int(threshold_min_signals),
+                        default_threshold=0.5,
+                        utility_per_signal=_util,
+                        stability_band=float(threshold_stability_band),
+                        preferred_min_score=(
+                            float(args.threshold_min_utility_score)
+                            if args.threshold_objective == "utility_bps"
+                            else None
+                        ),
+                        enforce_min_score=(
+                            args.threshold_objective == "utility_bps"
+                            and bool(args.threshold_disable_on_nonpositive_utility)
+                        ),
+                        enforce_no_fallback=(
+                            args.threshold_objective == "utility_bps"
+                            and bool(args.threshold_disable_on_fallback)
+                        ),
+                        no_signal_threshold=NO_SIGNAL_THRESHOLD,
+                    )
+
+                def _wf_utility(_r, _s, _t):
+                    return utility_bps_for_target(
+                        _r, _s, _t, trade_cost_bps=float(args.threshold_trade_cost_bps)
+                    )
+
+                try:
+                    wf = run_walk_forward_oos(
+                        X=X,
+                        y=y.to_numpy(),
+                        return_bps=sub["return_bps"].to_numpy(),
+                        touch_side=sub["touch_side"].to_numpy(),
+                        ts=sub["ts_event"].to_numpy(),
+                        target=target,
+                        model_factory=_wf_model,
+                        calibrate_fn=(_wf_calibrate if args.calibration != "none" else None),
+                        select_threshold_fn=_wf_select_threshold,
+                        utility_fn=_wf_utility,
+                        n_folds=int(args.oos_folds),
+                        test_window=int(args.oos_test_window),
+                        min_train=int(args.oos_min_train),
+                        calib_window=int(args.oos_calib_window),
+                        fit_fraction=float(args.calib_fit_fraction),
+                        min_signals=int(threshold_min_signals),
+                        trade_cost_bps=float(args.threshold_trade_cost_bps),
+                    )
+                    threshold_meta["oos_score_observations"] = wf["oos_score_observations"]
+                    threshold_meta["oos_score_observations_source"] = (
+                        wf["source"] if wf["feasible"] else None
+                    )
+                    threshold_meta["signals_on_oos_slice"] = wf["signals_on_oos_slice"]
+                    threshold_meta["oos_slice_bounds"] = wf["oos_slice_bounds"]
+                    threshold_meta["oos_feasible"] = bool(wf["feasible"])
+                    threshold_meta["oos_skip_reason"] = wf["skip_reason"]
+                    print(
+                        f"[walk-forward-oos] {target}@{horizon}m feasible={wf['feasible']} "
+                        f"oos_signals={wf['signals_on_oos_slice']} skip={wf['skip_reason']}"
+                    )
+                except Exception as exc:  # noqa: BLE001 — additive; never break training
+                    threshold_meta["oos_score_observations"] = None
+                    threshold_meta["oos_score_observations_source"] = None
+                    threshold_meta["signals_on_oos_slice"] = 0
+                    threshold_meta["oos_feasible"] = False
+                    threshold_meta["oos_skip_reason"] = f"exception:{type(exc).__name__}:{exc}"
+                    print(f"[walk-forward-oos] {target}@{horizon}m ERROR: {exc}")
 
             # Compute per-feature quantile bounds for drift detection at inference.
             # Uses the full training set (not calib) since we want the broadest

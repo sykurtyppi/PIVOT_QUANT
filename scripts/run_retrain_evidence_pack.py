@@ -401,6 +401,12 @@ def _row_for_horizon(
         # (in-sample on the slice that picked the threshold).
         "score_observations_source": meta.get("score_observations_source"),
         "signals_on_tune_slice": meta.get("signals_on_tune_slice"),
+        # OOS axis (walk-forward harness). Absent on pre-B4 manifests -> None,
+        # which keeps the OOS axis empty and the in-sample path unchanged.
+        "oos_score_observations": meta.get("oos_score_observations"),
+        "oos_score_observations_source": meta.get("oos_score_observations_source"),
+        "signals_on_oos_slice": meta.get("signals_on_oos_slice"),
+        "oos_slice_bounds": meta.get("oos_slice_bounds"),
     }
 
 
@@ -688,32 +694,32 @@ def _validate_horizon_statistically(
     alpha: float = 0.05,
     rng_seed: int = 42,
     min_signals: int = 30,
+    observations_key: str = "score_observations",
+    source_key: str = "score_observations_source",
+    signals_key: str = "signals_on_tune_slice",
 ) -> dict:
     """One-sample statistical validation of per-signal utility observations.
 
-    The validator is **only** meaningful when the candidate manifest exposes a
-    raw per-signal utility distribution (``meta["score_observations"]``) for the
-    horizon. When that field is absent or too small, this function reports
-    ``status="insufficient_data"`` — not a pass. Aggregate scores alone cannot
-    be tested for significance; fabricating one would defeat the purpose of B2.
+    ``observations_key``/``source_key``/``signals_key`` select which per-signal
+    distribution to validate: the default in-sample axis (``score_observations``
+    / ``threshold_tune_slice``) or the OOS axis (``oos_score_observations`` /
+    ``walk_forward_fold``). The result's ``score_observations_source`` is set
+    from ``source_key`` so ``_aggregate_statistical_validation`` routes it.
 
-    When per-signal observations are available, two complementary tests run:
+    The validator is **only** meaningful when the manifest exposes a raw
+    per-signal utility distribution for the horizon. When that field is absent
+    or too small, this reports ``status="insufficient_data"`` — not a pass.
 
-    - Bootstrap CI on the mean utility (``n_bootstrap`` resamples). Pass
-      criterion: ``ci_low > 0`` at ``alpha``.
-    - One-sample sign-flip permutation against H0 ``mean == 0`` vs
-      H1 ``mean > 0``. Pass criterion: ``p_value < alpha``.
-
-    The horizon passes iff BOTH criteria hold. This is intentionally strict —
-    promotion gates should err on the side of withholding readiness.
-
-    Returns a dict with: method, sample_size, observed_score, ci_low, ci_high,
-    p_value, passed, status, warnings.
+    Two complementary tests run when observations are available:
+    - Bootstrap CI on the mean utility; pass: ``ci_low > 0`` at ``alpha``.
+    - One-sample sign-flip permutation (H0 mean==0 vs H1 mean>0); pass:
+      ``p_value < alpha``. The horizon passes iff BOTH hold (intentionally
+      strict — promotion gates err toward withholding readiness).
     """
     import numpy as np  # noqa: PLC0415 — keep numpy out of cold import paths
     target = row.get("target")
     horizon = row.get("horizon")
-    observations = row.get("score_observations")
+    observations = row.get(observations_key)
     observed_score = row.get("score")
 
     result: dict = {
@@ -729,16 +735,20 @@ def _validate_horizon_statistically(
         "passed": False,
         "status": "insufficient_data",
         "warnings": [],
-        # Disclosure attached to each validation entry: which slice the
-        # observations came from and the firing-count that produced them.
-        # Critical caveat: at present the source is the same slice that
-        # picked the threshold (in-sample), not a clean OOS slice.
-        "score_observations_source": row.get("score_observations_source"),
-        "signals_on_tune_slice": row.get("signals_on_tune_slice"),
+        # Disclosure: which slice these observations came from and the
+        # firing-count that produced them. ``score_observations_source`` drives
+        # the in-sample-vs-OOS routing in the aggregator.
+        "score_observations_source": row.get(source_key),
+        "signals_on_tune_slice": row.get(signals_key),
     }
 
     if observations is None:
-        result["warnings"].append("no_score_observations_in_manifest")
+        # Preserve the canonical in-sample warning string (consumed by tests /
+        # downstream); use a distinct, keyed warning for the OOS axis.
+        if observations_key == "score_observations":
+            result["warnings"].append("no_score_observations_in_manifest")
+        else:
+            result["warnings"].append(f"no_observations_in_manifest:{observations_key}")
         return result
     if not isinstance(observations, (list, tuple)):
         result["warnings"].append("score_observations_not_list")
@@ -828,6 +838,48 @@ def run_statistical_validation(
     return out
 
 
+def run_oos_validation(
+    per_horizon: list[dict],
+    *,
+    viable_set: set[tuple[str, int]],
+    rng_seed: int = 42,
+) -> dict[str, dict]:
+    """Validate the OOS (walk-forward) per-signal observations for viable horizons.
+
+    Mirrors ``run_statistical_validation`` but reads the OOS axis fields
+    (``oos_score_observations`` / ``oos_score_observations_source`` /
+    ``signals_on_oos_slice``). A horizon with no OOS observations produces NO
+    entry here — so it is absent from the OOS axis and (via coverage) blocks
+    promotion rather than silently passing. Returns ``{}`` for pre-B4 manifests.
+    """
+    out: dict[str, dict] = {}
+    for row in per_horizon:
+        target = row.get("target")
+        horizon = row.get("horizon")
+        if horizon is None:
+            continue
+        try:
+            key_tuple = (target, int(horizon))
+        except (TypeError, ValueError):
+            continue
+        if key_tuple not in viable_set:
+            continue
+        # Only emit an OOS result when the harness actually produced OOS
+        # observations for this horizon (feasible folds). No field -> no entry
+        # -> oos coverage stays incomplete -> promotion blocked.
+        if row.get("oos_score_observations") is None:
+            continue
+        key = f"{target}@{int(horizon)}m"
+        out[key] = _validate_horizon_statistically(
+            row,
+            rng_seed=rng_seed,
+            observations_key="oos_score_observations",
+            source_key="oos_score_observations_source",
+            signals_key="signals_on_oos_slice",
+        )
+    return out
+
+
 # Recognized OOS observation source labels. Anything else (including
 # "threshold_tune_slice", None, "", "unknown") is treated as IN-SAMPLE for
 # promotion purposes. Future OOS-validation PRs MUST pick a source name from
@@ -857,7 +909,9 @@ def _is_oos_source(source: object) -> bool:
     return s.startswith("oos_")
 
 
-def _aggregate_statistical_validation(per_horizon_results: dict) -> dict:
+def _aggregate_statistical_validation(
+    per_horizon_results: dict, *, viable_count: int | None = None
+) -> dict:
     """Roll per-horizon statistical results into a scope-aware, coverage-aware aggregate.
 
     ``per_horizon_results`` is the output of ``run_statistical_validation`` —
@@ -912,7 +966,13 @@ def _aggregate_statistical_validation(per_horizon_results: dict) -> dict:
     if not per_horizon_results:
         return out
 
-    viable_count = len(per_horizon_results)
+    # ``viable_count`` is the number of unique viable horizons. When the caller
+    # merges in-sample AND OOS results into one dict (2 entries per horizon),
+    # it MUST pass viable_count explicitly so coverage math (len(axis_ran) ==
+    # viable_count) stays per-horizon. Default = len for the legacy in-sample-
+    # only callers (and existing tests), where it equals the horizon count.
+    if viable_count is None:
+        viable_count = len(per_horizon_results)
     overall_ran: list[bool] = []      # True for passed, False for failed
     in_sample_ran: list[bool] = []
     oos_ran: list[bool] = []
@@ -1219,7 +1279,21 @@ def classify_candidate_readiness(report: dict) -> dict:
     statistical_validation_per_horizon = run_statistical_validation(
         per_horizon, viable_set=viable_set_for_validation
     )
-    sv_agg = _aggregate_statistical_validation(statistical_validation_per_horizon)
+    # OOS axis (walk-forward harness). Empty dict on pre-B4 manifests, in which
+    # case the merge below is a no-op and behavior is identical to in-sample-only.
+    oos_validation_per_horizon = run_oos_validation(
+        per_horizon, viable_set=viable_set_for_validation
+    )
+    # Merge both axes into one dict for the aggregator: in-sample keyed
+    # "target@Hm", OOS keyed "target@Hm::oos". viable_count = unique viable
+    # horizons so per-axis coverage (len(ran) == viable_count) stays correct.
+    _merged_validation = dict(statistical_validation_per_horizon)
+    for _k, _v in oos_validation_per_horizon.items():
+        _merged_validation[f"{_k}::oos"] = _v
+    sv_agg = _aggregate_statistical_validation(
+        _merged_validation,
+        viable_count=len(statistical_validation_per_horizon),
+    )
     statistical_validation_present = bool(sv_agg["present"])
     statistical_validation_passed = sv_agg["passed"]
     in_sample_validation_present = bool(sv_agg["in_sample_present"])
@@ -1328,6 +1402,8 @@ def classify_candidate_readiness(report: dict) -> dict:
         "statistical_validation_present": statistical_validation_present,
         "statistical_validation_passed": statistical_validation_passed,
         "statistical_validation": statistical_validation_per_horizon,
+        # OOS (walk-forward) per-horizon results, surfaced for visibility.
+        "oos_validation": oos_validation_per_horizon,
         # Scope-split validation axis. ``oos_validation_passed=True`` is the
         # only path that can set ``promotion_ready=True``; in-sample-only
         # passing evidence lands in ``full_family_in_sample_validated`` /
