@@ -4745,11 +4745,23 @@ class OpsSmokeTests(unittest.TestCase):
         ml_server = self._load_ml_server_module()
         original_snapshot = ml_server.registry.snapshot
         original_try_begin = ml_server._try_begin_score_request
+        original_is_active = ml_server.serving_state.is_active
         try:
             ml_server.registry.snapshot = lambda: {
                 "manifest": {"version": "smoke-test"},
                 "models": {"reject": {5: object()}, "break": {5: object()}},
             }
+            # Pin serving state ACTIVE so the request reaches the concurrency
+            # gate. The D1 dormant short-circuit (serving_state.is_active() in
+            # score()) runs BEFORE the busy check, so without this the test
+            # reads the ambient data/models/serving_state.json — and whenever an
+            # operator has paused serving (dormant_manual_pause), /score returns
+            # a 200 dormant response and never reaches the 429 path, making this
+            # test fail (200 != 429) purely because of live ops state. This test
+            # is about concurrency backpressure, which is independent of the
+            # manual pause flag; the dormant short-circuit has its own dedicated
+            # coverage (test_serving_state_valid_dormant_blocks et al.).
+            ml_server.serving_state.is_active = lambda: True
             ml_server._try_begin_score_request = lambda: False
             status, payload = self._asgi_json_request(
                 ml_server.app,
@@ -4764,6 +4776,7 @@ class OpsSmokeTests(unittest.TestCase):
         finally:
             ml_server.registry.snapshot = original_snapshot
             ml_server._try_begin_score_request = original_try_begin
+            ml_server.serving_state.is_active = original_is_active
 
     # ---------------------------------------------------------------
     # C1 follow-up: write-endpoint auth on /reload + /score.
