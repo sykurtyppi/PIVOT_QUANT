@@ -471,6 +471,14 @@ def main() -> None:
         if len(X_train) < args.min_events or len(X_test) < 20:
             continue
 
+        # A single-class training fold cannot train a binary discriminator; the
+        # pipeline's predict_proba would return one column and the calibrator
+        # (or any [:, 1] access) would raise. Skip the fold, mirroring the guards
+        # above and the same fix in train_rf_artifacts.py (Review Feedback
+        # Protocol: no partial fixes that leave sibling paths broken).
+        if len(set(y_train)) < 2:
+            continue
+
         fold_numeric = [c for c in usable_cols if c in numeric_cols]
         fold_categorical = [c for c in usable_cols if c in categorical_cols]
         pipeline = build_pipeline(fold_numeric, fold_categorical, args)
