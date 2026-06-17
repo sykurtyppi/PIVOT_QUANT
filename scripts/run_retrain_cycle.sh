@@ -400,6 +400,21 @@ trap mark_failure ERR
 trap release_lock EXIT INT TERM
 acquire_lock
 
+# Yield to an actively-running calibration refit. Both jobs rebuild the same
+# single-writer DuckDB view and write artifacts under data/models; running them
+# concurrently can corrupt the export. This mirrors the reciprocal check in
+# run_calibration_refit.sh (which already stands down for an active retrain), so
+# whichever job starts second stands down. We acquire our own lock FIRST (above)
+# so the peer also sees us; the rare double-start where both see each other just
+# skips this cycle harmlessly and runs on the next schedule.
+if [[ -d "${LOG_DIR}/run_calibration_refit.lock" ]] && [[ -f "${LOG_DIR}/run_calibration_refit.lock/pid" ]]; then
+  CALIB_PID="$(cat "${LOG_DIR}/run_calibration_refit.lock/pid" 2>/dev/null || true)"
+  if [[ -n "${CALIB_PID}" ]] && kill -0 "${CALIB_PID}" >/dev/null 2>&1; then
+    echo "[$(timestamp)] WARN retrain: calibration_refit lock active (pid ${CALIB_PID}); skipping run." | tee -a "${LOG_DIR}/retrain.log"
+    exit 0
+  fi
+fi
+
 cd "${ROOT_DIR}"
 
 # Resolve >=3.10 Python via shared helper. Replaces the previous
