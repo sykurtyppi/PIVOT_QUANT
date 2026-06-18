@@ -1049,6 +1049,58 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
 
     # Bootstrap: first accepted candidate becomes active.
     if not active_path.exists():
+        # Bootstrap is still a PROMOTION and must clear the SAME OOS gate as the
+        # normal path below. Otherwise a missing manifest_active.json turns the
+        # next unattended cycle into an unvalidated auto-promote — the one
+        # promotion path with no OOS check. The only escape is the explicit,
+        # loud --allow-unvalidated-promotion, identical to the normal path.
+        require_oos = bool(getattr(args, "require_oos_validation", True))
+        allow_unvalidated = bool(getattr(args, "allow_unvalidated_promotion", False))
+        oos_ok, oos_reason, oos_detail = check_oos_validation(
+            candidate_version, getattr(args, "evidence_report", "")
+        )
+        if require_oos and not oos_ok and not allow_unvalidated:
+            reason = "bootstrap blocked: OOS validation required"
+            result.update(
+                {
+                    "action": "rejected",
+                    "promoted": False,
+                    "reason": reason,
+                    "gate_failures": [f"oos_validation_required: {oos_reason}"],
+                    "oos_validation": oos_detail,
+                    "active_version": None,
+                }
+            )
+            state.update(
+                {
+                    "candidate_version": candidate_version,
+                    "active_version": None,
+                    "last_action": "rejected",
+                    "last_reason": reason + ": " + oos_reason,
+                    "last_checked_at_ms": now_ms(),
+                }
+            )
+            push_history(
+                state,
+                {
+                    "ts_ms": now_ms(),
+                    "action": "rejected",
+                    "candidate_version": candidate_version,
+                    "active_version": None,
+                    "reason": state["last_reason"],
+                    "oos_validation": oos_detail,
+                },
+            )
+            _persist_state_and_ops(state_path, state, args.ops_db, result)
+            print(json.dumps(result))
+            return 0
+        if require_oos and not oos_ok and allow_unvalidated:
+            print(
+                "WARNING: bootstrapping active manifest WITHOUT OOS validation "
+                f"(--allow-unvalidated-promotion). candidate={candidate_version} "
+                f"reason={oos_reason}",
+                file=sys.stderr,
+            )
         atomic_copy(candidate_path, active_path)
         state.update(
             {

@@ -16,6 +16,8 @@ Covers, per the remediation spec:
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import sys
 import tempfile
@@ -237,6 +239,99 @@ class TestOOSValidationGuard(unittest.TestCase):
             ok, reason, _ = gov.check_oos_validation("v500", str(p))
             self.assertFalse(ok)
             self.assertIn("not_promotion_ready", reason)
+
+
+class TestBootstrapRequiresOOS(unittest.TestCase):
+    """Bootstrap (no manifest_active.json yet) must clear the SAME OOS gate as a
+    normal promotion. Otherwise a missing active manifest turns the next
+    unattended retrain cycle into an unvalidated auto-promote — the one promotion
+    path that previously had no OOS check. The only escape is the explicit, loud
+    --allow-unvalidated-promotion (or genuine OOS-passing evidence)."""
+
+    def _candidate(self):
+        return {
+            "version": "v500",
+            "feature_version": "v3",
+            "trained_end_ts": 2000,
+            "models": {"reject": {"5": "reject_5.pkl"}},
+            "thresholds": {"reject": {"5": 0.5}},
+            "thresholds_meta": {
+                "reject": {"5": {"objective": "utility_bps", "score": 10.0, "guard_applied": False}}
+            },
+            "stats": {"5": {"reject": {"sample_size": 200, "reject_count": 80,
+                                        "mfe_bps_reject": 8.0, "mae_bps_reject": -12.0}}},
+        }
+
+    def _setup(self, d: Path):
+        # validate_manifest requires the referenced model artifact to exist on disk.
+        (d / "reject_5.pkl").write_bytes(b"stub")
+        (d / gov.DEFAULT_CANDIDATE_MANIFEST).write_text(json.dumps(self._candidate()))
+
+    def _args(self, d: Path, *, require_oos=True, allow_unvalidated=False,
+              evidence_report=""):
+        # Global args (--models-dir/--ops-db) precede the subcommand; eval args
+        # follow it. --ops-db "" keeps the test off the live pivot_events.sqlite
+        # (the _persist_state_and_ops write is guarded by `if ops_db:`).
+        argv = ["--models-dir", str(d), "--ops-db", "",
+                "evaluate", "--required-targets", "reject", "--required-horizons", "5"]
+        args = gov.build_parser().parse_args(argv)
+        # Pin the governance flags EXPLICITLY. Their argparse defaults come from
+        # MODEL_GOV_REQUIRE_OOS_VALIDATION / MODEL_GOV_ALLOW_UNVALIDATED_PROMOTION
+        # in the ambient env, so relying on the defaults would let a stray env var
+        # flip the test's outcome (or make it pass for the wrong reason).
+        args.require_oos_validation = require_oos
+        args.allow_unvalidated_promotion = allow_unvalidated
+        args.evidence_report = evidence_report
+        return args
+
+    def _run(self, args):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = gov.cmd_evaluate(args)
+        out = json.loads(buf.getvalue().strip().splitlines()[-1])
+        return rc, out
+
+    def test_bootstrap_without_oos_is_rejected_and_writes_no_active(self):
+        with tempfile.TemporaryDirectory() as dd:
+            d = Path(dd)
+            self._setup(d)
+            rc, out = self._run(self._args(d))  # default: require_oos=True, no evidence/flag
+            self.assertEqual(rc, 0)
+            self.assertEqual(out["action"], "rejected")
+            self.assertFalse(out["promoted"])
+            self.assertIn("bootstrap blocked", out["reason"])
+            # The crown-jewel assertion: NO unvalidated auto-promote occurred.
+            self.assertFalse((d / gov.DEFAULT_ACTIVE_MANIFEST).exists())
+
+    def test_bootstrap_with_allow_unvalidated_promotes(self):
+        with tempfile.TemporaryDirectory() as dd:
+            d = Path(dd)
+            self._setup(d)
+            rc, out = self._run(self._args(d, allow_unvalidated=True))
+            self.assertEqual(rc, 0)
+            self.assertEqual(out["action"], "bootstrap")
+            self.assertTrue(out["promoted"])
+            self.assertTrue((d / gov.DEFAULT_ACTIVE_MANIFEST).exists())
+
+    def test_bootstrap_with_oos_passing_evidence_promotes(self):
+        with tempfile.TemporaryDirectory() as dd:
+            d = Path(dd)
+            self._setup(d)
+            report = {
+                "candidate_manifest": {"version": "v500"},
+                "candidate_readiness": {
+                    "oos_validation_passed": True,
+                    "promotion_ready": True,
+                    "promotion_disposition": "ready_full_family",
+                },
+            }
+            rp = d / "evidence.json"
+            rp.write_text(json.dumps(report))
+            rc, out = self._run(self._args(d, evidence_report=str(rp)))
+            self.assertEqual(rc, 0)
+            self.assertEqual(out["action"], "bootstrap")
+            self.assertTrue(out["promoted"])
+            self.assertTrue((d / gov.DEFAULT_ACTIVE_MANIFEST).exists())
 
 
 if __name__ == "__main__":

@@ -1090,6 +1090,17 @@ def main() -> None:
                     f"All training rows purged for {target} {horizon}m after embargo. Skipping."
                 )
                 continue
+            # A single-class training slice cannot train a binary discriminator;
+            # the pipeline's predict_proba would return one column and the
+            # calibrator (or any [:, 1] access) would raise mid-run. Skip the
+            # horizon cleanly, mirroring the empty-slice skip above.
+            if int(y_train.nunique()) < 2:
+                print(
+                    f"Single-class training slice for {target} {horizon}m "
+                    f"(labels={sorted(set(y_train.tolist()))}); cannot train a binary "
+                    f"model. Skipping."
+                )
+                continue
             # Some features can be present overall but become fully missing in
             # the non-calibration training split. Drop them to avoid imputer warnings.
             all_null_train_cols = [col for col in X_train.columns if not X_train[col].notna().any()]

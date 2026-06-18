@@ -4,10 +4,29 @@ class ProbabilityCalibrator:
         self.method = method
         self.calibrator = None
 
+    @staticmethod
+    def _positive_class_proba(probs):
+        """Return the P(class=1) column with a clear error if the base model is
+        not a proper binary classifier. A single-class base model returns a
+        1-column ``predict_proba``; indexing ``[:, 1]`` would otherwise raise an
+        opaque ``IndexError`` mid-training (and, with no try/except around the
+        train loop, abort the whole run). Fail with a diagnosable message so the
+        caller can skip the degenerate horizon instead."""
+        import numpy as np
+
+        arr = np.asarray(probs)
+        if arr.ndim != 2 or arr.shape[1] < 2:
+            raise ValueError(
+                "ProbabilityCalibrator requires a binary base model: predict_proba "
+                f"returned shape {arr.shape} (need 2 columns). The base model "
+                "appears to be single-class and cannot be calibrated."
+            )
+        return arr[:, 1]
+
     def fit(self, X_calib, y_calib):
         import numpy as np
 
-        probs = self.base_model.predict_proba(X_calib)[:, 1]
+        probs = self._positive_class_proba(self.base_model.predict_proba(X_calib))
         if self.method == "isotonic":
             from sklearn.isotonic import IsotonicRegression
 
@@ -30,7 +49,7 @@ class ProbabilityCalibrator:
         probs = self.base_model.predict_proba(X)
         if self.calibrator is None:
             return probs
-        p1 = probs[:, 1]
+        p1 = self._positive_class_proba(probs)
         if self.method == "isotonic":
             p1c = self.calibrator.transform(p1)
         else:
