@@ -176,6 +176,28 @@ def split_calibration_slices(X_calib, y_calib, *, fit_fraction: float, min_fit_e
     return X_fit, y_fit, X_tune, y_tune, True
 
 
+def resolve_manifest_threshold_to_write(
+    manifest: dict, target: str, horizon: int, *, artifact_threshold: float,
+    retune_thresholds: bool,
+) -> float:
+    """Decide the decision threshold to write into the ACTIVE manifest for a
+    (target, horizon) during a calibration refit.
+
+    The manifest threshold is AUTHORITATIVE (manifest-first precedence). When NOT
+    retuning, preserve the existing manifest threshold rather than overwriting it
+    with the artifact's ``optimal_threshold`` — otherwise recalibration could
+    silently resurrect a threshold that a runtime guard or governance had
+    neutralized (e.g. the no-signal sentinel) on the live-served model. Decision
+    thresholds change ONLY through training/governance or the explicit
+    ``--retune-thresholds`` opt-in. For a genuinely new pair the manifest does
+    not yet carry, fall back to the artifact threshold."""
+    if not retune_thresholds:
+        existing = (manifest.get("thresholds", {}).get(target, {}) or {}).get(str(horizon))
+        if existing is not None:
+            return float(existing)
+    return float(artifact_threshold)
+
+
 @dataclass
 class PairResult:
     target: str
@@ -295,6 +317,16 @@ def main() -> None:
     manifest_models = manifest.get("models", {}) if isinstance(manifest, dict) else {}
     if not isinstance(manifest_models, dict) or not manifest_models:
         raise ValueError("Invalid active manifest: missing models map")
+
+    # Snapshot the live decision thresholds BEFORE refit. The recalibration
+    # channel may update calibration mappings but must NOT change decision
+    # thresholds unless --retune-thresholds is explicitly set; the snapshot powers
+    # a fail-closed invariant just before the manifest is published.
+    original_thresholds_snapshot = {
+        (str(t), str(h)): v
+        for t, hm in (manifest.get("thresholds", {}) or {}).items()
+        for h, v in (hm or {}).items()
+    }
 
     requested_targets = set(parse_csv(args.targets))
     requested_horizons = set(parse_horizons(args.horizons))
@@ -590,7 +622,13 @@ def main() -> None:
         payload["feature_columns"] = feature_columns
 
         manifest.setdefault("calibration", {}).setdefault(target, {})[str(horizon)] = method
-        manifest.setdefault("thresholds", {}).setdefault(target, {})[str(horizon)] = optimal_threshold
+        manifest.setdefault("thresholds", {}).setdefault(target, {})[str(horizon)] = (
+            resolve_manifest_threshold_to_write(
+                manifest, target, horizon,
+                artifact_threshold=optimal_threshold,
+                retune_thresholds=bool(args.retune_thresholds),
+            )
+        )
         manifest.setdefault("thresholds_meta", {}).setdefault(target, {})[str(horizon)] = threshold_meta
 
         if not args.dry_run:
@@ -610,6 +648,23 @@ def main() -> None:
         )
 
     if updated_pairs > 0:
+        # Fail-closed gate: with threshold retune disabled, the refit must not
+        # have changed ANY pre-existing decision threshold on the live manifest.
+        # If it somehow did, refuse to publish rather than silently alter what
+        # the live model fires on (threshold changes belong to governance/OOS).
+        if not args.retune_thresholds:
+            for (t, h), v0 in original_thresholds_snapshot.items():
+                v1 = (manifest.get("thresholds", {}).get(t, {}) or {}).get(h)
+                if (
+                    isinstance(v0, (int, float)) and isinstance(v1, (int, float))
+                    and abs(float(v0) - float(v1)) > 1e-12
+                ):
+                    raise ValueError(
+                        f"calibration refit changed live decision threshold {t}@{h}m "
+                        f"({v0} -> {v1}) with --retune-thresholds disabled; refusing to "
+                        f"publish the active manifest. Threshold changes must go through "
+                        f"training/governance."
+                    )
         manifest["calibration_refit_ts"] = int(time.time() * 1000)
         if not args.dry_run:
             atomic_write_json(manifest_path, manifest)
