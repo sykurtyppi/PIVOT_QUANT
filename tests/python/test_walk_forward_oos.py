@@ -123,6 +123,34 @@ class TestAntiLeak(unittest.TestCase):
         self.assertTrue(res.feasible)
         self.assertEqual(res.test_signals, 3)  # all 3 test rows fire (p=0.9>=0.5)
 
+    def test_tied_timestamps_at_boundary_do_not_leak(self):
+        """build_expanding_folds must not place train and test rows at the SAME
+        ts_event. Real SPY data has many same-minute touches; a tied cluster
+        straddling the index boundary used to make assert_strictly_before raise
+        (caught per-horizon in production -> the fold's OOS silently vanished).
+        The tie-guard drops the straddling train rows so train is STRICTLY
+        before test."""
+        n = 200
+        ts = np.arange(n, dtype=int)
+        # tied cluster straddling fold-0's boundary (test_start = n - 20 = 180)
+        ts[178:183] = 180
+        self.assertEqual(ts[179], ts[180])  # precondition: a real boundary tie
+        folds, skip = wf.build_expanding_folds(
+            ts, n_folds=1, test_window=20, min_train=120, calib_window=40
+        )
+        self.assertEqual(skip, "")
+        self.assertEqual(len(folds), 1)
+        f = folds[0]
+        train = np.concatenate([f.fit_idx, f.calib_fit_idx, f.tune_idx])
+        # the guard: every train ts STRICTLY before the test window...
+        self.assertLess(int(ts[train].max()), int(ts[f.test_idx].min()))
+        # ...so the anti-leak assertion must NOT raise (it did before the fix).
+        wf.assert_strictly_before(ts, train, f.test_idx, context="fold0")
+        # the tied train rows (178, 179) were dropped from train; the tied test
+        # rows (180-182) stay in the test window (untouched).
+        self.assertFalse({178, 179} & set(train.tolist()))
+        self.assertEqual(int(ts[f.test_idx].min()), 180)
+
 
 # ───────────────────────── per-fold threshold pre-test only ───────────────── #
 

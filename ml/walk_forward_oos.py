@@ -120,6 +120,22 @@ def build_expanding_folds(
         calib_fit_idx = np.arange(calib_start, calib_fit_end, dtype=int)
         tune_idx = np.arange(calib_fit_end, train_end, dtype=int)
         test_idx = np.arange(test_start, test_end, dtype=int)
+        # Anti-leak hardening for TIED timestamps. Many rows can share a
+        # ts_event (e.g. same-minute SPY touches), so the index-based boundary
+        # can place train and test rows at the SAME ts. assert_strictly_before
+        # (correctly) treats equality as leakage and raises — which in
+        # production is caught per-horizon and silently sinks the whole fold's
+        # OOS. Drop any train row whose ts ties with the test-window start so
+        # train is STRICTLY before test. Conservative: only removes potential
+        # leakers, never adds rows, and leaves the test window untouched. The
+        # tune slice (adjacent to the boundary) absorbs the loss; run_one_fold
+        # already degrades gracefully if it shrinks below min_signals.
+        test_start_ts = ts[test_start]
+        fit_idx = fit_idx[ts[fit_idx] < test_start_ts]
+        calib_fit_idx = calib_fit_idx[ts[calib_fit_idx] < test_start_ts]
+        tune_idx = tune_idx[ts[tune_idx] < test_start_ts]
+        train_kept = np.concatenate([fit_idx, calib_fit_idx, tune_idx])
+        train_end_ts = int(ts[int(train_kept.max())]) if train_kept.size else int(ts[0])
         folds.append(
             FoldPlan(
                 fold_index=k,
@@ -128,7 +144,7 @@ def build_expanding_folds(
                 tune_idx=tune_idx,
                 test_idx=test_idx,
                 train_start_ts=int(ts[0]),
-                train_end_ts=int(ts[train_end - 1]),
+                train_end_ts=train_end_ts,
                 test_start_ts=int(ts[test_start]),
                 test_end_ts=int(ts[test_end - 1]),
             )
