@@ -36,7 +36,17 @@ echo "$$" > "${LOCK_DIR}/pid"
 trap 'rm -rf "${LOCK_DIR}" >/dev/null 2>&1 || true' EXIT INT TERM HUP
 
 cd "${ROOT_DIR}"
-log "=== levels product daily start (symbol=${SYMBOL}, py=${PY}) ==="
+
+# trading-day gate (reuse the repo's single source of truth) — skip weekends and
+# US market holidays so we never email on a non-trading day. LEVELS_FORCE=1 overrides.
+if [[ "${LEVELS_FORCE:-0}" != "1" ]]; then
+  if ! "${PY}" -c "import sys; sys.path.insert(0, '${ROOT_DIR}/scripts'); from trading_calendar import is_trading_day; from datetime import datetime; from zoneinfo import ZoneInfo; sys.exit(0 if is_trading_day(datetime.now(ZoneInfo('America/New_York')).date()) else 1)"; then
+    log "non-trading day (ET); skipping levels run"
+    exit 0
+  fi
+fi
+
+log "=== levels product daily start (symbol=${SYMBOL}, py=${PY}, channel=${LEVELS_CHANNEL:-auto}) ==="
 
 if [[ "${LEVELS_SKIP_LABELS:-0}" != "1" ]]; then
   log "step 1/6 build_labels --incremental (maturation)"

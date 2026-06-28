@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 import notify
@@ -64,14 +65,39 @@ def render(mp, tr) -> str:
     return "\n".join(L)
 
 
+def _resolve_channel(requested: str) -> str:
+    """auto → email if SMTP configured, else webhook if set, else dry-run."""
+    if requested != "auto":
+        return requested
+    notify._load_env_file()
+    if (os.getenv("ML_REPORT_SMTP_HOST") or "").strip() and (os.getenv("ML_REPORT_EMAIL_TO") or "").strip():
+        return "email"
+    if (os.getenv(notify.WEBHOOK_ENV) or "").strip():
+        return "webhook"
+    return "dryrun"
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--symbol", default="SPY")
+    ap.add_argument("--channel", default=os.getenv("LEVELS_CHANNEL", "auto"),
+                    choices=["auto", "email", "webhook", "dryrun"])
+    ap.add_argument("--dry-run", action="store_true", help="build but do not actually send")
     args = ap.parse_args()
     mp, tr = _latest(args.symbol)
-    msg = render(mp, tr)
-    delivered = notify.post(msg)
-    print(f"\n[{'delivered to webhook' if delivered else 'dry-run (no webhook set)'}]")
+    body = render(mp, tr)
+    subject = f"SPY Levels — {mp['prior_session_date']} session basis"
+    channel = _resolve_channel(args.channel)
+    if channel == "email":
+        ok = notify.email_post(subject, body, dry_run=args.dry_run)
+    elif channel == "webhook":
+        ok = False if args.dry_run else notify.post(body)
+        if args.dry_run:
+            print(body)
+    else:  # dryrun
+        print(body)
+        ok = False
+    print(f"\n[channel={channel} {'sent' if ok else 'dry-run/not-sent'}]")
 
 
 if __name__ == "__main__":
