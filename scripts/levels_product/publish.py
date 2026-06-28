@@ -37,31 +37,44 @@ def _latest(symbol):
 
 
 def render(mp, tr) -> str:
+    """Clean, no-emoji, plain-text post for a human reader (single column so it
+    degrades gracefully in proportional-font mail clients). Keeps the exporter's
+    discipline (plain text, price+label) but uses real section headers and puts
+    the track record — the product's proof — front and centre.
+    """
     sym = mp["symbol"]
     spot = mp["reference_spot"]
-    res = [r for r in mp["levels"] if r["side"] == "resistance"]
+    res = [r for r in mp["levels"] if r["side"] == "resistance"]  # already price-desc
     sup = [r for r in mp["levels"] if r["side"] == "support"]
-    L = [f"📍 **{sym} Levels — {mp['prior_session_date']} basis**  (spot ~{spot})", ""]
-    L.append("**Resistance**")
-    for r in res:
-        L.append(f"`{r['level_type']:>3}`  {r['price']:>8.2f}   `{r['distance_from_spot_bps']:+6.0f} bps`")
-    L.append("**Support**")
-    for r in sup:
-        L.append(f"`{r['level_type']:>3}`  {r['price']:>8.2f}   `{r['distance_from_spot_bps']:+6.0f} bps`")
-    base = mp.get("unconditional_hold_rate_by_horizon", {})
-    if base:
-        bstr = " · ".join(f"{h}m {int(round(v['hold_rate']*100))}%" for h, v in sorted(base.items(), key=lambda x: int(x[0])))
-        L += ["", f"Base hold rate (any level): {bstr}"]
 
-    L += ["", "📊 **Track record** — last 30 trading days, confluence-alerted (conf≥1) levels"]
+    def level_line(r):
+        return f"  {r['level_type']:<3} {r['price']:>8.2f}   {r['distance_from_spot_bps']:>+5.0f} bps"
+
+    L = [f"{sym} LEVELS — {mp['prior_session_date']} session   (spot {spot:.2f})", ""]
+    L.append("RESISTANCE")
+    L += [level_line(r) for r in res]
+    L += ["", "SUPPORT"]
+    L += [level_line(r) for r in sup]
+
+    tparts, n_alerted = [], None
     for h in (15, 30, 60):
         rec = tr["horizons"].get(f"h{h}", {})
         sb = rec.get("rolling_scoreboard_alerted_levels") or rec.get("rolling_scoreboard_alerted")
         if sb and sb.get("actual_hold_rate") is not None:
-            n = sb.get("n_alerted_touches", sb.get("n"))
-            L.append(f"   {h}m: **{int(round(sb['actual_hold_rate']*100))}%** held  (n={n})")
-    L += ["", "_Most S/R levels are roughly coin-flips; confluence levels hold meaningfully more. "
-          "Educational, not financial advice._"]
+            tparts.append(f"{h}m {int(round(sb['actual_hold_rate'] * 100))}% held")
+            n_alerted = sb.get("n_alerted_touches", sb.get("n"))
+    if tparts:
+        L += ["", "TRACK RECORD — last 30 trading days, confluence levels",
+              "  " + "    ".join(tparts) + (f"   (n={n_alerted})" if n_alerted else "")]
+    base = mp.get("unconditional_hold_rate_by_horizon", {})
+    if base:
+        bstr = " / ".join(f"{int(round(v['hold_rate'] * 100))}%"
+                          for _, v in sorted(base.items(), key=lambda x: int(x[0])))
+        L.append(f"  Base rate, any level (15m/30m/60m): {bstr}")
+
+    L += ["",
+          "Most S/R levels are roughly coin-flips; confluence levels hold meaningfully more.",
+          "Educational, not financial advice."]
     return "\n".join(L)
 
 
