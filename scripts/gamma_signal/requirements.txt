@@ -1,0 +1,5 @@
+# Feature deps for the free GEX vol-regime signal (scripts/gamma_signal/).
+# Isolated from requirements-runtime.txt so CI is unaffected; install to use:
+#   .venv/bin/pip install -r scripts/gamma_signal/requirements.txt
+yfinance>=0.2        # free full SPY option chain (no paid feed / IBKR needed)
+scipy>=1.10          # Black-Scholes gamma (norm.pdf); already transitive via scikit-learn
