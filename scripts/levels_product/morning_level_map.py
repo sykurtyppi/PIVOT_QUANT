@@ -52,10 +52,12 @@ def daily_rth_ohlc(con, symbol):
     o = pd.DataFrame({"open": g.open.first(), "high": g.high.max(),
                       "low": g.low.min(), "close": g.close.last(),
                       "bars": g.size()}).reset_index()
-    # exclude the CURRENT ET date and any incomplete session: floor-trader pivots
-    # must use the prior COMPLETED day's OHLC, never today's partial bars.
-    today_et = pd.Timestamp.now(ET).date()
-    o = o[(o.d < today_et) & (o.bars >= MIN_SESSION_BARS)]
+    # Use the most recent COMPLETE session (by bar count), regardless of run hour:
+    # floor-trader pivots must come from a finished session, never today's partial
+    # bars. A morning run → prior session; an after-close run → today's session
+    # (i.e. the upcoming day's levels). Today's partial session has < MIN bars and
+    # is excluded automatically, so no explicit "exclude today" is needed.
+    o = o[o.bars >= MIN_SESSION_BARS]
     return o.sort_values("d").reset_index(drop=True)
 
 

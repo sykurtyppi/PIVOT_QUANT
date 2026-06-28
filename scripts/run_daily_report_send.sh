@@ -259,3 +259,20 @@ else
   echo "[$(timestamp)] ERROR notification send failed" >> "${LOG_DIR}/report_delivery.log"
   exit 1
 fi
+
+# ---------------------------------------------------------------------------
+# Levels data product (read-only add-on). We only reach here on a trading day
+# after a successful report send, so it inherits this wrapper's trading-day gate
+# and SMTP config and emails the validated SPY level map + track record. Fully
+# guarded: any failure is logged and ignored — it can never affect the ML report
+# above. Disable with LEVELS_PRODUCT_SKIP=1.
+# ---------------------------------------------------------------------------
+if [[ "${LEVELS_PRODUCT_SKIP:-0}" != "1" ]]; then
+  if LEVELS_SKIP_LABELS="${LEVELS_SKIP_LABELS:-1}" LEVELS_CHANNEL="${LEVELS_CHANNEL:-email}" LEVELS_FORCE=1 \
+       /bin/bash "${ROOT_DIR}/scripts/levels_product/run_levels_product_daily.sh" \
+       >> "${LOG_DIR}/report_delivery.log" 2>&1; then
+    echo "[$(timestamp)] DONE  levels_product email" >> "${LOG_DIR}/report_delivery.log"
+  else
+    echo "[$(timestamp)] WARN levels_product step failed (non-fatal)" >> "${LOG_DIR}/report_delivery.log"
+  fi
+fi
