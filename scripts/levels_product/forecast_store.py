@@ -65,15 +65,37 @@ def ensure_table(con):
             PRIMARY KEY (event_id, horizon_min)
         )""")
     con.execute("CREATE INDEX IF NOT EXISTS idx_lhf_ts ON level_hold_forecasts(ts_event);")
+    con.execute("CREATE TABLE IF NOT EXISTS product_meta (key TEXT PRIMARY KEY, value TEXT)")
     con.commit()
 
 
-def emit(symbol, dq_min):
+def _golive_ts(pcon, now, override=None):
+    """Return the go-live watermark; set it ONCE on first emit (or to `override`).
+
+    The forward log commits only touches at/after this watermark, so it never
+    re-backfills the 14-month history — it contains ONLY genuinely-forward,
+    pre-committed forecasts. The retrospective proof lives in build_track_record.
+    """
+    row = pcon.execute("SELECT value FROM product_meta WHERE key='go_live_ts'").fetchone()
+    if row is not None:
+        return int(row[0])
+    wm = int(override) if override is not None else now
+    pcon.execute("INSERT INTO product_meta (key, value) VALUES ('go_live_ts', ?)", (str(wm),))
+    pcon.commit()
+    print(f"[forecast_store] go-live watermark set to {wm} — forward log starts here "
+          f"(no historical backfill; retrospective lives in build_track_record)")
+    return wm
+
+
+def emit(symbol, dq_min, golive_ts=None):
     rcon, pcon = _read_con(), _product_con()
     ensure_table(pcon)
     now = int(datetime.now(timezone.utc).timestamp() * 1000)
+    golive = _golive_ts(pcon, now, override=golive_ts)
     committed = 0
     for h in HORIZONS:
+        # load FULL history so the trailing window has prior context; the
+        # go-live watermark gates only what we COMMIT, not what we read.
         df = pd.read_sql_query(
             """SELECT te.event_id, te.ts_event, te.confluence_count, el.reject
                FROM touch_events te
@@ -90,7 +112,8 @@ def emit(symbol, dq_min):
         mature_before = now - h * 60_000  # touch's own horizon must have elapsed
         for i, row in enumerate(df.itertuples()):
             p = preds[i]
-            if not np.isfinite(p) or int(row.ts_event) > mature_before:
+            # commit only matured, forward (>= go-live) touches with a valid forecast
+            if not np.isfinite(p) or int(row.ts_event) > mature_before or int(row.ts_event) < golive:
                 continue
             cur = pcon.execute(
                 """INSERT OR IGNORE INTO level_hold_forecasts
@@ -150,9 +173,11 @@ def main():
     ap.add_argument("--symbol", default="SPY")
     ap.add_argument("--dq-min", type=float, default=0.9)
     ap.add_argument("--recent-days", type=int, default=30)
+    ap.add_argument("--golive-ts", type=int, default=None,
+                    help="override the go-live watermark (ms epoch); only honored on first emit")
     args = ap.parse_args()
     if args.cmd == "emit":
-        n = emit(args.symbol, args.dq_min)
+        n = emit(args.symbol, args.dq_min, golive_ts=args.golive_ts)
         pcon = _product_con()
         total = pcon.execute("SELECT COUNT(*) FROM level_hold_forecasts WHERE symbol=?",
                              (args.symbol,)).fetchone()[0]

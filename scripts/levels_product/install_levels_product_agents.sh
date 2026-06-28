@@ -22,6 +22,14 @@ DAILY_HOUR="${LEVELS_DAILY_HOUR:-8}"
 DAILY_MINUTE="${LEVELS_DAILY_MINUTE:-15}"
 INTRADAY_INTERVAL="${LEVELS_INTRADAY_INTERVAL_SEC:-120}"
 WEBHOOK="${LEVELS_PRODUCT_WEBHOOK_URL:-}"
+# default to skipping the in-product label maturation: the com.pivotquant.retrain
+# agent already maintains event_labels, so the product stays fully read-only on
+# the live DB. Set LEVELS_SKIP_LABELS=0 to have the daily job mature labels itself.
+SKIP_LABELS="${LEVELS_SKIP_LABELS:-1}"
+# "install-daily" installs only the daily agent (forward log + morning post),
+# holding the intraday alert poller until a webhook is configured.
+INSTALL_INTRADAY=1
+[[ "${ACTION}" == "install-daily" ]] && INSTALL_INTRADAY=0
 mkdir -p "${LOG_DIR}" "${LA_DIR}"
 
 # resolve a >=3.10 interpreter for the intraday agent (mirrors the daily script)
@@ -84,7 +92,8 @@ cat > "${LA_DIR}/${daily_label}.plist" <<EOF
   </array>
   <key>EnvironmentVariables</key>
   <dict>
-$(webhook_env_block)  </dict>
+$(webhook_env_block)    <key>LEVELS_SKIP_LABELS</key><string>${SKIP_LABELS}</string>
+  </dict>
   <key>StartCalendarInterval</key>
   <array>
 $(weekday_block "${DAILY_HOUR}" "${DAILY_MINUTE}")  </array>
@@ -94,7 +103,8 @@ $(weekday_block "${DAILY_HOUR}" "${DAILY_MINUTE}")  </array>
 </dict></plist>
 EOF
 
-# --- intraday agent (interval poller) ---
+# --- intraday agent (interval poller) — only when INSTALL_INTRADAY=1 ---
+if [[ "${INSTALL_INTRADAY}" == "1" ]]; then
 cat > "${LA_DIR}/${intraday_label}.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -115,12 +125,20 @@ $(webhook_env_block)  </dict>
   <key>WorkingDirectory</key><string>${ROOT_DIR}</string>
 </dict></plist>
 EOF
+fi
 
-chmod 600 "${LA_DIR}/${daily_label}.plist" "${LA_DIR}/${intraday_label}.plist"  # plist holds the webhook secret
-unload "${daily_label}"; unload "${intraday_label}"
+chmod 600 "${LA_DIR}/${daily_label}.plist"  # plist holds the webhook secret
+unload "${daily_label}"
 launchctl bootstrap "gui/${UID_NUM}" "${LA_DIR}/${daily_label}.plist"
-launchctl bootstrap "gui/${UID_NUM}" "${LA_DIR}/${intraday_label}.plist"
 echo "installed:"
-echo "  ${daily_label}     weekdays ${DAILY_HOUR}:$(printf '%02d' "${DAILY_MINUTE}") (morning post + track record)"
-echo "  ${intraday_label}  every ${INTRADAY_INTERVAL}s (confluence alert poller)"
-[[ -z "${WEBHOOK}" ]] && echo "  NOTE: LEVELS_PRODUCT_WEBHOOK_URL unset → agents dry-run to ${LOG_DIR}"
+echo "  ${daily_label}     weekdays ${DAILY_HOUR}:$(printf '%02d' "${DAILY_MINUTE}") (forward log + morning post + track record; LEVELS_SKIP_LABELS=${SKIP_LABELS})"
+if [[ "${INSTALL_INTRADAY}" == "1" ]]; then
+  chmod 600 "${LA_DIR}/${intraday_label}.plist"
+  unload "${intraday_label}"
+  launchctl bootstrap "gui/${UID_NUM}" "${LA_DIR}/${intraday_label}.plist"
+  echo "  ${intraday_label}  every ${INTRADAY_INTERVAL}s (confluence alert poller)"
+else
+  unload "${intraday_label}"  # ensure no stale intraday agent remains in daily-only mode
+  echo "  ${intraday_label}  NOT installed (install-daily mode; add it later with 'install')"
+fi
+[[ -z "${WEBHOOK}" ]] && echo "  NOTE: LEVELS_PRODUCT_WEBHOOK_URL unset → agents dry-run (logged, not delivered) to ${LOG_DIR}"
