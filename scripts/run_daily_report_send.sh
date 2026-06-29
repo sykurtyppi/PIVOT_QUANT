@@ -276,3 +276,21 @@ if [[ "${LEVELS_PRODUCT_SKIP:-0}" != "1" ]]; then
     echo "[$(timestamp)] WARN levels_product step failed (non-fatal)" >> "${LOG_DIR}/report_delivery.log"
   fi
 fi
+
+# ---------------------------------------------------------------------------
+# Gamma vol-regime signal (read-only add-on). Reached only on a trading day, so
+# it inherits the trading-day gate. Appends today's free-chain GEX snapshot to
+# data/gamma_signal.sqlite so the regime calibrates over ~20 live days. Fully
+# guarded — needs network (yfinance) and the gamma_signal deps; any failure is
+# logged and ignored. Disable with GAMMA_SIGNAL_SKIP=1.
+# ---------------------------------------------------------------------------
+if [[ "${GAMMA_SIGNAL_SKIP:-0}" != "1" ]]; then
+  # prefer the .venv that carries yfinance/scipy (gamma_signal deps); fall back to PYTHON
+  GAMMA_PY="${ROOT_DIR}/.venv/bin/python"; [[ -x "${GAMMA_PY}" ]] || GAMMA_PY="${PYTHON}"
+  if "${GAMMA_PY}" "${ROOT_DIR}/scripts/gamma_signal/gex_signal.py" --symbol SPY \
+       >> "${LOG_DIR}/report_delivery.log" 2>&1; then
+    echo "[$(timestamp)] DONE  gamma_signal snapshot" >> "${LOG_DIR}/report_delivery.log"
+  else
+    echo "[$(timestamp)] WARN gamma_signal step failed (non-fatal; check yfinance/network)" >> "${LOG_DIR}/report_delivery.log"
+  fi
+fi
