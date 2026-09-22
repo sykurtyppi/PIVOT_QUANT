@@ -13,6 +13,7 @@ import { ConfigurationManager } from './config/ConfigurationManager.js';
 import { ValidationFramework } from './validation/ValidationFramework.js';
 import { PerformanceMonitor } from './monitoring/PerformanceMonitor.js';
 import { MathematicalModels } from './math/MathematicalModels.js';
+import { MultiHorizonVolatilityLevels } from './math/MultiHorizonVolatilityLevels.js';
 
     /**
      * Main QuantPivot class - Institutional API
@@ -131,6 +132,16 @@ import { MathematicalModels } from './math/MathematicalModels.js';
     async calculateATR(ohlcData, period = 14, method = 'wilder') {
         const trueRanges = await this.math.calculateTrueRange(ohlcData);
         return await this.math.calculateATR(trueRanges, period, method);
+    }
+
+    /**
+     * Calculate point-in-time daily, weekly, and monthly volatility levels.
+     * @param {Array} bars - Chronological bars containing timestamp and close
+     * @param {Object} options - Symbol, as-of date, windows, calendar, and provenance options
+     * @returns {Object} Stable, machine-readable volatility-level result
+     */
+    calculateVolatilityLevels(bars, options = {}) {
+        return MultiHorizonVolatilityLevels.calculate(bars, options);
     }
 
     /**
@@ -524,7 +535,8 @@ export {
     ConfigurationManager,
     ValidationFramework,
     PerformanceMonitor,
-    MathematicalModels
+    MathematicalModels,
+    MultiHorizonVolatilityLevels
 };
 
 // Export factory functions for common use cases

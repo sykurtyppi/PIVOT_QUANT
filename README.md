@@ -169,6 +169,25 @@ Average True Range calculation.
 const atr = await pivot.calculateATR(ohlcData, 14, 'wilder');
 ```
 
+#### `calculateVolatilityLevels(bars, options)`
+Point-in-time daily, weekly, and monthly realized-volatility reference levels with a stable JSON contract. Every bar must provide an ISO `timestamp` with an explicit timezone. Bars at or before `generatedAt` must be chronological, contain exactly one close per UTC weekday session date, and provide a positive `close`; dates supplied in `holidays` are rejected as calculation sessions.
+
+```javascript
+const result = pivot.calculateVolatilityLevels(bars, {
+  symbol: 'QQQ',
+  asOf: '2026-09-22',           // target session, YYYY-MM-DD
+  generatedAt: '2026-09-21T21:00:00.000Z',
+  volatilityWindows: [20, 60],  // first available window is selected
+  holidays: ['2026-09-07']      // exchange holidays in the projected period
+});
+
+console.log(result.horizons.weekly.levels.upper2Sigma);
+```
+
+Each horizon requires the close from the immediately preceding session, completed week, or completed month; a missing period-end close makes that horizon unavailable rather than silently substituting stale data. Bars timestamped after `generatedAt` are excluded from horizon calculations but remain reflected in input-vintage provenance. Volatility uses only close-to-close log returns available through the anchor. Bands are log-symmetric and scale by the number of weekday sessions remaining after explicit holidays. The output records anchors, input and calculation data vintages, estimator, selected/fallback window, and quality status.
+
+These are probabilistic realized-volatility references—not option-implied moves, proprietary support/resistance, or trade signals. Supply the relevant exchange holiday calendar; the built-in calendar otherwise treats weekdays as sessions.
+
 ### Advanced Features
 
 #### Batch Processing
