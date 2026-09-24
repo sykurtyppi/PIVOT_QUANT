@@ -115,27 +115,33 @@ describe('publishForecast (integration)', () => {
       .toThrow(/priceAdjustment is required/);
   });
 
-  test('production mode refuses a backdated asOf and post-cutoff publication', () => {
+  test('production derives publication time from the trusted clock, not caller input', () => {
     const bars = sessionBars('2026-09-23');
-    // Backdating: asOf is before the trusted clock's date.
+    const clockAt = (iso) => () => Date.parse(iso);
+
+    // Backdating: the trusted clock is well after asOf's session.
     expect(() => publishForecast({
-      ...BASE, bars, ledgerPath: ledger, mode: 'production', nowIso: '2026-11-02T12:00:00.000Z',
+      ...BASE, bars, ledgerPath: ledger, mode: 'production', clock: clockAt('2026-11-02T12:00:00.000Z'),
     })).toThrow(/backdating/);
-    // Post-cutoff: generatedAt after the asOf session open cutoff.
+
+    // A stale caller generatedAt cannot slip past the cutoff: the clock is after the cutoff even
+    // though the caller claims a pre-open generatedAt.
     expect(() => publishForecast({
-      ...BASE, bars, generatedAt: '2026-09-24T15:00:00.000Z', ledgerPath: ledger,
-      mode: 'production', nowIso: '2026-09-24T15:00:00.000Z',
+      ...BASE, bars, generatedAt: '2026-09-24T12:00:00.000Z', ledgerPath: ledger,
+      mode: 'production', clock: clockAt('2026-09-24T18:00:00.000Z'),
     })).toThrow(/cutoff/);
     expect(readForecasts(ledger)).toEqual([]);
   });
 
-  test('production mode allows a legitimate pre-open publication', () => {
+  test('production allows a legitimate pre-open publication and stamps the clock time', () => {
     const bars = sessionBars('2026-09-23');
     const { records } = publishForecast({
-      ...BASE, bars, generatedAt: '2026-09-24T12:15:00.000Z', ledgerPath: ledger, persist: false,
-      mode: 'production', nowIso: '2026-09-24T12:15:00.000Z',
+      ...BASE, bars, generatedAt: '2099-01-01T00:00:00.000Z', ledgerPath: ledger, persist: false,
+      mode: 'production', clock: () => Date.parse('2026-09-24T12:15:00.000Z'),
     });
     expect(records).toHaveLength(3);
+    // The caller's bogus generatedAt was overridden by the trusted clock.
+    expect(records[0].generated_at).toBe('2026-09-24T12:15:00.000Z');
   });
 
   test('fails closed (writes nothing) on every data-quality gate', () => {

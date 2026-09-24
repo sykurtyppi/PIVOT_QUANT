@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
-import { computeContentHash } from '../../src/forecast/forecastRecord.js';
+import { computeContentHash, computeRecordHash } from '../../src/forecast/forecastRecord.js';
 import {
   appendOutcome,
   ForecastIntegrityError,
@@ -14,6 +14,7 @@ import {
 
 function record(overrides = {}) {
   const base = {
+    schema_version: '1.0.0',
     forecast_id: 'SPY-2026-09-24-daily-v1',
     version: 'v1',
     symbol: 'SPY',
@@ -21,8 +22,12 @@ function record(overrides = {}) {
     horizon: 'daily',
     outcome_forecast: 'close_containment',
     software_sha: '31c4fdb',
+    data_source: 'yahoo_proxy',
     data_snapshot_hash: 'a'.repeat(64),
+    data_through: '2026-09-23T20:00:00.000Z',
+    price_adjustment: 'split_and_dividend_adjusted',
     calendar_version: 'nyse-rulegen-1.0.0',
+    generated_at: '2026-09-24T12:15:00.000Z',
     estimator: '20_session_close_to_close_rv',
     anchor: 666,
     horizon_sigma_log_return: 0.01,
@@ -30,7 +35,10 @@ function record(overrides = {}) {
     quality: { status: 'complete', reason: null },
     ...overrides,
   };
-  if (!('content_hash' in overrides)) base.content_hash = computeContentHash(base);
+  if (!('content_hash' in overrides)) {
+    base.content_hash = computeContentHash(base);
+    base.record_hash = computeRecordHash(base);
+  }
   return base;
 }
 

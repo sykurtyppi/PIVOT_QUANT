@@ -2,7 +2,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFile
 import { tmpdir } from 'os';
 import { dirname, join } from 'path';
 
-import { computeContentHash } from '../../src/forecast/forecastRecord.js';
+import { computeContentHash, computeRecordHash } from '../../src/forecast/forecastRecord.js';
 import {
   appendForecast,
   appendForecasts,
@@ -12,17 +12,22 @@ import {
   readForecasts,
 } from '../../src/forecast/ledgerStore.js';
 
-// A realistic, hash-valid forecast record. Identity is (symbol, target_session, horizon).
+// A realistic, schema-complete, hash-valid forecast record. Identity is (symbol, session, horizon).
 function record(overrides = {}) {
   const base = {
+    schema_version: '1.0.0',
     forecast_id: 'SPY-2026-09-24-daily-v1',
     version: 'v1',
     symbol: 'SPY',
     target_session: '2026-09-24',
     horizon: 'daily',
     software_sha: '31c4fdb',
+    data_source: 'yahoo_proxy',
     data_snapshot_hash: 'a'.repeat(64),
+    data_through: '2026-09-23T20:00:00.000Z',
+    price_adjustment: 'split_and_dividend_adjusted',
     calendar_version: 'nyse-rulegen-1.0.0',
+    generated_at: '2026-09-24T12:15:00.000Z',
     anchor: 666,
     estimator: '20_session_close_to_close_rv',
     horizon_sigma_log_return: 0.01,
@@ -30,7 +35,10 @@ function record(overrides = {}) {
     quality: { status: 'complete', reason: null },
     ...overrides,
   };
-  if (!('content_hash' in overrides)) base.content_hash = computeContentHash(base);
+  if (!('content_hash' in overrides)) {
+    base.content_hash = computeContentHash(base);
+    base.record_hash = computeRecordHash(base);
+  }
   return base;
 }
 
@@ -147,5 +155,34 @@ describe('ledgerStore (append-only)', () => {
     const res = appendForecasts(ledger, [record(), weekly()]);
     expect(res.every((r) => r.written)).toBe(true);
     expect(readForecasts(ledger)).toHaveLength(2);
+  });
+
+  test('a single batch cannot introduce a duplicate identity', () => {
+    // Two different records sharing one (symbol, session, horizon) identity in ONE call.
+    const a = record({ forecast_id: 'SPY-2026-09-24-daily-v1' });
+    const b = record({ forecast_id: 'SPY-2026-09-24-daily-v2', version: 'v2', anchor: 670 });
+    expect(() => appendForecasts(ledger, [a, b])).toThrow(LedgerImmutabilityError);
+    expect(readForecasts(ledger)).toEqual([]); // nothing written
+  });
+
+  test('a batch with two byte-identical records writes a single row', () => {
+    const res = appendForecasts(ledger, [record(), record()]);
+    expect(res[0].written).toBe(true);
+    expect(res[1].idempotent).toBe(true);
+    expect(readForecasts(ledger)).toHaveLength(1);
+  });
+
+  test('refuses a record missing required schema fields', () => {
+    const incomplete = record();
+    delete incomplete.data_source; // drop a required provenance field
+    expect(() => appendForecast(ledger, incomplete)).toThrow(LedgerIntegrityError);
+  });
+
+  test('the envelope hash catches tampering with provenance fields', () => {
+    appendForecast(ledger, record());
+    // Change a NON-level provenance field (outside content_hash) without updating record_hash.
+    const tampered = readFileSync(ledger, 'utf8').replace('"yahoo_proxy"', '"attacker_feed"');
+    writeFileSync(ledger, tampered, 'utf8');
+    expect(() => readForecasts(ledger)).toThrow(LedgerIntegrityError);
   });
 });

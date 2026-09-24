@@ -18,19 +18,14 @@ import { execSync } from 'child_process';
 
 import { fetchDailyBars, YAHOO_PRICE_ADJUSTMENT } from '../src/forecast/dataSourceYahoo.js';
 import { isTradingSession, nextTradingSession } from '../src/forecast/nyseCalendar.js';
+import { parseCliArgs } from '../src/forecast/parseCliArgs.js';
 import { publishForecast, DEFAULT_LEDGER_PATH } from '../src/forecast/publishForecast.js';
 
+const BOOLEAN_FLAGS = ['dry-run', 'production', 'allow-dirty'];
+const VALUE_FLAGS = ['symbol', 'as-of', 'range', 'proxy', 'ledger', 'version', 'auth-header'];
+
 function parseArgs(argv) {
-  const args = {};
-  for (let i = 0; i < argv.length; i += 1) {
-    const token = argv[i];
-    if (!token.startsWith('--')) continue;
-    const key = token.slice(2);
-    if (key === 'dry-run') { args.dryRun = true; continue; }
-    args[key] = argv[i + 1];
-    i += 1;
-  }
-  return args;
+  return parseCliArgs(argv, { booleanFlags: BOOLEAN_FLAGS, valueFlags: VALUE_FLAGS });
 }
 
 function resolveSoftwareSha({ allowDirty = false } = {}) {
@@ -78,7 +73,7 @@ async function main() {
   const { sha: softwareSha } = resolveSoftwareSha({ allowDirty: Boolean(args['allow-dirty']) && !production });
   const generatedAt = new Date().toISOString();
 
-  console.error(`[publish] symbol=${symbol} asOf=${asOf} sha=${softwareSha.slice(0, 12)} mode=${production ? 'production' : 'research'} dryRun=${!!args.dryRun}`);
+  console.error(`[publish] symbol=${symbol} asOf=${asOf} sha=${softwareSha.slice(0, 12)} mode=${production ? 'production' : 'research'} dryRun=${!!args['dry-run']}`);
 
   const { bars, ingestedAt } = await fetchDailyBars({ proxyBaseUrl, symbol, range, headers });
   console.error(`[publish] fetched ${bars.length} adjusted daily bars (ingestedAt=${ingestedAt})`);
@@ -94,13 +89,14 @@ async function main() {
     ingestedAt,
     version,
     ledgerPath,
-    persist: !args.dryRun,
+    persist: !args['dry-run'],
     mode: production ? 'production' : 'research',
-    nowIso: production ? generatedAt : null,
+    // In production the library stamps the publication time from its own trusted clock and
+    // overrides the generatedAt above, so a stale caller timestamp cannot be backdated in.
   });
 
   for (const record of result.records) {
-    const w = args.dryRun ? 'dry-run' : (result.writes.find((x) => x.record.forecast_id === record.forecast_id)?.idempotent ? 'idempotent' : 'written');
+    const w = args['dry-run'] ? 'dry-run' : (result.writes.find((x) => x.record.forecast_id === record.forecast_id)?.idempotent ? 'idempotent' : 'written');
     const bands = record.levels
       ? `[${record.levels.lower_2}, ${record.levels.lower_1}, ${record.levels.upper_1}, ${record.levels.upper_2}]`
       : `unavailable(${record.quality.reason})`;

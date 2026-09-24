@@ -93,39 +93,37 @@ export function appendForecasts(ledgerPath, records, { allowSupersede = false } 
     const byId = new Map(existing.map((r) => [r.forecast_id, r]));
     const byIdentity = new Map(existing.map((r) => [identityOf(r), r]));
 
-    // A batch must not carry two different records for one forecast_id.
-    const batchHashes = new Map();
+    // Phase 1: validate every record against the ledger AND against already-accepted records in
+    // this same batch (each accepted record is registered before the next is checked), so a
+    // single "atomic" call cannot itself introduce a duplicate id or identity. Abort on any
+    // conflict — nothing is written.
+    const plan = [];
     for (const record of list) {
-      const prev = batchHashes.get(record.forecast_id);
-      if (prev != null && prev !== record.content_hash) {
-        throw new LedgerImmutabilityError(`batch contains conflicting records for ${record.forecast_id}`, record.forecast_id);
-      }
-      batchHashes.set(record.forecast_id, record.content_hash);
-    }
-
-    // Phase 1: validate every record against the ledger; abort on any conflict (write nothing).
-    const plan = list.map((record) => {
+      const identity = identityOf(record);
       const sameId = byId.get(record.forecast_id);
       if (sameId) {
-        if (sameId.content_hash === record.content_hash) return { record, existing: sameId };
+        if (sameId.content_hash === record.content_hash) { plan.push({ record, existing: sameId }); continue; }
         throw new LedgerImmutabilityError(
           `forecast ${record.forecast_id} already exists with a different content_hash; the ledger is append-only`,
           record.forecast_id,
         );
       }
-      const sameIdentity = byIdentity.get(identityOf(record));
+      const sameIdentity = byIdentity.get(identity);
       if (sameIdentity) {
         const isLinkedSupersede = allowSupersede && record.supersedes === sameIdentity.forecast_id;
         if (!isLinkedSupersede) {
           throw new LedgerImmutabilityError(
-            `a forecast already exists for ${identityOf(record)} (${sameIdentity.forecast_id}); ` +
+            `a forecast already exists for ${identity} (${sameIdentity.forecast_id}); ` +
               'republishing under a new version is refused. Pass allowSupersede with record.supersedes to correct it before the outcome.',
             record.forecast_id,
           );
         }
       }
-      return { record, existing: null };
-    });
+      // Register the accepted record so a later record in this batch conflicts against it.
+      byId.set(record.forecast_id, record);
+      byIdentity.set(identity, record);
+      plan.push({ record, existing: null });
+    }
 
     // Phase 2: append everything new in one durable write.
     const toWrite = plan.filter((p) => !p.existing);

@@ -60,10 +60,9 @@ export function publishForecast(params) {
     ledgerPath = DEFAULT_LEDGER_PATH,
     persist = true,
     mode = 'research',
-    nowIso = null,
+    clock = () => Date.now(),
     publicationCutoff = null,
     allowSupersede = false,
-    clockSkewMs = 120000,
   } = params || {};
 
   // #5: adjustment is mandatory, so nothing is ever silently labeled "adjusted".
@@ -71,29 +70,29 @@ export function publishForecast(params) {
     if (!val) throw new Error(`publishForecast: ${key} is required`);
   }
 
-  // #1: in production, refuse backdating and post-cutoff publication so a forecast cannot be
-  // manufactured for an already-known session and stored as if it were prospective. (Republishing
-  // under a bumped version is refused at the ledger layer by (symbol, target_session, horizon)
-  // identity regardless of mode.)
+  // #2: in production the publication time is taken from the TRUSTED CLOCK, not from caller
+  // input — a caller cannot supply a stale pre-cutoff `generatedAt` for an already-known session.
+  // Combined with the store-layer (symbol, session, horizon) immutability (which refuses a
+  // version-bumped republish regardless of mode), this closes the backdating path. Stale input
+  // data is independently caught by the snapshot's stale-feed gate against this same clock.
+  let effectiveGeneratedAt = generatedAt;
   if (mode === 'production') {
-    if (!nowIso) throw new Error('publishForecast: production mode requires nowIso (a trusted clock)');
-    const nowMs = Date.parse(nowIso);
-    if (!Number.isFinite(nowMs)) throw new Error(`publishForecast: nowIso is not a valid timestamp: ${nowIso}`);
-    if (asOf < nowIso.slice(0, 10)) {
-      throw new Error(`publishForecast: production refuses a past asOf ${asOf} (now ${nowIso.slice(0, 10)}); backdating is not allowed`);
-    }
-    if (Date.parse(generatedAt) > nowMs + clockSkewMs) {
-      throw new Error(`publishForecast: production refuses generatedAt ${generatedAt} in the future vs the trusted clock ${nowIso}`);
+    const nowMs = clock();
+    if (!Number.isFinite(nowMs)) throw new Error('publishForecast: production clock did not return a finite time');
+    effectiveGeneratedAt = new Date(nowMs).toISOString(); // authoritative publication time
+    const nowDate = effectiveGeneratedAt.slice(0, 10);
+    if (asOf < nowDate) {
+      throw new Error(`publishForecast: production refuses a past asOf ${asOf} (now ${nowDate}); backdating is not allowed`);
     }
     const cutoff = publicationCutoff || `${asOf}T13:30:00.000Z`; // default: US cash-open (~9:30 ET)
-    if (Date.parse(generatedAt) >= Date.parse(cutoff)) {
-      throw new Error(`publishForecast: production refuses generatedAt ${generatedAt} at/after the publication cutoff ${cutoff}`);
+    if (nowMs >= Date.parse(cutoff)) {
+      throw new Error(`publishForecast: production refuses publication at ${effectiveGeneratedAt} — at/after the cutoff ${cutoff} for session ${asOf}`);
     }
   }
 
   // Validate + snapshot + hash the exact input data (fail closed on bad data).
   const snapshot = buildDataSnapshot(bars, {
-    symbol, asOf, generatedAt, priceAdjustment,
+    symbol, asOf, generatedAt: effectiveGeneratedAt, priceAdjustment,
   });
 
   // Authoritative NYSE holidays from the input span through the furthest period end any
@@ -107,7 +106,7 @@ export function publishForecast(params) {
   const engineResult = MultiHorizonVolatilityLevels.calculate(snapshot.bars, {
     symbol,
     asOf,
-    generatedAt,
+    generatedAt: effectiveGeneratedAt,
     holidays,
     ...(horizons ? { horizons } : {}),
     ...(volatilityWindows ? { volatilityWindows } : {}),
@@ -120,7 +119,7 @@ export function publishForecast(params) {
     dataThrough: snapshot.dataThrough,
     priceAdjustment,
     calendarVersion: CALENDAR_VERSION,
-    generatedAt,
+    generatedAt: effectiveGeneratedAt,
     ingestedAt,
     version,
   });

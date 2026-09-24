@@ -139,9 +139,21 @@ export function buildForecastRecords(engineResult, lineage) {
     };
 
     record.content_hash = computeContentHash(record);
+    // #5: an envelope hash over the ENTIRE record (provenance + chronology included) so no
+    // stored field can be altered without detection. content_hash stays the reproducibility hash
+    // (levels only); record_hash is the tamper-evidence hash (everything).
+    record.record_hash = computeRecordHash(record);
     return record;
   });
 }
+
+// Required fields (and coarse types) every persisted forecast record must carry.
+const REQUIRED_FORECAST_FIELDS = {
+  schema_version: 'string', forecast_id: 'string', symbol: 'string', target_session: 'string',
+  horizon: 'string', software_sha: 'string', data_source: 'string', data_snapshot_hash: 'string',
+  data_through: 'string', price_adjustment: 'string', calendar_version: 'string',
+  generated_at: 'string', content_hash: 'string',
+};
 
 /**
  * Canonical content hash for a forecast record: covers exactly the level-determining content
@@ -168,7 +180,33 @@ export function computeContentHash(record) {
   });
 }
 
-/** True iff a stored record's content_hash still matches its content (tamper / corruption check). */
+/**
+ * Envelope hash over the whole record (every field except the two hash fields themselves), so any
+ * change to provenance or chronology — data_source, price_adjustment, data_through, timestamps —
+ * is detectable, not just a change to the levels.
+ */
+export function computeRecordHash(record) {
+  const { content_hash: _ch, record_hash: _rh, ...rest } = record; // exclude the hash fields
+  return sha256Hex(rest);
+}
+
+/** Coarse schema check: every required field present with the right primitive type. */
+export function validateForecastRecord(record) {
+  if (!record || typeof record !== 'object') return { ok: false, reason: 'not an object' };
+  for (const [field, type] of Object.entries(REQUIRED_FORECAST_FIELDS)) {
+    if (typeof record[field] !== type) return { ok: false, reason: `missing/invalid ${field}` };
+  }
+  if (record.quality == null || typeof record.quality !== 'object') return { ok: false, reason: 'missing quality' };
+  return { ok: true };
+}
+
+/**
+ * True iff a stored record still matches its content_hash AND its record_hash (when present) AND
+ * satisfies the schema — the full read/pre-score integrity check.
+ */
 export function verifyForecastContentHash(record) {
-  return typeof record?.content_hash === 'string' && computeContentHash(record) === record.content_hash;
+  if (!validateForecastRecord(record).ok) return false;
+  if (computeContentHash(record) !== record.content_hash) return false;
+  if (typeof record.record_hash === 'string' && computeRecordHash(record) !== record.record_hash) return false;
+  return true;
 }
