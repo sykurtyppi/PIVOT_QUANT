@@ -2,6 +2,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFile
 import { tmpdir } from 'os';
 import { dirname, join } from 'path';
 
+import { computeContentHash } from '../../src/forecast/forecastRecord.js';
 import {
   appendForecast,
   appendForecasts,
@@ -11,14 +12,32 @@ import {
   readForecasts,
 } from '../../src/forecast/ledgerStore.js';
 
+// A realistic, hash-valid forecast record. Identity is (symbol, target_session, horizon).
 function record(overrides = {}) {
-  return {
+  const base = {
     forecast_id: 'SPY-2026-09-24-daily-v1',
-    content_hash: 'a'.repeat(64),
+    version: 'v1',
     symbol: 'SPY',
+    target_session: '2026-09-24',
+    horizon: 'daily',
+    software_sha: '31c4fdb',
+    data_snapshot_hash: 'a'.repeat(64),
+    calendar_version: 'nyse-rulegen-1.0.0',
+    anchor: 666,
+    estimator: '20_session_close_to_close_rv',
+    horizon_sigma_log_return: 0.01,
+    levels: { lower_2: 653, lower_1: 659, upper_1: 673, upper_2: 679 },
+    quality: { status: 'complete', reason: null },
     ...overrides,
   };
+  if (!('content_hash' in overrides)) base.content_hash = computeContentHash(base);
+  return base;
 }
+
+// Same identity, different content (a conflicting republish).
+const conflicting = (id) => record({ forecast_id: id, anchor: 667 });
+// A different identity (different horizon), so it legitimately coexists.
+const weekly = (over = {}) => record({ forecast_id: 'SPY-2026-09-24-weekly-v1', horizon: 'weekly', ...over });
 
 describe('ledgerStore (append-only)', () => {
   let dir;
@@ -40,20 +59,36 @@ describe('ledgerStore (append-only)', () => {
     appendForecast(ledger, record());
     const res = appendForecast(ledger, record());
     expect(res).toMatchObject({ written: false, idempotent: true });
-    expect(readForecasts(ledger)).toHaveLength(1); // not duplicated
+    expect(readForecasts(ledger)).toHaveLength(1);
     expect(readFileSync(ledger, 'utf8').trim().split('\n')).toHaveLength(1);
   });
 
-  test('re-appending a different record for the same id is refused', () => {
+  test('same forecast_id with different content is refused', () => {
     appendForecast(ledger, record());
-    expect(() => appendForecast(ledger, record({ content_hash: 'b'.repeat(64) })))
+    expect(() => appendForecast(ledger, conflicting('SPY-2026-09-24-daily-v1')))
       .toThrow(LedgerImmutabilityError);
-    expect(readForecasts(ledger)).toHaveLength(1); // original untouched
+    expect(readForecasts(ledger)).toHaveLength(1);
   });
 
-  test('different forecast_ids coexist', () => {
+  test('republishing the same identity under a new version is refused', () => {
+    appendForecast(ledger, record({ forecast_id: 'SPY-2026-09-24-daily-v1', version: 'v1' }));
+    // Different forecast_id (v2) but SAME (symbol, session, horizon) identity, different content.
+    expect(() => appendForecast(ledger, record({ forecast_id: 'SPY-2026-09-24-daily-v2', version: 'v2', anchor: 670 })))
+      .toThrow(LedgerImmutabilityError);
+    expect(readForecasts(ledger)).toHaveLength(1);
+  });
+
+  test('an explicit linked supersede is allowed and retains the original', () => {
+    appendForecast(ledger, record({ forecast_id: 'SPY-2026-09-24-daily-v1' }));
+    const corrected = record({ forecast_id: 'SPY-2026-09-24-daily-v2', version: 'v2', anchor: 670, supersedes: 'SPY-2026-09-24-daily-v1' });
+    const res = appendForecast(ledger, corrected, { allowSupersede: true });
+    expect(res.written).toBe(true);
+    expect(readForecasts(ledger)).toHaveLength(2); // original retained
+  });
+
+  test('different identities (horizons) coexist', () => {
     appendForecast(ledger, record());
-    appendForecast(ledger, record({ forecast_id: 'SPY-2026-09-24-weekly-v1', content_hash: 'c'.repeat(64) }));
+    appendForecast(ledger, weekly());
     expect(readForecasts(ledger)).toHaveLength(2);
   });
 
@@ -65,19 +100,31 @@ describe('ledgerStore (append-only)', () => {
     expect(() => appendForecast(ledger, { symbol: 'SPY' })).toThrow(/forecast_id and content_hash/);
   });
 
+  test('refuses a record whose content_hash does not match its content', () => {
+    expect(() => appendForecast(ledger, record({ content_hash: 'f'.repeat(64) })))
+      .toThrow(LedgerIntegrityError);
+  });
+
+  test('verifies content_hash on read and fails closed on tampering', () => {
+    appendForecast(ledger, record());
+    // Tamper with a persisted level without updating the hash.
+    const tampered = readFileSync(ledger, 'utf8').replace('"anchor":666', '"anchor":999');
+    writeFileSync(ledger, tampered, 'utf8');
+    expect(() => readForecasts(ledger)).toThrow(LedgerIntegrityError);
+  });
+
   test('tolerates a torn trailing line and still appends', () => {
     appendForecast(ledger, record());
-    // Simulate an interrupted append: a partial JSON fragment with no trailing newline.
     appendFileSync(ledger, '{"forecast_id":"SPY-2026-09-24-weekly-v1","content_ha', 'utf8');
-    expect(readForecasts(ledger)).toHaveLength(1); // torn tail ignored, not a hard error
-    const res = appendForecast(ledger, record({ forecast_id: 'SPY-2026-09-24-weekly-v1', content_hash: 'd'.repeat(64) }));
+    expect(readForecasts(ledger)).toHaveLength(1); // torn tail ignored
+    const res = appendForecast(ledger, weekly());
     expect(res.written).toBe(true);
     expect(readForecasts(ledger)).toHaveLength(2);
   });
 
   test('a malformed non-final line is still a hard error', () => {
     mkdirSync(dirname(ledger), { recursive: true });
-    writeFileSync(ledger, 'not json\n' + JSON.stringify(record()) + '\n', 'utf8');
+    writeFileSync(ledger, `not json\n${JSON.stringify(record())}\n`, 'utf8');
     expect(() => readForecasts(ledger)).toThrow(/not valid JSON/);
   });
 
@@ -89,22 +136,15 @@ describe('ledgerStore (append-only)', () => {
   });
 
   test('appendForecasts is all-or-nothing when one record conflicts', () => {
-    appendForecast(ledger, record({ forecast_id: 'A' }));
-    const batch = [
-      record({ forecast_id: 'B', content_hash: 'b'.repeat(64) }), // new
-      record({ forecast_id: 'A', content_hash: 'x'.repeat(64) }), // conflicts with existing A
-    ];
+    appendForecast(ledger, record()); // daily exists
+    const batch = [weekly(), conflicting('SPY-2026-09-24-daily-v1')]; // weekly new, daily conflicts
     expect(() => appendForecasts(ledger, batch)).toThrow(LedgerImmutabilityError);
-    // B must NOT have been written — the batch aborted before any append.
-    expect(findForecast(ledger, 'B')).toBeNull();
+    expect(findForecast(ledger, 'SPY-2026-09-24-weekly-v1')).toBeNull(); // nothing written
     expect(readForecasts(ledger)).toHaveLength(1);
   });
 
   test('appendForecasts writes a clean multi-record batch together', () => {
-    const res = appendForecasts(ledger, [
-      record({ forecast_id: 'A' }),
-      record({ forecast_id: 'B', content_hash: 'b'.repeat(64) }),
-    ]);
+    const res = appendForecasts(ledger, [record(), weekly()]);
     expect(res.every((r) => r.written)).toBe(true);
     expect(readForecasts(ledger)).toHaveLength(2);
   });

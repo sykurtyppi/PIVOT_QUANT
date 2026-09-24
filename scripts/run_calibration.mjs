@@ -14,6 +14,7 @@
  */
 
 import { createHash } from 'crypto';
+import { mkdir, writeFile } from 'fs/promises';
 
 import { dailyCoverage, summarizeCoverage } from '../src/forecast/calibration.js';
 import { mapMarketResponseToBars } from '../src/forecast/dataSourceYahoo.js';
@@ -61,24 +62,44 @@ async function main() {
   const symbol = (args.symbol || 'SPY').toUpperCase();
   const range = args.range || '10y';
   const window = Number(args.window || 20);
+  if (!Number.isInteger(window) || window < 2) throw new Error('--window must be an integer >= 2');
 
+  const retrievedAt = new Date().toISOString();
   const response = await fetchYahoo(symbol, range);
   const bars = mapMarketResponseToBars(response);
   const snapshotHash = createHash('sha256')
     .update(JSON.stringify(bars.map((b) => [b.timestamp, b.close]))).digest('hex');
 
+  // #7: persist the immutable normalized snapshot so this run is independently reproducible
+  // and never overwritten (Yahoo re-adjusts history, so a hash alone is not provenance).
+  const snapDir = new URL('../research/calibration/snapshots/', import.meta.url);
+  await mkdir(snapDir, { recursive: true });
+  const snapPath = new URL(`${symbol}_${range}_${snapshotHash.slice(0, 12)}.json`, snapDir);
+  await writeFile(snapPath, JSON.stringify({
+    symbol, range, retrieved_at: retrievedAt, provider: 'yahoo_v8_chart',
+    price_adjustment: 'split_and_dividend_adjusted', bar_count: bars.length,
+    data_snapshot_sha256: snapshotHash, bars,
+  }, null, 0));
+
   const results = dailyCoverage(bars, { window });
-  const s = summarizeCoverage(results);
+  const s = summarizeCoverage(results, { window });
   const regimes = regimeSplit(results);
 
   console.log(`\n=== Point-in-time daily calibration — ${symbol} (window=${window}) ===`);
   console.log(`data: ${bars.length} adjusted sessions ${bars[0].timestamp.slice(0, 10)} .. ${bars[bars.length - 1].timestamp.slice(0, 10)}`);
   console.log(`data_snapshot_sha256: ${snapshotHash}`);
+  console.log(`snapshot persisted: research/calibration/snapshots/${symbol}_${range}_${snapshotHash.slice(0, 12)}.json`);
   console.log(`scored forecast/outcome pairs: ${s.n}\n`);
 
-  console.log('close containment (daily horizon):');
-  console.log(`  +/-1sigma: empirical ${pct(s.coverage1)}  (nominal ${pct(s.nominal1)}, error ${pp(s.calibration_error_1)})  95% CI [${pct(s.ci1.lo)}, ${pct(s.ci1.hi)}]`);
-  console.log(`  +/-2sigma: empirical ${pct(s.coverage2)}  (nominal ${pct(s.nominal2)}, error ${pp(s.calibration_error_2)})  95% CI [${pct(s.ci2.lo)}, ${pct(s.ci2.hi)}]`);
+  console.log('close containment (daily horizon) — empirical vs the ESTIMATOR-AWARE null');
+  console.log(`(bands use sigma from ${window} obs, so the correct null is a ~t${window - 1}, not the asymptotic normal):`);
+  console.log(`  +/-1sigma: empirical ${pct(s.coverage1)}  95% CI [${pct(s.ci1.lo)}, ${pct(s.ci1.hi)}]`);
+  console.log(`            estimator-aware null ${pct(s.estimator_null_1)} (asymptotic-normal ref ${pct(s.nominal1)})  -> vs null ${pp(s.calibration_error_vs_null_1)}`);
+  console.log(`  +/-2sigma: empirical ${pct(s.coverage2)}  95% CI [${pct(s.ci2.lo)}, ${pct(s.ci2.hi)}]`);
+  console.log(`            estimator-aware null ${pct(s.estimator_null_2)} (asymptotic-normal ref ${pct(s.nominal2)})  -> vs null ${pp(s.calibration_error_vs_null_2)}`);
+  const nullInCi2 = s.estimator_null_2 >= s.ci2.lo && s.estimator_null_2 <= s.ci2.hi;
+  console.log(`  interpretation: the +/-2sigma CI ${nullInCi2 ? 'CONTAINS' : 'excludes'} the estimator-aware null` +
+    `${nullInCi2 ? ' -> consistent with Gaussian+estimation noise, does NOT establish fat tails' : ' -> evidence beyond estimation noise'}.`);
   console.log(`  1sigma breaches: upper ${s.breach_1sigma_upper}, lower ${s.breach_1sigma_lower} (asymmetry ${pp(s.breach_asymmetry_1)})`);
 
   console.log('\nby realized-volatility regime (median split):');

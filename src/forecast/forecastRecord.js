@@ -138,26 +138,37 @@ export function buildForecastRecords(engineResult, lineage) {
       provenance: engineResult.provenance,
     };
 
-    // Hash only the content that MUST be identical on a re-run from the same snapshot +
-    // SHA. Wall-clock and ingestion fields are deliberately excluded.
-    record.content_hash = sha256Hex({
-      forecast_id: record.forecast_id,
-      symbol: record.symbol,
-      target_session: record.target_session,
-      horizon: record.horizon,
-      software_sha: record.software_sha,
-      data_snapshot_hash: record.data_snapshot_hash,
-      calendar_version: record.calendar_version,
-      anchor: record.anchor,
-      estimator: record.estimator,
-      horizon_sigma_log_return: record.horizon_sigma_log_return,
-      levels: record.levels,
-      quality_status: record.quality.status,
-      // Distinguishes the two unavailable shapes (insufficient history vs non-finite levels)
-      // so re-runs that differ only in why a horizon is unavailable hash differently.
-      quality_reason: record.quality.reason,
-    });
-
+    record.content_hash = computeContentHash(record);
     return record;
   });
+}
+
+/**
+ * Canonical content hash for a forecast record: covers exactly the level-determining content
+ * (and lineage that determines it), excluding wall-clock/ingestion fields. Used both to stamp a
+ * new record and to VERIFY a stored one, so the two can never drift apart.
+ */
+export function computeContentHash(record) {
+  return sha256Hex({
+    forecast_id: record.forecast_id,
+    symbol: record.symbol,
+    target_session: record.target_session,
+    horizon: record.horizon,
+    software_sha: record.software_sha,
+    data_snapshot_hash: record.data_snapshot_hash,
+    calendar_version: record.calendar_version,
+    anchor: record.anchor,
+    estimator: record.estimator,
+    horizon_sigma_log_return: record.horizon_sigma_log_return,
+    levels: record.levels,
+    quality_status: record.quality?.status ?? null,
+    // Distinguishes the two unavailable shapes (insufficient history vs non-finite levels)
+    // so re-runs that differ only in why a horizon is unavailable hash differently.
+    quality_reason: record.quality?.reason ?? null,
+  });
+}
+
+/** True iff a stored record's content_hash still matches its content (tamper / corruption check). */
+export function verifyForecastContentHash(record) {
+  return typeof record?.content_hash === 'string' && computeContentHash(record) === record.content_hash;
 }

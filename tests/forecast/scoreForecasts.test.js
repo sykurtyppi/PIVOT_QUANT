@@ -2,8 +2,10 @@ import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
+import { computeContentHash } from '../../src/forecast/forecastRecord.js';
 import {
   appendOutcome,
+  ForecastIntegrityError,
   readOutcomes,
   scoreForecast,
   scoreMaturedForecasts,
@@ -11,7 +13,7 @@ import {
 } from '../../src/forecast/scoreForecasts.js';
 
 function record(overrides = {}) {
-  return {
+  const base = {
     forecast_id: 'SPY-2026-09-24-daily-v1',
     version: 'v1',
     symbol: 'SPY',
@@ -19,12 +21,17 @@ function record(overrides = {}) {
     horizon: 'daily',
     outcome_forecast: 'close_containment',
     software_sha: '31c4fdb',
-    content_hash: 'a'.repeat(64),
+    data_snapshot_hash: 'a'.repeat(64),
+    calendar_version: 'nyse-rulegen-1.0.0',
+    estimator: '20_session_close_to_close_rv',
     anchor: 666,
     horizon_sigma_log_return: 0.01,
     levels: { lower_2: 653, lower_1: 659, upper_1: 673, upper_2: 679 },
+    quality: { status: 'complete', reason: null },
     ...overrides,
   };
+  if (!('content_hash' in overrides)) base.content_hash = computeContentHash(base);
+  return base;
 }
 
 describe('scoreForecast', () => {
@@ -64,6 +71,12 @@ describe('scoreForecast', () => {
 
   test('rejects an invalid realized close', () => {
     expect(() => scoreForecast(record(), -1)).toThrow(/positive finite/);
+  });
+
+  test('refuses to score a record whose content was tampered', () => {
+    const r = record({ anchor: 700 }); // hash valid for anchor 700
+    r.anchor = 666; // tamper without recomputing the hash
+    expect(() => scoreForecast(r, 666)).toThrow(ForecastIntegrityError);
   });
 });
 

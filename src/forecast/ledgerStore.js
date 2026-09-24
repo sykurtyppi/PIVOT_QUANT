@@ -1,20 +1,22 @@
 /**
  * Append-only forecast ledger store (JSONL).
  *
- * Immutability is the whole point: a forecast, once written for a (forecast_id), is never
- * overwritten. A re-run that produces a byte-identical record (same content_hash) is an
- * idempotent no-op; a re-run that produces a DIFFERENT record for the same forecast_id is
- * a hard error, because it means something that should have been frozen has changed.
+ * Immutability: a forecast, once written for its identity, is never overwritten. A re-run that
+ * produces a byte-identical record (same content_hash) is an idempotent no-op; a re-run that
+ * produces a DIFFERENT record for the same identity aborts. Writes are serialized across
+ * processes by an exclusive lock and committed two-phase (validate every record, then append
+ * all durably), reads recompute and VERIFY each record's content_hash (tamper/corruption
+ * detection) and detect duplicate identities, and a torn trailing line is recovered rather than
+ * bricking future writes.
  *
- * Concurrency: appends are serialized with an exclusive on-disk lock, and a whole batch of
- * horizons commits two-phase (validate every record, then append all) so a conflict on a
- * later horizon cannot leave earlier horizons half-written. Reads tolerate a torn trailing
- * line (an interrupted append) instead of bricking every future write, and detect a
- * duplicated forecast_id rather than silently returning the first copy.
+ * Identity is (symbol, target_session, horizon) — NOT the versioned forecast_id — so a forecast
+ * cannot be silently republished under a bumped version after its outcome is known. A genuine
+ * pre-outcome correction must be an explicit superseding record (allowSupersede), which is
+ * itself appended and never deletes the original.
  */
 
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'fs';
-import { dirname } from 'path';
+import { verifyForecastContentHash } from './forecastRecord.js';
+import { appendLinesDurable, readJsonl, truncateTornTail, withLock } from './fileLock.js';
 
 export class LedgerImmutabilityError extends Error {
   constructor(message, forecastId) {
@@ -32,34 +34,29 @@ export class LedgerIntegrityError extends Error {
   }
 }
 
-/**
- * Parse the ledger into records. Throws on a malformed line UNLESS it is the final line and
- * the file does not end in a newline — that is treated as an interrupted (torn) append and
- * ignored, so a crash mid-write cannot poison every subsequent read/append.
- */
-export function readForecasts(ledgerPath) {
-  if (!existsSync(ledgerPath)) return [];
-  const text = readFileSync(ledgerPath, 'utf8');
-  if (text === '') return [];
-  const endsWithNewline = text.endsWith('\n');
-  const lines = text.split('\n');
-  if (lines[lines.length - 1] === '') lines.pop(); // drop the empty tail after a trailing newline
-  const records = [];
-  lines.forEach((line, index) => {
-    const trimmed = line.trim();
-    if (!trimmed) return;
-    const isLastLine = index === lines.length - 1;
-    try {
-      records.push(JSON.parse(trimmed));
-    } catch (err) {
-      if (isLastLine && !endsWithNewline) return; // torn final append: ignore incomplete tail
-      throw new Error(`ledger ${ledgerPath} line ${index + 1} is not valid JSON: ${err.message}`);
-    }
-  });
-  return records;
+function verifier(record, line) {
+  if (!verifyForecastContentHash(record)) {
+    throw new LedgerIntegrityError(
+      `forecast record on line ${line} (${record?.forecast_id}) fails content_hash verification`,
+      record?.forecast_id,
+    );
+  }
 }
 
-/** Find a record by id, throwing if the ledger somehow contains more than one for that id. */
+/** Identity that must be unique regardless of version. */
+function identityOf(record) {
+  return `${record.symbol}::${record.target_session}::${record.horizon}`;
+}
+
+/**
+ * Read + verify every forecast record. Set { verify: false } only for raw inspection; the
+ * default recomputes each content_hash and throws on any mismatch.
+ */
+export function readForecasts(ledgerPath, { verify = true } = {}) {
+  return readJsonl(ledgerPath, verify ? { verify: verifier } : {});
+}
+
+/** Find a record by forecast_id, throwing if the ledger holds more than one for that id. */
 export function findForecast(ledgerPath, forecastId) {
   const matches = readForecasts(ledgerPath).filter((r) => r.forecast_id === forecastId);
   if (matches.length > 1) {
@@ -71,114 +68,75 @@ export function findForecast(ledgerPath, forecastId) {
   return matches[0] || null;
 }
 
-const LOCK_STALE_MS = 30_000;
-
-function acquireLock(ledgerPath, { maxWaitMs = 5000 } = {}) {
-  const lockPath = `${ledgerPath}.lock`;
-  const dir = dirname(lockPath);
-  if (dir && !existsSync(dir)) mkdirSync(dir, { recursive: true });
-  const deadline = Date.now() + maxWaitMs;
-  for (;;) {
-    try {
-      closeSync(openSync(lockPath, 'wx')); // O_CREAT | O_EXCL
-      return lockPath;
-    } catch (err) {
-      if (err.code !== 'EEXIST') throw err;
-      try {
-        if (Date.now() - statSync(lockPath).mtimeMs > LOCK_STALE_MS) {
-          unlinkSync(lockPath); // steal a stale lock left by a crashed writer
-          continue;
-        }
-      } catch { /* lock vanished between stat and now; retry */ }
-      if (Date.now() >= deadline) {
-        throw new Error(`could not acquire ledger lock ${lockPath} within ${maxWaitMs}ms`);
-      }
-      const spinUntil = Date.now() + 25; // brief bounded spin; the lock is held only per-commit
-      while (Date.now() < spinUntil) { /* wait */ }
-    }
-  }
-}
-
-function releaseLock(lockPath) {
-  try { unlinkSync(lockPath); } catch { /* already gone */ }
-}
-
 /**
- * If the ledger ends mid-line (a crashed append left a partial record with no trailing
- * newline), drop that incomplete tail before writing, so the new record starts on a clean
- * line instead of being concatenated onto the fragment. Must run under the lock.
- */
-function truncateTornTail(ledgerPath) {
-  if (!existsSync(ledgerPath)) return;
-  const text = readFileSync(ledgerPath, 'utf8');
-  if (text === '' || text.endsWith('\n')) return;
-  const lastNewline = text.lastIndexOf('\n');
-  writeFileSync(ledgerPath, lastNewline < 0 ? '' : text.slice(0, lastNewline + 1), 'utf8');
-}
-
-/**
- * Two-phase append of one or more records under an exclusive lock.
- *  - Every record's forecast_id must be absent, or present with an identical content_hash.
- *  - A present id with a different content_hash aborts the WHOLE batch (nothing is written).
- *  - Otherwise all new records are appended together in a single write.
+ * Two-phase append of one or more records under an exclusive cross-process lock.
+ *  - New identity, or same identity with identical content_hash -> written / idempotent.
+ *  - Same identity with different content aborts the WHOLE batch, unless the record sets
+ *    `supersedes` (the superseded forecast_id) and `allowSupersede` is passed — then it is
+ *    appended as an explicit, linked correction (the original is retained).
  * @returns {Array<{written:boolean, idempotent:boolean, record:object}>} one per input record.
  */
-export function appendForecasts(ledgerPath, records) {
+export function appendForecasts(ledgerPath, records, { allowSupersede = false } = {}) {
   const list = Array.isArray(records) ? records : [records];
   for (const record of list) {
     if (!record || typeof record.forecast_id !== 'string' || typeof record.content_hash !== 'string') {
       throw new Error('appendForecasts requires records with forecast_id and content_hash');
     }
+    if (!verifyForecastContentHash(record)) {
+      throw new LedgerIntegrityError(`record ${record.forecast_id} content_hash does not match its content`, record.forecast_id);
+    }
   }
-  const dir = dirname(ledgerPath);
-  if (dir && !existsSync(dir)) mkdirSync(dir, { recursive: true });
 
-  const lockPath = acquireLock(ledgerPath);
-  try {
+  return withLock(ledgerPath, () => {
     truncateTornTail(ledgerPath); // recover from a crashed prior append before writing
-    const existingById = new Map();
-    for (const rec of readForecasts(ledgerPath)) existingById.set(rec.forecast_id, rec);
+    const existing = readForecasts(ledgerPath);
+    const byId = new Map(existing.map((r) => [r.forecast_id, r]));
+    const byIdentity = new Map(existing.map((r) => [identityOf(r), r]));
 
-    // Guard against a batch that itself carries two different records for one id.
+    // A batch must not carry two different records for one forecast_id.
     const batchHashes = new Map();
     for (const record of list) {
       const prev = batchHashes.get(record.forecast_id);
       if (prev != null && prev !== record.content_hash) {
-        throw new LedgerImmutabilityError(
-          `batch contains conflicting records for ${record.forecast_id}`,
-          record.forecast_id,
-        );
+        throw new LedgerImmutabilityError(`batch contains conflicting records for ${record.forecast_id}`, record.forecast_id);
       }
       batchHashes.set(record.forecast_id, record.content_hash);
     }
 
     // Phase 1: validate every record against the ledger; abort on any conflict (write nothing).
     const plan = list.map((record) => {
-      const existing = existingById.get(record.forecast_id);
-      if (existing && existing.content_hash !== record.content_hash) {
+      const sameId = byId.get(record.forecast_id);
+      if (sameId) {
+        if (sameId.content_hash === record.content_hash) return { record, existing: sameId };
         throw new LedgerImmutabilityError(
-          `forecast ${record.forecast_id} already exists with a different content_hash ` +
-            `(${existing.content_hash} != ${record.content_hash}); the ledger is append-only`,
+          `forecast ${record.forecast_id} already exists with a different content_hash; the ledger is append-only`,
           record.forecast_id,
         );
       }
-      return { record, existing };
+      const sameIdentity = byIdentity.get(identityOf(record));
+      if (sameIdentity) {
+        const isLinkedSupersede = allowSupersede && record.supersedes === sameIdentity.forecast_id;
+        if (!isLinkedSupersede) {
+          throw new LedgerImmutabilityError(
+            `a forecast already exists for ${identityOf(record)} (${sameIdentity.forecast_id}); ` +
+              'republishing under a new version is refused. Pass allowSupersede with record.supersedes to correct it before the outcome.',
+            record.forecast_id,
+          );
+        }
+      }
+      return { record, existing: null };
     });
 
-    // Phase 2: append everything new in one write.
+    // Phase 2: append everything new in one durable write.
     const toWrite = plan.filter((p) => !p.existing);
-    if (toWrite.length) {
-      appendFileSync(ledgerPath, `${toWrite.map((p) => JSON.stringify(p.record)).join('\n')}\n`, 'utf8');
-    }
+    if (toWrite.length) appendLinesDurable(ledgerPath, toWrite.map((p) => JSON.stringify(p.record)));
     return plan.map((p) => (p.existing
       ? { written: false, idempotent: true, record: p.existing }
       : { written: true, idempotent: false, record: p.record }));
-  } finally {
-    releaseLock(lockPath);
-  }
+  });
 }
 
 /** Append a single record (convenience wrapper over the two-phase batch append). */
-export function appendForecast(ledgerPath, record) {
-  return appendForecasts(ledgerPath, [record])[0];
+export function appendForecast(ledgerPath, record, opts) {
+  return appendForecasts(ledgerPath, [record], opts)[0];
 }

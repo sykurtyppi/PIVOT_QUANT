@@ -91,6 +91,9 @@ function mulberry32(seed) {
  */
 export function blockBootstrapCI(indicator, opts = {}) {
   const { blockSize = 20, iters = 2000, seed = 20260924, level = 0.95 } = opts;
+  if (!Number.isInteger(blockSize) || blockSize < 1) throw new Error('blockSize must be a positive integer');
+  if (!Number.isInteger(iters) || iters < 1) throw new Error('iters must be a positive integer');
+  if (!(level > 0 && level < 1)) throw new Error('level must be in (0, 1)');
   const n = indicator.length;
   if (n === 0) return { lo: NaN, hi: NaN, mean: NaN };
   const rng = mulberry32(seed);
@@ -114,9 +117,57 @@ export function blockBootstrapCI(indicator, opts = {}) {
   return { lo: means[loIdx], hi: means[hiIdx], mean };
 }
 
+function randNormal(rng) {
+  // Box-Muller; guard u1 away from 0 for the log.
+  let u1 = rng();
+  if (u1 < 1e-12) u1 = 1e-12;
+  const u2 = rng();
+  return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+}
+
+/**
+ * Estimator-aware null coverage: the coverage the band ACTUALLY achieves under an IID-Gaussian
+ * null when sigma is estimated from only `window` observations. Because sigma is estimated,
+ * the standardized next return is ~Student-t(window-1), not standard normal, so the true null
+ * coverage of a ±kσ̂ band is well below the asymptotic 68.3% / 95.5%. This Monte Carlo simulates
+ * the exact rolling estimator (draw `window` returns, standardize the next return by their
+ * sample std) rather than assuming an approximation.
+ *
+ * For window=20 this yields ≈67.0% (±1σ̂) and ≈94.0% (±2σ̂) — the correct benchmark to judge the
+ * empirical coverage against, and the reason a 93% ±2σ result does NOT by itself prove fat tails.
+ *
+ * @returns {{coverage1:number, coverage2:number, iters:number, window:number}}
+ */
+export function simulateGaussianNullCoverage(opts = {}) {
+  const { window = 20, iters = 200000, seed = 20260924 } = opts;
+  if (!Number.isInteger(window) || window < 2) throw new Error('window must be an integer >= 2');
+  if (!Number.isInteger(iters) || iters < 1) throw new Error('iters must be a positive integer');
+  const rng = mulberry32(seed);
+  let within1 = 0;
+  let within2 = 0;
+  for (let it = 0; it < iters; it += 1) {
+    let sum = 0;
+    let sumsq = 0;
+    for (let k = 0; k < window; k += 1) {
+      const x = randNormal(rng);
+      sum += x;
+      sumsq += x * x;
+    }
+    const mean = sum / window;
+    const variance = (sumsq - window * mean * mean) / (window - 1);
+    const sigmaHat = Math.sqrt(Math.max(variance, 0));
+    const next = randNormal(rng);
+    const z = sigmaHat > 0 ? Math.abs(next / sigmaHat) : 0;
+    if (z <= 1) within1 += 1;
+    if (z <= 2) within2 += 1;
+  }
+  return { coverage1: within1 / iters, coverage2: within2 / iters, iters, window };
+}
+
 /**
  * Summarize a coverage series: empirical ±1σ/±2σ coverage with bootstrap CIs, calibration
- * error vs the nominal normal targets, upper/lower breach asymmetry, and per-year coverage.
+ * error vs BOTH the asymptotic-normal target and the estimator-aware (finite-sample) null,
+ * upper/lower breach asymmetry, and per-year coverage.
  */
 export function summarizeCoverage(results, opts = {}) {
   const n = results.length;
@@ -142,14 +193,26 @@ export function summarizeCoverage(results, opts = {}) {
     coverage2: rs.filter((r) => r.within2).length / rs.length,
   }));
 
+  // The correct benchmark is the estimator-aware null, not the asymptotic normal, because
+  // sigma is estimated from `window` observations. Callers pass the same window used to build
+  // the bands so the null matches the estimator.
+  const window = opts.window ?? 20;
+  const nullCov = simulateGaussianNullCoverage({ window, iters: opts.nullIters ?? 200000, seed: opts.seed ?? 20260924 });
+
   return {
     n,
     coverage1: cov1,
     coverage2: cov2,
+    // Asymptotic-normal targets — reported for reference but NOT the right benchmark here.
     nominal1: NOMINAL_1SIGMA,
     nominal2: NOMINAL_2SIGMA,
     calibration_error_1: cov1 - NOMINAL_1SIGMA,
     calibration_error_2: cov2 - NOMINAL_2SIGMA,
+    // Estimator-aware (finite-sample) null — the correct comparison for a ±kσ̂ band.
+    estimator_null_1: nullCov.coverage1,
+    estimator_null_2: nullCov.coverage2,
+    calibration_error_vs_null_1: cov1 - nullCov.coverage1,
+    calibration_error_vs_null_2: cov2 - nullCov.coverage2,
     ci1: blockBootstrapCI(ind1, opts),
     ci2: blockBootstrapCI(ind2, opts),
     breach_1sigma_upper: upper1,

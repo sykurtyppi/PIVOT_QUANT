@@ -52,17 +52,43 @@ function periodEndBound(asOfKey) {
 export function publishForecast(params) {
   const {
     bars, symbol, asOf, generatedAt, softwareSha, dataSource,
-    priceAdjustment = 'split_and_dividend_adjusted',
+    priceAdjustment, // #5: no default — the caller/adapter must assert adjustment explicitly
     ingestedAt = null,
     version = 1,
     horizons,
     volatilityWindows,
     ledgerPath = DEFAULT_LEDGER_PATH,
     persist = true,
+    mode = 'research',
+    nowIso = null,
+    publicationCutoff = null,
+    allowSupersede = false,
+    clockSkewMs = 120000,
   } = params || {};
 
-  for (const [key, val] of Object.entries({ symbol, asOf, generatedAt, softwareSha, dataSource })) {
+  // #5: adjustment is mandatory, so nothing is ever silently labeled "adjusted".
+  for (const [key, val] of Object.entries({ symbol, asOf, generatedAt, softwareSha, dataSource, priceAdjustment })) {
     if (!val) throw new Error(`publishForecast: ${key} is required`);
+  }
+
+  // #1: in production, refuse backdating and post-cutoff publication so a forecast cannot be
+  // manufactured for an already-known session and stored as if it were prospective. (Republishing
+  // under a bumped version is refused at the ledger layer by (symbol, target_session, horizon)
+  // identity regardless of mode.)
+  if (mode === 'production') {
+    if (!nowIso) throw new Error('publishForecast: production mode requires nowIso (a trusted clock)');
+    const nowMs = Date.parse(nowIso);
+    if (!Number.isFinite(nowMs)) throw new Error(`publishForecast: nowIso is not a valid timestamp: ${nowIso}`);
+    if (asOf < nowIso.slice(0, 10)) {
+      throw new Error(`publishForecast: production refuses a past asOf ${asOf} (now ${nowIso.slice(0, 10)}); backdating is not allowed`);
+    }
+    if (Date.parse(generatedAt) > nowMs + clockSkewMs) {
+      throw new Error(`publishForecast: production refuses generatedAt ${generatedAt} in the future vs the trusted clock ${nowIso}`);
+    }
+    const cutoff = publicationCutoff || `${asOf}T13:30:00.000Z`; // default: US cash-open (~9:30 ET)
+    if (Date.parse(generatedAt) >= Date.parse(cutoff)) {
+      throw new Error(`publishForecast: production refuses generatedAt ${generatedAt} at/after the publication cutoff ${cutoff}`);
+    }
   }
 
   // Validate + snapshot + hash the exact input data (fail closed on bad data).
@@ -101,7 +127,7 @@ export function publishForecast(params) {
 
   // Two-phase commit: all horizons validate against the ledger before any is written, so a
   // conflict on one horizon can never leave the others half-published.
-  const writes = persist ? appendForecasts(ledgerPath, records) : [];
+  const writes = persist ? appendForecasts(ledgerPath, records, { allowSupersede }) : [];
 
   return {
     records,

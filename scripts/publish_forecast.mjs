@@ -33,12 +33,19 @@ function parseArgs(argv) {
   return args;
 }
 
-function resolveSoftwareSha() {
+function resolveSoftwareSha({ allowDirty = false } = {}) {
+  let sha;
   try {
-    return execSync('git rev-parse HEAD', { encoding: 'utf8' }).trim();
+    sha = execSync('git rev-parse HEAD', { encoding: 'utf8' }).trim();
   } catch {
     throw new Error('could not resolve git SHA; run inside the repository');
   }
+  // #8: a clean SHA must not label a modified working tree. Refuse a dirty tree in production.
+  const dirty = execSync('git status --porcelain', { encoding: 'utf8' }).trim();
+  if (dirty && !allowDirty) {
+    throw new Error('working tree is dirty; refusing to publish a clean SHA over local modifications (use --allow-dirty for research only)');
+  }
+  return { sha, dirty: Boolean(dirty) };
 }
 
 function todayUtcDateKey() {
@@ -67,10 +74,11 @@ async function main() {
     if (idx > 0) headers[args['auth-header'].slice(0, idx).trim()] = args['auth-header'].slice(idx + 1).trim();
   }
 
-  const softwareSha = resolveSoftwareSha();
+  const production = Boolean(args.production);
+  const { sha: softwareSha } = resolveSoftwareSha({ allowDirty: Boolean(args['allow-dirty']) && !production });
   const generatedAt = new Date().toISOString();
 
-  console.error(`[publish] symbol=${symbol} asOf=${asOf} sha=${softwareSha.slice(0, 12)} proxy=${proxyBaseUrl} dryRun=${!!args.dryRun}`);
+  console.error(`[publish] symbol=${symbol} asOf=${asOf} sha=${softwareSha.slice(0, 12)} mode=${production ? 'production' : 'research'} dryRun=${!!args.dryRun}`);
 
   const { bars, ingestedAt } = await fetchDailyBars({ proxyBaseUrl, symbol, range, headers });
   console.error(`[publish] fetched ${bars.length} adjusted daily bars (ingestedAt=${ingestedAt})`);
@@ -87,6 +95,8 @@ async function main() {
     version,
     ledgerPath,
     persist: !args.dryRun,
+    mode: production ? 'production' : 'research',
+    nowIso: production ? generatedAt : null,
   });
 
   for (const record of result.records) {
