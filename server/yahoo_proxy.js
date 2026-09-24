@@ -1881,6 +1881,10 @@ function parseYahooPayload(payload, requestedSymbol, yahooSymbol) {
   const meta = result.meta || {};
   const timestamps = result.timestamp || [];
   const quote = result.indicators?.quote?.[0] || {};
+  // Split/dividend-adjusted close series (only present when Yahoo returns adjustments).
+  // Passed through so downstream consumers can use total-return-adjusted closes for
+  // volatility/returns work; null when unavailable, never silently substituted.
+  const adjcloseSeries = result.indicators?.adjclose?.[0]?.adjclose || [];
 
   const candles = [];
   for (let i = 0; i < timestamps.length; i += 1) {
@@ -1889,6 +1893,7 @@ function parseYahooPayload(payload, requestedSymbol, yahooSymbol) {
     const low = quote.low?.[i];
     const close = quote.close?.[i];
     const volume = quote.volume?.[i];
+    const adjclose = adjcloseSeries[i];
 
     if (
       Number.isFinite(open) &&
@@ -1902,6 +1907,7 @@ function parseYahooPayload(payload, requestedSymbol, yahooSymbol) {
         high: Number(high),
         low: Number(low),
         close: Number(close),
+        adjclose: Number.isFinite(adjclose) ? Number(adjclose) : null,
         volume: Number.isFinite(volume) ? volume : 0,
       });
     }
