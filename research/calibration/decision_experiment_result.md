@@ -28,26 +28,52 @@ Daily net-return difference (annualized), 95% block-bootstrap CI:
 ## Verdict against the frozen criteria: DOES NOT CLEAR THE BAR — stop escalating
 
 The prereg required vol-targeting to improve Sharpe **and** CE over fixed, with the difference CI
-excluding 0, **and the sign to hold on the holdout**. It fails: the return-difference CI spans 0
-on the full sample, and on the prespecified holdout fixed exposure actually wins (Sharpe 1.36 vs
-1.29). Per the frozen stop rule, **stop** — no robust net mean-variance decision value was shown
-out-of-sample.
+excluding 0, **and the sign to hold on the holdout**. It fails on every leg:
+
+- **Return-difference** CI spans 0 (full sample [−4.4%, +5.6%]).
+- **Sharpe-difference** (bootstrapped directly — the metric the gate actually claims):
+  full-sample ΔSharpe rv20−fixed = **+0.178, CI [−0.145, +0.509]** → not significant; holdout
+  ΔSharpe = **−0.069** (fixed ahead).
+- On the **prespecified holdout, fixed exposure wins** (Sharpe 1.36 vs 1.29).
+- **4% financing sensitivity** (preregistered): rv20 Sharpe falls 0.96 → 0.90 and rv20−fixed return
+  goes negative — the small full-sample edge erodes under a realistic leverage cost.
+
+Per the frozen stop rule, **stop** — no robust net mean-variance decision value was shown, and the
+conclusion holds on the risk-adjusted metric itself, not just the return proxy.
 
 ## What is nonetheless true (reported honestly, not as a criterion rescue)
 Over the full sample, vol-targeting delivered a large, real **risk reduction**: max drawdown
 −41% → −21% and annualized vol 18.2% → 15.3%, lifting full-sample Sharpe 0.78 → 0.96. But that
-benefit is **regime-dependent** — it comes from de-risking through the 2020 and 2022 vol spikes in
-the full sample, and it does **not** appear in the calm bull-run holdout, where constant exposure
-wins. So this is crisis-period drawdown control, not a general utility improvement.
+benefit is **regime-dependent** — it appears in the full sample (which contains the 2020 and 2022
+vol spikes, consistent with de-risking through them) but **not** in the calm bull-run holdout, where
+constant exposure wins. So this looks like crisis-period drawdown control, not a general utility
+improvement.
 
 ## Honest limitations of this experiment
-- **Inference power:** the prereg bootstrapped the *return* difference, which has low power to
-  detect a *risk-adjusted* benefit (vol-targeting's edge is in vol/drawdown, not mean return). A
-  cleaner test bootstraps the Sharpe/utility difference. But the holdout point estimates also favor
-  fixed, so the "no robust benefit" conclusion does not depend on this.
-- One symbol, one horizon, one current-vintage (retroactively adjusted) data pull.
+- **Inference:** the prereg's accept test bootstrapped the *return* difference, which has low power
+  for a *risk-adjusted* benefit; that gap is now closed by also bootstrapping the Sharpe difference
+  (above), which likewise spans 0 — so the conclusion is tested on the metric it claims.
+- **Multiplicity is not formally adjusted** (3 comparisons × 2 samples). This only makes
+  significance *harder* to reach, so it strengthens the null "no robust benefit"; the one nominal
+  win (rv20 vs ewma94, within the vol-targeting family) is explicitly not treated as an edge.
+- **The holdout is an out-of-sample regime subsample, not an overfitting guard** — no tuning or
+  model selection happened, so it cannot certify against overfitting; it is a different-regime check
+  (the calm 2023–26 bull), and it favors fixed exposure.
+- **Block bootstrap** (block = 20) assumes rough stationarity across a decade spanning very
+  different vol regimes; treat the CIs as indicative, not exact.
+- Returns/metrics use the **log-return approximation** (`w·log-return`, log-return drawdowns); fine
+  for daily moves at w ≤ 1.5 and applied identically to all methods, so it does not affect the
+  ranking. One symbol, one horizon, one current-vintage (retroactively adjusted) data pull.
 - A drawdown-/tail-averse user might value the −41%→−21% maxDD even at equal Sharpe — but that is a
   *different* objective and would need its own preregistered criterion, not a post-hoc reinterpretation.
+
+## Note on verification
+An adversarial review workflow of this experiment (backtest look-ahead, accounting, inference, and
+honesty of the write-up) was launched but **could not complete — the account hit its weekly usage
+limit**, so most verify passes did not run. The reviewer agents that did run raised the leads folded
+in above (return-vs-Sharpe test, multiplicity, holdout framing, financing sensitivity, log-return
+convention); I addressed each directly in the main thread rather than treat the aborted run as a
+clean pass. The direction is unchanged: the gate fails.
 
 ## Recommendation
 The gate result says stop the modeling/infrastructure escalation. The expected-move band is an

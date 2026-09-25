@@ -11,7 +11,7 @@ import { createHash } from 'crypto';
 
 import { mapMarketResponseToBars } from '../src/forecast/dataSourceYahoo.js';
 import { logReturns } from '../src/forecast/calibration.js';
-import { runExperiment, blockBootstrapMeanCI } from '../src/forecast/volTargeting.js';
+import { runExperiment, blockBootstrapMeanCI, bootstrapMetricDiff, sharpeOf } from '../src/forecast/volTargeting.js';
 
 function parseArgs(argv) {
   const a = {};
@@ -49,6 +49,13 @@ function reportBlock(label, exp) {
     const ci = diffCI(a, b);
     const verdict = ci.lo > 0 ? `${a} BETTER` : ci.hi < 0 ? `${a} WORSE` : 'no difference detected';
     console.log(`    ${a} - ${b}: ${pct(ci.mean * 252, 2)}  CI [${pct(ci.lo * 252, 2)}, ${pct(ci.hi * 252, 2)}]  -> ${verdict}`);
+  }
+  // Directly test the risk-adjusted claim the gate makes: bootstrap the SHARPE difference.
+  console.log('  Sharpe difference, 95% block-bootstrap CI (the metric the gate actually claims):');
+  for (const [a, b] of [['rv20', 'fixed'], ['ewma94', 'fixed'], ['rv20', 'ewma94']]) {
+    const ci = bootstrapMetricDiff(exp.netByMethod[a], exp.netByMethod[b], sharpeOf);
+    const verdict = ci.lo > 0 ? `${a} BETTER` : ci.hi < 0 ? `${a} WORSE` : 'no difference detected';
+    console.log(`    ΔSharpe ${a} - ${b}: ${f(ci.mean, 3)}  CI [${f(ci.lo, 3)}, ${f(ci.hi, 3)}]  -> ${verdict}`);
   }
 }
 

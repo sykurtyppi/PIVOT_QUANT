@@ -125,6 +125,50 @@ function mulberry32(seed) {
   };
 }
 
+/** Annualized Sharpe of a daily-return array (rf = 0). */
+export function sharpeOf(daily) {
+  const n = daily.length;
+  if (n < 2) return 0;
+  const mean = daily.reduce((s, v) => s + v, 0) / n;
+  const sd = Math.sqrt(daily.reduce((s, v) => s + (v - mean) ** 2, 0) / (n - 1));
+  return sd > 0 ? (mean / sd) * Math.sqrt(252) : 0;
+}
+
+/**
+ * Block-bootstrap 95% CI for the DIFFERENCE in a scalar metric between two paired daily-return
+ * series (e.g. ΔSharpe of A − B). Resamples day-blocks once and applies the SAME positions to both
+ * series, preserving the pairing and serial dependence. This tests the risk-adjusted claim the gate
+ * actually makes, rather than only the mean-return difference.
+ */
+export function bootstrapMetricDiff(netA, netB, metricFn, opts = {}) {
+  const { blockSize = 20, iters = 2000, seed = 20260925, level = 0.95 } = opts;
+  const n = netA.length;
+  if (n === 0 || netB.length !== n) return { mean: NaN, lo: NaN, hi: NaN };
+  const rng = mulberry32(seed);
+  const diffs = new Array(iters);
+  const ra = new Array(n);
+  const rb = new Array(n);
+  for (let it = 0; it < iters; it += 1) {
+    let count = 0;
+    while (count < n) {
+      const start = Math.floor(rng() * n);
+      for (let k = 0; k < blockSize && count < n; k += 1) {
+        const idx = (start + k) % n;
+        ra[count] = netA[idx];
+        rb[count] = netB[idx];
+        count += 1;
+      }
+    }
+    diffs[it] = metricFn(ra) - metricFn(rb);
+  }
+  diffs.sort((a, b) => a - b);
+  return {
+    mean: metricFn(netA) - metricFn(netB),
+    lo: diffs[Math.floor(((1 - level) / 2) * iters)],
+    hi: diffs[Math.min(iters - 1, Math.floor(((1 + level) / 2) * iters))],
+  };
+}
+
 /** Block-bootstrap 95% CI for the mean of a paired-difference series (serial-dependence aware). */
 export function blockBootstrapMeanCI(values, opts = {}) {
   const { blockSize = 20, iters = 2000, seed = 20260925, level = 0.95 } = opts;
