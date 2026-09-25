@@ -68,7 +68,11 @@ export function strategyReturns(returns, weights, { costPerTurn = 0.0002, financ
     const turn = prevW == null ? 0 : Math.abs(w - prevW);
     prevW = w;
     if (t < from) continue;
-    const gross = w * returns[t];
+    // P&L in SIMPLE-return space: the market log return is converted to a simple return before
+    // scaling by the weight, and turnover/financing costs (already simple fractions of capital)
+    // are subtracted in the same units. Mixing log returns with simple-fraction costs was wrong.
+    const simpleMkt = Math.expm1(returns[t]); // exp(logret) - 1
+    const gross = w * simpleMkt;
     const cost = turn * costPerTurn + (financingDaily > 0 ? Math.max(w - 1, 0) * financingDaily : 0);
     netReturns.push(gross - cost);
     turnover.push(turn);
@@ -77,16 +81,18 @@ export function strategyReturns(returns, weights, { costPerTurn = 0.0002, financ
   return { netReturns, turnover, indices };
 }
 
-function maxDrawdown(dailyReturns) {
-  let cum = 0;
-  let peak = 0;
+// Wealth-based (simple-return) max drawdown: compound (1 + simple return) and track the largest
+// peak-to-trough fractional wealth decline. A log-return cumulation overstates the drawdown.
+function maxDrawdown(simpleReturns) {
+  let wealth = 1;
+  let peak = 1;
   let mdd = 0;
-  for (const r of dailyReturns) {
-    cum += r; // log-return cumulation
-    peak = Math.max(peak, cum);
-    mdd = Math.min(mdd, cum - peak);
+  for (const r of simpleReturns) {
+    wealth *= 1 + r;
+    peak = Math.max(peak, wealth);
+    mdd = Math.min(mdd, wealth / peak - 1);
   }
-  return mdd; // <= 0
+  return mdd; // <= 0, a true wealth drawdown
 }
 
 function expectedShortfall(dailyReturns, q = 0.05) {
@@ -99,13 +105,15 @@ function expectedShortfall(dailyReturns, q = 0.05) {
 /** Summary metrics for a net daily-return series. */
 export function summarizeStrategy(netReturns, turnover, gammas = [1, 3, 5]) {
   const n = netReturns.length;
-  const mean = netReturns.reduce((s, v) => s + v, 0) / n;
+  const mean = netReturns.reduce((s, v) => s + v, 0) / n; // arithmetic mean of simple returns
   const variance = netReturns.reduce((s, v) => s + (v - mean) ** 2, 0) / (n - 1);
   const vol = Math.sqrt(variance);
   const ce = Object.fromEntries(gammas.map((g) => [g, (mean - (g / 2) * variance) * 252]));
+  const wealth = netReturns.reduce((w, r) => w * (1 + r), 1);
+  const cagr = wealth > 0 ? wealth ** (252 / n) - 1 : -1; // geometric annualized return
   return {
     n,
-    annReturn: mean * 252,
+    annReturn: cagr,
     annVol: vol * ANNUALIZE,
     sharpe: vol > 0 ? (mean / vol) * ANNUALIZE : 0,
     maxDrawdown: maxDrawdown(netReturns),

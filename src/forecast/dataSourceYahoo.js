@@ -15,6 +15,16 @@
 export const YAHOO_PRICE_ADJUSTMENT = 'split_and_dividend_adjusted';
 
 /**
+ * Keep only bars for sessions strictly before the current UTC date, dropping the current
+ * (possibly still-open, partial) session's bar. Yahoo returns a live partial bar intraday; using
+ * it makes results non-reproducible and scores an unfinished close. Deterministic given `nowMs`.
+ */
+export function completedSessionsOnly(bars, { nowMs = Date.now() } = {}) {
+  const todayUtc = new Date(nowMs).toISOString().slice(0, 10);
+  return bars.filter((b) => b.timestamp.slice(0, 10) < todayUtc);
+}
+
+/**
  * Map a yahoo_proxy /api/market response into ledger bars ({timestamp, close}) using the
  * adjusted close. Deterministic and side-effect free.
  *

@@ -46,20 +46,20 @@ describe('strategyReturns', () => {
     const returns = [0.01, 0.01, 0.01];
     const weights = [1, 0.5, 0.5]; // one change of 0.5 at index 1
     const { netReturns } = strategyReturns(returns, weights, { costPerTurn: 0.001, from: 0 });
-    // index0: prevW null -> turn 0 -> net = 1*0.01
-    expect(netReturns[0]).toBeCloseTo(0.01, 12);
-    // index1: turn |0.5-1|=0.5 -> cost 0.5*0.001=0.0005 -> net = 0.5*0.01 - 0.0005
-    expect(netReturns[1]).toBeCloseTo(0.5 * 0.01 - 0.0005, 12);
+    // Simple-return P&L: market simple return = expm1(logret). index0: w=1, no turnover.
+    expect(netReturns[0]).toBeCloseTo(Math.expm1(0.01), 12);
+    // index1: w=0.5, turn 0.5 -> cost 0.0005 -> net = 0.5*expm1(0.01) - 0.0005
+    expect(netReturns[1]).toBeCloseTo(0.5 * Math.expm1(0.01) - 0.0005, 12);
   });
 });
 
 describe('summarizeStrategy', () => {
   test('reports annualized metrics and certainty-equivalent returns', () => {
-    const r = new Array(300).fill(0.0004); // ~10%/yr, zero vol
+    const r = new Array(300).fill(0.0004); // constant simple return, zero vol
     const s = summarizeStrategy(r, new Array(300).fill(0));
-    expect(s.annReturn).toBeCloseTo(0.0004 * 252, 9);
+    expect(s.annReturn).toBeCloseTo(1.0004 ** 252 - 1, 9); // CAGR (geometric), not mean*252
     expect(s.annVol).toBeCloseTo(0, 9);
-    expect(s.ceReturn[3]).toBeCloseTo(0.0004 * 252, 6); // zero variance -> CE == mean return
+    expect(s.ceReturn[3]).toBeCloseTo(0.0004 * 252, 6); // zero variance -> CE == annualized mean
   });
 });
 

@@ -10,7 +10,7 @@
  * Usage: node scripts/run_tournament.mjs [--symbol SPY] [--range 10y] [--holdout-frac 0.3]
  */
 
-import { mapMarketResponseToBars } from '../src/forecast/dataSourceYahoo.js';
+import { mapMarketResponseToBars, completedSessionsOnly } from '../src/forecast/dataSourceYahoo.js';
 import { logReturns } from '../src/forecast/calibration.js';
 import {
   blockBootstrapMeanCI, runTournament, TOURNAMENT_METHODS,
@@ -41,12 +41,14 @@ async function main() {
   const range = args.range || '10y';
   const holdoutFrac = args['holdout-frac'] !== undefined ? Number(args['holdout-frac']) : 0.3;
 
-  const bars = mapMarketResponseToBars(await fetchYahoo(symbol, range));
+  const bars = completedSessionsOnly(mapMarketResponseToBars(await fetchYahoo(symbol, range)));
   const returns = logReturns(bars);
-  const holdoutFrom = Math.floor(returns.length * (1 - holdoutFrac));
+  const WARMUP = 60;
+  // Holdout = last 30% of SCORED sessions (returns after warmup), not 30% of all returns.
+  const holdoutFrom = WARMUP + Math.floor((returns.length - WARMUP) * (1 - holdoutFrac));
 
-  const full = runTournament(returns, { warmup: 60 });
-  const holdout = runTournament(returns, { warmup: 60, from: holdoutFrom });
+  const full = runTournament(returns, { warmup: WARMUP });
+  const holdout = runTournament(returns, { warmup: WARMUP, from: holdoutFrom });
 
   const report = (label, res) => {
     console.log(`\n=== ${label} (${res.n} days) — mean WIS (lower is better) ===`);

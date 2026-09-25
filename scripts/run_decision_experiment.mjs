@@ -8,10 +8,13 @@
  */
 
 import { createHash } from 'crypto';
+import { mkdir, writeFile } from 'fs/promises';
 
-import { mapMarketResponseToBars } from '../src/forecast/dataSourceYahoo.js';
+import { mapMarketResponseToBars, completedSessionsOnly } from '../src/forecast/dataSourceYahoo.js';
 import { logReturns } from '../src/forecast/calibration.js';
 import { runExperiment, blockBootstrapMeanCI, bootstrapMetricDiff, sharpeOf } from '../src/forecast/volTargeting.js';
+
+const WARMUP = 60;
 
 function parseArgs(argv) {
   const a = {};
@@ -35,10 +38,11 @@ const pct = (x, d = 1) => `${f(x * 100, d)}%`;
 
 function reportBlock(label, exp) {
   console.log(`\n=== ${label} (${exp.strategies.fixed.n} days) ===`);
-  console.log('  method     annRet   annVol  Sharpe   maxDD    ES5     turn/day  CE(γ=3)');
+  console.log('  method     annRet   annVol  Sharpe   maxDD    ES5     turn/day  CE(γ=1/3/5)');
   for (const m of ['fixed', 'rv20', 'ewma94']) {
     const s = exp.strategies[m];
-    console.log(`  ${m.padEnd(9)} ${pct(s.annReturn).padStart(7)} ${pct(s.annVol).padStart(7)} ${f(s.sharpe).padStart(6)} ${pct(s.maxDrawdown).padStart(7)} ${pct(s.es5).padStart(7)} ${f(s.meanTurnover, 3).padStart(8)} ${pct(s.ceReturn[3]).padStart(8)}`);
+    const ce = `${pct(s.ceReturn[1])}/${pct(s.ceReturn[3])}/${pct(s.ceReturn[5])}`;
+    console.log(`  ${m.padEnd(9)} ${pct(s.annReturn).padStart(7)} ${pct(s.annVol).padStart(7)} ${f(s.sharpe).padStart(6)} ${pct(s.maxDrawdown).padStart(7)} ${pct(s.es5).padStart(7)} ${f(s.meanTurnover, 3).padStart(8)}  ${ce}`);
   }
   const diffCI = (a, b) => {
     const d = exp.netByMethod[a].map((v, i) => v - exp.netByMethod[b][i]); // daily net-return diff a-b
@@ -66,17 +70,31 @@ async function main() {
   const holdoutFrac = args['holdout-frac'] !== undefined ? Number(args['holdout-frac']) : 0.3;
   const financingAnnual = args.financing !== undefined ? Number(args.financing) : 0;
 
-  const bars = mapMarketResponseToBars(await fetchYahoo(symbol, range));
+  // Completed sessions only (drop the current partial bar), for reproducibility and to avoid
+  // scoring an unfinished close.
+  const bars = completedSessionsOnly(mapMarketResponseToBars(await fetchYahoo(symbol, range)));
   const returns = logReturns(bars);
   const snapshotHash = createHash('sha256').update(JSON.stringify(bars.map((b) => [b.timestamp, b.close]))).digest('hex');
-  const holdoutFrom = Math.floor(returns.length * (1 - holdoutFrac));
+  // Holdout = last 30% of SCORED sessions (returns after the warmup), matching the preregistration.
+  const scored = returns.length - WARMUP;
+  const holdoutFrom = WARMUP + Math.floor(scored * (1 - holdoutFrac));
 
-  console.log(`data: ${bars.length} adjusted sessions ${bars[0].timestamp.slice(0, 10)} .. ${bars[bars.length - 1].timestamp.slice(0, 10)}`);
-  console.log(`data_snapshot_sha256: ${snapshotHash}`);
+  // Persist the immutable normalized snapshot (the prereg promised this, not just a hash).
+  const snapDir = new URL('../research/calibration/snapshots/', import.meta.url);
+  await mkdir(snapDir, { recursive: true });
+  await writeFile(new URL(`decision_${symbol}_${range}_${snapshotHash.slice(0, 12)}.json`, snapDir), JSON.stringify({
+    symbol, range, retrieved_at: new Date().toISOString(), provider: 'yahoo_v8_chart',
+    price_adjustment: 'split_and_dividend_adjusted', completed_sessions_only: true,
+    bar_count: bars.length, data_snapshot_sha256: snapshotHash, bars,
+  }));
+
+  console.log(`data: ${bars.length} completed adjusted sessions ${bars[0].timestamp.slice(0, 10)} .. ${bars[bars.length - 1].timestamp.slice(0, 10)}`);
+  console.log(`data_snapshot_sha256: ${snapshotHash} (snapshot persisted under research/calibration/snapshots/)`);
+  console.log(`scored sessions: ${scored}; holdout starts at scored index ${holdoutFrom - WARMUP} (${scored - (holdoutFrom - WARMUP)} holdout days)`);
   console.log('rule: w = clip(0.15 / ann_sigma_hat, 0, 1.5); 2bps turnover cost; 1-day timing; financing=' + financingAnnual);
 
-  reportBlock('FULL SAMPLE', runExperiment(returns, { financingAnnual }));
-  reportBlock(`HOLDOUT (last ${Math.round(holdoutFrac * 100)}%)`, runExperiment(returns, { from: holdoutFrom, financingAnnual }));
+  reportBlock('FULL SAMPLE', runExperiment(returns, { warmup: WARMUP, financingAnnual }));
+  reportBlock(`HOLDOUT (last ${Math.round(holdoutFrac * 100)}% of scored)`, runExperiment(returns, { warmup: WARMUP, from: holdoutFrom, financingAnnual }));
   console.log('');
 }
 

@@ -17,7 +17,7 @@ import { createHash } from 'crypto';
 import { mkdir, writeFile } from 'fs/promises';
 
 import { dailyCoverage, summarizeCoverage } from '../src/forecast/calibration.js';
-import { mapMarketResponseToBars } from '../src/forecast/dataSourceYahoo.js';
+import { mapMarketResponseToBars, completedSessionsOnly } from '../src/forecast/dataSourceYahoo.js';
 
 function parseArgs(argv) {
   const a = {};
