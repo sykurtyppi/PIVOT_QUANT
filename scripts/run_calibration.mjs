@@ -66,7 +66,8 @@ async function main() {
 
   const retrievedAt = new Date().toISOString();
   const response = await fetchYahoo(symbol, range);
-  const bars = mapMarketResponseToBars(response);
+  // Completed sessions only — drop the current partial trading-day bar for reproducibility.
+  const bars = completedSessionsOnly(mapMarketResponseToBars(response));
   const snapshotHash = createHash('sha256')
     .update(JSON.stringify(bars.map((b) => [b.timestamp, b.close]))).digest('hex');
 

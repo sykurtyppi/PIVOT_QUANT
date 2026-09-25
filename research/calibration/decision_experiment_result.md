@@ -37,7 +37,7 @@ timing, no financing. **Simple-return P&L; wealth-based drawdowns.** Input snaps
 The prereg required vol-targeting to improve Sharpe **and** CE over fixed, with the difference CI
 excluding 0, **and the sign to hold on the holdout**. It fails on every leg:
 
-- **Return-difference** CI spans 0 (full sample [−4.4%, +5.6%]).
+- **Return-difference** CI spans 0 (full sample [−4.92%, +4.60%]).
 - **Sharpe-difference** (bootstrapped directly — the metric the gate actually claims):
   full-sample ΔSharpe rv20−fixed = **+0.166, CI [−0.151, +0.488]** → not significant; holdout
   ΔSharpe = **−0.069, CI [−0.510, +0.330]** (fixed ahead).
@@ -68,9 +68,14 @@ improvement.
   (the calm 2023–26 bull), and it favors fixed exposure.
 - **Block bootstrap** (block = 20) assumes rough stationarity across a decade spanning very
   different vol regimes; treat the CIs as indicative, not exact.
-- Returns/metrics use the **log-return approximation** (`w·log-return`, log-return drawdowns); fine
-  for daily moves at w ≤ 1.5 and applied identically to all methods, so it does not affect the
-  ranking. One symbol, one horizon, one current-vintage (retroactively adjusted) data pull.
+- **Accounting:** P&L is computed in simple-return space (market log return → `expm1` → scaled by
+  the weight; costs are simple fractions) and drawdowns are wealth-based (compounded `1+r`); returns
+  are annualized as CAGR. One symbol, one horizon, one current-vintage (retroactively adjusted) pull.
+- **Preregistered outputs not fully completed (disclosed):** the accept test was evaluated via the
+  return and Sharpe bootstraps, but the prereg's **CE-difference bootstrap** and the **realized-vol
+  median regime breakdown** were **not** produced. Because RV20 already fails the holdout-sign
+  requirement, the FAIL verdict does not depend on them — but the crisis-regime explanation above is
+  therefore partly post-hoc (supported by the full-vs-holdout contrast, not a formal median split).
 - A drawdown-/tail-averse user might value the −34%→−19% maxDD even at equal Sharpe — but that is a
   *different* objective and would need its own preregistered criterion, not a post-hoc reinterpretation.
 

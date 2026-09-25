@@ -79,14 +79,20 @@ async function main() {
   const scored = returns.length - WARMUP;
   const holdoutFrom = WARMUP + Math.floor(scored * (1 - holdoutFrac));
 
-  // Persist the immutable normalized snapshot (the prereg promised this, not just a hash).
+  // Persist the normalized snapshot write-once (flag 'wx'): a rerun with identical bars maps to the
+  // same hash-named file and must NOT overwrite it or rewrite retrieved_at — the first write wins.
   const snapDir = new URL('../research/calibration/snapshots/', import.meta.url);
   await mkdir(snapDir, { recursive: true });
-  await writeFile(new URL(`decision_${symbol}_${range}_${snapshotHash.slice(0, 12)}.json`, snapDir), JSON.stringify({
-    symbol, range, retrieved_at: new Date().toISOString(), provider: 'yahoo_v8_chart',
-    price_adjustment: 'split_and_dividend_adjusted', completed_sessions_only: true,
-    bar_count: bars.length, data_snapshot_sha256: snapshotHash, bars,
-  }));
+  const snapPath = new URL(`decision_${symbol}_${range}_${snapshotHash.slice(0, 12)}.json`, snapDir);
+  try {
+    await writeFile(snapPath, JSON.stringify({
+      symbol, range, retrieved_at: new Date().toISOString(), provider: 'yahoo_v8_chart',
+      price_adjustment: 'split_and_dividend_adjusted', completed_sessions_only: true,
+      bar_count: bars.length, data_snapshot_sha256: snapshotHash, bars,
+    }), { flag: 'wx' });
+  } catch (err) {
+    if (err.code !== 'EEXIST') throw err; // identical snapshot already persisted; keep the original
+  }
 
   console.log(`data: ${bars.length} completed adjusted sessions ${bars[0].timestamp.slice(0, 10)} .. ${bars[bars.length - 1].timestamp.slice(0, 10)}`);
   console.log(`data_snapshot_sha256: ${snapshotHash} (snapshot persisted under research/calibration/snapshots/)`);

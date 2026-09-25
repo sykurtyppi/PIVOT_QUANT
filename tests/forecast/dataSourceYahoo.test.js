@@ -1,7 +1,27 @@
-import { mapMarketResponseToBars, fetchDailyBars, YAHOO_PRICE_ADJUSTMENT } from '../../src/forecast/dataSourceYahoo.js';
+import {
+  completedSessionsOnly, mapMarketResponseToBars, fetchDailyBars, YAHOO_PRICE_ADJUSTMENT,
+} from '../../src/forecast/dataSourceYahoo.js';
 
 // Unix seconds for a couple of session dates.
 const t = (iso) => Math.floor(Date.parse(iso) / 1000);
+
+describe('completedSessionsOnly', () => {
+  const bars = [
+    { timestamp: '2026-09-23T13:30:00.000Z', close: 662 },
+    { timestamp: '2026-09-24T13:30:00.000Z', close: 664 },
+    { timestamp: '2026-09-25T13:30:00.000Z', close: 999 }, // current (partial) session
+  ];
+  test('drops the current UTC-date bar (the possibly-partial session)', () => {
+    const nowMs = Date.parse('2026-09-25T17:44:00.000Z'); // mid-session
+    const kept = completedSessionsOnly(bars, { nowMs });
+    expect(kept.map((b) => b.timestamp.slice(0, 10))).toEqual(['2026-09-23', '2026-09-24']);
+  });
+  test('keeps a bar once its date is strictly before the current UTC date', () => {
+    const nowMs = Date.parse('2026-09-26T00:00:00.000Z'); // next UTC day
+    const kept = completedSessionsOnly(bars, { nowMs });
+    expect(kept).toHaveLength(3); // 09-25 now complete
+  });
+});
 
 describe('mapMarketResponseToBars', () => {
   test('uses the adjusted close and sorts ascending by time', () => {
