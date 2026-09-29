@@ -456,15 +456,15 @@
         }
 
         .decision-label {
-            font-size: 9px;
-            letter-spacing: 0.4px;
+            font-size: 10.5px;
+            letter-spacing: 0.3px;
             text-transform: uppercase;
             color: var(--muted);
             margin-bottom: 3px;
         }
 
         .decision-value {
-            font-size: 12px;
+            font-size: 14px;
             font-weight: 600;
             color: var(--text);
             white-space: nowrap;
@@ -526,8 +526,8 @@
         }
 
         .transparency-details {
-            border-bottom: 1px solid var(--border);
-            background: rgba(6, 10, 24, 0.36);
+            border-bottom: 1px solid rgba(148, 163, 184, 0.07);
+            background: rgba(4, 7, 18, 0.52);
         }
 
         .transparency-details > summary {
@@ -539,6 +539,11 @@
             list-style: none;
             color: var(--muted);
             user-select: none;
+            opacity: 0.72;
+        }
+
+        .transparency-details > summary:hover {
+            opacity: 1;
         }
 
         .transparency-details > summary::-webkit-details-marker {
@@ -555,7 +560,8 @@
         }
 
         .transparency-details[open] > summary {
-            border-bottom: 1px solid rgba(148, 163, 184, 0.1);
+            border-bottom: 1px solid rgba(148, 163, 184, 0.07);
+            opacity: 1;
         }
 
         .transparency-details[open] > summary::after {
@@ -567,14 +573,14 @@
             letter-spacing: 0.4px;
             text-transform: uppercase;
             font-weight: 700;
-            color: #9fb3d1;
+            color: #6b7f99;
             white-space: nowrap;
         }
 
         .transparency-summary-text {
             min-width: 0;
             font-size: 11px;
-            color: var(--text);
+            color: var(--muted);
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
@@ -859,6 +865,146 @@
             line-height: 1.3;
         }
 
+        .research-filter-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(152px, 1fr));
+            gap: 10px;
+        }
+
+        .research-field {
+            background: var(--panel);
+            color: var(--text);
+            border: 1px solid var(--border);
+            padding: 7px 10px;
+            border-radius: 8px;
+            font-size: 12px;
+            width: 100%;
+        }
+
+        .research-actions {
+            grid-column: span 2;
+        }
+
+        .research-kicker {
+            font-size: 10px;
+            letter-spacing: 0.4px;
+            text-transform: uppercase;
+            color: #8ea4c7;
+            font-weight: 700;
+            margin-bottom: 2px;
+        }
+
+        .research-note {
+            font-size: 11px;
+            line-height: 1.4;
+            color: var(--muted);
+        }
+
+        .research-lineage {
+            white-space: normal;
+            line-height: 1.35;
+        }
+
+        .research-empty {
+            color: var(--muted);
+            text-align: center;
+            padding: 18px;
+            font-size: 12px;
+        }
+
+        .research-heatmap {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            min-height: 112px;
+            background: rgba(2, 6, 23, 0.35);
+            border: 1px solid rgba(148, 163, 184, 0.1);
+            border-radius: 10px;
+            padding: 10px;
+        }
+
+        .research-heatmap-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(116px, 1fr));
+            gap: 8px;
+        }
+
+        .research-heatmap-cell {
+            border-radius: 10px;
+            border: 1px solid rgba(148, 163, 184, 0.14);
+            padding: 10px;
+            background: rgba(15, 23, 42, 0.8);
+            min-height: 84px;
+        }
+
+        .research-heatmap-cell.good {
+            border-color: rgba(34, 197, 94, 0.35);
+            background: linear-gradient(180deg, rgba(6, 54, 33, 0.72), rgba(9, 23, 19, 0.9));
+        }
+
+        .research-heatmap-cell.bad {
+            border-color: rgba(239, 68, 68, 0.35);
+            background: linear-gradient(180deg, rgba(72, 19, 24, 0.72), rgba(24, 10, 13, 0.92));
+        }
+
+        .research-heatmap-axis {
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.34px;
+            color: var(--muted);
+            margin-bottom: 6px;
+        }
+
+        .research-heatmap-value {
+            font-size: 18px;
+            font-weight: 700;
+            letter-spacing: 0.2px;
+            font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+            color: var(--text);
+        }
+
+        .research-heatmap-meta {
+            margin-top: 6px;
+            font-size: 11px;
+            color: var(--muted);
+        }
+
+        .research-walkforward-note {
+            font-size: 11px;
+            color: var(--muted);
+            line-height: 1.4;
+        }
+
+        .table-action-btn {
+            border: 1px solid rgba(148, 163, 184, 0.2);
+            background: rgba(148, 163, 184, 0.14);
+            color: var(--text);
+            border-radius: 8px;
+            padding: 5px 8px;
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 0.25px;
+            text-transform: uppercase;
+            cursor: pointer;
+        }
+
+        .table-action-btn:hover {
+            background: rgba(148, 163, 184, 0.24);
+            border-color: rgba(148, 163, 184, 0.36);
+        }
+
+        .replay-note {
+            font-size: 11px;
+            line-height: 1.4;
+            color: var(--muted);
+        }
+
+        .models-note {
+            font-size: 11px;
+            line-height: 1.4;
+            color: var(--muted);
+        }
+
         .stat-grid {
             display: grid;
             grid-template-columns: 1fr 1fr;
@@ -877,9 +1023,9 @@
         }
 
         .stat-label {
-            font-size: 10px;
+            font-size: 11px;
             text-transform: uppercase;
-            letter-spacing: 0.32px;
+            letter-spacing: 0.28px;
             color: var(--muted);
         }
 
@@ -925,7 +1071,6 @@
 
         .ml-decision-trace {
             flex: 1 1 auto;
-            min-height: 260px;
             display: flex;
             flex-direction: column;
             gap: 14px;
@@ -955,8 +1100,8 @@
         }
 
         .ml-trace-kicker {
-            font-size: 10px;
-            letter-spacing: 0.42px;
+            font-size: 11.5px;
+            letter-spacing: 0.36px;
             text-transform: uppercase;
             color: #8ea4c7;
             font-weight: 700;
@@ -982,9 +1127,9 @@
             gap: 7px;
             padding: 7px 12px;
             border-radius: 999px;
-            font-size: 10px;
+            font-size: 11px;
             font-weight: 700;
-            letter-spacing: 0.4px;
+            letter-spacing: 0.32px;
             text-transform: uppercase;
             white-space: nowrap;
             border: 1px solid rgba(148, 163, 184, 0.22);
@@ -1070,17 +1215,17 @@
         }
 
         .ml-trace-card-title {
-            font-size: 11px;
+            font-size: 12px;
             font-weight: 700;
-            letter-spacing: 0.42px;
+            letter-spacing: 0.36px;
             text-transform: uppercase;
             color: #8ea4c7;
         }
 
         .ml-trace-card-signal {
-            font-size: 10px;
+            font-size: 11px;
             font-weight: 700;
-            letter-spacing: 0.36px;
+            letter-spacing: 0.28px;
             text-transform: uppercase;
             color: var(--muted);
         }
@@ -1140,7 +1285,6 @@
             border-radius: 12px;
             border: 1px solid rgba(148, 163, 184, 0.14);
             background: rgba(2, 6, 23, 0.26);
-            min-height: 82px;
         }
 
         .ml-trace-meta[data-state="ok"] {
@@ -1156,9 +1300,8 @@
         }
 
         .ml-trace-meta-label {
-            font-size: 10px;
-            letter-spacing: 0.38px;
-            text-transform: uppercase;
+            font-size: 11px;
+            letter-spacing: 0.22px;
             color: #8ea4c7;
             font-weight: 700;
         }
@@ -1171,7 +1314,7 @@
         }
 
         .ml-trace-meta [data-role="note"] {
-            font-size: 10px;
+            font-size: 11px;
             line-height: 1.4;
             color: var(--muted);
         }
@@ -1181,31 +1324,32 @@
             align-items: center;
             gap: 12px;
             flex-wrap: wrap;
-            font-size: 10px;
+            font-size: 11.5px;
             color: var(--muted);
         }
 
+        /* Collapsed to dot-only — primary banner carries the full status text */
         .ml-service-pill {
             display: inline-flex;
             align-items: center;
-            gap: 6px;
-            padding: 3px 9px;
+            justify-content: center;
+            font-size: 0;
+            padding: 0;
+            border: none;
+            background: none;
+            width: 10px;
+            height: 10px;
             border-radius: 999px;
-            border: 1px solid rgba(148, 163, 184, 0.22);
-            background: rgba(15, 23, 42, 0.55);
-            color: var(--muted);
-            font-size: 10px;
-            font-weight: 600;
-            letter-spacing: 0.3px;
-            text-transform: uppercase;
+            cursor: default;
         }
 
         .ml-service-pill::before {
             content: '';
-            width: 7px;
-            height: 7px;
+            width: 9px;
+            height: 9px;
             border-radius: 999px;
-            background: rgba(148, 163, 184, 0.9);
+            background: rgba(148, 163, 184, 0.55);
+            flex-shrink: 0;
         }
 
         .ml-service-pill[data-state="online"] {
@@ -1398,9 +1542,9 @@
         }
 
         .ml-horizon-title {
-            font-size: 11px;
+            font-size: 12px;
             font-weight: 600;
-            letter-spacing: 0.3px;
+            letter-spacing: 0.25px;
             text-transform: uppercase;
             color: var(--accent-2);
         }
@@ -1661,12 +1805,12 @@
         }
 
         .ml-signal-label {
-            font-size: 11px;
-            font-weight: 600;
-            letter-spacing: 0.4px;
+            font-size: 13px;
+            font-weight: 700;
+            letter-spacing: 0.3px;
             text-transform: uppercase;
-            padding: 2px 6px;
-            border-radius: 4px;
+            padding: 3px 8px;
+            border-radius: 5px;
             text-align: center;
         }
         .ml-signal-label[data-signal="reject"] { color: #22c55e; background: rgba(34, 197, 94, 0.12); }
@@ -1697,6 +1841,84 @@
         }
         .ml-abstain-banner.visible { display: block; }
 
+        /* ── Break-signal rollout monitor ───────────────────────────────── */
+        .ml-rollout-strip {
+            display: flex;
+            align-items: stretch;
+            gap: 0;
+            border: 1px solid rgba(148, 163, 184, 0.10);
+            border-radius: 8px;
+            overflow: hidden;
+            margin-top: 8px;
+            margin-bottom: 2px;
+            font-size: 11px;
+        }
+        .ml-rollout-item {
+            flex: 1;
+            padding: 5px 8px;
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            border-right: 1px solid rgba(148, 163, 184, 0.08);
+        }
+        .ml-rollout-item:last-child { border-right: none; }
+        .ml-rollout-label {
+            color: var(--muted);
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            white-space: nowrap;
+        }
+        .ml-rollout-value {
+            font-size: 13px;
+            font-weight: 700;
+            color: var(--text-primary);
+            font-variant-numeric: tabular-nums;
+        }
+        .ml-rollout-value.active   { color: #ef4444; }
+        .ml-rollout-value.caution  { color: #f59e0b; }
+        .ml-rollout-value.ok       { color: #22c55e; }
+        .ml-rollout-value.muted    { color: var(--muted); }
+
+        /* ── decision_meta: confidence tier + caution banner ────────────── */
+        .ml-confidence-row {
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+            align-items: center;
+            margin-top: 4px;
+            min-height: 18px;
+        }
+        .ml-confidence-chip {
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 0.05em;
+            padding: 2px 6px;
+            border-radius: 4px;
+            text-transform: uppercase;
+        }
+        .ml-confidence-chip[data-tier="high_confidence"] {
+            background: rgba(239, 68, 68, 0.15);
+            color: #fca5a5;
+            border: 1px solid rgba(239, 68, 68, 0.25);
+        }
+        .ml-confidence-chip[data-tier="standard"] {
+            background: rgba(251, 191, 36, 0.10);
+            color: #fde68a;
+            border: 1px solid rgba(251, 191, 36, 0.18);
+        }
+        .ml-confluence-caution {
+            display: none;
+            font-size: 10px;
+            color: #f59e0b;
+            padding: 3px 7px;
+            border-radius: 4px;
+            border: 1px solid rgba(245, 158, 11, 0.25);
+            background: rgba(245, 158, 11, 0.07);
+            font-weight: 500;
+        }
+        .ml-confluence-caution.visible { display: inline-block; }
+
         .alerts {
             display: flex;
             flex-direction: column;
@@ -1714,7 +1936,7 @@
             border: 1px solid rgba(148, 163, 184, 0.12);
             border-radius: 10px;
             padding: 9px 10px;
-            font-size: 11px;
+            font-size: 12px;
             color: var(--muted);
         }
 
@@ -1729,7 +1951,7 @@
             border: 1px solid rgba(148, 163, 184, 0.1);
             border-radius: 10px;
             padding: 9px 10px;
-            font-size: 11px;
+            font-size: 12px;
             color: var(--muted);
         }
 
@@ -2015,6 +2237,198 @@
             from { opacity: 1; transform: translateX(0); }
             to   { opacity: 0; transform: translateX(40px); }
         }
+
+        /* ── Primary signal banner — decision-first visual anchor ───────── */
+        .ml-primary-banner {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            padding: 13px 16px 11px;
+            border-radius: 10px;
+            border: 1px solid rgba(148, 163, 184, 0.10);
+            background: rgba(15, 23, 42, 0.35);
+            margin-bottom: 10px;
+            transition: border-color 0.18s, background 0.18s;
+        }
+        .ml-primary-banner-left { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+        .ml-primary-banner-signal {
+            font-size: 26px;
+            font-weight: 700;
+            letter-spacing: 0.01em;
+            line-height: 1;
+            font-family: "IBM Plex Mono", ui-monospace, monospace;
+            color: var(--muted);
+        }
+        .ml-primary-banner-sub {
+            font-size: 12px;
+            font-weight: 500;
+            color: var(--muted);
+            letter-spacing: 0.01em;
+            line-height: 1.3;
+        }
+        .ml-primary-banner-prob {
+            font-size: 22px;
+            font-weight: 700;
+            font-family: "IBM Plex Mono", ui-monospace, monospace;
+            color: var(--muted);
+            min-width: 58px;
+            text-align: right;
+            flex-shrink: 0;
+            line-height: 1;
+        }
+        /* idle — muted */
+        .ml-primary-banner[data-state="idle"] .ml-primary-banner-signal {
+            font-size: 13px; font-weight: 500; letter-spacing: 0.06em; text-transform: uppercase;
+        }
+        .ml-primary-banner[data-state="idle"] .ml-primary-banner-prob { display: none; }
+        /* scored but no signal */
+        .ml-primary-banner[data-state="scored"] .ml-primary-banner-signal {
+            font-size: 14px; font-weight: 500; letter-spacing: 0.04em;
+        }
+        .ml-primary-banner[data-state="scored"] .ml-primary-banner-prob { display: none; }
+        /* offline / error */
+        .ml-primary-banner[data-state="offline"] {
+            border-color: rgba(239, 68, 68, 0.20); background: rgba(239, 68, 68, 0.05);
+        }
+        .ml-primary-banner[data-state="offline"] .ml-primary-banner-signal {
+            font-size: 13px; font-weight: 600; color: var(--danger); letter-spacing: 0.04em; text-transform: uppercase;
+        }
+        .ml-primary-banner[data-state="offline"] .ml-primary-banner-prob { display: none; }
+        /* BREAK FIRED */
+        .ml-primary-banner[data-state="break"] {
+            border-color: rgba(239, 68, 68, 0.38); background: rgba(239, 68, 68, 0.08);
+        }
+        .ml-primary-banner[data-state="break"] .ml-primary-banner-signal { color: #ef4444; }
+        .ml-primary-banner[data-state="break"] .ml-primary-banner-prob  { color: #ef4444; }
+        .ml-primary-banner[data-state="break"] .ml-primary-banner-sub   { color: #fca5a5; }
+        /* BREAK BLOCKED by filter */
+        .ml-primary-banner[data-state="break-blocked"] {
+            border-color: rgba(245, 158, 11, 0.38); background: rgba(245, 158, 11, 0.07);
+        }
+        .ml-primary-banner[data-state="break-blocked"] .ml-primary-banner-signal {
+            font-size: 18px; color: #f59e0b;
+        }
+        .ml-primary-banner[data-state="break-blocked"] .ml-primary-banner-prob { font-size: 15px; color: #f59e0b; }
+        .ml-primary-banner[data-state="break-blocked"] .ml-primary-banner-sub  { color: #fde68a; }
+        /* REJECT */
+        .ml-primary-banner[data-state="reject"] {
+            border-color: rgba(34, 197, 94, 0.28); background: rgba(34, 197, 94, 0.05);
+        }
+        .ml-primary-banner[data-state="reject"] .ml-primary-banner-signal { font-size: 20px; color: #22c55e; }
+        .ml-primary-banner[data-state="reject"] .ml-primary-banner-prob   { font-size: 18px; color: #22c55e; }
+        .ml-primary-banner[data-state="reject"] .ml-primary-banner-sub    { color: #86efac; }
+        /* NO EDGE */
+        .ml-primary-banner[data-state="no-edge"] {
+            border-color: rgba(251, 191, 36, 0.22); background: rgba(251, 191, 36, 0.05);
+        }
+        .ml-primary-banner[data-state="no-edge"] .ml-primary-banner-signal { font-size: 16px; color: #fbbf24; }
+        .ml-primary-banner[data-state="no-edge"] .ml-primary-banner-prob   { display: none; }
+        .ml-primary-banner[data-state="no-edge"] .ml-primary-banner-sub    { color: #fde68a; }
+
+        /* ═══════════════════════════════════════════════════════════════════
+           Pass 2 — cognitive load reduction
+           ═══════════════════════════════════════════════════════════════════ */
+
+        /* ── 1. Header data-state pill (LIVE / STALE / DISCONNECTED) ──────── */
+        .hds {
+            display: inline-flex; align-items: center; gap: 6px;
+            padding: 4px 11px; border-radius: 999px;
+            border: 1px solid rgba(148, 163, 184, 0.15);
+            font-size: 11.5px; font-weight: 700; letter-spacing: 0.03em;
+            white-space: nowrap; cursor: default; user-select: none;
+            color: var(--muted);
+            transition: color 0.25s, border-color 0.25s, background 0.25s;
+        }
+        .hds-dot {
+            width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+            background: var(--muted); opacity: 0.4;
+            transition: background 0.25s, box-shadow 0.25s, opacity 0.25s;
+        }
+        .hds[data-state="live"]  { border-color: rgba(34,197,94,0.32); color: #86efac; background: rgba(34,197,94,0.07); }
+        .hds[data-state="live"] .hds-dot  { background: #22c55e; opacity: 1; box-shadow: 0 0 6px rgba(34,197,94,0.55); }
+        .hds[data-state="stale"] { border-color: rgba(245,158,11,0.32); color: #fde68a; background: rgba(245,158,11,0.06); }
+        .hds[data-state="stale"] .hds-dot { background: #f59e0b; opacity: 1; }
+        .hds[data-state="disconnected"] { border-color: rgba(239,68,68,0.32); color: #fca5a5; background: rgba(239,68,68,0.06); }
+        .hds[data-state="disconnected"] .hds-dot { background: var(--danger); opacity: 1; }
+
+        /* ── 2. Tab improvements ──────────────────────────────────────────── */
+        /* Mixed case + larger font for faster reading */
+        .tab-btn {
+            font-size: 11.5px;
+            letter-spacing: 0.1px;
+            text-transform: none;
+            padding: 5px 10px;
+        }
+        /* Secondary tabs (Research and later): slightly recessed */
+        .tab-btn:nth-child(n+3):not(.is-active) { opacity: 0.68; }
+        .tab-btn:nth-child(3) { margin-left: 8px; } /* visual gap before secondary group */
+        /* Calmer active state — was a loud gradient */
+        .tab-btn.is-active {
+            background: rgba(96, 165, 250, 0.14);
+            color: var(--accent);
+            border-color: rgba(96, 165, 250, 0.38);
+        }
+        /* Scrollable tab row with a right fade mask instead of wrapping */
+        .insights-panel .panel-header { position: relative; }
+        .insights-panel .panel-header::after {
+            content: ''; position: absolute;
+            right: 0; top: 0; bottom: 0; width: 28px;
+            background: linear-gradient(to right, transparent, rgba(11,15,26,0.95));
+            pointer-events: none; z-index: 2;
+        }
+        .insights-panel .tablist {
+            flex-wrap: nowrap; overflow-x: auto;
+            scrollbar-width: none; -ms-overflow-style: none;
+        }
+        .insights-panel .tablist::-webkit-scrollbar { display: none; }
+
+        /* ── 3. Market panel de-emphasis ──────────────────────────────────── */
+        .market-panel {
+            border-color: rgba(148, 163, 184, 0.07);
+            background: linear-gradient(180deg, rgba(11, 17, 32, 0.88), rgba(7, 12, 22, 0.88));
+            box-shadow: 0 4px 14px rgba(2, 6, 23, 0.16);
+        }
+        .market-panel .stat {
+            background: linear-gradient(180deg, rgba(11,17,31,0.80), rgba(7,12,22,0.80));
+            border-color: rgba(148, 163, 184, 0.07);
+        }
+        .market-panel h3 { color: #7a90a8; }
+
+        /* ── 4. ML panel idle-state visual dimming ────────────────────────── */
+        #ml-panel[data-ml-state="idle"] .ml-horizon-row,
+        #ml-panel[data-ml-state="idle"] .ml-threshold-row,
+        #ml-panel[data-ml-state="idle"] .ml-rollout-value,
+        #ml-panel[data-ml-state="idle"] .stat-value,
+        #ml-panel[data-ml-state="idle"] .ml-trust-grid {
+            opacity: 0.32;
+        }
+        #ml-panel[data-ml-state="idle"] .ml-primary-banner {
+            opacity: 1; /* keep the banner fully readable — it IS the idle state */
+        }
+
+        /* ── 5. System strip: quiet neutral pills ─────────────────────────── */
+        .system-pill:not(.ok):not(.warn):not(.risk) {
+            opacity: 0.50;
+        }
+
+        /* ── 15m horizon card: primary signal distinction ───────────────── */
+        #ml-horizon-card-15m {
+            border-color: rgba(148, 163, 184, 0.18);
+            background: linear-gradient(160deg, rgba(17, 24, 39, 0.95), rgba(11, 18, 34, 0.95));
+            box-shadow: inset 0 1px 0 rgba(148, 163, 184, 0.06);
+        }
+        #ml-horizon-card-15m .ml-horizon-title {
+            font-size: 13px;
+            color: var(--text);
+            letter-spacing: 0.05em;
+        }
+        #ml-horizon-card-15m .ml-signal-label {
+            font-size: 15px;
+            padding: 4px 10px;
+        }
+        #ml-horizon-card-15m[data-signal="break"]  { border-color: rgba(239, 68, 68, 0.35); }
+        #ml-horizon-card-15m[data-signal="reject"] { border-color: rgba(34, 197, 94, 0.30); }
     </style>
 </head>
 <body>
@@ -2024,6 +2438,10 @@
             <div>
                 <div class="title">PIVOT <span style="color: var(--accent)">QUANT</span></div>
                 <div class="subtitle">Institutional pivot analysis · ML-driven level scoring</div>
+            </div>
+            <div id="header-data-state" class="hds" data-state="starting" title="Data freshness — LIVE: bar within window · STALE: bar older than expected · DISCONNECTED: both services offline">
+                <span class="hds-dot"></span>
+                <span class="hds-text">STARTING</span>
             </div>
             <div class="status">
                 <div id="status-dot" class="status-dot loading" aria-hidden="true"></div>
@@ -2347,6 +2765,16 @@
                         </label>
                     </div>
                 </div>
+
+                <!-- Primary signal banner — first thing the eye should land on -->
+                <div class="ml-primary-banner" id="ml-primary-banner" data-state="idle" aria-live="polite" aria-label="Primary ML signal">
+                    <div class="ml-primary-banner-left">
+                        <div class="ml-primary-banner-signal" id="ml-primary-banner-signal">MONITORING</div>
+                        <div class="ml-primary-banner-sub" id="ml-primary-banner-sub">Awaiting touch event</div>
+                    </div>
+                    <div class="ml-primary-banner-prob" id="ml-primary-banner-prob"></div>
+                </div>
+
                 <div class="ml-health-widget" id="ml-health-widget">
                     <div class="ml-health-badge" id="ml-health-badge" data-health="unknown">Unknown</div>
                     <div class="ml-health-stats">
@@ -2374,6 +2802,40 @@
                 <div class="ml-abstain-banner" id="ml-abstain-banner">
                     ⚠ NO EDGE — Models below threshold at all horizons. Consider sitting out.
                 </div>
+
+                <!-- Break-signal rollout monitor (v210 / threshold=0.94 override).
+                     All five cells are break-specific. "Break Conf" shows HIGH when a
+                     break fires (always — signal thr = high-conf thr = 0.94), or shows
+                     raw break probability when no break is active (proximity context).
+                     "standard break" cannot occur under current thresholds.
+                     "Break Filter" shows BLOCKED when regime4/gamma_pos filters suppress a break. -->
+                <div class="ml-rollout-strip" id="ml-rollout-strip" title="Break model rollout monitor — ML_BREAK_THRESHOLD_OVERRIDE=15:0.94 active; F1/F7 risk filters enabled">
+                    <div class="ml-rollout-item">
+                        <span class="ml-rollout-label">Break Thr 15m</span>
+                        <span class="ml-rollout-value muted" id="ml-rollout-break-thr">--</span>
+                    </div>
+                    <div class="ml-rollout-item">
+                        <span class="ml-rollout-label">Break Prob</span>
+                        <span class="ml-rollout-value muted" id="ml-rollout-break-prob">--</span>
+                    </div>
+                    <div class="ml-rollout-item">
+                        <span class="ml-rollout-label">Break Signal</span>
+                        <span class="ml-rollout-value muted" id="ml-rollout-break-signal">--</span>
+                    </div>
+                    <div class="ml-rollout-item">
+                        <span class="ml-rollout-label" title="HIGH when break fires (always, since signal thr = high-conf thr = 0.94). Shows raw break prob when no break active.">Break Conf</span>
+                        <span class="ml-rollout-value muted" id="ml-rollout-confidence">--</span>
+                    </div>
+                    <div class="ml-rollout-item">
+                        <span class="ml-rollout-label" title="Break risk filters (F1: regime=4, F7: gamma_pos). BLOCKED = break suppressed. pass = filters active, no suppression.">Break Filter</span>
+                        <span class="ml-rollout-value muted" id="ml-rollout-filter">--</span>
+                    </div>
+                </div>
+
+                <!-- decision_meta: confidence tier + confluence caution -->
+                <div class="ml-confidence-row" id="ml-confidence-row" aria-label="Signal confidence tier"></div>
+                <span class="ml-confluence-caution" id="ml-confluence-caution" title="ML edge is weaker on stacked MTF confluence setups (+0.32 bps avg vs +2.85 bps on no-confluence). Treat signal as secondary filter only.">⚠ Stacked confluence — treat ML as secondary filter</span>
+
                 <div class="ml-horizon-grid">
                     <div class="ml-horizon-card">
                         <div class="ml-horizon-title">5m</div>
@@ -2387,7 +2849,7 @@
                             <span>Thr B: <span id="ml-thr-break-5m">--</span></span>
                         </div>
                     </div>
-                    <div class="ml-horizon-card">
+                    <div class="ml-horizon-card" id="ml-horizon-card-15m">
                         <div class="ml-horizon-title">15m</div>
                         <div class="ml-signal-label" id="ml-signal-15m">--</div>
                         <div class="ml-horizon-row" title="Probability that price will reject from this level within 15 minutes">Reject: <span id="ml-reject-15m">--</span></div>
@@ -2552,6 +3014,10 @@
                     <h3>Execution Insights</h3>
                     <div class="tablist" id="insight-tabs" role="tablist" aria-label="Execution insight sections">
                         <button class="tab-btn is-active" id="tab-levels" data-tab="levels" role="tab" aria-controls="panel-levels" aria-selected="true" type="button">Levels</button>
+                        <button class="tab-btn" id="tab-replay" data-tab="replay" role="tab" aria-controls="panel-replay" aria-selected="false" tabindex="-1" type="button">Replay</button>
+                        <button class="tab-btn" id="tab-research" data-tab="research" role="tab" aria-controls="panel-research" aria-selected="false" tabindex="-1" type="button">Research</button>
+                        <button class="tab-btn" id="tab-models" data-tab="models" role="tab" aria-controls="panel-models" aria-selected="false" tabindex="-1" type="button">Models</button>
+                        <button class="tab-btn" id="tab-governance" data-tab="governance" role="tab" aria-controls="panel-governance" aria-selected="false" tabindex="-1" type="button">Governance</button>
                         <button class="tab-btn" id="tab-gamma" data-tab="gamma" role="tab" aria-controls="panel-gamma" aria-selected="false" tabindex="-1" type="button">Gamma / Vol</button>
                         <button class="tab-btn" id="tab-ivoi" data-tab="ivoi" role="tab" aria-controls="panel-ivoi" aria-selected="false" tabindex="-1" type="button">IV / OI</button>
                         <button class="tab-btn" id="tab-ops" data-tab="ops" role="tab" aria-controls="panel-ops" aria-selected="false" tabindex="-1" type="button">Ops</button>
@@ -2603,6 +3069,745 @@
                     </div>
                 </section>
 
+                <section class="tab-panel" id="panel-replay" data-tab-panel="replay" role="tabpanel" aria-labelledby="tab-replay" hidden>
+                    <h4 class="subsection-title">Replay Workspace</h4>
+                    <div class="alerts">
+                        <div class="alert" id="replay-status">Replay status: choose a session or open a day from Research.</div>
+                        <div class="alert research-lineage" id="replay-lineage">Replay lineage: --</div>
+                    </div>
+                    <div class="replay-note">Replay is session-first. The chart remains the visual truth, while this workspace adds day-level research context by horizon, time bucket, level family, and best/worst event outcomes for the selected trading day.</div>
+                    <div class="stat-grid stat-grid-3">
+                        <div class="stat">
+                            <div class="stat-label">Replay Day</div>
+                            <div class="stat-value" id="replay-date">--</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Primary Horizon</div>
+                            <div class="stat-value" id="replay-horizon">--</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Rows</div>
+                            <div class="stat-value" id="replay-rows">--</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Avg Reject Net</div>
+                            <div class="stat-value" id="replay-avg">--</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Win Rate</div>
+                            <div class="stat-value" id="replay-win">--</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Avg MFE / MAE</div>
+                            <div class="stat-value" id="replay-mfe-mae">--</div>
+                        </div>
+                    </div>
+                    <h4 class="subsection-title">By Horizon</h4>
+                    <div class="table-wrap">
+                        <table class="levels-table">
+                            <thead>
+                                <tr>
+                                    <th>Horizon</th>
+                                    <th>Rows</th>
+                                    <th>Avg</th>
+                                    <th>Win</th>
+                                    <th>MFE</th>
+                                    <th>MAE</th>
+                                </tr>
+                            </thead>
+                            <tbody id="replay-horizon-body">
+                                <tr><td colspan="6" class="research-empty">Replay day metrics pending.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div class="explain-grid">
+                        <div class="explain-card">
+                            <div class="explain-title">Time Of Day</div>
+                            <div class="table-wrap">
+                                <table class="levels-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Bucket</th>
+                                            <th>Rows</th>
+                                            <th>Avg</th>
+                                            <th>Win</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="replay-tod-body">
+                                        <tr><td colspan="4" class="research-empty">Replay TOD breakdown pending.</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                        <div class="explain-card">
+                            <div class="explain-title">Level Family</div>
+                            <div class="table-wrap">
+                                <table class="levels-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Family</th>
+                                            <th>Rows</th>
+                                            <th>Avg</th>
+                                            <th>Win</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="replay-level-family-body">
+                                        <tr><td colspan="4" class="research-empty">Replay level-family breakdown pending.</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="explain-grid">
+                        <div class="explain-card">
+                            <div class="explain-title">Top Events</div>
+                            <div class="table-wrap">
+                                <table class="levels-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Time</th>
+                                            <th>Level</th>
+                                            <th>Avg</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="replay-top-events-body">
+                                        <tr><td colspan="3" class="research-empty">Replay event leaders pending.</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                        <div class="explain-card">
+                            <div class="explain-title">Worst Events</div>
+                            <div class="table-wrap">
+                                <table class="levels-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Time</th>
+                                            <th>Level</th>
+                                            <th>Avg</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="replay-worst-events-body">
+                                        <tr><td colspan="3" class="research-empty">Replay event misses pending.</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="tab-panel" id="panel-research" data-tab-panel="research" role="tabpanel" aria-labelledby="tab-research" hidden>
+                    <h4 class="subsection-title">Research Workspace</h4>
+                    <div class="alerts">
+                        <div class="alert" id="research-status">Research status: waiting for the first query.</div>
+                        <div class="alert research-lineage" id="research-lineage">Lineage: --</div>
+                    </div>
+                    <div class="research-filter-grid">
+                        <div class="control">
+                            <label for="research-date-from">Window Start</label>
+                            <input id="research-date-from" class="research-field" type="date">
+                        </div>
+                        <div class="control">
+                            <label for="research-date-to">Window End</label>
+                            <input id="research-date-to" class="research-field" type="date">
+                        </div>
+                        <div class="control">
+                            <label for="research-horizon">Horizon</label>
+                            <select id="research-horizon" class="research-field">
+                                <option value="15">15m</option>
+                                <option value="60">60m</option>
+                            </select>
+                        </div>
+                        <div class="control">
+                            <label for="research-regime">Regime Slice</label>
+                            <select id="research-regime" class="research-field">
+                                <option value="">All regimes</option>
+                            </select>
+                        </div>
+                        <div class="control">
+                            <label for="research-level-family">Level Family</label>
+                            <select id="research-level-family" class="research-field">
+                                <option value="">All level families</option>
+                            </select>
+                        </div>
+                        <div class="control">
+                            <label for="research-tod">Time of Day</label>
+                            <select id="research-tod" class="research-field">
+                                <option value="">All session buckets</option>
+                            </select>
+                        </div>
+                        <div class="control">
+                            <label for="research-confluence">Confluence</label>
+                            <select id="research-confluence" class="research-field">
+                                <option value="">All confluence</option>
+                            </select>
+                        </div>
+                        <div class="control">
+                            <label for="research-train-days">Train Days</label>
+                            <input id="research-train-days" class="research-field" type="number" min="20" step="5" value="180">
+                        </div>
+                        <div class="control">
+                            <label for="research-test-days">Test Days</label>
+                            <input id="research-test-days" class="research-field" type="number" min="5" step="5" value="20">
+                        </div>
+                        <div class="control">
+                            <label for="research-step-days">Step Days</label>
+                            <input id="research-step-days" class="research-field" type="number" min="1" step="1" value="20">
+                        </div>
+                        <div class="control research-actions">
+                            <label>Query Controls</label>
+                            <div class="control-actions-inline">
+                                <button id="research-run-btn" type="button">Run Research Pass</button>
+                                <button id="research-reset-btn" class="secondary-btn" type="button">Reset</button>
+                            </div>
+                            <div class="control-note" id="research-filter-note">Research results are sourced from the active DuckDB marts and always include lineage. Sprint 2 adds rolling walk-forward windows so promising slices are challenged out of sample immediately.</div>
+                        </div>
+                    </div>
+                    <div class="stat-grid stat-grid-3">
+                        <div class="stat">
+                            <div class="stat-label">Rows</div>
+                            <div class="stat-value" id="research-summary-rows">--</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Days</div>
+                            <div class="stat-value" id="research-summary-days">--</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Avg Reject Net</div>
+                            <div class="stat-value" id="research-summary-avg">--</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Win Rate</div>
+                            <div class="stat-value" id="research-summary-win">--</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Avg MFE</div>
+                            <div class="stat-value" id="research-summary-mfe">--</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Avg MAE</div>
+                            <div class="stat-value" id="research-summary-mae">--</div>
+                        </div>
+                    </div>
+                    <div class="explain-card">
+                        <div class="research-kicker">Research Charter</div>
+                        <div class="research-note">This workspace turns the historical DB into a slice explorer. The focus is not “one model must solve everything,” but whether a regime, level family, and horizon combination produces stable, cost-aware expectancy that survives closer scrutiny.</div>
+                    </div>
+                    <h4 class="subsection-title">Grouped Slice Results</h4>
+                    <div class="table-wrap">
+                        <table class="levels-table">
+                            <thead>
+                                <tr>
+                                    <th>Horizon</th>
+                                    <th>Regime</th>
+                                    <th>Level</th>
+                                    <th>TOD</th>
+                                    <th>Rows</th>
+                                    <th>Avg Net</th>
+                                    <th>Win Rate</th>
+                                </tr>
+                            </thead>
+                            <tbody id="research-groups-body">
+                                <tr>
+                                    <td colspan="7" class="research-empty">Waiting for metadata.</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <h4 class="subsection-title">Expectancy Map</h4>
+                    <div class="research-heatmap" id="research-heatmap">
+                        <div class="research-empty">Expectancy heatmap will appear after the first query.</div>
+                    </div>
+                    <h4 class="subsection-title">Walk-Forward Validation</h4>
+                    <div class="research-walkforward-note">This panel rolls the selected slice through ordered trading days using fixed train/test windows. It is meant to answer the institutional question directly: does the slice still work when time is advanced, or only in aggregate?</div>
+                    <div class="stat-grid stat-grid-3">
+                        <div class="stat">
+                            <div class="stat-label">Windows</div>
+                            <div class="stat-value" id="research-wf-windows">--</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Positive Windows</div>
+                            <div class="stat-value" id="research-wf-positive">--</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Mean Test Avg</div>
+                            <div class="stat-value" id="research-wf-mean-test">--</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Mean Test Win</div>
+                            <div class="stat-value" id="research-wf-mean-win">--</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Best Window</div>
+                            <div class="stat-value" id="research-wf-best">--</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Worst Window</div>
+                            <div class="stat-value" id="research-wf-worst">--</div>
+                        </div>
+                    </div>
+                    <div class="table-wrap">
+                        <table class="levels-table">
+                            <thead>
+                                <tr>
+                                    <th>Train Range</th>
+                                    <th>Test Range</th>
+                                    <th>Test Rows</th>
+                                    <th>Test Avg</th>
+                                    <th>Test Win</th>
+                                    <th>Positive Days</th>
+                                    <th>Replay</th>
+                                </tr>
+                            </thead>
+                            <tbody id="research-wf-body">
+                                <tr>
+                                    <td colspan="7" class="research-empty">Walk-forward results will appear after the first research pass.</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <h4 class="subsection-title">Cohort Drilldown</h4>
+                    <div class="research-walkforward-note">These tables rank the actual days behind the selected slice. Best and worst cohorts should be one click away from replay, so we can inspect whether a result comes from transferable behavior or a few unstable sessions.</div>
+                    <div class="explain-grid">
+                        <div class="explain-card">
+                            <div class="explain-title">Best Days</div>
+                            <div class="table-wrap">
+                                <table class="levels-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Date</th>
+                                            <th>Rows</th>
+                                            <th>Avg</th>
+                                            <th>Replay</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="research-best-days-body">
+                                        <tr><td colspan="4" class="research-empty">Best-day cohort pending.</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                        <div class="explain-card">
+                            <div class="explain-title">Worst Days</div>
+                            <div class="table-wrap">
+                                <table class="levels-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Date</th>
+                                            <th>Rows</th>
+                                            <th>Avg</th>
+                                            <th>Replay</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="research-worst-days-body">
+                                        <tr><td colspan="4" class="research-empty">Worst-day cohort pending.</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                        <div class="explain-card">
+                            <div class="explain-title">Recent Days</div>
+                            <div class="table-wrap">
+                                <table class="levels-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Date</th>
+                                            <th>Rows</th>
+                                            <th>Avg</th>
+                                            <th>Replay</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="research-recent-days-body">
+                                        <tr><td colspan="4" class="research-empty">Recent-day cohort pending.</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="tab-panel" id="panel-models" data-tab-panel="models" role="tabpanel" aria-labelledby="tab-models" hidden>
+                    <h4 class="subsection-title">Model Lab</h4>
+                    <div class="alerts">
+                        <div class="alert" id="models-status">Models status: loading registry on first open.</div>
+                        <div class="alert research-lineage" id="models-lineage">Model registry roots: --</div>
+                    </div>
+                    <div class="models-note">This workspace is read-only and artifact-first. It surfaces candidate model metadata, threshold guards, calibration, and utility diagnostics without mixing them into the live execution surface.</div>
+                    <div class="control-actions-inline" style="margin-bottom:16px;">
+                        <button id="models-open-research-btn" type="button">Open Tune Window in Research</button>
+                        <button id="models-open-replay-btn" class="secondary-btn" type="button">Open Tune End in Replay</button>
+                    </div>
+                    <div class="control" style="margin-bottom:16px;">
+                        <label for="models-review-note">Review Note</label>
+                        <div class="control-actions-inline">
+                            <input id="models-review-note" class="research-field" type="text" placeholder="Optional note for this committee snapshot">
+                            <button id="models-record-review-btn" type="button">Record Review Snapshot</button>
+                        </div>
+                        <div class="control-note">This writes an append-only review ledger entry with the current verdict, peer/baseline evidence, lineage, and optional note.</div>
+                    </div>
+                    <h4 class="subsection-title">Promotion Committee</h4>
+                    <div class="alerts">
+                        <div class="alert" id="models-decision-headline">Decision status: select a model to evaluate challenger rules.</div>
+                    </div>
+                    <div class="stat-grid stat-grid-3">
+                        <div class="stat">
+                            <div class="stat-label">Verdict</div>
+                            <div class="stat-value" id="models-decision-verdict">--</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Rules Passed</div>
+                            <div class="stat-value" id="models-decision-rules">--</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Peer Rank</div>
+                            <div class="stat-value" id="models-decision-rank">--</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Selected Utility</div>
+                            <div class="stat-value" id="models-decision-utility">--</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Window Delta</div>
+                            <div class="stat-value" id="models-decision-window-delta">--</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Regime Delta</div>
+                            <div class="stat-value" id="models-decision-regime-delta">--</div>
+                        </div>
+                    </div>
+                    <div class="table-wrap">
+                        <table class="levels-table">
+                            <thead>
+                                <tr>
+                                    <th>Rule</th>
+                                    <th>Outcome</th>
+                                    <th>Actual</th>
+                                    <th>Threshold</th>
+                                    <th>Why It Matters</th>
+                                </tr>
+                            </thead>
+                            <tbody id="models-decision-body">
+                                <tr><td colspan="5" class="research-empty">Select a model to evaluate the challenger ruleset.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <h4 class="subsection-title">Review Ledger</h4>
+                    <div class="control-actions-inline" style="margin-bottom:12px;">
+                        <select id="models-review-filter-verdict" class="research-field" style="max-width:180px;">
+                            <option value="">All verdicts</option>
+                            <option value="challenger_pass">challenger_pass</option>
+                            <option value="research_only">research_only</option>
+                            <option value="blocked">blocked</option>
+                        </select>
+                        <input id="models-review-filter-reviewer" class="research-field" type="text" placeholder="Filter reviewer">
+                        <button id="models-review-refresh-btn" class="secondary-btn" type="button">Refresh Ledger</button>
+                    </div>
+                    <div class="table-wrap">
+                        <table class="levels-table">
+                            <thead>
+                                <tr>
+                                    <th>Recorded</th>
+                                    <th>Version</th>
+                                    <th>Verdict</th>
+                                    <th>Rules</th>
+                                    <th>Reviewer</th>
+                                    <th>Note</th>
+                                    <th>Compare</th>
+                                </tr>
+                            </thead>
+                            <tbody id="models-review-body">
+                                <tr><td colspan="7" class="research-empty">No review snapshots recorded for the selected model yet.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <h4 class="subsection-title">Snapshot Compare</h4>
+                    <div class="stat-grid stat-grid-3">
+                        <div class="stat">
+                            <div class="stat-label">Snapshot A</div>
+                            <div class="stat-value" id="models-compare-a">--</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Snapshot B</div>
+                            <div class="stat-value" id="models-compare-b">--</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Verdict Changed</div>
+                            <div class="stat-value" id="models-compare-verdict">--</div>
+                        </div>
+                    </div>
+                    <div class="table-wrap">
+                        <table class="levels-table">
+                            <thead>
+                                <tr>
+                                    <th>Metric</th>
+                                    <th>Snapshot A</th>
+                                    <th>Snapshot B</th>
+                                    <th>Delta</th>
+                                </tr>
+                            </thead>
+                            <tbody id="models-compare-body">
+                                <tr><td colspan="4" class="research-empty">Choose two review snapshots to compare.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div class="stat-grid stat-grid-3">
+                        <div class="stat">
+                            <div class="stat-label">Selected Version</div>
+                            <div class="stat-value" id="models-selected-version">--</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Feature Version</div>
+                            <div class="stat-value" id="models-selected-feature">--</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Status</div>
+                            <div class="stat-value" id="models-selected-status">--</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Trained End</div>
+                            <div class="stat-value" id="models-selected-trained">--</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Tune Window</div>
+                            <div class="stat-value" id="models-selected-tune">--</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Guarded Pairs</div>
+                            <div class="stat-value" id="models-selected-guards">--</div>
+                        </div>
+                    </div>
+                    <h4 class="subsection-title">Benchmark Snapshot</h4>
+                    <div class="stat-grid stat-grid-3">
+                        <div class="stat">
+                            <div class="stat-label">Registry Rank</div>
+                            <div class="stat-value" id="models-benchmark-rank">--</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Peer Median Utility</div>
+                            <div class="stat-value" id="models-benchmark-peer-median">--</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Best Peer</div>
+                            <div class="stat-value" id="models-benchmark-best-peer">--</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Shadow Policies OK</div>
+                            <div class="stat-value" id="models-benchmark-shadow">--</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Suggested Horizon</div>
+                            <div class="stat-value" id="models-benchmark-horizon">--</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Suggested Regime</div>
+                            <div class="stat-value" id="models-benchmark-regime">--</div>
+                        </div>
+                    </div>
+                    <h4 class="subsection-title">Baseline Comparison</h4>
+                    <div class="models-note">These baselines come from the same research marts that power the Research workspace. They answer the institutional question directly: is the selected cohort better than simply taking the same window and horizon, with or without the model’s favored regime slice?</div>
+                    <div class="stat-grid stat-grid-3">
+                        <div class="stat">
+                            <div class="stat-label">Window Baseline</div>
+                            <div class="stat-value" id="models-baseline-window">--</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Regime Baseline</div>
+                            <div class="stat-value" id="models-baseline-regime">--</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Model Minus Regime</div>
+                            <div class="stat-value" id="models-baseline-delta">--</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Regime Rows</div>
+                            <div class="stat-value" id="models-baseline-rows">--</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Positive Regime Days</div>
+                            <div class="stat-value" id="models-baseline-days">--</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Baseline Symbol</div>
+                            <div class="stat-value" id="models-baseline-symbol">--</div>
+                        </div>
+                    </div>
+                    <h4 class="subsection-title">Model Registry</h4>
+                    <div class="table-wrap">
+                        <table class="levels-table">
+                            <thead>
+                                <tr>
+                                    <th>Version</th>
+                                    <th>Family</th>
+                                    <th>Trained</th>
+                                    <th>Status</th>
+                                    <th>Guarded</th>
+                                    <th>Mean Utility</th>
+                                    <th>Inspect</th>
+                                </tr>
+                            </thead>
+                            <tbody id="models-registry-body">
+                                <tr><td colspan="7" class="research-empty">Model registry pending.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <h4 class="subsection-title">Peer Benchmarks</h4>
+                    <div class="models-note">Peer benchmarks compare the selected artifact against every registry entry that exposes the same target and horizon. This keeps the lab honest: a model is only interesting if it improves on its peers and on the label-separation context implied by training stats.</div>
+                    <div class="table-wrap">
+                        <table class="levels-table">
+                            <thead>
+                                <tr>
+                                    <th>Target</th>
+                                    <th>Horizon</th>
+                                    <th>Global Rank</th>
+                                    <th>Sel Utility</th>
+                                    <th>Peer Median</th>
+                                    <th>Best Peer</th>
+                                    <th>Base Rate</th>
+                                    <th>Best Regime</th>
+                                </tr>
+                            </thead>
+                            <tbody id="models-benchmarks-body">
+                                <tr><td colspan="8" class="research-empty">Select a model to inspect peer benchmarks.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <h4 class="subsection-title">Research Slice Baselines</h4>
+                    <div class="table-wrap">
+                        <table class="levels-table">
+                            <thead>
+                                <tr>
+                                    <th>Target</th>
+                                    <th>Horizon</th>
+                                    <th>Baseline</th>
+                                    <th>Regime</th>
+                                    <th>Rows</th>
+                                    <th>Avg Net</th>
+                                    <th>Win Rate</th>
+                                    <th>Model Delta</th>
+                                </tr>
+                            </thead>
+                            <tbody id="models-baseline-body">
+                                <tr><td colspan="8" class="research-empty">Select a model to inspect research baselines.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <h4 class="subsection-title">Horizon Diagnostics</h4>
+                    <div class="table-wrap">
+                        <table class="levels-table">
+                            <thead>
+                                <tr>
+                                    <th>Target</th>
+                                    <th>Horizon</th>
+                                    <th>Calibration</th>
+                                    <th>Threshold</th>
+                                    <th>Signals</th>
+                                    <th>Precision</th>
+                                    <th>Utility Avg</th>
+                                    <th>Guard</th>
+                                </tr>
+                            </thead>
+                            <tbody id="models-diagnostics-body">
+                                <tr><td colspan="8" class="research-empty">Select a model to inspect diagnostics.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <h4 class="subsection-title">Shadow Policy Benchmarks</h4>
+                    <div class="table-wrap">
+                        <table class="levels-table">
+                            <thead>
+                                <tr>
+                                    <th>Policy</th>
+                                    <th>Side</th>
+                                    <th>Horizon</th>
+                                    <th>Status</th>
+                                    <th>Emits</th>
+                                    <th>Utility Avg</th>
+                                    <th>Positive Rate</th>
+                                    <th>Reason</th>
+                                </tr>
+                            </thead>
+                            <tbody id="models-shadow-body">
+                                <tr><td colspan="8" class="research-empty">Select a model to inspect shadow policy benchmarks.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+
+                <section class="tab-panel" id="panel-governance" data-tab-panel="governance" role="tabpanel" aria-labelledby="tab-governance" hidden>
+                    <h4 class="subsection-title">Governance Workspace</h4>
+                    <div class="alerts">
+                        <div class="alert" id="governance-status">Governance status: loading on first open.</div>
+                        <div class="alert research-lineage" id="governance-lineage">Governance lineage: --</div>
+                    </div>
+                    <div class="models-note">Governance is the formal bridge between artifact research and operational readiness. It keeps the candidate queue, committee history, and review freshness visible in one audited surface without mutating live execution state.</div>
+                    <div class="stat-grid stat-grid-3">
+                        <div class="stat">
+                            <div class="stat-label">Pending Review</div>
+                            <div class="stat-value" id="governance-pending-review">--</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Needs Refresh</div>
+                            <div class="stat-value" id="governance-needs-refresh">--</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Reviewed Models</div>
+                            <div class="stat-value" id="governance-reviewed-models">--</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Latest Verdict</div>
+                            <div class="stat-value" id="governance-latest-verdict">--</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Top Current Candidate</div>
+                            <div class="stat-value" id="governance-latest-candidate">--</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Coverage</div>
+                            <div class="stat-value" id="governance-coverage">--</div>
+                        </div>
+                    </div>
+                    <h4 class="subsection-title">Candidate Queue</h4>
+                    <div class="models-note">The queue is ordered for committee work: unreviewed and stale-review artifacts rise to the top, then reviewed challengers, then blocked entries. Every row is linked back to Models, Research, and Replay for forensic follow-through.</div>
+                    <div class="table-wrap">
+                        <table class="levels-table">
+                            <thead>
+                                <tr>
+                                    <th>Version</th>
+                                    <th>Status</th>
+                                    <th>Review State</th>
+                                    <th>Pref Horizon</th>
+                                    <th>Sel Utility</th>
+                                    <th>Peer Rank</th>
+                                    <th>Reviewed</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="governance-queue-body">
+                                <tr><td colspan="8" class="research-empty">Governance queue pending.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <h4 class="subsection-title">Latest Committee Activity</h4>
+                    <div class="table-wrap">
+                        <table class="levels-table">
+                            <thead>
+                                <tr>
+                                    <th>Recorded</th>
+                                    <th>Version</th>
+                                    <th>Verdict</th>
+                                    <th>Rules</th>
+                                    <th>Reviewer</th>
+                                    <th>Note</th>
+                                    <th>Open</th>
+                                </tr>
+                            </thead>
+                            <tbody id="governance-reviews-body">
+                                <tr><td colspan="7" class="research-empty">Committee history pending.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+
                 <section class="tab-panel" id="panel-gamma" data-tab-panel="gamma" role="tabpanel" aria-labelledby="tab-gamma" hidden>
                     <h4 class="subsection-title">Gamma / Vol Signals</h4>
                     <div class="signal-grid">
@@ -2642,11 +3847,15 @@
                         <div class="signal-item" id="ops-host-status" title="Host health status from disk, DB growth, and launchd checks"><strong>Host Health</strong>--</div>
                         <div class="signal-item" id="ops-report-alerts" title="Daily report notification channel health"><strong>Report Alerts</strong>--</div>
                         <div class="signal-item" id="ops-immediate-alerts" title="Immediate ML/collector alert channel health"><strong>Immediate Alerts</strong>--</div>
+                        <div class="signal-item" id="ops-model-review-status" title="Latest committee verdict recorded in the append-only review ledger"><strong>Model Review</strong>--</div>
+                        <div class="signal-item" id="ops-model-reviewed-candidate" title="Whether the top current registry candidate has been formally reviewed"><strong>Top Candidate Review</strong>--</div>
+                        <div class="signal-item" id="ops-model-review-coverage" title="Review ledger breadth across recorded models"><strong>Review Coverage</strong>--</div>
                     </div>
                     <div class="alerts">
                         <div class="alert" id="ops-backup-note">Backup note: --</div>
                         <div class="alert" id="ops-drill-note">Drill note: --</div>
                         <div class="alert" id="ops-alert-note">Alert note: --</div>
+                        <div class="alert" id="ops-model-note">Model governance note: --</div>
                     </div>
                 </section>
 
@@ -2662,6 +3871,13 @@
         <footer class="app-footer">Created by Tristan Alejandro | Not financial Advice.</footer>
     </div>
 
+    <script src="/app/shared/dashboard_runtime.js"></script>
+    <script src="/app/shared/workspace_requests.js"></script>
+    <script src="/app/research/index.js"></script>
+    <script src="/app/models/index.js"></script>
+    <script src="/app/governance/index.js"></script>
+    <script src="/app/replay/index.js"></script>
+    <script src="/app/ops/index.js"></script>
     <script>
         const UI_DEFAULTS = Object.freeze({
             range: '3mo',
@@ -2779,10 +3995,67 @@
             mlHealthTimer: null,
             collectorHealthTimer: null,
             opsStatus: null,
+            opsModelGovernance: null,
             opsStatusTimer: null,
             debugEnabled: false,
             debugMessage: '',
             activeInsightTab: 'levels',
+            pendingReplayDate: null,
+            replay: {
+                loading: false,
+                date: null,
+                payload: null,
+                lastError: '',
+            },
+            models: {
+                initialized: false,
+                loading: false,
+                workspaceRequestSeq: 0,
+                registryRequestSeq: 0,
+                diagnosticsRequestSeq: 0,
+                reviewLogRequestSeq: 0,
+                reviewCompareRequestSeq: 0,
+                registry: [],
+                selectedId: '',
+                diagnostics: null,
+                benchmarks: null,
+                baselineCompare: null,
+                decision: null,
+                reviewLog: [],
+                reviewCompare: null,
+                reviewFilters: {
+                    verdict: '',
+                    reviewer: '',
+                },
+                selectedReviewA: '',
+                selectedReviewB: '',
+                lastError: '',
+                roots: [],
+            },
+            governance: {
+                initialized: false,
+                loading: false,
+                requestSeq: 0,
+                summary: null,
+                queue: [],
+                latestReviews: [],
+                lineage: null,
+                lastError: '',
+            },
+            research: {
+                initialized: false,
+                loading: false,
+                metadataRequestSeq: 0,
+                queryRequestSeq: 0,
+                workspaceRequestSeq: 0,
+                metadata: null,
+                summary: null,
+                groups: [],
+                heatmap: [],
+                walkforward: null,
+                drilldown: null,
+                lastError: '',
+            },
             uiVisibility: {
                 pivots: true,
                 gammaWalls: true,
@@ -2812,6 +4085,141 @@
             lastEmaWarmupBars: 0,
             lastEmaVisibleBars: 0,
         };
+        const dashboardRuntime = window.PQDashboardRuntime;
+        const workspaceRequests = window.PQWorkspaceRequests;
+        if (!dashboardRuntime || typeof dashboardRuntime.getApiOrigin !== 'function') {
+            throw new Error('Dashboard runtime helpers failed to load');
+        }
+        if (
+            !workspaceRequests
+            || typeof workspaceRequests.beginWorkspaceRequest !== 'function'
+            || typeof workspaceRequests.isWorkspaceRequestCurrent !== 'function'
+        ) {
+            throw new Error('Workspace request helpers failed to load');
+        }
+        const researchWorkspaceFactory = window.PQResearchWorkspace;
+        const modelsWorkspaceFactory = window.PQModelsWorkspace;
+        const governanceWorkspaceFactory = window.PQGovernanceWorkspace;
+        const replayWorkspaceFactory = window.PQReplayWorkspace;
+        const opsWorkspaceFactory = window.PQOpsWorkspace;
+        if (!researchWorkspaceFactory || typeof researchWorkspaceFactory.createResearchWorkspace !== 'function') {
+            throw new Error('Research workspace module failed to load');
+        }
+        if (!modelsWorkspaceFactory || typeof modelsWorkspaceFactory.createModelsWorkspace !== 'function') {
+            throw new Error('Models workspace module failed to load');
+        }
+        if (!governanceWorkspaceFactory || typeof governanceWorkspaceFactory.createGovernanceWorkspace !== 'function') {
+            throw new Error('Governance workspace module failed to load');
+        }
+        if (!replayWorkspaceFactory || typeof replayWorkspaceFactory.createReplayWorkspace !== 'function') {
+            throw new Error('Replay workspace module failed to load');
+        }
+        if (!opsWorkspaceFactory || typeof opsWorkspaceFactory.createOpsWorkspace !== 'function') {
+            throw new Error('Ops workspace module failed to load');
+        }
+
+        const { getApiOrigin } = dashboardRuntime;
+        const beginWorkspaceRequest = (workspaceKey, counterKey = 'requestSeq') =>
+            workspaceRequests.beginWorkspaceRequest(state, workspaceKey, counterKey);
+        const isWorkspaceRequestCurrent = (workspaceKey, requestSeq, counterKey = 'requestSeq') =>
+            workspaceRequests.isWorkspaceRequestCurrent(state, workspaceKey, requestSeq, counterKey);
+
+        let activateInsightTabByName = null;
+        let replayWorkspaceApi = null;
+        let opsWorkspaceApi = null;
+        const openResearchReplayDate = (...args) => replayWorkspaceApi?.openResearchReplayDate(...args);
+        const loadReplayDay = (...args) => replayWorkspaceApi?.loadReplayDay(...args);
+        const loadOpsStatus = (...args) => opsWorkspaceApi?.loadOpsStatus(...args);
+        const researchWorkspace = researchWorkspaceFactory.createResearchWorkspace({
+            state,
+            fetchJson,
+            postJson,
+            beginWorkspaceRequest,
+            isWorkspaceRequestCurrent,
+            setResearchStatus,
+            showToast,
+            escapeHtml,
+            formatNumber,
+            formatPercent,
+            fillSelectOptions,
+            subtractDays,
+            openResearchReplayDate,
+            getActivateInsightTabByName: () => activateInsightTabByName,
+        });
+        const {
+            bindResearchDomEvents,
+            loadResearchMetadata,
+            runResearchSliceQuery,
+            loadResearchWorkspace,
+            resetResearchFilters,
+            openModelResearchContext,
+            openGovernanceResearchContext,
+        } = researchWorkspace;
+        const modelsWorkspace = modelsWorkspaceFactory.createModelsWorkspace({
+            state,
+            fetchJson,
+            postJson,
+            beginWorkspaceRequest,
+            isWorkspaceRequestCurrent,
+            setModelsStatus,
+            showToast,
+            escapeHtml,
+            formatNumber,
+            formatPercent,
+            openModelResearchContext,
+            openResearchReplayDate,
+            requestOpsRefresh: () => {
+                state.governance.initialized = false;
+                void loadOpsStatus();
+            },
+        });
+        const {
+            bindModelDomEvents,
+            loadModelsWorkspace,
+            loadModelDiagnostics,
+            loadModelReviewLog,
+            openModelReplayContext,
+        } = modelsWorkspace;
+        const governanceWorkspace = governanceWorkspaceFactory.createGovernanceWorkspace({
+            state,
+            fetchJson,
+            beginWorkspaceRequest,
+            isWorkspaceRequestCurrent,
+            setGovernanceStatus,
+            showToast,
+            escapeHtml,
+            formatNumber,
+            openGovernanceResearchContext,
+            openResearchReplayDate,
+            getActivateInsightTabByName: () => activateInsightTabByName,
+            getLoadModelsWorkspace: () => loadModelsWorkspace,
+        });
+        const {
+            bindGovernanceDomEvents,
+            loadGovernanceWorkspace,
+            openGovernanceModelContext,
+        } = governanceWorkspace;
+        replayWorkspaceApi = replayWorkspaceFactory.createReplayWorkspace({
+            state,
+            postJson,
+            showToast,
+            escapeHtml,
+            formatNumber,
+            formatPercent,
+            renderForSession: (...args) => renderForSession(...args),
+            saveUiPrefs: (...args) => saveUiPrefs(...args),
+            updateAdvancedControlsSummary: (...args) => updateAdvancedControlsSummary(...args),
+            loadMarketData: (...args) => loadMarketData(...args),
+        });
+        opsWorkspaceApi = opsWorkspaceFactory.createOpsWorkspace({
+            state,
+            fetchJson,
+            getApiOrigin,
+            setLabeledText: (...args) => setLabeledText(...args),
+            clipText: (...args) => clipText(...args),
+            updateMlDecisionTrace: (...args) => updateMlDecisionTrace(...args),
+            updateSystemStrip: (...args) => updateSystemStrip(...args),
+        });
 
         // ── Toast Notification System ──
         const TOAST_ICONS = { info: 'ℹ️', success: '✅', warning: '⚠️', error: '❌' };
@@ -2949,9 +4357,20 @@
         const INTRADAY_INTERVALS = new Set(['1m', '5m', '15m', '30m', '60m', '90m']);
         const ML_SUPPORTED_SYMBOLS = new Set(['SPY']);
         const GAMMA_EXPIRY_MODES = new Set(['90dte', 'aggregate_90dte']);
-        const EMA_WARMUP_RANGE = '5y';
         const EMA_MAX_PERIOD = 200;
         const EMA_WARMUP_MIN_BARS = EMA_MAX_PERIOD * 3;
+        const EMA_WARMUP_RANGE_BY_INTERVAL = Object.freeze({
+            '1d': '5y',
+            daily: '5y',
+            '1wk': '10y',
+            '1mo': 'max',
+        });
+        const EMA_WARMUP_MIN_BARS_BY_INTERVAL = Object.freeze({
+            '1d': EMA_WARMUP_MIN_BARS,
+            daily: EMA_WARMUP_MIN_BARS,
+            '1wk': EMA_MAX_PERIOD * 2,
+            '1mo': EMA_MAX_PERIOD,
+        });
         const EMA_WARMUP_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
         const INTRADAY_RANGE_CAP = {
             '5m': '1mo',
@@ -2980,22 +4399,22 @@
             return rangeIdx > capIdx ? maxRange : range;
         }
 
-        const formatNumber = (value, digits = 2) => {
+        function formatNumber(value, digits = 2) {
             if (!Number.isFinite(value)) return '--';
             return Number(value).toFixed(digits);
-        };
+        }
 
-        const formatPercent = (value, digits = 2) => {
+        function formatPercent(value, digits = 2) {
             if (!Number.isFinite(value)) return '--';
             return `${value.toFixed(digits)}%`;
-        };
+        }
 
-        const formatDateTime = (epochMs) => {
+        function formatDateTime(epochMs) {
             if (!Number.isFinite(epochMs)) return '--';
             const date = new Date(epochMs);
             if (Number.isNaN(date.getTime())) return '--';
             return date.toLocaleString('en-US', { timeZone: state.timeZone, hour12: false });
-        };
+        }
 
         function getCryptoApi() {
             if (typeof globalThis !== 'undefined' && globalThis.crypto) {
@@ -3059,13 +4478,6 @@
 
         const ML_CACHE_MAX = 200;
         installRandomUuidPolyfill();
-
-        function getApiOrigin(port = 3000) {
-            const raw = window.location.origin;
-            if (!raw || raw === 'null') return `http://127.0.0.1:${port}`;
-            if (port === 3000) return raw;
-            return raw.replace(/:\d+$/, '') + `:${port}`;
-        }
 
         const loadScript = (src) => new Promise((resolve, reject) => {
             const script = document.createElement('script');
@@ -3249,7 +4661,8 @@
             const panels = Array.from(document.querySelectorAll('[data-tab-panel]'));
             if (!tabs.length || !panels.length) return;
 
-            const activateTab = (tabName, shouldFocus = false) => {
+            const activateTab = (tabName, shouldFocus = false, options = {}) => {
+                const triggerLoad = options?.triggerLoad !== false;
                 state.activeInsightTab = tabName;
                 tabs.forEach((tab) => {
                     const active = tab.dataset.tab === tabName;
@@ -3265,6 +4678,23 @@
                     const active = panel.dataset.tabPanel === tabName;
                     panel.hidden = !active;
                 });
+
+                if (!triggerLoad) {
+                    return;
+                }
+
+                if (tabName === 'replay') {
+                    loadReplayDay();
+                }
+                if (tabName === 'research') {
+                    loadResearchWorkspace();
+                }
+                if (tabName === 'models') {
+                    loadModelsWorkspace();
+                }
+                if (tabName === 'governance') {
+                    loadGovernanceWorkspace();
+                }
             };
 
             tabs.forEach((tab, index) => {
@@ -3286,6 +4716,7 @@
                 });
             });
 
+            activateInsightTabByName = (tabName, options = {}) => activateTab(tabName, Boolean(options?.shouldFocus), options);
             activateTab(state.activeInsightTab || tabs[0].dataset.tab);
         }
 
@@ -3483,7 +4914,7 @@
             if (state.lastPlaybook && state.lastPlaybook !== '--') rationaleParts.push(state.lastPlaybook);
             if (nearest) rationaleParts.push(`nearest ${nearest.label} ${formatPercent(nearest.distance)}`);
             if (state.lastGammaDrivers && state.lastGammaDrivers !== '--') rationaleParts.push(state.lastGammaDrivers);
-            const rationale = rationaleParts.length ? rationaleParts.join(' · ') : '--';
+            const rationale = rationaleParts.length ? rationaleParts.join(' · ') : 'No active signal';
 
             const supports = levels.filter((level) => level.type === 'support').sort((a, b) => b.strength - a.strength);
             const resistances = levels.filter((level) => level.type === 'resistance').sort((a, b) => b.strength - a.strength);
@@ -3773,18 +5204,24 @@
             );
 
             const emaMethod = String(state.lastEmaMethod || '--');
-            const emaMethodLabel = emaMethod === 'daily_warmup_merged'
-                ? 'TV seed + 5Y warmup'
+            const emaMethodLabel = emaMethod.endsWith('_warmup_merged')
+                ? `TV seed + ${getEmaWarmupRange(state.interval).toUpperCase()} warmup`
                 : emaMethod === 'daily_visible_seed'
                     ? 'TV seed (daily visible)'
-                    : emaMethod === 'intraday_visible_seed'
-                        ? 'TV seed (intraday)'
-                        : '--';
+                    : emaMethod === 'weekly_visible_seed'
+                        ? 'TV seed (weekly visible)'
+                        : emaMethod === 'monthly_visible_seed'
+                            ? 'TV seed (monthly visible)'
+                            : emaMethod === 'intraday_visible_seed'
+                                ? 'TV seed (intraday)'
+                                : '--';
             const emaVisibleBars = Number(state.lastEmaVisibleBars);
             const emaWarmupBars = Number(state.lastEmaWarmupBars);
-            const emaNeedsWarmup = isDailyInterval(state.interval) && emaVisibleBars > 0 && emaVisibleBars < EMA_WARMUP_MIN_BARS;
+            const emaNeedsWarmup = shouldUseEmaWarmup(state.interval)
+                && emaVisibleBars > 0
+                && emaVisibleBars < getEmaWarmupMinBars(state.interval);
             let emaTone = 'ok';
-            if (emaNeedsWarmup && emaMethod !== 'daily_warmup_merged') {
+            if (emaNeedsWarmup && !emaMethod.endsWith('_warmup_merged')) {
                 emaTone = 'warn';
             }
             setTransparencyItem(
@@ -4064,6 +5501,45 @@
                 : `Refresh: manual · last ${formatRefreshClock(state.lastRefreshAt)}`;
             setSystemPill('sys-refresh', refreshLabel, autoSec > 0 ? 'ok' : '');
             updateTransparencyStrip();
+            updateHeaderDataState();
+        }
+
+        function updateHeaderDataState() {
+            const el   = document.getElementById('header-data-state');
+            const text = el && el.querySelector('.hds-text');
+            if (!el || !text) return;
+
+            const mlOffline        = state.mlServiceStatus        === 'offline';
+            const collectorOffline = state.collectorServiceStatus === 'offline';
+            const lastBar          = state.lastBarTs;
+            const freshnessWindowMs = isIntradayInterval(state.interval)
+                ? 15 * 60 * 1000
+                : 36 * 60 * 60 * 1000;
+
+            let s, label;
+            if (!lastBar && !state.lastRefreshAt) {
+                s = 'starting'; label = 'STARTING';
+            } else if (mlOffline && collectorOffline) {
+                s = 'disconnected'; label = 'DISCONNECTED';
+            } else if (!Number.isFinite(lastBar)) {
+                // Have a refresh time but no bar yet
+                s = 'stale'; label = 'NO DATA';
+            } else {
+                const age = Date.now() - lastBar;
+                if (age <= freshnessWindowMs) {
+                    // Show a short age when recent (≤ 90s use seconds, else minutes)
+                    const ageLabel = age < 90_000
+                        ? `${Math.round(age / 1000)}s`
+                        : `${Math.round(age / 60_000)}m`;
+                    s = 'live'; label = `LIVE  ·  ${ageLabel}`;
+                } else {
+                    const mins = Math.round(age / 60_000);
+                    const ageLabel = mins < 60 ? `${mins}m` : `${Math.round(mins / 60)}h`;
+                    s = 'stale'; label = `STALE  ·  ${ageLabel}`;
+                }
+            }
+            el.setAttribute('data-state', s);
+            text.textContent = label;
         }
 
         function updateRefreshMeta() {
@@ -4588,6 +6064,18 @@
 
         function isDailyInterval(interval) {
             return interval === '1d' || interval === 'daily';
+        }
+
+        function shouldUseEmaWarmup(interval) {
+            return Object.prototype.hasOwnProperty.call(EMA_WARMUP_RANGE_BY_INTERVAL, interval);
+        }
+
+        function getEmaWarmupRange(interval) {
+            return EMA_WARMUP_RANGE_BY_INTERVAL[interval] || '5y';
+        }
+
+        function getEmaWarmupMinBars(interval) {
+            return EMA_WARMUP_MIN_BARS_BY_INTERVAL[interval] || EMA_WARMUP_MIN_BARS;
         }
 
         function clipSeriesToCandles(series, candles) {
@@ -5274,6 +6762,9 @@
                 state.resizeChartToContainer();
             }
             updateDecisionStrip();
+            if (state.activeInsightTab === 'replay' || state.pendingReplayDate) {
+                void loadReplayDay(true);
+            }
 
             void maybeLogTouches(levels, state.referencePrice);
         }
@@ -6122,6 +7613,77 @@
             }
         }
 
+        function escapeHtml(value) {
+            return String(value ?? '')
+                .replaceAll('&', '&amp;')
+                .replaceAll('<', '&lt;')
+                .replaceAll('>', '&gt;')
+                .replaceAll('"', '&quot;')
+                .replaceAll("'", '&#39;');
+        }
+
+        function subtractDays(ymd, days) {
+            if (!ymd) return '';
+            const date = new Date(`${ymd}T00:00:00Z`);
+            if (Number.isNaN(date.getTime())) return ymd;
+            date.setUTCDate(date.getUTCDate() - days);
+            return date.toISOString().slice(0, 10);
+        }
+
+        function fillSelectOptions(id, values, emptyLabel) {
+            const select = document.getElementById(id);
+            if (!select) return;
+            const currentValue = String(select.value || '');
+            select.innerHTML = '';
+            const emptyOption = document.createElement('option');
+            emptyOption.value = '';
+            emptyOption.textContent = emptyLabel;
+            select.appendChild(emptyOption);
+            (values || []).forEach((value) => {
+                if (value == null || String(value).trim() === '') return;
+                const option = document.createElement('option');
+                option.value = String(value);
+                option.textContent = String(value);
+                select.appendChild(option);
+            });
+            if (Array.from(select.options).some((option) => option.value === currentValue)) {
+                select.value = currentValue;
+            }
+        }
+
+        function setResearchStatus(message, tone = '') {
+            const el = document.getElementById('research-status');
+            if (!el) return;
+            el.textContent = message || 'Research status: --';
+            el.style.color = tone === 'error'
+                ? 'var(--danger)'
+                : tone === 'warn'
+                    ? 'var(--warning)'
+                    : '';
+        }
+
+        function setModelsStatus(message, tone = '') {
+            const el = document.getElementById('models-status');
+            if (!el) return;
+            el.textContent = message || 'Models status: --';
+            el.style.color = tone === 'error'
+                ? 'var(--danger)'
+                : tone === 'warn'
+                    ? 'var(--warning)'
+                    : '';
+        }
+
+        function setGovernanceStatus(message, tone = '') {
+            const el = document.getElementById('governance-status');
+            if (!el) return;
+            el.textContent = message || 'Governance status: --';
+            el.style.color = tone === 'error'
+                ? 'var(--danger)'
+                : tone === 'warn'
+                    ? 'var(--warning)'
+                    : '';
+        }
+
         function formatYmd(epochSeconds, timeZone) {
             const date = new Date(epochSeconds * 1000);
             const formatter = new Intl.DateTimeFormat('en-CA', {
@@ -6134,7 +7696,48 @@
             return `${parts.year}-${parts.month}-${parts.day}`;
         }
 
-        function normalizeYahooPayload(payload, requestedSymbol, yahooSymbol) {
+        function yahooCandlePeriodKey(epochSeconds, interval, timeZone) {
+            const ymd = formatYmd(epochSeconds, timeZone);
+            const [year, month, day] = ymd.split('-').map((v) => Number(v));
+            if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) {
+                return String(epochSeconds);
+            }
+            if (interval === '1mo') {
+                return `${year}-${String(month).padStart(2, '0')}`;
+            }
+            if (interval === '1wk') {
+                const date = new Date(Date.UTC(year, month - 1, day));
+                const weekday = date.getUTCDay() || 7;
+                date.setUTCDate(date.getUTCDate() - weekday + 1);
+                return date.toISOString().slice(0, 10);
+            }
+            return String(epochSeconds);
+        }
+
+        function normalizeYahooCandlesForInterval(candles, interval, timeZone) {
+            if (interval !== '1wk' && interval !== '1mo') {
+                return candles;
+            }
+            const byPeriod = new Map();
+            for (const candle of candles || []) {
+                const key = yahooCandlePeriodKey(candle.time, interval, timeZone);
+                const existing = byPeriod.get(key);
+                if (!existing) {
+                    byPeriod.set(key, { ...candle });
+                    continue;
+                }
+                // Yahoo may append a latest quote inside the active weekly/monthly
+                // period. Merge it so EMAs do not double-count the same period.
+                existing.high = Math.max(existing.high, candle.high);
+                existing.low = Math.min(existing.low, candle.low);
+                existing.close = candle.close;
+                existing.volume = (existing.volume || 0) + (candle.volume || 0);
+                existing.time = Math.min(existing.time, candle.time);
+            }
+            return Array.from(byPeriod.values()).sort((a, b) => a.time - b.time);
+        }
+
+        function normalizeYahooPayload(payload, requestedSymbol, yahooSymbol, interval = '1d') {
             const result = payload?.chart?.result?.[0];
             if (!result) throw new Error('Invalid Yahoo response');
 
@@ -6178,9 +7781,10 @@
                 isLastSessionComplete = now >= regularEnd;
             }
 
-            const lastIndex = candles.length - 1;
+            const normalizedCandles = normalizeYahooCandlesForInterval(candles, interval, timeZone);
+            const lastIndex = normalizedCandles.length - 1;
             let usedIndex = lastIndex;
-            const lastDate = formatYmd(candles[lastIndex].time, timeZone);
+            const lastDate = formatYmd(normalizedCandles[lastIndex].time, timeZone);
             const todayDate = formatYmd(now, timeZone);
 
             if (!isLastSessionComplete && lastIndex > 0 && lastDate === todayDate) {
@@ -6193,12 +7797,12 @@
                 currency: meta.currency || 'USD',
                 exchangeName: meta.exchangeName || 'UNKNOWN',
                 marketState: meta.marketState || 'UNKNOWN',
-                currentPrice: meta.regularMarketPrice || candles[lastIndex].close,
-                previousClose: meta.previousClose || candles[Math.max(0, lastIndex - 1)].close,
-                candles,
+                currentPrice: meta.regularMarketPrice || normalizedCandles[lastIndex].close,
+                previousClose: meta.previousClose || normalizedCandles[Math.max(0, lastIndex - 1)].close,
+                candles: normalizedCandles,
                 session: {
                     usedIndex,
-                    usedDate: formatYmd(candles[usedIndex].time, timeZone),
+                    usedDate: formatYmd(normalizedCandles[usedIndex].time, timeZone),
                     isLastSessionComplete,
                     timeZone,
                 },
@@ -6234,7 +7838,7 @@
                         throw new Error('Yahoo proxy returned no data');
                     }
 
-                    const normalized = normalizeYahooPayload(payload, symbol, yahooSymbol);
+                    const normalized = normalizeYahooPayload(payload, symbol, yahooSymbol, interval);
                     normalized.fetch = { fromCache: false, attempts: attempt };
                     return normalized;
                 } catch (error) {
@@ -6406,9 +8010,32 @@
             return normalizeDailyCandles(merged, timeZone);
         }
 
+        function mergeCandlesByTime(visibleCandles, warmupCandles) {
+            const byTime = new Map();
+            for (const candle of warmupCandles || []) {
+                const ts = Number(candle?.time);
+                if (!Number.isFinite(ts)) continue;
+                byTime.set(ts, candle);
+            }
+            for (const candle of visibleCandles || []) {
+                const ts = Number(candle?.time);
+                if (!Number.isFinite(ts)) continue;
+                byTime.set(ts, candle);
+            }
+            return Array.from(byTime.values()).sort((a, b) => Number(a.time) - Number(b.time));
+        }
+
+        function mergeWarmupCandlesForInterval(visibleCandles, warmupCandles, interval, timeZone) {
+            if (isDailyInterval(interval)) {
+                return mergeDailyCandles(visibleCandles, warmupCandles, timeZone);
+            }
+            return mergeCandlesByTime(visibleCandles, warmupCandles);
+        }
+
         async function fetchEmaWarmupCandles(symbol, interval, options = {}, isStaleRequest = null) {
-            if (!isDailyInterval(interval)) return [];
-            const cacheKey = `${String(symbol || '').toUpperCase()}|${interval}|${EMA_WARMUP_RANGE}`;
+            if (!shouldUseEmaWarmup(interval)) return [];
+            const warmupRange = getEmaWarmupRange(interval);
+            const cacheKey = `${String(symbol || '').toUpperCase()}|${interval}|${warmupRange}`;
             const cacheAgeMs = Date.now() - Number(state.emaWarmupFetchedAtMs || 0);
             if (
                 state.emaWarmupKey === cacheKey
@@ -6422,17 +8049,17 @@
 
             let data = null;
             try {
-                data = await fetchIbkrMarket(symbol, interval, EMA_WARMUP_RANGE, options);
+                data = await fetchIbkrMarket(symbol, interval, warmupRange, options);
                 if (typeof isStaleRequest === 'function' && isStaleRequest()) return [];
                 if (!data?.candles?.length) {
                     throw new Error('IBKR warmup data unavailable');
                 }
             } catch (error) {
                 console.warn('IBKR EMA warmup fetch failed, falling back to dashboard market API', error);
-                data = await fetchDashboardMarket(symbol, interval, EMA_WARMUP_RANGE, options);
+                data = await fetchDashboardMarket(symbol, interval, warmupRange, options);
                 if (typeof isStaleRequest === 'function' && isStaleRequest()) return [];
                 if (!data?.candles?.length) {
-                    data = await fetchYahooWithBackoff(symbol, EMA_WARMUP_RANGE, interval, 4, options);
+                    data = await fetchYahooWithBackoff(symbol, warmupRange, interval, 4, options);
                     if (typeof isStaleRequest === 'function' && isStaleRequest()) return [];
                 }
             }
@@ -6441,7 +8068,11 @@
             if (!warmupCandles.length) return [];
 
             const timeZone = data?.session?.timeZone || state.timeZone || 'America/New_York';
-            const normalized = normalizeDailyCandles(warmupCandles, timeZone);
+            const normalized = isDailyInterval(interval)
+                ? normalizeDailyCandles(warmupCandles, timeZone)
+                : warmupCandles
+                    .filter((candle) => Number.isFinite(Number(candle?.time)))
+                    .sort((a, b) => Number(a.time) - Number(b.time));
             if (!normalized.length) return [];
 
             state.emaWarmupKey = cacheKey;
@@ -7347,128 +8978,6 @@
             }
         }
 
-        function formatOpsAge(mins) {
-            if (!Number.isFinite(mins) || mins < 0) return '--';
-            if (mins < 60) return `${Math.round(mins)}m ago`;
-            const hours = mins / 60;
-            if (hours < 48) return `${hours.toFixed(1)}h ago`;
-            return `${(hours / 24).toFixed(1)}d ago`;
-        }
-
-        function setOpsField(id, label, value) {
-            setLabeledText(id, label, value ?? '--');
-        }
-
-        function updateOpsPanel(payload) {
-            state.opsStatus = payload || null;
-
-            if (!payload) {
-                setOpsField('ops-backup-age', 'Backup Age', '--');
-                setOpsField('ops-backup-status', 'Backup Status', '--');
-                setOpsField('ops-drill-status', 'Restore Drill', '--');
-                setOpsField('ops-host-status', 'Host Health', '--');
-                setOpsField('ops-report-alerts', 'Report Alerts', '--');
-                setOpsField('ops-immediate-alerts', 'Immediate Alerts', '--');
-                const backupNote = document.getElementById('ops-backup-note');
-                if (backupNote) backupNote.textContent = 'Backup note: --';
-                const drillNote = document.getElementById('ops-drill-note');
-                if (drillNote) drillNote.textContent = 'Drill note: --';
-                const alertNote = document.getElementById('ops-alert-note');
-                if (alertNote) alertNote.textContent = 'Alert note: --';
-                updateMlDecisionTrace(state.lastMlScore);
-                updateSystemStrip();
-                return;
-            }
-
-            const backup = payload.backup || {};
-            const drill = payload.restore_drill || {};
-            const fullDrill = payload.full_restore_drill || {};
-            const host = payload.host_health || {};
-            const slo = payload.slo || {};
-            const release = payload.release || {};
-            const audit = payload.audit || {};
-            const predictionLog = payload.prediction_log || {};
-            const predictionAlerts = predictionLog.alerts || {};
-            const alerts = payload.alerts || {};
-            const reportAlerts = alerts.daily_report || {};
-            const immediateAlerts = alerts.immediate || {};
-
-            setOpsField('ops-backup-age', 'Backup Age', formatOpsAge(Number(backup.age_min)));
-            setOpsField(
-                'ops-backup-status',
-                'Backup Status',
-                `${String(backup.status || 'unknown').toUpperCase()}${backup.snapshot ? ` · ${backup.snapshot}` : ''}`
-            );
-            setOpsField(
-                'ops-drill-status',
-                'Restore Drill',
-                `${String(drill.status || 'unknown').toUpperCase()}${drill.snapshot ? ` · ${drill.snapshot}` : ''}`
-            );
-            setOpsField(
-                'ops-host-status',
-                'Host Health',
-                `${String(host.status || 'unknown').toUpperCase()} · warn ${Number(host.warn_count || 0)} · crit ${Number(host.crit_count || 0)}`
-            );
-            setOpsField(
-                'ops-report-alerts',
-                'Report Alerts',
-                `${String(reportAlerts.last_status || 'unknown').toUpperCase()}${Array.isArray(reportAlerts.channels) ? ` · ${reportAlerts.channels.join(',') || 'none'}` : ''}`
-            );
-            setOpsField(
-                'ops-immediate-alerts',
-                'Immediate Alerts',
-                `${String(immediateAlerts.last_status || 'unknown').toUpperCase()}${Array.isArray(immediateAlerts.channels) ? ` · ${immediateAlerts.channels.join(',') || 'none'}` : ''}`
-            );
-
-            const backupNote = document.getElementById('ops-backup-note');
-            if (backupNote) {
-                const fullPart = fullDrill.status
-                    ? ` | Full restore: ${String(fullDrill.status || 'unknown').toUpperCase()}`
-                    : '';
-                backupNote.textContent = `Backup note: ${backup.error || 'No backup errors recorded.'}${fullPart}`;
-            }
-            const drillNote = document.getElementById('ops-drill-note');
-            if (drillNote) {
-                const restoreMsg = drill.error || 'Restore drill healthy.';
-                const fullMsg = fullDrill.error
-                    ? `Full restore error: ${fullDrill.error}`
-                    : `Full restore: ${String(fullDrill.status || 'unknown').toUpperCase()}`;
-                drillNote.textContent = `Drill note: ${restoreMsg} | ${fullMsg}`;
-            }
-            const alertNote = document.getElementById('ops-alert-note');
-            if (alertNote) {
-                const reportTs = reportAlerts.last_timestamp || '--';
-                const immediateTs = immediateAlerts.last_timestamp || '--';
-                const sloText = String(slo.status || 'unknown').toUpperCase();
-                const releaseText = release.active_commit
-                    ? `${release.active_commit} (${release.active_env || 'unknown'})`
-                    : 'none';
-                const auditText = String(audit.chain_status || 'unknown').toUpperCase();
-                const queueDepth = Number(predictionLog.queue_depth);
-                const droppedTotal = Number(predictionLog.dropped_total || 0);
-                const writeFailTotal = Number(predictionLog.write_fail_total || 0);
-                let queueText = 'OK';
-                if (predictionAlerts && predictionAlerts.ok === false) {
-                    queueText = `ALERT depth=${Number.isFinite(queueDepth) ? queueDepth : '--'} dropped=${droppedTotal} fail=${writeFailTotal}`;
-                } else if (Number.isFinite(queueDepth)) {
-                    queueText = `depth=${queueDepth} dropped=${droppedTotal} fail=${writeFailTotal}`;
-                }
-                alertNote.textContent = `Alert note: report@${reportTs} | immediate@${immediateTs} | slo=${sloText} | release=${releaseText} | audit=${auditText} | prediction_log=${queueText}`;
-            }
-            updateMlDecisionTrace(state.lastMlScore);
-            updateSystemStrip();
-        }
-
-        async function loadOpsStatus() {
-            const apiUrl = `${getApiOrigin()}/api/ops/status`;
-            try {
-                const payload = await fetchJson(apiUrl, 5000);
-                updateOpsPanel(payload);
-            } catch (_error) {
-                updateOpsPanel(null);
-            }
-        }
-
         function setMlServiceState(status, message = '') {
             const prevStatus = state.mlServiceStatus;
             state.mlServiceStatus = status;
@@ -7788,6 +9297,147 @@
             return parts.join(' · ') || 'Detailed flags, calibration, drift, and model-age context.';
         }
 
+        // ── Break rollout monitor + decision_meta ────────────────────────────
+        function updateMlRolloutStrip(payload) {
+            const scores     = payload?.scores || {};
+            const signals    = payload?.signals || {};
+            const thresholds = payload?.thresholds || {};
+            const meta       = payload?.decision_meta || {};
+
+            // Threshold in effect for 15m break (shows override when active)
+            const thrB15 = thresholds['threshold_break_15m'];
+            const thrEl  = document.getElementById('ml-rollout-break-thr');
+            if (thrEl) {
+                if (thrB15 != null) {
+                    thrEl.textContent = formatPercent(thrB15 * 100);
+                    // Flag if this looks like an override (not 1.0 / 0.5 fallback)
+                    const isOverride = thrB15 < 0.99 && thrB15 !== 0.5;
+                    thrEl.className = 'ml-rollout-value ' + (isOverride ? 'caution' : 'muted');
+                    thrEl.title = isOverride ? 'Threshold override active (ML_BREAK_THRESHOLD_OVERRIDE)' : '';
+                } else {
+                    thrEl.textContent = '--';
+                    thrEl.className = 'ml-rollout-value muted';
+                }
+            }
+
+            // Raw break probability at 15m
+            const probB15 = scores['prob_break_15m'];
+            const probEl  = document.getElementById('ml-rollout-break-prob');
+            if (probEl) {
+                if (probB15 != null) {
+                    probEl.textContent = formatPercent(probB15 * 100);
+                    const aboveThr = thrB15 != null && probB15 >= thrB15;
+                    probEl.className = 'ml-rollout-value ' + (aboveThr ? 'active' : 'muted');
+                } else {
+                    probEl.textContent = '--';
+                    probEl.className = 'ml-rollout-value muted';
+                }
+            }
+
+            // Signal at 15m (specifically whether it fired as break)
+            const sig15   = signals['signal_15m'];
+            const sigEl   = document.getElementById('ml-rollout-break-signal');
+            if (sigEl) {
+                const isBreak = sig15 === 'break';
+                sigEl.textContent = isBreak ? 'FIRED' : sig15 === 'reject' ? 'reject' : sig15 === 'no_edge' ? 'no edge' : '--';
+                sigEl.className   = 'ml-rollout-value ' + (isBreak ? 'active' : sig15 === 'reject' ? 'ok' : 'muted');
+            }
+
+            // Break confidence at 15m — computed directly from break probability,
+            // independent of which signal (reject/break) happened to fire at 15m.
+            // Under current thresholds (signal thr = high-conf thr = 0.94) every
+            // break signal is automatically HIGH; "standard break" is unreachable.
+            const hcBreakThr = meta.high_confidence_break_threshold ?? 0.94;
+            const confEl = document.getElementById('ml-rollout-confidence');
+            if (confEl) {
+                const isBreakFired = sig15 === 'break';
+                if (isBreakFired) {
+                    // signal thr == high-conf thr == 0.94: all fired breaks are HIGH
+                    confEl.textContent = 'HIGH';
+                    confEl.className   = 'ml-rollout-value active';
+                    confEl.title       = `Break signal confirmed high-confidence (prob ≥ ${formatPercent(hcBreakThr * 100)}). Signal threshold = high-conf threshold = ${formatPercent(hcBreakThr * 100)} — every fired break is automatically HIGH under current config (0.94 threshold).`;
+                } else if (probB15 != null) {
+                    // Break did not fire — show raw break prob as proximity context
+                    confEl.textContent = formatPercent(probB15 * 100);
+                    confEl.className   = 'ml-rollout-value muted';
+                    confEl.title       = `Break probability ${formatPercent(probB15 * 100)} — below signal threshold (${formatPercent((thrB15 ?? hcBreakThr) * 100)}). No break triggered.`;
+                } else {
+                    confEl.textContent = '--';
+                    confEl.className   = 'ml-rollout-value muted';
+                    confEl.title       = 'No break probability available';
+                }
+            }
+
+            // Break filter status (F1: regime=4, F7: gamma_pos)
+            const filterEl = document.getElementById('ml-rollout-filter');
+            if (filterEl) {
+                const blocked = meta.break_filter_blocked;
+                const reason  = meta.break_filter_reason;
+                const active  = meta.break_filter_active || {};
+                if (blocked === true) {
+                    filterEl.textContent = reason ? `BLOCKED (${reason})` : 'BLOCKED';
+                    filterEl.className   = 'ml-rollout-value caution';
+                    filterEl.title       = `Break signal suppressed by risk filter: ${reason || 'unknown'}. ` +
+                        `Active filters — regime4: ${active.regime4 ?? '?'}, gamma_pos: ${active.gamma_pos ?? '?'}.`;
+                } else if (blocked === false) {
+                    const anyActive = active.regime4 || active.gamma_pos;
+                    filterEl.textContent = anyActive ? 'pass' : 'off';
+                    filterEl.className   = 'ml-rollout-value ' + (anyActive ? 'ok' : 'muted');
+                    filterEl.title       = anyActive
+                        ? `Break filters active and passing — regime4: ${active.regime4}, gamma_pos: ${active.gamma_pos}.`
+                        : 'Break risk filters disabled.';
+                } else {
+                    filterEl.textContent = '--';
+                    filterEl.className   = 'ml-rollout-value muted';
+                    filterEl.title       = 'Filter state not available (server may not expose break_filter_active yet).';
+                }
+            }
+
+            // Confidence chips for all fired horizons
+            const chipRow = document.getElementById('ml-confidence-row');
+            if (chipRow) {
+                chipRow.innerHTML = '';
+                const hcs = Array.isArray(meta.high_confidence_horizons) ? meta.high_confidence_horizons : [];
+                if (hcs.length > 0) {
+                    hcs.forEach((h) => {
+                        const chip = document.createElement('span');
+                        chip.className = 'ml-confidence-chip';
+                        chip.setAttribute('data-tier', 'high_confidence');
+                        const sigAtH = signals[`signal_${h}m`] || '';
+                        chip.textContent = `${h}m ${sigAtH.toUpperCase()} ★`;
+                        chip.title = `High-confidence ${sigAtH} signal at ${h}m`;
+                        chipRow.appendChild(chip);
+                    });
+                }
+                // Standard chips: reject only under current config.
+                // "Standard break" cannot occur at 15m (signal thr = high-conf thr = 0.94).
+                // At other horizons standard break is also impossible until thresholds diverge.
+                [5, 15, 30, 60].forEach((h) => {
+                    const tier   = (meta.signal_confidence || {})[`signal_${h}m`];
+                    const sigAtH = signals[`signal_${h}m`] || '';
+                    if (tier === 'standard') {
+                        const chip = document.createElement('span');
+                        chip.className = 'ml-confidence-chip';
+                        chip.setAttribute('data-tier', 'standard');
+                        chip.textContent = `${h}m ${sigAtH.toUpperCase()}`;
+                        // Reject standard band at 15m: 0.87–0.95 (8pp wide).
+                        // Break standard: impossible under current thresholds.
+                        chip.title = sigAtH === 'reject'
+                            ? `${h}m reject signal above threshold but below high-confidence tier (prob 0.87–0.95)`
+                            : `${h}m ${sigAtH} signal above threshold but below high-confidence tier`;
+                        chipRow.appendChild(chip);
+                    }
+                });
+            }
+
+            // Stacked confluence caution
+            const cautionEl = document.getElementById('ml-confluence-caution');
+            if (cautionEl) {
+                const show = !!meta.stacked_confluence_caution;
+                cautionEl.classList.toggle('visible', show);
+            }
+        }
+
         function updateMlPanel(payload) {
             const panel = document.getElementById('ml-panel');
             const status = document.getElementById('ml-status');
@@ -7811,12 +9461,16 @@
                 detail.textContent = `ML scoring is currently SPY-only. ${symbol} shows chart + structure analytics only.`;
                 setMlSummaryNote(`Coverage is limited for ${symbol}; chart and structure analytics remain available.`, 'warning');
                 setMlDiagnosticsSummary(buildMlDiagnosticsSummary(metaLabels));
+                updateMlRolloutStrip(null);
                 updateMlDecisionTrace(null);
                 return;
             }
 
             if (!payload || !payload.scores) {
+                panel.dataset.mlState = 'idle';
                 if (abstainBanner) abstainBanner.classList.remove('visible');
+                updateMlPrimaryBanner(null);
+                updateMlRolloutStrip(null);
                 resetMlHorizonCards();
                 setMlText('ml-best-horizon', '--');
                 if (state.mlServiceStatus === 'offline') {
@@ -7842,6 +9496,7 @@
             }
 
             setMlServiceState('online');
+            panel.dataset.mlState = 'scored';
 
             const scores = payload.scores || {};
             const signals = payload.signals || {};
@@ -7924,7 +9579,107 @@
                 setMlText(`ml-thr-break-${h}m`, thrB != null ? formatPercent(thrB * 100) : '--');
             });
 
+            updateMlPrimaryBanner(payload);
+            updateMlRolloutStrip(payload);
             updateMlDecisionTrace(payload);
+        }
+
+        // ── Primary signal banner: decision-first visual anchor ─────────────
+        function updateMlPrimaryBanner(payload) {
+            const banner  = document.getElementById('ml-primary-banner');
+            const sigEl   = document.getElementById('ml-primary-banner-signal');
+            const subEl   = document.getElementById('ml-primary-banner-sub');
+            const probEl  = document.getElementById('ml-primary-banner-prob');
+            if (!banner || !sigEl || !subEl || !probEl) return;
+
+            // Helper
+            function set(state, signal, sub, prob) {
+                banner.setAttribute('data-state', state);
+                sigEl.textContent  = signal;
+                subEl.textContent  = sub;
+                probEl.textContent = prob || '';
+            }
+
+            // No payload: idle or offline
+            if (!payload || !payload.scores) {
+                if (window.state && state.mlServiceStatus === 'offline') {
+                    set('offline', 'ML OFFLINE', state.mlServiceMessage || 'Cannot reach ML service on :5003', '');
+                } else if (window.state && state.mlServiceStatus === 'checking') {
+                    set('idle', 'CHECKING', 'Verifying ML service connection…', '');
+                } else if (window.state && state.mlServiceStatus === 'degraded') {
+                    set('offline', 'DEGRADED', 'Scoring endpoint restricted', '');
+                } else {
+                    set('idle', 'MONITORING', 'Awaiting touch event', '');
+                }
+                return;
+            }
+
+            const signals  = payload.signals  || {};
+            const scores   = payload.scores   || {};
+            const thresholds = payload.thresholds || {};
+            const meta     = payload.decision_meta || {};
+            const isAbstain = !!payload.abstain;
+
+            const sig15      = signals['signal_15m'];
+            const probB15    = scores['prob_break_15m'];
+            const probR15    = scores['prob_reject_15m'];
+            const thrB15     = thresholds['threshold_break_15m'];
+            const filterBlocked = meta.break_filter_blocked;
+            const filterReason  = meta.break_filter_reason;
+
+            // Was a break candidate even if filter suppressed it?
+            const wasBreakCandidate = probB15 != null && thrB15 != null && probB15 >= thrB15;
+
+            if (filterBlocked && wasBreakCandidate) {
+                // Break-eligible but suppressed by F1/F7 risk filter
+                const reasonLabel = filterReason
+                    ? filterReason.replace('_', ' ').toUpperCase()
+                    : 'FILTER';
+                set('break-blocked',
+                    'BREAK BLOCKED',
+                    `Risk filter active — ${reasonLabel}. Level was break-eligible.`,
+                    probB15 != null ? formatPercent(probB15 * 100) : '');
+            } else if (sig15 === 'break') {
+                const conf = (meta.signal_confidence || {})['signal_15m'];
+                const confLabel = conf === 'high_confidence' ? 'HIGH CONFIDENCE' : 'ABOVE THRESHOLD';
+                set('break',
+                    'BREAK  15m',
+                    confLabel + (payload.preview ? '  ·  PREVIEW' : ''),
+                    probB15 != null ? formatPercent(probB15 * 100) : '');
+            } else if (isAbstain) {
+                set('no-edge', 'NO EDGE', 'All horizons below threshold — consider standing down', '');
+            } else if (sig15 === 'reject') {
+                const conf = (meta.signal_confidence || {})['signal_15m'];
+                const confLabel = conf === 'high_confidence' ? 'HIGH CONFIDENCE' : 'ABOVE THRESHOLD';
+                set('reject',
+                    'REJECT  15m',
+                    confLabel + (payload.preview ? '  ·  PREVIEW' : ''),
+                    probR15 != null ? formatPercent(probR15 * 100) : '');
+            } else {
+                // Scored but 15m is no_edge — check other horizons
+                const brkH = [5, 30, 60].find(h => signals[`signal_${h}m`] === 'break');
+                const rejH = [5, 30, 60].find(h => signals[`signal_${h}m`] === 'reject');
+                if (brkH) {
+                    const p = scores[`prob_break_${brkH}m`];
+                    set('break',
+                        `BREAK  ${brkH}m`,
+                        'Secondary horizon · 15m below threshold',
+                        p != null ? formatPercent(p * 100) : '');
+                } else if (rejH) {
+                    const p = scores[`prob_reject_${rejH}m`];
+                    set('reject',
+                        `REJECT  ${rejH}m`,
+                        'Secondary horizon · 15m below threshold',
+                        p != null ? formatPercent(p * 100) : '');
+                } else {
+                    const best = payload.best_horizon ? payload.best_horizon + 'm' : '--';
+                    const probB15Pct = probB15 != null ? `  ·  Break: ${formatPercent(probB15 * 100)}` : '';
+                    set('scored',
+                        'NO SIGNAL',
+                        `Scored · Best: ${best}${probB15Pct}`,
+                        '');
+                }
+            }
         }
 
         function updateMlMetrics(metrics) {
@@ -8206,15 +9961,21 @@
                 let emaSourceCandles = state.candles;
                 state.lastEmaVisibleBars = state.candles.length;
                 state.lastEmaWarmupBars = 0;
-                state.lastEmaMethod = isDailyInterval(interval) ? 'daily_visible_seed' : 'intraday_visible_seed';
-                if (isDailyInterval(interval) && state.candles.length < EMA_WARMUP_MIN_BARS) {
+                state.lastEmaMethod = isDailyInterval(interval)
+                    ? 'daily_visible_seed'
+                    : interval === '1wk'
+                        ? 'weekly_visible_seed'
+                        : interval === '1mo'
+                            ? 'monthly_visible_seed'
+                            : 'intraday_visible_seed';
+                if (shouldUseEmaWarmup(interval) && state.candles.length < getEmaWarmupMinBars(interval)) {
                     const warmupCandles = await fetchEmaWarmupCandles(symbol, interval, requestOptions, isStaleRequest);
                     if (isStaleRequest()) return;
                     if (warmupCandles.length) {
-                        emaSourceCandles = mergeDailyCandles(state.candles, warmupCandles, state.timeZone);
+                        emaSourceCandles = mergeWarmupCandlesForInterval(state.candles, warmupCandles, interval, state.timeZone);
                         state.lastEmaWarmupBars = warmupCandles.length;
-                        state.lastEmaMethod = 'daily_warmup_merged';
-                        setDebug(`EMA warmup loaded (${emaSourceCandles.length} bars source, ${state.candles.length} visible).`);
+                        state.lastEmaMethod = `${isDailyInterval(interval) ? 'daily' : interval === '1wk' ? 'weekly' : 'monthly'}_warmup_merged`;
+                        setDebug(`EMA warmup loaded (${emaSourceCandles.length} ${interval} bars source, ${state.candles.length} visible).`);
                     }
                 }
 
@@ -8289,6 +10050,11 @@
 
                 populateSessionSelect(state.pivotHistory, defaultSessionIndex);
                 renderForSession(data, defaultSessionIndex);
+                if (state.pendingReplayDate) {
+                    const replayDate = state.pendingReplayDate;
+                    state.pendingReplayDate = null;
+                    openResearchReplayDate(replayDate, { allowReload: false });
+                }
 
                 const fetchInfo = data.fetch
                     ? (data.fetch.fromCache ? 'cache' : `attempts ${data.fetch?.attempts || 1}`)
@@ -8545,6 +10311,10 @@
                     }
                 });
             }
+
+            bindResearchDomEvents();
+            bindModelDomEvents();
+            bindGovernanceDomEvents();
         }
 
         // ── Keyboard Shortcuts ──
@@ -8567,13 +10337,29 @@
                         break;
                     case '2':
                         event.preventDefault();
-                        document.getElementById('tab-gamma')?.click();
+                        document.getElementById('tab-replay')?.click();
                         break;
                     case '3':
                         event.preventDefault();
-                        document.getElementById('tab-ivoi')?.click();
+                        document.getElementById('tab-research')?.click();
                         break;
                     case '4':
+                        event.preventDefault();
+                        document.getElementById('tab-models')?.click();
+                        break;
+                    case '5':
+                        event.preventDefault();
+                        document.getElementById('tab-governance')?.click();
+                        break;
+                    case '6':
+                        event.preventDefault();
+                        document.getElementById('tab-gamma')?.click();
+                        break;
+                    case '7':
+                        event.preventDefault();
+                        document.getElementById('tab-ivoi')?.click();
+                        break;
+                    case '8':
                         event.preventDefault();
                         document.getElementById('tab-ops')?.click();
                         break;
@@ -8598,7 +10384,7 @@
                     case '?':
                         event.preventDefault();
                         showToast(
-                            '<b>R</b> Refresh · <b>1-4</b> Tabs · <b>P</b> Pivots · <b>G</b> Gamma · <b>F</b> Fit chart · <b>?</b> Help',
+                            '<b>R</b> Refresh · <b>1-8</b> Tabs · <b>P</b> Pivots · <b>G</b> Gamma · <b>F</b> Fit chart · <b>?</b> Help',
                             'info',
                             { title: 'Keyboard Shortcuts', duration: 8000, html: true }
                         );
