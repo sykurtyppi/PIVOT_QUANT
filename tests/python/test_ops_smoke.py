@@ -3146,6 +3146,8 @@ class OpsSmokeTests(unittest.TestCase):
 
     def test_dashboard_proxy_public_auth_and_endpoint_hardening_present(self) -> None:
         proxy_source = (REPO_ROOT / "server" / "yahoo_proxy.js").read_text(encoding="utf-8")
+        runtime_source = (REPO_ROOT / "server" / "routes" / "runtime.js").read_text(encoding="utf-8")
+        combined_source = f"{proxy_source}\n{runtime_source}"
         env_example = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
         self.assertIn("DASH_AUTH_ENABLED", proxy_source)
         self.assertIn("DASH_AUTH_PASSWORD", proxy_source)
@@ -3168,12 +3170,12 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("recordAuthLoginSuccess", proxy_source)
         self.assertIn("loadPersistedAuthMetricsState", proxy_source)
         self.assertIn("persistAuthMetricsState", proxy_source)
-        self.assertIn("url.pathname === '/api/security/sessions'", proxy_source)
-        self.assertIn("url.pathname === '/api/runtime/architecture'", proxy_source)
+        self.assertIn("url.pathname === '/api/security/sessions'", runtime_source)
+        self.assertIn("url.pathname === '/api/runtime/architecture'", runtime_source)
         self.assertIn("RUNTIME_ARCHITECTURE", proxy_source)
         self.assertIn("buildRuntimeArchitectureSnapshot()", proxy_source)
-        self.assertIn("runtime_architecture_mode", proxy_source)
-        self.assertIn("runtime_dashboard_uses_src_library", proxy_source)
+        self.assertIn("runtime_architecture_mode", runtime_source)
+        self.assertIn("runtime_dashboard_uses_src_library", runtime_source)
         self.assertIn("dashboard_script_count_total", proxy_source)
         self.assertIn("dashboard_script_count_external", proxy_source)
         self.assertIn("dashboard_script_count_inline", proxy_source)
@@ -3181,10 +3183,10 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("auth_login_success_total", proxy_source)
         self.assertIn("Retry-After", proxy_source)
         self.assertIn("url.pathname === '/auth/login'", proxy_source)
-        self.assertIn("auth_method: 'password_cookie'", proxy_source)
-        self.assertIn("auth_policy_ok", proxy_source)
-        self.assertIn("auth_policy_issues", proxy_source)
-        self.assertIn("runtime_architecture_governance_state", proxy_source)
+        self.assertIn("auth_method: 'password_cookie'", runtime_source)
+        self.assertIn("auth_policy_ok", runtime_source)
+        self.assertIn("auth_policy_issues", runtime_source)
+        self.assertIn("runtime_architecture_governance_state", runtime_source)
         self.assertIn("local_bypass_with_non_loopback_bind", proxy_source)
         self.assertIn(
             "DASH_AUTH_ENFORCE_STRONG_PASSWORD=false while auth is enabled; weak passwords are allowed.",
@@ -3192,7 +3194,10 @@ class OpsSmokeTests(unittest.TestCase):
         )
         self.assertIn("auth_rate_limit_enabled", proxy_source)
         self.assertIn("x-forwarded-for", proxy_source)
-        self.assertIn("url.pathname === '/health'", proxy_source)
+        self.assertIn("url.pathname === '/health'", runtime_source)
+        self.assertIn("url.pathname === '/api/runtime/health'", runtime_source)
+        self.assertIn("const localOnly = () =>", runtime_source)
+        self.assertIn("'/api/models/review-log'", combined_source)
 
     def test_dashboard_proxy_yahoo_gamma_90dte_expiry_contract_present(self) -> None:
         proxy_source = (REPO_ROOT / "server" / "yahoo_proxy.js").read_text(encoding="utf-8")
@@ -3209,11 +3214,18 @@ class OpsSmokeTests(unittest.TestCase):
         proc = self._start_dashboard_proxy(port)
         try:
             health = self._wait_for_dashboard_proxy_health(port, proc)
-            self.assertEqual(health.get("runtime_architecture_mode"), "dashboard_globals")
-            self.assertIn("runtime_dashboard_script_count", health)
-            self.assertIn("runtime_architecture_governance_state", health)
-            self.assertIn("auth_policy_ok", health)
-            self.assertIn("auth_policy_issues", health)
+            self.assertEqual(health, {"status": "ok"})
+
+            status, runtime_health = self._read_json_url(
+                f"http://127.0.0.1:{port}/api/runtime/health",
+                timeout_sec=2.0,
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(runtime_health.get("runtime_architecture_mode"), "dashboard_globals")
+            self.assertIn("runtime_dashboard_script_count", runtime_health)
+            self.assertIn("runtime_architecture_governance_state", runtime_health)
+            self.assertIn("auth_policy_ok", runtime_health)
+            self.assertIn("auth_policy_issues", runtime_health)
 
             status, payload = self._read_json_url(
                 f"http://127.0.0.1:{port}/api/runtime/architecture",
@@ -3302,16 +3314,20 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("`${gammaMainSource} ${gammaMainExpiry}`", dashboard)
         self.assertIn("const summaryText = summaryParts.join(' · ');", dashboard)
         self.assertIn("state.mlHealthRaw = payload || null;", dashboard)
-        self.assertIn("state.lastEmaMethod = 'daily_warmup_merged';", dashboard)
+        self.assertIn("state.lastEmaMethod = `${isDailyInterval(interval) ? 'daily' : interval === '1wk' ? 'weekly' : 'monthly'}_warmup_merged`;", dashboard)
 
     def test_dashboard_ema_warmup_and_tradingview_seed_contract_present(self) -> None:
         dashboard = (REPO_ROOT / "production_pivot_dashboard.html").read_text(encoding="utf-8")
-        self.assertIn("const EMA_WARMUP_RANGE = '5y';", dashboard)
         self.assertIn("const EMA_WARMUP_MIN_BARS = EMA_MAX_PERIOD * 3;", dashboard)
+        self.assertIn("const EMA_WARMUP_RANGE_BY_INTERVAL = Object.freeze({", dashboard)
+        self.assertIn("'1wk': '10y',", dashboard)
         self.assertIn("function fetchEmaWarmupCandles(symbol, interval, options = {}, isStaleRequest = null)", dashboard)
+        self.assertIn("function mergeWarmupCandlesForInterval(visibleCandles, warmupCandles, interval, timeZone)", dashboard)
+        self.assertIn("function normalizeYahooCandlesForInterval(candles, interval, timeZone)", dashboard)
+        self.assertIn("Yahoo may append a latest quote inside the active weekly/monthly", dashboard)
         self.assertIn("function clipSeriesToCandles(series, candles)", dashboard)
         self.assertIn("ema = close;", dashboard)
-        self.assertIn("if (isDailyInterval(interval) && state.candles.length < EMA_WARMUP_MIN_BARS)", dashboard)
+        self.assertIn("if (shouldUseEmaWarmup(interval) && state.candles.length < getEmaWarmupMinBars(interval))", dashboard)
 
     def test_dashboard_ml_operator_summary_contract_present(self) -> None:
         dashboard = (REPO_ROOT / "production_pivot_dashboard.html").read_text(encoding="utf-8")
@@ -3438,6 +3454,8 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("self._lock = threading.RLock()", registry_block)
         self.assertIn("ML_INFERENCE_N_JOBS", source)
         self.assertIn("def _set_inference_n_jobs(", registry_block)
+        self.assertIn("def _manifest_governance_block_reason(", source)
+        self.assertIn("def _manifest_missing_model_files(", source)
         self.assertIn("def snapshot(self) -> dict[str, object]:", registry_block)
         load_block = registry_block.split("def load(self", 1)[1].split(
             "def snapshot(self) -> dict[str, object]:",
@@ -3455,6 +3473,9 @@ class OpsSmokeTests(unittest.TestCase):
             "ModelRegistry._set_inference_n_jobs(payload.get(\"calibrator\"), ML_INFERENCE_N_JOBS)",
             load_block,
         )
+        self.assertIn("governance_block_reason = _manifest_governance_block_reason", load_block)
+        self.assertIn("missing_model_files = _manifest_missing_model_files(manifest)", load_block)
+        self.assertIn("raise FileNotFoundError(", load_block)
         self.assertIn("self.manifest = manifest", load_block)
         self.assertIn("self.models = models", load_block)
         self.assertIn("self.thresholds = thresholds", load_block)
@@ -3473,9 +3494,55 @@ class OpsSmokeTests(unittest.TestCase):
         )
         ml_server._missing_threshold_warnings.clear()
         with self.assertLogs("ml_server", level="WARNING") as cm:
-            value = ml_server._threshold_from_map({"reject": {}, "break": {}}, "reject", 5, context="test_case")
+            value = ml_server._threshold_from_map(
+                {"reject": {}, "break": {}},
+                "reject",
+                5,
+                context="test_case",
+            )
         self.assertEqual(value, 0.5)
         self.assertIn("Missing reject threshold for 5m horizon in test_case", "\n".join(cm.output))
+
+    def test_ml_server_blocks_rejected_or_missing_runtime_artifacts(self) -> None:
+        try:
+            ml_server = load_module(
+                "pq_ml_server_governance_artifact_guard_test",
+                REPO_ROOT / "server" / "ml_server.py",
+            )
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"runtime dependency unavailable: {exc.name}")
+        model_dir = self.tmp / "models"
+        model_dir.mkdir()
+        (model_dir / "model_registry.json").write_text(
+            json.dumps(
+                {
+                    "active_version": "v001",
+                    "candidate_version": "v002",
+                    "last_action": "rejected",
+                    "last_reason": "candidate rejected by governance gates",
+                }
+            ),
+            encoding="utf-8",
+        )
+        original_model_dir = ml_server.MODEL_DIR
+        original_state = ml_server.RF_GOVERNANCE_STATE
+        try:
+            ml_server.MODEL_DIR = model_dir
+            ml_server.RF_GOVERNANCE_STATE = "model_registry.json"
+            block_reason = ml_server._manifest_governance_block_reason(
+                {"version": "v002"},
+                model_dir / "manifest_runtime_latest.json",
+            )
+            self.assertIn("Refusing to load rejected candidate manifest", block_reason)
+            self.assertEqual(
+                ml_server._manifest_missing_model_files(
+                    {"models": {"reject": {"15": "rf_reject_15m_v001.pkl"}}}
+                ),
+                [f"reject:15={model_dir / 'rf_reject_15m_v001.pkl'}"],
+            )
+        finally:
+            ml_server.MODEL_DIR = original_model_dir
+            ml_server.RF_GOVERNANCE_STATE = original_state
 
     def test_ml_server_reload_endpoint_has_busy_and_cooldown_backpressure(self) -> None:
         source = (REPO_ROOT / "server" / "ml_server.py").read_text(encoding="utf-8")
@@ -4277,10 +4344,19 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn('DASH_AUTH_ENFORCE_STRONG_PASSWORD', stack_script)
         self.assertIn('DASH_AUTH_LOCAL_BYPASS=true is not allowed when HOST is non-loopback', stack_script)
         self.assertIn('DASH_AUTH_PASSWORD length', stack_script)
+        self.assertIn('export ML_SERVER_BIND="${ML_SERVER_BIND:-127.0.0.1}"', stack_script)
         self.assertNotIn("${value,,}", stack_script)
         self.assertNotIn("${host_value,,}", stack_script)
 
         proc = run_cmd(["bash", "-n", "server/run_persistent_stack.sh"], cwd=REPO_ROOT)
+        self.assertEqual(proc.returncode, 0, msg=f"{proc.stdout}\n{proc.stderr}")
+
+    def test_run_ml_server_uses_governed_active_manifest_by_default(self) -> None:
+        script = (REPO_ROOT / "server" / "run_ml_server.sh").read_text(encoding="utf-8")
+        self.assertIn('export RF_ACTIVE_MANIFEST="${RF_ACTIVE_MANIFEST:-manifest_active.json}"', script)
+        self.assertNotIn('RF_ACTIVE_MANIFEST="${RF_ACTIVE_MANIFEST:-manifest_runtime_latest.json}"', script)
+
+        proc = run_cmd(["bash", "-n", "server/run_ml_server.sh"], cwd=REPO_ROOT)
         self.assertEqual(proc.returncode, 0, msg=f"{proc.stdout}\n{proc.stderr}")
 
     def test_run_gamma_bridge_sources_dotenv_safely(self) -> None:
