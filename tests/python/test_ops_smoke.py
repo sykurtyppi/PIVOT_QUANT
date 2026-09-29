@@ -2722,8 +2722,10 @@ class OpsSmokeTests(unittest.TestCase):
             conn.close()
 
     def test_level_converter_contract_and_route_present(self) -> None:
-        proxy_source = (REPO_ROOT / "server" / "yahoo_proxy.js").read_text(encoding="utf-8")
-        self.assertIn("/api/levels/convert", proxy_source)
+        # The /api/levels/convert route moved out of yahoo_proxy.js into the
+        # modularized market route handler.
+        market_source = (REPO_ROOT / "server" / "routes" / "market.js").read_text(encoding="utf-8")
+        self.assertIn("/api/levels/convert", market_source)
 
         if shutil.which("node") is None:
             self.skipTest("node is not available in PATH")
@@ -3200,11 +3202,14 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("'/api/models/review-log'", combined_source)
 
     def test_dashboard_proxy_yahoo_gamma_90dte_expiry_contract_present(self) -> None:
+        # The normalizeOptionsExpiryMode helper stays in yahoo_proxy.js; the
+        # request handler that reads the expiry param moved into the market route.
         proxy_source = (REPO_ROOT / "server" / "yahoo_proxy.js").read_text(encoding="utf-8")
+        market_source = (REPO_ROOT / "server" / "routes" / "market.js").read_text(encoding="utf-8")
         self.assertIn("function normalizeOptionsExpiryMode(mode)", proxy_source)
         self.assertIn("if (safeMode === '90dte')", proxy_source)
         self.assertIn("Math.abs(a.dteDays - 90)", proxy_source)
-        self.assertIn("const expiry = url.searchParams.get('expiry') || '90dte';", proxy_source)
+        self.assertIn("const expiry = url.searchParams.get('expiry') || '90dte';", market_source)
 
     def test_dashboard_proxy_runtime_architecture_live_endpoint(self) -> None:
         if shutil.which("node") is None:
@@ -3272,8 +3277,11 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertNotIn("if (opts.html)", dashboard)
         self.assertIn("closeBtn.textContent = '×';", dashboard)
         self.assertIn("function setLabeledText(id, label, value)", dashboard)
-        self.assertIn("setOpsField(id, label, value)", dashboard)
-        self.assertIn("setLabeledText(id, label, value ?? '--');", dashboard)
+        self.assertIn("function setLabeledTextWithNote(id, label, value, noteText)", dashboard)
+        # Safe-default handling moved inside the helper; assert the XSS-safe DOM
+        # construction (textContent + createTextNode, never innerHTML).
+        self.assertIn("const tail = value == null ? '--' : String(value);", dashboard)
+        self.assertIn("el.appendChild(document.createTextNode(tail));", dashboard)
         self.assertIn("function formatGammaSourceLabel(rawSource)", dashboard)
         self.assertIn("if (lower === 'marketdata.app') return 'marketdata.app';", dashboard)
         self.assertIn("cacheStale: !!data.cacheStale", dashboard)
@@ -3386,8 +3394,9 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertNotIn("readFileSync(", query_block)
 
     def test_dashboard_proxy_ml_metrics_uses_async_file_reads(self) -> None:
-        proxy_source = (REPO_ROOT / "server" / "yahoo_proxy.js").read_text(encoding="utf-8")
-        metrics_block = proxy_source.split("if (url.pathname === '/api/ml/metrics') {", 1)[1].split(
+        # The /api/ml/metrics handler moved into the modularized runtime route.
+        runtime_source = (REPO_ROOT / "server" / "routes" / "runtime.js").read_text(encoding="utf-8")
+        metrics_block = runtime_source.split("if (url.pathname === '/api/ml/metrics') {", 1)[1].split(
             "if (url.pathname === '/api/ml/health')",
             1,
         )[0]
