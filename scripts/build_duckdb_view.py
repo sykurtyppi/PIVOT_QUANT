@@ -3,9 +3,30 @@ import os
 import sys
 from pathlib import Path
 
-EXPORT_DIR = Path(os.getenv("EXPORT_DIR", "data/exports"))
-DB_PATH = Path(os.getenv("DUCKDB_PATH", "data/pivot_training.duckdb"))
+PIVOT_DB = Path(os.getenv("PIVOT_DB", "data/pivot_events.sqlite")).expanduser()
 PIP_INSTALL = f"{sys.executable} -m pip install"
+
+
+def _default_export_dir() -> Path:
+    raw = os.getenv("EXPORT_DIR")
+    if raw:
+        return Path(raw).expanduser()
+    if PIVOT_DB.is_absolute():
+        return PIVOT_DB.parent / f"{PIVOT_DB.stem}_exports"
+    return Path("data") / "exports" / PIVOT_DB.stem
+
+
+def _default_duckdb_path() -> Path:
+    raw = os.getenv("DUCKDB_PATH")
+    if raw:
+        return Path(raw).expanduser()
+    if PIVOT_DB.is_absolute():
+        return PIVOT_DB.parent / f"{PIVOT_DB.stem}_training.duckdb"
+    return Path("data") / f"{PIVOT_DB.stem}_training.duckdb"
+
+
+EXPORT_DIR = _default_export_dir()
+DB_PATH = _default_duckdb_path()
 
 
 def _is_parquet_fresh(

@@ -1,0 +1,9 @@
+{
+  "rt_cost_v1": {
+    "label": "Runtime default cost model v1",
+    "spread_bps": 0.8,
+    "slippage_bps": 0.4,
+    "commission_bps": 0.1,
+    "trade_cost_bps": 1.3
+  }
+}

@@ -9,13 +9,33 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
-DEFAULT_DUCKDB = os.getenv("DUCKDB_PATH", "data/pivot_training.duckdb")
+PIVOT_DB = Path(os.getenv("PIVOT_DB", "data/pivot_events.sqlite")).expanduser()
+
+
+def _default_duckdb_path() -> str:
+    raw = os.getenv("DUCKDB_PATH")
+    if raw:
+        return raw
+    if PIVOT_DB.is_absolute():
+        return str(PIVOT_DB.parent / f"{PIVOT_DB.stem}_training.duckdb")
+    return str(Path("data") / f"{PIVOT_DB.stem}_training.duckdb")
+
+
+def _default_export_file(name: str) -> str:
+    if PIVOT_DB.is_absolute():
+        out_dir = PIVOT_DB.parent / f"{PIVOT_DB.stem}_exports"
+    else:
+        out_dir = Path("data") / "exports" / PIVOT_DB.stem
+    return str(out_dir / name)
+
+
+DEFAULT_DUCKDB = _default_duckdb_path()
 DEFAULT_VIEW = os.getenv("DUCKDB_VIEW", "training_events_v1")
-DEFAULT_OUT = os.getenv("RF_METRICS_OUT", "data/exports/rf_walkforward_metrics.json")
-DEFAULT_FEATURE_OUT = os.getenv("RF_FEATURE_OUT", "data/exports/rf_feature_report.json")
-DEFAULT_FEATURE_CSV = os.getenv("RF_FEATURE_CSV", "data/exports/rf_feature_report.csv")
-DEFAULT_CALIB_OUT = os.getenv("RF_CALIB_OUT", "data/exports/rf_calibration_curve.json")
-DEFAULT_CALIB_CSV = os.getenv("RF_CALIB_CSV", "data/exports/rf_calibration_curve.csv")
+DEFAULT_OUT = os.getenv("RF_METRICS_OUT", _default_export_file("rf_walkforward_metrics.json"))
+DEFAULT_FEATURE_OUT = os.getenv("RF_FEATURE_OUT", _default_export_file("rf_feature_report.json"))
+DEFAULT_FEATURE_CSV = os.getenv("RF_FEATURE_CSV", _default_export_file("rf_feature_report.csv"))
+DEFAULT_CALIB_OUT = os.getenv("RF_CALIB_OUT", _default_export_file("rf_calibration_curve.json"))
+DEFAULT_CALIB_CSV = os.getenv("RF_CALIB_CSV", _default_export_file("rf_calibration_curve.csv"))
 
 
 def require(module_name: str, hint: str):

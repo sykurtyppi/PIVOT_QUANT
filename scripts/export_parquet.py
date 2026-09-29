@@ -5,8 +5,20 @@ import sys
 from pathlib import Path
 
 DEFAULT_DB = os.getenv("PIVOT_DB", "data/pivot_events.sqlite")
-OUT_DIR = Path(os.getenv("EXPORT_DIR", "data/exports"))
 PIP_INSTALL = f"{sys.executable} -m pip install"
+
+
+def _default_export_dir() -> Path:
+    raw = os.getenv("EXPORT_DIR")
+    if raw:
+        return Path(raw).expanduser()
+    db_path = Path(DEFAULT_DB).expanduser()
+    if db_path.is_absolute():
+        return db_path.parent / f"{db_path.stem}_exports"
+    return Path("data") / "exports" / db_path.stem
+
+
+OUT_DIR = _default_export_dir()
 
 
 def require(module_name: str, pip_package: str):

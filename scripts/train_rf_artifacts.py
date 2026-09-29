@@ -19,10 +19,26 @@ from ml.features import FEATURE_VERSION, build_feature_row, drop_features
 from ml.regime_semantics import favored_bucket_for_target
 from ml.thresholds import select_threshold, utility_bps_for_target
 
-DEFAULT_DUCKDB = os.getenv("DUCKDB_PATH", "data/pivot_training.duckdb")
+PIVOT_DB = Path(os.getenv("PIVOT_DB", "data/pivot_events.sqlite")).expanduser()
+
+
+def _default_duckdb_path() -> str:
+    raw = os.getenv("DUCKDB_PATH")
+    if raw:
+        return raw
+    if PIVOT_DB.is_absolute():
+        return str(PIVOT_DB.parent / f"{PIVOT_DB.stem}_training.duckdb")
+    return str(ROOT / "data" / f"{PIVOT_DB.stem}_training.duckdb")
+
+
+DEFAULT_DUCKDB = _default_duckdb_path()
 DEFAULT_VIEW = os.getenv("DUCKDB_VIEW", "training_events_v1")
 DEFAULT_OUT_DIR = os.getenv("RF_MODEL_DIR", "data/models")
 DEFAULT_METADATA_DIR = os.getenv("RF_METADATA_DIR", "metadata_runtime")
+DEFAULT_RESEARCH_COST_MODEL_VERSION = (
+    os.getenv("RESEARCH_COST_MODEL_VERSION", "rt_cost_v1").strip()
+    or "rt_cost_v1"
+)
 DEFAULT_CANDIDATE_MANIFEST = (
     os.getenv("RF_CANDIDATE_MANIFEST", "manifest_runtime_latest.json").strip()
     or "manifest_runtime_latest.json"
@@ -85,6 +101,40 @@ def _gamma_context_metadata() -> dict[str, object]:
         "context_dte_window_days": _env_int("GAMMA_CONTEXT_DTE_DAYS", 120),
         "history_expiry_mode": _gamma_mode("GAMMA_HISTORY_EXPIRY_MODE", "90dte"),
         "history_dte_window_days": _env_int("GAMMA_HISTORY_LIVE_DTE_DAYS", 120),
+    }
+
+
+def _normalize_symbols(values) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values or []:
+        symbol = str(value or "").strip().upper()
+        if not symbol or symbol in seen:
+            continue
+        seen.add(symbol)
+        out.append(symbol)
+    return sorted(out)
+
+
+def _build_model_context(
+    *,
+    symbols,
+    targets,
+    trade_cost_bps: float,
+    training_view: str,
+    source_duckdb_path: str,
+    cost_model_version: str = DEFAULT_RESEARCH_COST_MODEL_VERSION,
+) -> dict[str, object]:
+    normalized_symbols = _normalize_symbols(symbols)
+    normalized_targets = [str(target).strip() for target in targets if str(target).strip()]
+    return {
+        "symbols": normalized_symbols,
+        "default_symbol": normalized_symbols[0] if len(normalized_symbols) == 1 else None,
+        "targets": normalized_targets,
+        "cost_model_version": str(cost_model_version or DEFAULT_RESEARCH_COST_MODEL_VERSION),
+        "trade_cost_bps": float(trade_cost_bps),
+        "training_view": str(training_view),
+        "source_duckdb_path": str(Path(source_duckdb_path).expanduser()),
     }
 
 
@@ -225,14 +275,30 @@ def build_pipeline(numeric_cols, categorical_cols, args):
     return Pipeline(steps=[("prep", preprocessor), ("rf", rf)])
 
 
-def load_dataframe(db_path: str, view: str, horizon: int):
+def load_dataframe(db_path: str, view: str, horizon: int, *, train_end_date: str | None = None):
+    """Load training data for a given horizon.
+
+    Args:
+        train_end_date: Optional ISO date string (YYYY-MM-DD) to cap the training window.
+            Events on or after this date are excluded.  Use this to hold out recent data
+            for out-of-sample validation (e.g. '--train-end-date 2026-03-01' to exclude
+            March 2026 when training v211).
+    """
     duckdb = require("duckdb", "python3 -m pip install duckdb")
     con = duckdb.connect(db_path, read_only=True)
     try:
-        df = con.execute(
-            f"SELECT * FROM {view} WHERE horizon_min = ? ORDER BY ts_event",
-            [horizon],
-        ).df()
+        if train_end_date:
+            df = con.execute(
+                f"SELECT * FROM {view}"
+                f" WHERE horizon_min = ? AND CAST(event_date_et AS DATE) < CAST(? AS DATE)"
+                f" ORDER BY ts_event",
+                [horizon, train_end_date],
+            ).df()
+        else:
+            df = con.execute(
+                f"SELECT * FROM {view} WHERE horizon_min = ? ORDER BY ts_event",
+                [horizon],
+            ).df()
     finally:
         con.close()
     return df
@@ -1011,6 +1077,16 @@ def main() -> None:
         default=DEFAULT_METADATA_DIR,
         help="Directory for runtime metadata manifests (absolute or relative to --out-dir)",
     )
+    parser.add_argument(
+        "--train-end-date",
+        default=None,
+        metavar="YYYY-MM-DD",
+        help=(
+            "Exclude events on or after this date from all training/calibration/tuning data. "
+            "Use to hold out recent data for out-of-sample validation.  "
+            "Example: --train-end-date 2026-03-01 excludes March 2026 when training v211."
+        ),
+    )
     parser.add_argument("--version", default=None)
     parser.add_argument(
         "--candidate-manifest",
@@ -1073,6 +1149,13 @@ def main() -> None:
         "time_decay_half_life_days": float(args.time_decay_half_life_days) if args.time_decay_enabled else None,
         "calib_mode": str(args.calib_mode),
         "calib_lookback_days": int(args.calib_lookback_days),
+        "model_context": _build_model_context(
+            symbols=[],
+            targets=targets,
+            trade_cost_bps=float(args.threshold_trade_cost_bps),
+            training_view=args.view,
+            source_duckdb_path=args.db,
+        ),
     }
     shadow_policy_key = str(args.shadow_policy_name or DEFAULT_SHADOW_POLICY_NAME).strip() or DEFAULT_SHADOW_POLICY_NAME
     manifest["shadow_policies"][shadow_policy_key] = {
@@ -1102,12 +1185,18 @@ def main() -> None:
     }
     trained_end_ts_max = None
     latest_aliases: list[tuple[Path, Path]] = []
+    observed_symbols: set[str] = set()
+
+    train_end_date: str | None = getattr(args, "train_end_date", None) or None
 
     for horizon in horizons:
-        df = load_dataframe(args.db, args.view, horizon)
+        df = load_dataframe(args.db, args.view, horizon, train_end_date=train_end_date)
         if df.empty:
             print(f"No rows for horizon {horizon}m. Skipping.")
             continue
+
+        if "symbol" in df.columns:
+            observed_symbols.update(_normalize_symbols(df["symbol"].dropna().tolist()))
 
         df = ensure_event_date(df)
         df = df.sort_values("ts_event")
@@ -1450,6 +1539,13 @@ def main() -> None:
             latest_aliases.append((model_path, latest_path))
 
     manifest["trained_end_ts"] = trained_end_ts_max
+    manifest["model_context"] = _build_model_context(
+        symbols=sorted(observed_symbols),
+        targets=targets,
+        trade_cost_bps=float(args.threshold_trade_cost_bps),
+        training_view=args.view,
+        source_duckdb_path=args.db,
+    )
 
     expected_pairs = {(target, str(horizon)) for target in targets for horizon in horizons}
     actual_pairs = set()

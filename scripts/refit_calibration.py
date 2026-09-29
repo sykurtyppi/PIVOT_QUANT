@@ -33,11 +33,27 @@ from ml.features import drop_features, build_feature_row
 from ml.regime_semantics import favored_bucket_for_target
 from ml.thresholds import select_threshold, utility_bps_for_target
 
-DEFAULT_DUCKDB = os.getenv("DUCKDB_PATH", "data/pivot_training.duckdb")
+PIVOT_DB = Path(os.getenv("PIVOT_DB", "data/pivot_events.sqlite")).expanduser()
+
+
+def _default_duckdb_path() -> str:
+    raw = os.getenv("DUCKDB_PATH")
+    if raw:
+        return raw
+    if PIVOT_DB.is_absolute():
+        return str(PIVOT_DB.parent / f"{PIVOT_DB.stem}_training.duckdb")
+    return str(ROOT / "data" / f"{PIVOT_DB.stem}_training.duckdb")
+
+
+DEFAULT_DUCKDB = _default_duckdb_path()
 DEFAULT_VIEW = os.getenv("DUCKDB_VIEW", "training_events_v1")
 DEFAULT_MODEL_DIR = os.getenv("RF_MODEL_DIR", "data/models")
 DEFAULT_ACTIVE_MANIFEST = os.getenv("RF_ACTIVE_MANIFEST", "manifest_active.json").strip() or "manifest_active.json"
 DEFAULT_SUMMARY_OUT = os.getenv("CALIB_REFIT_SUMMARY_PATH", "logs/calibration_refit_last.json")
+DEFAULT_RESEARCH_COST_MODEL_VERSION = (
+    os.getenv("RESEARCH_COST_MODEL_VERSION", "rt_cost_v1").strip()
+    or "rt_cost_v1"
+)
 DEFAULT_SHADOW_POLICY_NAME = (
     os.getenv("RF_SHADOW_POLICY_NAME", "model_side_margin_v1").strip()
     or "model_side_margin_v1"
@@ -87,6 +103,50 @@ def _to_int(value) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _normalize_symbols(values) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values or []:
+        symbol = str(value or "").strip().upper()
+        if not symbol or symbol in seen:
+            continue
+        seen.add(symbol)
+        out.append(symbol)
+    return sorted(out)
+
+
+def _build_model_context(
+    *,
+    symbols,
+    targets,
+    trade_cost_bps: float,
+    training_view: str,
+    source_duckdb_path: str,
+    cost_model_version: str = DEFAULT_RESEARCH_COST_MODEL_VERSION,
+    existing: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    existing = existing if isinstance(existing, dict) else {}
+    normalized_symbols = _normalize_symbols(symbols or existing.get("symbols") or [])
+    default_symbol = (
+        normalized_symbols[0]
+        if len(normalized_symbols) == 1
+        else existing.get("default_symbol")
+    )
+    normalized_targets = [str(target).strip() for target in targets if str(target).strip()]
+    if not normalized_targets:
+        normalized_targets = [str(target).strip() for target in (existing.get("targets") or []) if str(target).strip()]
+    return {
+        **existing,
+        "symbols": normalized_symbols,
+        "default_symbol": default_symbol,
+        "targets": normalized_targets,
+        "cost_model_version": str(cost_model_version or existing.get("cost_model_version") or DEFAULT_RESEARCH_COST_MODEL_VERSION),
+        "trade_cost_bps": float(trade_cost_bps),
+        "training_view": str(training_view),
+        "source_duckdb_path": str(Path(source_duckdb_path).expanduser()),
+    }
 
 
 def require(module_name: str, hint: str):
@@ -632,6 +692,7 @@ def main() -> None:
     results: list[PairResult] = []
     updated_pairs = 0
     attempted_pairs = 0
+    observed_symbols: set[str] = set()
 
     for target, horizon, model_name in pairs:
         attempted_pairs += 1
@@ -650,6 +711,8 @@ def main() -> None:
         if df is None:
             results.append(PairResult(target, horizon, "skipped", "no rows for horizon"))
             continue
+        if "symbol" in df.columns:
+            observed_symbols.update(_normalize_symbols(df["symbol"].dropna().tolist()))
         if target not in df.columns:
             results.append(PairResult(target, horizon, "skipped", f"target column '{target}' missing"))
             continue
@@ -934,6 +997,14 @@ def main() -> None:
 
     if updated_pairs > 0:
         manifest["calibration_refit_ts"] = int(time.time() * 1000)
+        manifest["model_context"] = _build_model_context(
+            symbols=sorted(observed_symbols),
+            targets=sorted(manifest_models.keys()),
+            trade_cost_bps=float(args.threshold_trade_cost_bps),
+            training_view=args.view,
+            source_duckdb_path=args.db,
+            existing=manifest.get("model_context"),
+        )
         if not args.dry_run:
             atomic_write_json(manifest_path, manifest)
 

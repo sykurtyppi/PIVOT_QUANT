@@ -526,6 +526,47 @@ def fetch_market(symbol: str, interval: str, range_str: str, source: str) -> tup
     return data, src
 
 
+def load_bars_from_sqlite(
+    conn: sqlite3.Connection,
+    symbol: str,
+    interval_sec: int,
+    range_str: str,
+) -> tuple[dict, str]:
+    """Load already-collected bars from bar_data as a candle payload."""
+    try:
+        if range_str.endswith("d"):
+            days = max(1, int(range_str[:-1]))
+            start_ms = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp() * 1000)
+        else:
+            start_ms = 0
+    except ValueError:
+        start_ms = 0
+
+    cur = conn.execute(
+        """
+        SELECT ts, open, high, low, close, volume
+        FROM bar_data
+        WHERE symbol = ?
+          AND bar_interval_sec = ?
+          AND ts >= ?
+        ORDER BY ts
+        """,
+        (symbol.upper(), interval_sec, start_ms),
+    )
+    candles = [
+        {
+            "time": int(row[0]) // 1000,
+            "open": float(row[1]),
+            "high": float(row[2]),
+            "low": float(row[3]),
+            "close": float(row[4]),
+            "volume": float(row[5] or 0),
+        }
+        for row in cur.fetchall()
+    ]
+    return {"symbol": symbol.upper(), "candles": candles}, "SQLite bar_data"
+
+
 def range_to_from_date(range_str: str) -> str:
     """Convert a range string (e.g. '9mo') to a YYYY-MM-DD from-date relative to today."""
     _days_map = {
@@ -1984,7 +2025,7 @@ def main() -> None:
     parser.add_argument("--symbols", default="SPY", help="Comma-separated symbols")
     parser.add_argument("--interval", default="1m")
     parser.add_argument("--range", dest="range_str", default="5d")
-    parser.add_argument("--source", choices=["auto", "ibkr", "yahoo", "marketdata"], default="auto")
+    parser.add_argument("--source", choices=["auto", "ibkr", "yahoo", "marketdata", "sqlite"], default="auto")
     parser.add_argument("--threshold-bps", type=float, default=10)
     parser.add_argument("--cooldown-min", type=int, default=10)
     parser.add_argument("--atr-window", type=int, default=14)
@@ -2018,7 +2059,10 @@ def main() -> None:
     for symbol in symbols:
         try:
             log.info("Processing %s (interval=%s, range=%s)", symbol, args.interval, range_str)
-            payload, source = fetch_market(symbol, args.interval, range_str, args.source)
+            if args.source == "sqlite":
+                payload, source = load_bars_from_sqlite(conn, symbol, interval_sec, range_str)
+            else:
+                payload, source = fetch_market(symbol, args.interval, range_str, args.source)
             candles = parse_candles(payload)
             if not candles:
                 log.warning("No candles for %s. Skipping.", symbol)
