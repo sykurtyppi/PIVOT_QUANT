@@ -14,7 +14,7 @@
     "./config": "./src/config/ConfigurationManager.js"
   },
   "scripts": {
-    "test": "jest --coverage --verbose",
+    "test": "jest --config jest.config.cjs --coverage --verbose",
     "test:watch": "jest --watch",
     "test:performance": "jest --testNamePattern=\"Performance\"",
     "test:stress": "jest --testNamePattern=\"Stress\"",
@@ -25,14 +25,23 @@
     "build:prod": "NODE_ENV=production rollup -c",
     "docs": "jsdoc -c jsdoc.config.json",
     "benchmark": "node benchmarks/pivot-benchmark.js",
-    "validate": "npm run lint && npm run test",
-    "prepare": "npm run validate && npm run build",
+    "validate": "npm run validate:local",
+    "validate:js": "npm run lint && npm run test",
+    "validate:local": "bash scripts/validate_local.sh",
+    "verify:integrity": "bash scripts/run_verify_integrity.sh",
+    "ops:preflight": "python3 scripts/operational_preflight.py --require-services",
+    "release:check": "bash scripts/release_readiness.sh",
+    "prepare": "npm run validate:js && npm run build",
     "start:dev": "node --experimental-modules examples/development-example.js",
     "start:prod": "node --experimental-modules examples/production-example.js",
     "dashboard:server": "node server/yahoo_proxy.js",
+    "test:ui": "bash scripts/run_ui_smoke.sh",
     "gamma:bridge": "bash server/run_gamma_bridge.sh",
     "event:writer": "bash server/run_event_writer.sh",
     "ml:collector": "bash server/run_live_collector.sh",
+    "research:build-marts": "python3 scripts/build_research_marts.py",
+    "research:api": "bash server/run_research_api.sh",
+    "models:api": "bash server/run_model_api.sh",
     "ml:init-db": "python3 scripts/init_db.py",
     "ml:log-events": "python3 scripts/run_logger.py --events data/events.jsonl",
     "ml:build-labels": "python3 scripts/build_labels.py --horizons 5 15 60 --incremental",
@@ -84,6 +93,7 @@
   "devDependencies": {
     "@babel/core": "^7.22.0",
     "@babel/preset-env": "^7.22.0",
+    "@playwright/test": "^1.59.1",
     "@rollup/plugin-commonjs": "^25.0.0",
     "@rollup/plugin-node-resolve": "^15.1.0",
     "@rollup/plugin-terser": "^0.4.3",
@@ -100,27 +110,6 @@
   },
   "dependencies": {
     "lightweight-charts": "^5.1.0"
-  },
-  "jest": {
-    "testEnvironment": "node",
-    "collectCoverageFrom": [
-      "src/**/*.js",
-      "!src/**/*.test.js"
-    ],
-    "coverageThreshold": {
-      "global": {
-        "branches": 45,
-        "functions": 60,
-        "lines": 58,
-        "statements": 58
-      }
-    },
-    "testMatch": [
-      "**/tests/**/*.test.js"
-    ],
-    "transform": {
-      "^.+\\.js$": "babel-jest"
-    }
   },
   "babel": {
     "presets": [

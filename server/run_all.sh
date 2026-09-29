@@ -23,7 +23,11 @@ MONITOR_LIVE_COLLECTOR_CONSECUTIVE_FAIL_LIMIT="${MONITOR_LIVE_COLLECTOR_CONSECUT
 MONITOR_LIVE_COLLECTOR_FATAL="${MONITOR_LIVE_COLLECTOR_FATAL:-0}"
 PIVOT_DB="${PIVOT_DB:-${ROOT_DIR}/data/pivot_events.sqlite}"
 LIVE_COLLECTOR_ENABLED="${LIVE_COLLECTOR_ENABLED:-1}"
+RESEARCH_API_ENABLED="${RESEARCH_API_ENABLED:-1}"
+MODEL_API_ENABLED="${MODEL_API_ENABLED:-1}"
 LIVE_COLLECTOR_ACTIVE=0
+RESEARCH_API_STATE="disabled"
+MODEL_API_STATE="disabled"
 CLEANUP_DONE=0
 LOCK_OWNED=0
 
@@ -37,14 +41,26 @@ is_listening() {
 }
 
 resolve_python() {
-  if [[ -x "${ROOT_DIR}/.venv/bin/python3" ]]; then
-    printf '%s' "${ROOT_DIR}/.venv/bin/python3"
-    return 0
+  local candidate=""
+  local candidates=()
+
+  if [[ -n "${PYTHON_BIN:-}" ]]; then
+    candidates+=("${PYTHON_BIN}")
   fi
-  if command -v python3 >/dev/null 2>&1; then
-    command -v python3
-    return 0
-  fi
+  candidates+=(
+    "${ROOT_DIR}/.venv313/bin/python"
+    "${ROOT_DIR}/.venv313/bin/python3"
+    "${ROOT_DIR}/.venv/bin/python"
+    "${ROOT_DIR}/.venv/bin/python3"
+  )
+
+  for candidate in "${candidates[@]}"; do
+    if [[ -n "${candidate}" && -x "${candidate}" ]]; then
+      printf '%s' "${candidate}"
+      return 0
+    fi
+  done
+
   return 1
 }
 
@@ -117,6 +133,7 @@ trap on_signal INT TERM
 
 die() {
   local message="$1"
+  echo "[state] stack: failed"
   echo "[ERROR] ${message}"
   exit 1
 }
@@ -131,6 +148,38 @@ is_truthy() {
       return 1
       ;;
   esac
+}
+
+announce_service_state() {
+  local name="$1"
+  local state="$2"
+  local detail="${3:-}"
+  if [[ -n "${detail}" ]]; then
+    echo "[state] ${name}: ${state} (${detail})"
+  else
+    echo "[state] ${name}: ${state}"
+  fi
+}
+
+check_optional_service_ready() {
+  local name="$1"
+  local port="$2"
+  local health_url="$3"
+  local unavailable_detail="$4"
+  local unhealthy_detail="$5"
+
+  if ! wait_for_port "${port}"; then
+    announce_service_state "${name}" "degraded" "${unavailable_detail}"
+    return 1
+  fi
+
+  if ! wait_for_http "${health_url}"; then
+    announce_service_state "${name}" "degraded" "${unhealthy_detail}"
+    return 1
+  fi
+
+  announce_service_state "${name}" "ready" "port ${port} · health ${health_url}"
+  return 0
 }
 
 start_service() {
@@ -410,7 +459,7 @@ monitor_stack() {
 run_db_migrations() {
   local py
   if ! py="$(resolve_python)"; then
-    die "No python3 interpreter available for DB migrations."
+    die "No supported Python interpreter available for DB migrations. Set PYTHON_BIN or create ${ROOT_DIR}/.venv313 or ${ROOT_DIR}/.venv."
   fi
 
   echo "Running DB migrations on ${PIVOT_DB}..."
@@ -430,6 +479,18 @@ fi
 start_service "event_writer" "5002" "false" bash server/run_event_writer.sh
 start_service "gamma_bridge" "5001" "true" bash server/run_gamma_bridge.sh
 start_service "ml_server" "5003" "false" bash server/run_ml_server.sh
+if is_truthy "${RESEARCH_API_ENABLED}"; then
+  RESEARCH_API_STATE="starting"
+  start_service "research_api" "5005" "true" bash server/run_research_api.sh
+else
+  announce_service_state "research_api" "disabled" "RESEARCH_API_ENABLED=${RESEARCH_API_ENABLED}"
+fi
+if is_truthy "${MODEL_API_ENABLED}"; then
+  MODEL_API_STATE="starting"
+  start_service "model_api" "5006" "true" bash server/run_model_api.sh
+else
+  announce_service_state "model_api" "disabled" "MODEL_API_ENABLED=${MODEL_API_ENABLED}"
+fi
 start_service "dashboard" "3000" "false" node server/yahoo_proxy.js
 
 verify_service "event_writer" "5002" "http://127.0.0.1:5002/health"
@@ -441,6 +502,30 @@ else
   echo "gamma_bridge ready on port 5001"
 fi
 verify_service "ml_server" "5003" "http://127.0.0.1:5003/health"
+if is_truthy "${RESEARCH_API_ENABLED}"; then
+  if ! check_optional_service_ready \
+    "research_api" \
+    "5005" \
+    "http://127.0.0.1:5005/health" \
+    "enabled but not listening on port 5005; research workspace unavailable" \
+    "bound port 5005 but failed health check http://127.0.0.1:5005/health; research workspace degraded"; then
+    RESEARCH_API_STATE="degraded"
+  else
+    RESEARCH_API_STATE="ready"
+  fi
+fi
+if is_truthy "${MODEL_API_ENABLED}"; then
+  if ! check_optional_service_ready \
+    "model_api" \
+    "5006" \
+    "http://127.0.0.1:5006/health" \
+    "enabled but not listening on port 5006; models workspace unavailable" \
+    "bound port 5006 but failed health check http://127.0.0.1:5006/health; models workspace degraded"; then
+    MODEL_API_STATE="degraded"
+  else
+    MODEL_API_STATE="ready"
+  fi
+fi
 verify_service "dashboard" "3000" "http://127.0.0.1:3000/health"
 if [[ "${LIVE_COLLECTOR_ACTIVE}" -eq 1 ]]; then
   # Start collector only after core services are confirmed ready to avoid first-cycle score race.
@@ -451,6 +536,10 @@ else
   echo "[WARN] live_collector disabled via LIVE_COLLECTOR_ENABLED=${LIVE_COLLECTOR_ENABLED}"
 fi
 
-echo "All services ready."
+if [[ "${RESEARCH_API_STATE}" == "degraded" || "${MODEL_API_STATE}" == "degraded" ]]; then
+  echo "[state] stack: degraded"
+else
+  echo "[state] stack: ready"
+fi
 echo "Press Ctrl+C to stop."
 monitor_stack

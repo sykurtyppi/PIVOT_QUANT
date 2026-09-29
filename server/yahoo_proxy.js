@@ -5,6 +5,11 @@ import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { buildConversionSnapshot, convertLevels, normalizeInstrument } from './level_converter.js';
+import { handleResearchRoutes } from './routes/research.js';
+import { handleModelRoutes } from './routes/models.js';
+import { handleRuntimeRoutes } from './routes/runtime.js';
+import { handleMarketRoutes } from './routes/market.js';
+import { handleStaticRoutes } from './routes/static.js';
 
 const fsp = fs.promises;
 const HOST = process.env.HOST || '127.0.0.1';
@@ -29,6 +34,13 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT_DIR = path.resolve(__dirname, '..');
 const DASHBOARD_FILE = path.join(ROOT_DIR, 'production_pivot_dashboard.html');
+const DASHBOARD_RUNTIME_FILE = path.join(ROOT_DIR, 'app', 'shared', 'dashboard_runtime.js');
+const WORKSPACE_REQUESTS_FILE = path.join(ROOT_DIR, 'app', 'shared', 'workspace_requests.js');
+const RESEARCH_WORKSPACE_FILE = path.join(ROOT_DIR, 'app', 'research', 'index.js');
+const MODELS_WORKSPACE_FILE = path.join(ROOT_DIR, 'app', 'models', 'index.js');
+const GOVERNANCE_WORKSPACE_FILE = path.join(ROOT_DIR, 'app', 'governance', 'index.js');
+const REPLAY_WORKSPACE_FILE = path.join(ROOT_DIR, 'app', 'replay', 'index.js');
+const OPS_WORKSPACE_FILE = path.join(ROOT_DIR, 'app', 'ops', 'index.js');
 const LOCAL_CHART_PATH = path.join(
   ROOT_DIR,
   'node_modules',
@@ -79,7 +91,13 @@ const authAuditState = {
   lastFailureAtMs: 0,
   lastLockoutAtMs: 0,
 };
-const WRITE_ENDPOINTS = new Set(['/api/ml/reload', '/api/ml/score', '/api/events', '/api/bars']);
+const WRITE_ENDPOINTS = new Set([
+  '/api/ml/reload',
+  '/api/ml/score',
+  '/api/events',
+  '/api/bars',
+  '/api/models/review-log',
+]);
 const RESPONSE_SECURITY_HEADERS = Object.freeze({
   'X-Content-Type-Options': 'nosniff',
   'X-Frame-Options': 'DENY',
@@ -98,6 +116,8 @@ const ML_STALENESS_KILL_SESSION_HOURS = toNumber(
   process.env.ML_STALENESS_KILL_SESSION_HOURS,
   19.5
 );
+const RESEARCH_API_PORT = Number(process.env.RESEARCH_API_PORT || 5005);
+const MODEL_API_PORT = Number(process.env.MODEL_API_PORT || 5006);
 
 function extractScriptTagSummaryFromHtml(rawHtml) {
   const summary = {
@@ -1060,6 +1080,59 @@ function isApiPath(pathname) {
   return typeof pathname === 'string' && pathname.startsWith('/api/');
 }
 
+function buildRouteDeps(requestIsLocal) {
+  return {
+    fs,
+    path,
+    ROOT_DIR,
+    SECURITY,
+    RUNTIME_ARCHITECTURE,
+    requestIsLocal,
+    RESEARCH_API_PORT,
+    MODEL_API_PORT,
+    DASHBOARD_FILE,
+    DASHBOARD_RUNTIME_FILE,
+    WORKSPACE_REQUESTS_FILE,
+    RESEARCH_WORKSPACE_FILE,
+    MODELS_WORKSPACE_FILE,
+    GOVERNANCE_WORKSPACE_FILE,
+    REPLAY_WORKSPACE_FILE,
+    OPS_WORKSPACE_FILE,
+    LOCAL_CHART_PATH,
+    METRICS_FILE,
+    CALIB_FILE,
+    ACTIVE_MANIFEST_FILE,
+    levelConversionResultCache,
+    LEVEL_CONVERTER_RESULT_TTL_MS,
+    LEVEL_CONVERTER_CACHE_MAX_SIZE,
+    getAuthAuditSnapshot,
+    buildAuthSessionsSnapshot,
+    methodAllowed,
+    methodNotAllowed,
+    sendJson,
+    sendProxyError,
+    sendJs,
+    sendFile,
+    withSecurityHeaders,
+    fetchLocalJson,
+    fetchLocalJsonPost,
+    readBody,
+    readJsonFileWithMetaAsync,
+    summarizeMlMetrics,
+    readMlDashboardHealth,
+    queryOpsStatus,
+    getYahooData,
+    fetchYahooGammaFallback,
+    readTimedCache,
+    writeTimedCache,
+    buildLevelConversionCacheKey,
+    normalizeInstrument,
+    getLevelConversionSnapshot,
+    convertLevels,
+    queryLevelStats,
+  };
+}
+
 function shouldUseLoginPage(req, url) {
   if (isApiPath(url.pathname)) return false;
   const accept = String(req.headers.accept || '').toLowerCase();
@@ -1712,7 +1785,54 @@ async function fetchWithRetry(url) {
   throw lastError;
 }
 
-function parseYahooPayload(payload, requestedSymbol, yahooSymbol) {
+function yahooCandlePeriodKey(epochSeconds, interval, timeZone) {
+  const ymd = formatYmd(epochSeconds, timeZone);
+  const [year, month, day] = ymd.split('-').map((v) => Number(v));
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) {
+    return String(epochSeconds);
+  }
+
+  if (interval === '1mo') {
+    return `${year}-${String(month).padStart(2, '0')}`;
+  }
+
+  if (interval === '1wk') {
+    const date = new Date(Date.UTC(year, month - 1, day));
+    const weekday = date.getUTCDay() || 7;
+    date.setUTCDate(date.getUTCDate() - weekday + 1);
+    return date.toISOString().slice(0, 10);
+  }
+
+  return String(epochSeconds);
+}
+
+function normalizeYahooCandlesForInterval(candles, interval, timeZone) {
+  if (interval !== '1wk' && interval !== '1mo') {
+    return candles;
+  }
+
+  const byPeriod = new Map();
+  for (const candle of candles) {
+    const key = yahooCandlePeriodKey(candle.time, interval, timeZone);
+    const existing = byPeriod.get(key);
+    if (!existing) {
+      byPeriod.set(key, { ...candle });
+      continue;
+    }
+
+    // Yahoo can append a latest quote candle inside the active weekly/monthly
+    // period. Merge it into the existing period so EMAs do not double-count it.
+    existing.high = Math.max(existing.high, candle.high);
+    existing.low = Math.min(existing.low, candle.low);
+    existing.close = candle.close;
+    existing.volume = (existing.volume || 0) + (candle.volume || 0);
+    existing.time = Math.min(existing.time, candle.time);
+  }
+
+  return Array.from(byPeriod.values()).sort((a, b) => a.time - b.time);
+}
+
+function parseYahooPayload(payload, requestedSymbol, yahooSymbol, interval = '1d') {
   const result = payload?.chart?.result?.[0];
   if (!result) {
     throw new Error('Invalid Yahoo Finance response payload');
@@ -1753,6 +1873,7 @@ function parseYahooPayload(payload, requestedSymbol, yahooSymbol) {
 
   const marketState = meta.marketState || 'UNKNOWN';
   const timeZone = meta.exchangeTimezoneName || 'America/New_York';
+  const normalizedCandles = normalizeYahooCandlesForInterval(candles, interval, timeZone);
   const now = Math.floor(Date.now() / 1000);
   const regularEnd = meta.currentTradingPeriod?.regular?.end;
 
@@ -1761,16 +1882,16 @@ function parseYahooPayload(payload, requestedSymbol, yahooSymbol) {
     isLastSessionComplete = now >= regularEnd;
   }
 
-  const lastIndex = candles.length - 1;
+  const lastIndex = normalizedCandles.length - 1;
   let usedIndex = lastIndex;
-  const lastDate = formatYmd(candles[lastIndex].time, timeZone);
+  const lastDate = formatYmd(normalizedCandles[lastIndex].time, timeZone);
   const todayDate = formatYmd(now, timeZone);
 
   if (!isLastSessionComplete && lastIndex > 0 && lastDate === todayDate) {
     usedIndex = lastIndex - 1;
   }
 
-  const usedCandle = candles[usedIndex];
+  const usedCandle = normalizedCandles[usedIndex];
 
   return {
     symbol: requestedSymbol,
@@ -1778,9 +1899,9 @@ function parseYahooPayload(payload, requestedSymbol, yahooSymbol) {
     currency: meta.currency || 'USD',
     exchangeName: meta.exchangeName || 'UNKNOWN',
     marketState,
-    currentPrice: meta.regularMarketPrice || candles[lastIndex].close,
-    previousClose: meta.previousClose || candles[Math.max(0, lastIndex - 1)].close,
-    candles,
+    currentPrice: meta.regularMarketPrice || normalizedCandles[lastIndex].close,
+    previousClose: meta.previousClose || normalizedCandles[Math.max(0, lastIndex - 1)].close,
+    candles: normalizedCandles,
     session: {
       usedIndex,
       usedDate: formatYmd(usedCandle.time, timeZone),
@@ -1830,7 +1951,7 @@ async function getYahooData({ symbol, range = '3mo', interval = '1d' }) {
     throw new Error(`Yahoo Finance failed: ${message}`);
   }
 
-  const parsed = parseYahooPayload(payload, requestedSymbol, yahooSymbol);
+  const parsed = parseYahooPayload(payload, requestedSymbol, yahooSymbol, interval);
 
   const response = {
     ...parsed,
@@ -2806,68 +2927,9 @@ const server = http.createServer(async (req, res) => {
   const hostHeader = req.headers.host || `127.0.0.1:${PORT}`;
   const url = new URL(req.url || '/', `http://${hostHeader}`);
   const requestIsLocal = isLoopbackRequest(req);
+  const routeDeps = buildRouteDeps(requestIsLocal);
 
-  if (url.pathname === '/health') {
-    const authAudit = getAuthAuditSnapshot();
-    sendJson(res, 200, {
-      status: 'ok',
-      auth_enabled: SECURITY.authEnabled,
-      auth_credentials_configured: SECURITY.authCredentialsConfigured,
-      auth_method: 'password_cookie',
-      auth_service_token_configured: SECURITY.authServiceTokenConfigured,
-      auth_service_token_scope: 'local_api_only',
-      auth_password_policy_enforced: SECURITY.authPasswordPolicyEnforced,
-      auth_password_strong_enough: SECURITY.authPasswordStrongEnough,
-      auth_password_min_length: SECURITY.authPasswordMinLength,
-      auth_local_bypass: SECURITY.authBypassLocal,
-      auth_cookie_secure: SECURITY.authCookieSecure,
-      auth_bind_host: SECURITY.bindHost,
-      auth_bind_is_loopback: SECURITY.bindIsLoopback,
-      auth_policy_ok: SECURITY.authPolicyOk,
-      auth_policy_issues: SECURITY.authPolicyIssues,
-      auth_rate_limit_enabled: SECURITY.authRateLimitEnabled,
-      auth_rate_limit_window_sec: SECURITY.authRateLimitWindowSec,
-      auth_rate_limit_max_attempts: SECURITY.authRateLimitMaxAttempts,
-      auth_rate_limit_lockout_sec: SECURITY.authRateLimitLockoutSec,
-      write_endpoints_local_only: SECURITY.writeEndpointsLocalOnly,
-      runtime_architecture_mode: RUNTIME_ARCHITECTURE.runtime_mode,
-      runtime_architecture_governance_state: RUNTIME_ARCHITECTURE.runtime_governance_state,
-      runtime_dashboard_uses_src_library: RUNTIME_ARCHITECTURE.dashboard_uses_src_library,
-      runtime_dashboard_script_count: RUNTIME_ARCHITECTURE.dashboard_script_count,
-      ...authAudit,
-    });
-    return;
-  }
-
-  if (url.pathname === '/api/security/sessions') {
-    if (!methodAllowed(req, 'GET')) {
-      methodNotAllowed(res, 'GET');
-      return;
-    }
-    if (!requestIsLocal) {
-      sendJson(res, 403, {
-        error: 'Forbidden',
-        message: 'This endpoint is restricted to local requests.',
-      });
-      return;
-    }
-    sendJson(res, 200, buildAuthSessionsSnapshot());
-    return;
-  }
-
-  if (url.pathname === '/api/runtime/architecture') {
-    if (!methodAllowed(req, 'GET')) {
-      methodNotAllowed(res, 'GET');
-      return;
-    }
-    if (!requestIsLocal) {
-      sendJson(res, 403, {
-        error: 'Forbidden',
-        message: 'This endpoint is restricted to local requests.',
-      });
-      return;
-    }
-    sendJson(res, 200, { status: 'ok', ...RUNTIME_ARCHITECTURE });
+  if (await handleRuntimeRoutes(req, res, url, routeDeps)) {
     return;
   }
 
@@ -2919,466 +2981,10 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (url.pathname === '/api/market') {
-    if (!methodAllowed(req, 'GET')) {
-      methodNotAllowed(res, 'GET');
-      return;
-    }
-    try {
-      const source = (url.searchParams.get('source') || 'yahoo').toLowerCase();
-      const symbol = url.searchParams.get('symbol');
-      const range = url.searchParams.get('range') || '3mo';
-      const interval = url.searchParams.get('interval') || '1d';
-
-      if (source === 'ibkr') {
-        const marketUrl = `http://127.0.0.1:5001/market?symbol=${encodeURIComponent(
-          symbol || 'SPX'
-        )}&range=${encodeURIComponent(range)}&interval=${encodeURIComponent(interval)}`;
-        const data = await fetchLocalJson(marketUrl);
-        sendJson(res, 200, data);
-      } else {
-        const data = await getYahooData({
-          symbol,
-          range,
-          interval,
-        });
-        sendJson(res, 200, data);
-      }
-    } catch (error) {
-      sendJson(res, 500, {
-        error: 'Data fetch failed',
-        message: error?.message || String(error),
-      });
-    }
-    return;
-  }
-
-  if (url.pathname === '/api/gamma') {
-    if (!methodAllowed(req, 'GET')) {
-      methodNotAllowed(res, 'GET');
-      return;
-    }
-    try {
-      const symbol = url.searchParams.get('symbol') || 'SPX';
-      const expiry = url.searchParams.get('expiry') || '90dte';
-      const limit = url.searchParams.get('limit') || '60';
-      const source = (url.searchParams.get('source') || 'auto').toLowerCase();
-      const gammaUrl = `http://127.0.0.1:5001/gamma?symbol=${encodeURIComponent(
-        symbol
-      )}&expiry=${encodeURIComponent(expiry)}&limit=${encodeURIComponent(limit)}`;
-
-      let data = null;
-      let bridgeError = null;
-      if (source !== 'yahoo') {
-        try {
-          data = await fetchLocalJson(gammaUrl);
-        } catch (error) {
-          bridgeError = error;
-          if (source === 'ibkr') {
-            throw error;
-          }
-        }
-      }
-
-      if (!data) {
-        try {
-          data = await fetchYahooGammaFallback({ symbol, expiryMode: expiry, limit });
-          if (bridgeError?.message) {
-            data.fallback = { mode: 'yahoo', reason: bridgeError.message };
-          }
-        } catch (fallbackError) {
-          if (bridgeError) {
-            throw {
-              statusCode: bridgeError?.statusCode || fallbackError?.statusCode || 502,
-              message: `IBKR gamma unavailable (${bridgeError?.message || 'error'}); Yahoo fallback unavailable (${fallbackError?.message || 'error'})`,
-            };
-          }
-          throw fallbackError;
-        }
-      }
-
-      sendJson(res, 200, data);
-    } catch (error) {
-      sendProxyError(res, error, 'Gamma bridge unavailable');
-    }
-    return;
-  }
-
-  if (url.pathname === '/api/ib/market') {
-    if (!methodAllowed(req, 'GET')) {
-      methodNotAllowed(res, 'GET');
-      return;
-    }
-    try {
-      const symbol = url.searchParams.get('symbol') || 'SPX';
-      const interval = url.searchParams.get('interval') || '1d';
-      const range = url.searchParams.get('range') || '3mo';
-      const ibUrl = `http://127.0.0.1:5001/market?symbol=${encodeURIComponent(
-        symbol
-      )}&interval=${encodeURIComponent(interval)}&range=${encodeURIComponent(range)}`;
-
-      const data = await fetchLocalJson(ibUrl);
-      sendJson(res, 200, data);
-    } catch (error) {
-      sendProxyError(res, error, 'IBKR market bridge unavailable');
-    }
-    return;
-  }
-
-  if (url.pathname === '/api/ib/spot') {
-    if (!methodAllowed(req, 'GET')) {
-      methodNotAllowed(res, 'GET');
-      return;
-    }
-    try {
-      const symbol = url.searchParams.get('symbol') || 'SPX';
-      const ibUrl = `http://127.0.0.1:5001/spot?symbol=${encodeURIComponent(symbol)}`;
-      const data = await fetchLocalJson(ibUrl);
-      sendJson(res, 200, data);
-    } catch (error) {
-      sendProxyError(res, error, 'IBKR spot bridge unavailable');
-    }
-    return;
-  }
-
-  if (url.pathname === '/api/ml/metrics') {
-    if (!methodAllowed(req, 'GET')) {
-      methodNotAllowed(res, 'GET');
-      return;
-    }
-    try {
-      const [metricsSource, calibSource, manifestSource] = await Promise.all([
-        readJsonFileWithMetaAsync(METRICS_FILE),
-        readJsonFileWithMetaAsync(CALIB_FILE),
-        readJsonFileWithMetaAsync(ACTIVE_MANIFEST_FILE),
-      ]);
-      const latestSourceMs = Math.max(
-        Number(metricsSource?.mtimeMs) || 0,
-        Number(calibSource?.mtimeMs) || 0
-      );
-      const sourceFiles = {
-        metrics: {
-          path: path.relative(ROOT_DIR, String(metricsSource?.filePath || METRICS_FILE)),
-          mtime_ms: metricsSource?.mtimeMs ?? null,
-          size_bytes: metricsSource?.sizeBytes ?? null,
-        },
-        calibration: {
-          path: path.relative(ROOT_DIR, String(calibSource?.filePath || CALIB_FILE)),
-          mtime_ms: calibSource?.mtimeMs ?? null,
-          size_bytes: calibSource?.sizeBytes ?? null,
-        },
-        active_manifest: {
-          path: path.relative(ROOT_DIR, String(manifestSource?.filePath || ACTIVE_MANIFEST_FILE)),
-          mtime_ms: manifestSource?.mtimeMs ?? null,
-          size_bytes: manifestSource?.sizeBytes ?? null,
-        },
-      };
-      const manifestPayload = (manifestSource?.data && typeof manifestSource.data === 'object')
-        ? manifestSource.data
-        : null;
-      const summary = summarizeMlMetrics(metricsSource?.data, calibSource?.data, {
-        updatedAtMs: latestSourceMs > 0 ? latestSourceMs : null,
-        sourceFiles,
-        activeModelVersion: manifestPayload?.version ?? null,
-        activeModelTrainedEndTs: manifestPayload?.trained_end_ts ?? null,
-      });
-      if (summary.status === 'empty') {
-        sendJson(res, 404, {
-          error: 'ML metrics unavailable',
-          message: 'Run the training script to generate metrics.',
-          updated_at: summary.updated_at,
-          stale_seconds: summary.stale_seconds,
-          source_files: summary.source_files,
-          active_model_version: summary.active_model_version,
-          active_model_trained_end_ts: summary.active_model_trained_end_ts,
-        });
-        return;
-      }
-      sendJson(res, 200, summary);
-    } catch (error) {
-      sendJson(res, 500, {
-        error: 'ML metrics failed',
-        message: error?.message || String(error),
-      });
-    }
-    return;
-  }
-
-  if (url.pathname === '/api/ml/health') {
-    if (!methodAllowed(req, 'GET')) {
-      methodNotAllowed(res, 'GET');
-      return;
-    }
-    try {
-      const [data, dashboardHealth] = await Promise.all([
-        fetchLocalJson('http://127.0.0.1:5003/health'),
-        readMlDashboardHealth(),
-      ]);
-      sendJson(res, 200, {
-        ...(data && typeof data === 'object' ? data : {}),
-        dashboard_health: dashboardHealth,
-      });
-    } catch (error) {
-      sendProxyError(res, error, 'ML health unavailable');
-    }
-    return;
-  }
-
-  if (url.pathname === '/api/live/health') {
-    if (!methodAllowed(req, 'GET')) {
-      methodNotAllowed(res, 'GET');
-      return;
-    }
-    try {
-      const data = await fetchLocalJson('http://127.0.0.1:5004/health');
-      sendJson(res, 200, data);
-    } catch (error) {
-      sendProxyError(res, error, 'Live collector health unavailable');
-    }
-    return;
-  }
-
-  if (url.pathname === '/api/ops/status') {
-    if (!methodAllowed(req, 'GET')) {
-      methodNotAllowed(res, 'GET');
-      return;
-    }
-    try {
-      const data = await queryOpsStatus();
-      sendJson(res, 200, data);
-    } catch (error) {
-      sendJson(res, 500, {
-        error: 'Ops status unavailable',
-        message: error?.message || String(error),
-      });
-    }
-    return;
-  }
-
-  if (url.pathname === '/api/ml/reload') {
-    if (!methodAllowed(req, 'POST')) {
-      methodNotAllowed(res, 'POST');
-      return;
-    }
-    try {
-      const data = await fetchLocalJsonPost('http://127.0.0.1:5003/reload', {});
-      sendJson(res, 200, data);
-    } catch (error) {
-      sendProxyError(res, error, 'ML reload unavailable');
-    }
-    return;
-  }
-
-  if (url.pathname === '/api/ml/score') {
-    if (!methodAllowed(req, 'POST')) {
-      methodNotAllowed(res, 'POST');
-      return;
-    }
-    try {
-      const body = await readBody(req);
-      const payload = body ? JSON.parse(body) : {};
-      const data = await fetchLocalJsonPost('http://127.0.0.1:5003/score', payload);
-      sendJson(res, 200, data);
-    } catch (error) {
-      sendProxyError(res, error, 'ML score unavailable');
-    }
-    return;
-  }
-
-  if (url.pathname === '/api/events') {
-    if (!methodAllowed(req, 'POST')) {
-      methodNotAllowed(res, 'POST');
-      return;
-    }
-    try {
-      const body = await readBody(req);
-      const payload = body ? JSON.parse(body) : {};
-      const writerUrl = 'http://127.0.0.1:5002/events';
-      const data = await fetchLocalJsonPost(writerUrl, payload);
-      sendJson(res, 200, data);
-    } catch (error) {
-      sendProxyError(res, error, 'Event writer unavailable');
-    }
-    return;
-  }
-
-  if (url.pathname === '/api/bars') {
-    if (!methodAllowed(req, 'POST')) {
-      methodNotAllowed(res, 'POST');
-      return;
-    }
-    try {
-      const body = await readBody(req);
-      const payload = body ? JSON.parse(body) : {};
-      const writerUrl = 'http://127.0.0.1:5002/bars';
-      const data = await fetchLocalJsonPost(writerUrl, payload);
-      sendJson(res, 200, data);
-    } catch (error) {
-      sendProxyError(res, error, 'Bar writer unavailable');
-    }
-    return;
-  }
-
-  if (url.pathname === '/api/daily-candles') {
-    if (!methodAllowed(req, 'GET')) {
-      methodNotAllowed(res, 'GET');
-      return;
-    }
-    try {
-      const symbol = url.searchParams.get('symbol') || 'SPY';
-      const limit = Math.min(Number(url.searchParams.get('limit') || 200), 500);
-      const writerUrl = `http://127.0.0.1:5002/daily-candles?symbol=${encodeURIComponent(
-        symbol
-      )}&limit=${limit}`;
-      const data = await fetchLocalJson(writerUrl);
-      sendJson(res, 200, data);
-    } catch (error) {
-      sendProxyError(res, error, 'Daily candle aggregation unavailable');
-    }
-    return;
-  }
-
-  if (url.pathname === '/api/levels/convert') {
-    if (!methodAllowed(req, 'POST')) {
-      methodNotAllowed(res, 'POST');
-      return;
-    }
-    try {
-      const body = await readBody(req);
-      const payload = body ? JSON.parse(body) : {};
-      const levels = Array.isArray(payload?.levels) ? payload.levels : [];
-      if (levels.length > 1000) {
-        sendJson(res, 413, {
-          error: 'Too many levels',
-          message: 'Maximum 1000 levels per conversion request.',
-        });
-        return;
-      }
-
-      const fromRequested = String(payload?.from || payload?.fromInstrument || 'SPY');
-      const toRequested = String(payload?.to || payload?.toInstrument || 'SPX');
-      const fromInstrument = normalizeInstrument(fromRequested, 'SPY');
-      const toInstrument = normalizeInstrument(toRequested, 'SPX');
-      const mode = payload?.mode === 'live' ? 'live' : 'prior_close';
-      const esBasisMode = payload?.esBasisMode !== false;
-
-      const cacheKey = buildLevelConversionCacheKey({
-        levels,
-        from: fromInstrument,
-        to: toInstrument,
-        mode,
-        esBasisMode,
-      });
-      const cached = readTimedCache(
-        levelConversionResultCache,
-        cacheKey,
-        LEVEL_CONVERTER_RESULT_TTL_MS
-      );
-      if (cached) {
-        const conversion = cached.data?.conversion
-          ? {
-              ...cached.data.conversion,
-              cache: {
-                ...(cached.data.conversion.cache || {}),
-                hit: true,
-                ageMs: cached.ageMs,
-              },
-            }
-          : null;
-        sendJson(res, 200, {
-          ...cached.data,
-          conversion,
-        });
-        return;
-      }
-
-      const snapshotResult = await getLevelConversionSnapshot(mode);
-      const converted = convertLevels({
-        levels,
-        fromInstrument,
-        toInstrument,
-        snapshot: snapshotResult.snapshot,
-        esBasisMode,
-      });
-
-      const response = {
-        status: 'ok',
-        levels: converted.levels,
-        conversion: {
-          ...converted.metadata,
-          fromRequested,
-          toRequested,
-          fromInstrument,
-          toInstrument,
-          levelCount: levels.length,
-          cache: {
-            hit: false,
-            ageMs: 0,
-            snapshotHit: snapshotResult.cache.hit,
-            snapshotAgeMs: snapshotResult.cache.ageMs,
-          },
-        },
-      };
-
-      writeTimedCache(
-        levelConversionResultCache,
-        cacheKey,
-        response,
-        LEVEL_CONVERTER_RESULT_TTL_MS,
-        LEVEL_CONVERTER_CACHE_MAX_SIZE
-      );
-      sendJson(res, 200, response);
-    } catch (error) {
-      const statusCode = error instanceof SyntaxError ? 400 : 500;
-      sendJson(res, statusCode, {
-        error: 'Level conversion failed',
-        message: error?.message || String(error),
-      });
-    }
-    return;
-  }
-
-  if (url.pathname === '/api/levels') {
-    if (!methodAllowed(req, 'GET')) {
-      methodNotAllowed(res, 'GET');
-      return;
-    }
-    try {
-      const symbol = url.searchParams.get('symbol') || 'SPX';
-      const limit = Math.min(Number(url.searchParams.get('limit') || 50), 200);
-      const levelStats = await queryLevelStats(symbol, limit);
-      sendJson(res, 200, levelStats);
-    } catch (error) {
-      sendJson(res, 500, {
-        error: 'Level stats query failed',
-        message: error?.message || String(error),
-      });
-    }
-    return;
-  }
-
-  if (url.pathname === '/static/lightweight-charts.js') {
-    if (!methodAllowed(req, 'GET')) {
-      methodNotAllowed(res, 'GET');
-      return;
-    }
-    if (fs.existsSync(LOCAL_CHART_PATH)) {
-      sendJs(res, LOCAL_CHART_PATH);
-    } else {
-      res.writeHead(404, withSecurityHeaders({ 'Content-Type': 'text/plain' }));
-      res.end('lightweight-charts not installed');
-    }
-    return;
-  }
-
-  if (url.pathname === '/' || url.pathname === '/production_pivot_dashboard.html') {
-    if (!methodAllowed(req, 'GET')) {
-      methodNotAllowed(res, 'GET');
-      return;
-    }
-    sendFile(res, DASHBOARD_FILE);
-    return;
-  }
+  if (await handleResearchRoutes(req, res, url, routeDeps)) return;
+  if (await handleModelRoutes(req, res, url, routeDeps)) return;
+  if (await handleMarketRoutes(req, res, url, routeDeps)) return;
+  if (await handleStaticRoutes(req, res, url, routeDeps)) return;
 
   res.writeHead(404, withSecurityHeaders({ 'Content-Type': 'text/plain' }));
   res.end('Not found');

@@ -120,6 +120,7 @@ RF_CANDIDATE_MANIFEST = (
     os.getenv("RF_CANDIDATE_MANIFEST", "manifest_runtime_latest.json").strip()
     or "manifest_runtime_latest.json"
 )
+RF_GOVERNANCE_STATE = os.getenv("RF_GOVERNANCE_STATE", "model_registry.json").strip() or "model_registry.json"
 LEGACY_CANDIDATE_MANIFEST = "manifest_latest.json"
 HOST = os.getenv("ML_SERVER_BIND", "127.0.0.1")
 PORT = int(os.getenv("ML_SERVER_PORT", "5003"))
@@ -376,6 +377,39 @@ ML_ANALOG_BLEND_MAX_SHIFT_REJECT_BY_HORIZON = _env_horizon_float_map(
 ML_ANALOG_BLEND_MAX_SHIFT_BREAK_BY_HORIZON = _env_horizon_float_map(
     "ML_ANALOG_BLEND_MAX_SHIFT_BREAK_BY_HORIZON"
 )
+
+# Per-horizon threshold overrides — bypass manifest values for specific targets/horizons.
+# Format: "5:0.85,15:0.92"  (comma-separated horizon:threshold pairs)
+# Use-case: unlock a break model whose manifest threshold is stuck at 1.0 after retune.
+ML_REJECT_THRESHOLD_OVERRIDE = _env_horizon_float_map("ML_REJECT_THRESHOLD_OVERRIDE")
+ML_BREAK_THRESHOLD_OVERRIDE = _env_horizon_float_map("ML_BREAK_THRESHOLD_OVERRIDE")
+
+# Probability above which a fired signal is classified as high-confidence.
+# High-confidence signals should be treated as strong triggers, not just filters.
+ML_HIGH_CONFIDENCE_REJECT = max(
+    0.50, min(0.99, float(os.getenv("ML_HIGH_CONFIDENCE_REJECT", "0.95")))
+)
+ML_HIGH_CONFIDENCE_BREAK = max(
+    0.50, min(0.99, float(os.getenv("ML_HIGH_CONFIDENCE_BREAK", "0.94")))
+)
+
+# ── Break signal risk filters ─────────────────────────────────────────────
+# Suppress break signals in validated high-risk contexts.  Reject signals
+# are never affected.  Both filters were validated by offline post-analysis
+# (2026-04):
+#   F1 (-regime=4):     regime_type==4 → 28.6% loss rate, avg loss -188 bps
+#                        (incl. -524 bps single-trade worst case 2025-04-07).
+#                        14 signals removed → -3 catastrophic losses, +0.67 avg bps.
+#   F7 (-gamma_mode=+1): gamma_mode==+1 → 22.2% loss rate, avg loss -59.8 bps,
+#                        Sharpe 14.0 (vs 6.2 unfiltered).  72% signal retention.
+# Both default to "false" so a bare restart of the old shell script is safe.
+ML_BREAK_FILTER_REGIME4 = (
+    os.getenv("ML_BREAK_FILTER_REGIME4", "false").strip().lower() in {"true", "1", "yes"}
+)
+ML_BREAK_FILTER_GAMMA_POS = (
+    os.getenv("ML_BREAK_FILTER_GAMMA_POS", "false").strip().lower() in {"true", "1", "yes"}
+)
+
 ML_ANALOG_FEATURE_WEIGHTS = {
     "distance_bps": max(0.0, float(os.getenv("ML_ANALOG_W_DISTANCE_BPS", "1.0"))),
     "distance_atr_ratio": max(
@@ -424,6 +458,57 @@ def _threshold_from_map(
         )
         _missing_threshold_warnings.add(key)
     return 0.5
+
+
+def _governance_state_path() -> Path:
+    path = Path(RF_GOVERNANCE_STATE)
+    if path.is_absolute():
+        return path
+    return MODEL_DIR / path
+
+
+def _read_json_object(path: Path) -> dict:
+    with path.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, dict):
+        raise ValueError(f"Expected JSON object in {path}")
+    return payload
+
+
+def _manifest_governance_block_reason(manifest: dict, manifest_path: Path) -> str | None:
+    version = str(manifest.get("version") or "").strip()
+    if not version:
+        return f"Manifest {manifest_path} is missing a version"
+
+    state_path = _governance_state_path()
+    if not state_path.exists():
+        return None
+
+    state = _read_json_object(state_path)
+    active_version = str(state.get("active_version") or "").strip()
+    candidate_version = str(state.get("candidate_version") or "").strip()
+    last_action = str(state.get("last_action") or "").strip().lower()
+    if version == active_version:
+        return None
+    if version == candidate_version and last_action == "rejected":
+        reason = str(state.get("last_reason") or "candidate rejected by governance").strip()
+        return f"Refusing to load rejected candidate manifest {manifest_path} version {version}: {reason}"
+    return None
+
+
+def _manifest_missing_model_files(manifest: dict) -> list[str]:
+    missing: list[str] = []
+    manifest_models = manifest.get("models", {})
+    if not isinstance(manifest_models, dict):
+        return missing
+    for target, horizons in manifest_models.items():
+        if not isinstance(horizons, dict):
+            continue
+        for horizon, filename in horizons.items():
+            path = MODEL_DIR / str(filename)
+            if not path.exists():
+                missing.append(f"{target}:{horizon}={path}")
+    return missing
 
 
 class ModelRegistry:
@@ -544,6 +629,18 @@ class ModelRegistry:
                     return False
         with manifest_path.open("r", encoding="utf-8") as handle:
             manifest = json.load(handle)
+        if not isinstance(manifest, dict):
+            raise ValueError(f"Expected manifest JSON object at {manifest_path}")
+        governance_block_reason = _manifest_governance_block_reason(manifest, manifest_path)
+        if governance_block_reason:
+            raise RuntimeError(governance_block_reason)
+        missing_model_files = _manifest_missing_model_files(manifest)
+        if missing_model_files:
+            joined = ", ".join(missing_model_files[:8])
+            suffix = "" if len(missing_model_files) <= 8 else f", ... +{len(missing_model_files) - 8} more"
+            raise FileNotFoundError(
+                f"Manifest {manifest_path} references missing model artifacts: {joined}{suffix}"
+            )
         models = {"reject": {}, "break": {}}
         thresholds = {"reject": {}, "break": {}}
 
@@ -555,9 +652,7 @@ class ModelRegistry:
 
         for target, horizons in manifest.get("models", {}).items():
             for horizon, filename in horizons.items():
-                path = MODEL_DIR / filename
-                if not path.exists():
-                    continue
+                path = MODEL_DIR / str(filename)
                 payload = joblib.load(path)
                 if isinstance(payload, dict):
                     ModelRegistry._set_inference_n_jobs(payload.get("pipeline"), ML_INFERENCE_N_JOBS)
@@ -579,6 +674,22 @@ class ModelRegistry:
                         target,
                         h_int,
                     )
+
+        # Apply per-target env-var threshold overrides (ML_REJECT/BREAK_THRESHOLD_OVERRIDE).
+        # These are applied last so they win over both manifest and pickle-embedded values.
+        # Typical use: unlock a break model whose manifest threshold is stuck at 1.0.
+        for horizon, override in ML_REJECT_THRESHOLD_OVERRIDE.items():
+            clamped = max(0.01, min(0.99, float(override)))
+            thresholds.setdefault("reject", {})[horizon] = clamped
+            log.info(
+                "Reject threshold env-var override applied: %sm → %.4f", horizon, clamped
+            )
+        for horizon, override in ML_BREAK_THRESHOLD_OVERRIDE.items():
+            clamped = max(0.01, min(0.99, float(override)))
+            thresholds.setdefault("break", {})[horizon] = clamped
+            log.info(
+                "Break threshold env-var override applied: %sm → %.4f", horizon, clamped
+            )
 
         # Atomically swap in the newly built registry payload so /score never
         # sees a transient empty model map during reload.
@@ -1685,6 +1796,7 @@ def _ensure_prediction_log_schema(conn: sqlite3.Connection) -> None:
             "analog_best_ci_width": "REAL",
             "analog_best_disagreement": "REAL",
             "analog_json": "TEXT",
+            "break_filter_reason": "TEXT",
         }
         for col_name, col_type in compat_cols.items():
             if col_name not in pred_cols:
@@ -1904,8 +2016,8 @@ def _write_prediction_record(event: dict, result: dict) -> tuple[str, str | None
                 regime_policy_mode, trade_regime, selected_policy, regime_policy_json,
                 analog_best_reject_prob, analog_best_break_prob, analog_best_n,
                 analog_best_ci_width, analog_best_disagreement, analog_json,
-                quality_flags, is_preview
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                quality_flags, is_preview, break_filter_reason
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(event_id, model_version) DO UPDATE SET
                 regime_policy_mode = excluded.regime_policy_mode,
                 trade_regime = excluded.trade_regime,
@@ -1918,7 +2030,8 @@ def _write_prediction_record(event: dict, result: dict) -> tuple[str, str | None
                 analog_best_disagreement = excluded.analog_best_disagreement,
                 analog_json = excluded.analog_json,
                 quality_flags = excluded.quality_flags,
-                is_preview = excluded.is_preview""",
+                is_preview = excluded.is_preview,
+                break_filter_reason = excluded.break_filter_reason""",
             (
                 event_id,
                 ts_prediction_ms,
@@ -1958,6 +2071,7 @@ def _write_prediction_record(event: dict, result: dict) -> tuple[str, str | None
                 json.dumps(analogs, separators=(",", ":")) if analogs else None,
                 json.dumps(result.get("quality_flags", [])),
                 is_preview,
+                result.get("decision_meta", {}).get("break_filter_reason"),
             ),
         )
         _write_shadow_emission_records(
@@ -2111,6 +2225,72 @@ def _log_prediction(event: dict, result: dict) -> None:
     _write_prediction_record(event, result)
 
 
+def _runtime_manifest_readiness(
+    *,
+    manifest: dict | None,
+    manifest_path: str | None,
+    models: dict[str, list[int]],
+) -> dict[str, object]:
+    """Expose additive readiness metadata for operational parity checks."""
+    model_context = manifest.get("model_context") if isinstance(manifest, dict) else None
+    required_context_fields = {
+        "symbols",
+        "default_symbol",
+        "targets",
+        "cost_model_version",
+        "trade_cost_bps",
+        "training_view",
+        "source_duckdb_path",
+    }
+    missing_context_fields = sorted(
+        field
+        for field in required_context_fields
+        if not isinstance(model_context, dict) or model_context.get(field) in (None, "", [])
+    )
+    policy_name = ML_MODEL_SIDE_MARGIN_SHADOW_POLICY_NAME
+    shadow_policies = manifest.get("shadow_policies") if isinstance(manifest, dict) else None
+    policy = shadow_policies.get(policy_name) if isinstance(shadow_policies, dict) else None
+    shadow_policy_ready = False
+    shadow_policy_horizon = None
+    shadow_policy_failures: list[str] = []
+    if ML_MODEL_SIDE_MARGIN_SHADOW_MODE == "off":
+        shadow_policy_failures.append("shadow_mode_off")
+    elif not isinstance(policy, dict):
+        shadow_policy_failures.append("missing_policy_config")
+    else:
+        shadow_policy_horizon = _to_int(policy.get("horizon"))
+        if shadow_policy_horizon not in {5, 15, 30, 60}:
+            shadow_policy_failures.append("invalid_policy_horizon")
+        for side in ("reject", "break"):
+            side_policy = policy.get(side)
+            if not isinstance(side_policy, dict):
+                shadow_policy_failures.append(f"missing_side_config={side}")
+                continue
+            if _to_float(side_policy.get("reference_threshold")) is None:
+                shadow_policy_failures.append(f"missing_reference_threshold={side}")
+            if _to_float(side_policy.get("margin_cutoff")) is None:
+                shadow_policy_failures.append(f"missing_margin_cutoff={side}")
+            if shadow_policy_horizon not in set(models.get(side, [])):
+                shadow_policy_failures.append(f"missing_loaded_model={side}_{shadow_policy_horizon}m")
+        shadow_policy_ready = not shadow_policy_failures
+
+    return {
+        "active_manifest_path": manifest_path,
+        "active_model_version": manifest.get("version") if isinstance(manifest, dict) else None,
+        "feature_version": manifest.get("feature_version") if isinstance(manifest, dict) else None,
+        "model_context_present": isinstance(model_context, dict) and not missing_context_fields,
+        "missing_model_context_fields": missing_context_fields,
+        "shadow_policy_name": policy_name,
+        "shadow_policy_horizon": shadow_policy_horizon,
+        "shadow_policy_ready": shadow_policy_ready,
+        "shadow_policy_failures": shadow_policy_failures,
+        "target_horizon_coverage": {
+            target: sorted(int(horizon) for horizon in horizons)
+            for target, horizons in models.items()
+        },
+    }
+
+
 @app.get("/health")
 async def health():
     registry_snapshot = registry.snapshot()
@@ -2174,6 +2354,11 @@ async def health():
         "manifest": manifest,
         "manifest_path": manifest_path,
         "models": models,
+        "runtime_readiness": _runtime_manifest_readiness(
+            manifest=manifest,
+            manifest_path=manifest_path,
+            models=models,
+        ),
         "reload": _reload_state_snapshot(),
         "score": _score_state_snapshot(),
         "inference_n_jobs": ML_INFERENCE_N_JOBS,
@@ -2202,7 +2387,20 @@ async def health():
                 "horizons": sorted(or_breakout_rules),
                 "block_values": or_breakout_block_values,
                 "rules": _serialize_reject_or_breakout_filter_rules(or_breakout_rules),
-            }
+            },
+            "break_filters": {
+                "regime4": ML_BREAK_FILTER_REGIME4,
+                "gamma_pos": ML_BREAK_FILTER_GAMMA_POS,
+                "note": "suppress break signals when regime_type==4 or gamma_mode==+1",
+            },
+        },
+        "threshold_overrides": {
+            "reject": {str(h): v for h, v in ML_REJECT_THRESHOLD_OVERRIDE.items()},
+            "break": {str(h): v for h, v in ML_BREAK_THRESHOLD_OVERRIDE.items()},
+        },
+        "decision_meta_config": {
+            "high_confidence_reject_threshold": ML_HIGH_CONFIDENCE_REJECT,
+            "high_confidence_break_threshold": ML_HIGH_CONFIDENCE_BREAK,
         },
         "analogs": {
             **analog_engine.health(),
@@ -2243,6 +2441,153 @@ async def health():
         age_hours = (time.time() * 1000 - trained_end_ts) / (3600 * 1000)
         result["stale_hours"] = round(age_hours, 1)
     return result
+
+
+@app.get("/ml/perf")
+async def ml_perf(days: int = 30):
+    """Rolling signal performance metrics from the prediction log.
+
+    Query params:
+      days — lookback window in days (default 30, max 180)
+
+    Returns coverage, signal counts, and average probabilities broken out by
+    model version.  Realized returns are not available here (they live in
+    event_labels); this endpoint tracks leading indicators: coverage drift and
+    confidence drift that precede performance decay.
+    """
+    days = max(1, min(180, int(days)))
+    cutoff_ms = int((time.time() - days * 86400) * 1000)
+    try:
+        conn = _get_prediction_log_conn()
+        _ensure_prediction_log_schema(conn)
+        rows = conn.execute(
+            """
+            SELECT
+                model_version,
+                COUNT(*)                                                AS total,
+                SUM(CASE WHEN abstain = 0
+                         AND (   signal_15m NOT IN ('no_edge','')
+                              OR signal_5m  NOT IN ('no_edge','')
+                              OR signal_30m NOT IN ('no_edge','')
+                              OR signal_60m NOT IN ('no_edge',''))
+                         THEN 1 ELSE 0 END)                             AS n_signal,
+                AVG(CASE WHEN signal_15m = 'reject'
+                         THEN prob_reject_15m END)                      AS avg_prob_reject_15m,
+                AVG(CASE WHEN signal_15m = 'break'
+                         THEN prob_break_15m END)                       AS avg_prob_break_15m,
+                MIN(ts_prediction)                                      AS window_start_ms,
+                MAX(ts_prediction)                                      AS window_end_ms
+            FROM prediction_log
+            WHERE ts_prediction >= ?
+            GROUP BY model_version
+            ORDER BY model_version
+            """,
+            (cutoff_ms,),
+        ).fetchall()
+        cols = [
+            "model_version", "total", "n_signal",
+            "avg_prob_reject_15m", "avg_prob_break_15m",
+            "window_start_ms", "window_end_ms",
+        ]
+        results = []
+        for row in rows:
+            r = dict(zip(cols, row))
+            total = r["total"] or 0
+            n_signal = r["n_signal"] or 0
+            r["coverage_pct"] = round(n_signal / total * 100, 1) if total > 0 else 0.0
+            results.append(r)
+
+        # ── Break filter audit ────────────────────────────────────────────────
+        # Counts how many events met the raw break threshold (candidates),
+        # how many passed through (signals fired), and how many were suppressed
+        # by the regime4 / gamma_pos filters — with reason breakdown.
+        # is_preview=0 excludes test/preview calls from counts.
+        audit_row = conn.execute(
+            """
+            SELECT
+                SUM(CASE WHEN prob_break_15m IS NOT NULL
+                          AND threshold_break_15m IS NOT NULL
+                          AND prob_break_15m >= threshold_break_15m
+                          AND abstain = 0
+                         THEN 1 ELSE 0 END)                               AS n_break_candidates,
+                SUM(CASE WHEN signal_15m = 'break'
+                         THEN 1 ELSE 0 END)                               AS n_break_passed,
+                SUM(CASE WHEN instr(quality_flags, 'BREAK_FILTER_ACTIVE') > 0
+                         THEN 1 ELSE 0 END)                               AS n_break_blocked,
+                SUM(CASE WHEN break_filter_reason = 'regime4'
+                         THEN 1 ELSE 0 END)                               AS n_blocked_regime4,
+                SUM(CASE WHEN break_filter_reason = 'gamma_pos'
+                         THEN 1 ELSE 0 END)                               AS n_blocked_gamma_pos,
+                SUM(CASE WHEN break_filter_reason = 'both'
+                         THEN 1 ELSE 0 END)                               AS n_blocked_both,
+                AVG(CASE WHEN prob_break_15m IS NOT NULL
+                          AND threshold_break_15m IS NOT NULL
+                          AND prob_break_15m >= threshold_break_15m
+                          AND abstain = 0
+                         THEN prob_break_15m END)                         AS avg_candidate_prob
+            FROM prediction_log
+            WHERE ts_prediction >= ? AND is_preview = 0
+            """,
+            (cutoff_ms,),
+        ).fetchone()
+        n_cand    = int(audit_row[0] or 0)
+        n_passed  = int(audit_row[1] or 0)
+        n_blocked = int(audit_row[2] or 0)
+        n_r4      = int(audit_row[3] or 0)
+        n_gp      = int(audit_row[4] or 0)
+        n_both    = int(audit_row[5] or 0)
+        avg_prob  = audit_row[6]
+        pass_rate  = round(n_passed  / n_cand * 100, 1) if n_cand > 0 else None
+        block_rate = round(n_blocked / n_cand * 100, 1) if n_cand > 0 else None
+        break_filter_audit = {
+            "window_days": days,
+            "n_break_candidates": n_cand,
+            "n_break_passed": n_passed,
+            "n_break_blocked": n_blocked,
+            "pass_rate_pct": pass_rate,
+            "block_rate_pct": block_rate,
+            "avg_candidate_prob": round(float(avg_prob), 4) if avg_prob is not None else None,
+            "blocked_by": {
+                "regime4":  n_r4,
+                "gamma_pos": n_gp,
+                "both":     n_both,
+            },
+            "filters_enabled": {
+                "regime4":   ML_BREAK_FILTER_REGIME4,
+                "gamma_pos": ML_BREAK_FILTER_GAMMA_POS,
+            },
+            "note": (
+                "n_break_candidates = events where prob_break_15m >= threshold_break_15m. "
+                "n_break_passed = signal_15m=='break'. "
+                "n_break_blocked = BREAK_FILTER_ACTIVE flag in quality_flags. "
+                "blocked_by reason available only for events scored after 2026-04 filter deploy."
+            ),
+        }
+    except Exception as exc:
+        return JSONResponse(
+            status_code=503,
+            content={"error": f"prediction_log unavailable: {type(exc).__name__}: {exc}"},
+        )
+    return {
+        "window_days": days,
+        "cutoff_ms": cutoff_ms,
+        "by_model": results,
+        "break_filter_audit": break_filter_audit,
+        "config": {
+            "high_confidence_reject_threshold": ML_HIGH_CONFIDENCE_REJECT,
+            "high_confidence_break_threshold": ML_HIGH_CONFIDENCE_BREAK,
+            "break_threshold_override": {
+                str(h): v for h, v in ML_BREAK_THRESHOLD_OVERRIDE.items()
+            },
+            "reject_threshold_override": {
+                str(h): v for h, v in ML_REJECT_THRESHOLD_OVERRIDE.items()
+            },
+            "break_filters": {
+                "regime4":   ML_BREAK_FILTER_REGIME4,
+                "gamma_pos": ML_BREAK_FILTER_GAMMA_POS,
+            },
+        },
+    }
 
 
 @app.post("/reload")
@@ -2928,6 +3273,61 @@ def _compute_model_side_margin_shadow_emission(
     return {policy_name: payload}
 
 
+def _build_decision_meta(
+    *,
+    event: dict,
+    features: dict,
+    signals: dict[str, str],
+    scores: dict[str, float | None],
+    all_horizons: list[int],
+) -> dict[str, object]:
+    """Annotate the final signal set with confidence tiers and context cautions.
+
+    Returns a lightweight metadata dict attached to every /score response.
+    It does NOT change the signal values — purely additive diagnostics.
+
+    Keys:
+      signal_confidence   — per-horizon: "high_confidence" | "standard" | "no_edge"
+      high_confidence_horizons — list of horizons where the signal is high-confidence
+      stacked_confluence_caution — True when event has both weekly+monthly MTF confluence;
+          ML edge is weaker in this context (see effectiveness assessment: +0.32 bps vs
+          +2.85 bps for no-confluence setups at the same threshold).
+      high_confidence_reject_threshold — active high-conf threshold (for UI display)
+      high_confidence_break_threshold  — active high-conf threshold (for UI display)
+    """
+    has_weekly = bool(features.get("has_weekly_confluence") or event.get("has_weekly_confluence"))
+    has_monthly = bool(features.get("has_monthly_confluence") or event.get("has_monthly_confluence"))
+    stacked = has_weekly and has_monthly
+
+    signal_confidence: dict[str, str] = {}
+    high_confidence_horizons: list[int] = []
+
+    for horizon in all_horizons:
+        sig = signals.get(f"signal_{horizon}m", "no_edge")
+        if sig == "no_edge":
+            signal_confidence[f"signal_{horizon}m"] = "no_edge"
+            continue
+        if sig == "reject":
+            prob = _to_float(scores.get(f"prob_reject_{horizon}m")) or 0.0
+            tier = "high_confidence" if prob >= ML_HIGH_CONFIDENCE_REJECT else "standard"
+        elif sig == "break":
+            prob = _to_float(scores.get(f"prob_break_{horizon}m")) or 0.0
+            tier = "high_confidence" if prob >= ML_HIGH_CONFIDENCE_BREAK else "standard"
+        else:
+            tier = "standard"
+        signal_confidence[f"signal_{horizon}m"] = tier
+        if tier == "high_confidence":
+            high_confidence_horizons.append(horizon)
+
+    return {
+        "signal_confidence": signal_confidence,
+        "high_confidence_horizons": sorted(high_confidence_horizons),
+        "stacked_confluence_caution": stacked,
+        "high_confidence_reject_threshold": ML_HIGH_CONFIDENCE_REJECT,
+        "high_confidence_break_threshold": ML_HIGH_CONFIDENCE_BREAK,
+    }
+
+
 def _score_event(event: dict):
     load_shed_analogs = bool(getattr(_SCORE_LOAD_SHED_LOCAL, "disable_analogs", False))
     missing = collect_missing(event)
@@ -3552,6 +3952,33 @@ def _score_event(event: dict):
 
     signals = selected_signals
 
+    # ── Break signal risk filters (F1: regime=4 / F7: gamma_mode=+1) ────────
+    # Applied after all threshold / regime / guardrail / disagreement-guard
+    # processing.  Only suppresses signals classified as "break" — reject
+    # signals are never touched.  Both filters are env-controlled and default
+    # to off so a restart without the new env vars is a safe no-op.
+    _break_filter_blocked = False
+    _break_filter_reasons: list[str] = []
+
+    _ev_regime = _to_float(event.get("regime_type")) if event.get("regime_type") is not None \
+        else _to_float(features.get("regime_type"))
+    _ev_gamma  = _to_float(event.get("gamma_mode"))  if event.get("gamma_mode")  is not None \
+        else _to_float(features.get("gamma_mode"))
+
+    if ML_BREAK_FILTER_REGIME4 and _ev_regime == 4.0:
+        _break_filter_reasons.append("regime4")
+    if ML_BREAK_FILTER_GAMMA_POS and _ev_gamma == 1.0:
+        _break_filter_reasons.append("gamma_pos")
+
+    if _break_filter_reasons:
+        for _h in all_horizons:
+            _k = f"signal_{_h}m"
+            if signals.get(_k) == "break":
+                signals[_k] = "no_edge"
+                _break_filter_blocked = True
+        if _break_filter_blocked:
+            quality_flags.append("BREAK_FILTER_ACTIVE")
+
     # ── Expected MFE/MAE: signal-conditional ──
     # Reject and break are independent binary classifiers (not mutually exclusive),
     # so we use the classified signal to select the appropriate conditional stats
@@ -3657,6 +4084,26 @@ def _score_event(event: dict):
         selected_threshold_map=selected_threshold_map,
     )
 
+    decision_meta = _build_decision_meta(
+        event=event,
+        features=features,
+        signals=signals,
+        scores=scores,
+        all_horizons=all_horizons,
+    )
+    # Attach break filter outcome to decision_meta (purely additive).
+    _filter_reason_str: str | None = (
+        _break_filter_reasons[0] if len(_break_filter_reasons) == 1
+        else "both" if len(_break_filter_reasons) > 1
+        else None
+    )
+    decision_meta["break_filter_blocked"] = _break_filter_blocked
+    decision_meta["break_filter_reason"]  = _filter_reason_str
+    decision_meta["break_filter_active"]  = {
+        "regime4":    ML_BREAK_FILTER_REGIME4,
+        "gamma_pos":  ML_BREAK_FILTER_GAMMA_POS,
+    }
+
     return {
         "status": "degraded" if missing else "ok",
         "scores": scores,
@@ -3673,6 +4120,7 @@ def _score_event(event: dict):
         "analog_blend": blend_info,
         "analog_disagreement_guard": disagreement_guard_info,
         "shadow_emissions": shadow_emissions,
+        "decision_meta": decision_meta,
         "regime_policy": {
             "mode": ML_REGIME_POLICY_MODE,
             "selected_policy": selected_policy,
