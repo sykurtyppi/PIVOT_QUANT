@@ -11,6 +11,8 @@ export async function handleStaticRoutes(req, res, url, deps) {
     GOVERNANCE_WORKSPACE_FILE,
     REPLAY_WORKSPACE_FILE,
     OPS_WORKSPACE_FILE,
+    DAILY_LEVELS_FILE,
+    VOLATILITY_LEVELS_JS,
     LOCAL_CHART_PATH,
     methodAllowed,
     methodNotAllowed,
@@ -96,6 +98,24 @@ export async function handleStaticRoutes(req, res, url, deps) {
       return true;
     }
     sendJs(res, OPS_WORKSPACE_FILE);
+    return true;
+  }
+
+  if (url.pathname === '/app/levels/volatility_levels.js') {
+    if (!methodAllowed(req, 'GET')) {
+      methodNotAllowed(res, 'GET');
+      return true;
+    }
+    sendJs(res, VOLATILITY_LEVELS_JS);
+    return true;
+  }
+
+  if (url.pathname === '/levels' || url.pathname === '/daily_levels.html') {
+    if (!methodAllowed(req, 'GET')) {
+      methodNotAllowed(res, 'GET');
+      return true;
+    }
+    sendFile(res, DAILY_LEVELS_FILE);
     return true;
   }
 

@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="color-scheme" content="dark" />
+<title>SPY Daily Levels</title>
+<style>
+  :root {
+    --ink: #0d1420;
+    --ink-raised: #131c2b;
+    --ink-line: #1f2c3f;
+    --text: #eef2f7;
+    --muted: #8493a8;
+    --faint: #56647a;
+    --resist: #e6a54e;      /* warm amber — levels above price */
+    --resist-soft: rgba(230,165,78,0.14);
+    --support: #4ec9c3;     /* cool teal — levels below price */
+    --support-soft: rgba(78,201,195,0.14);
+    --price: #f7fafc;       /* live price marker */
+    --band1: rgba(120,150,200,0.16);
+    --band2: rgba(120,150,200,0.07);
+    --danger: #e07a6b;
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--ink);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.4;
+    padding: max(14px, env(safe-area-inset-top)) 16px calc(28px + env(safe-area-inset-bottom));
+    max-width: 560px;
+    margin: 0 auto;
+  }
+  .num { font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1; }
+
+  /* ---- header ---- */
+  header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding-bottom: 4px; }
+  .sym { font-size: 30px; font-weight: 700; letter-spacing: -0.02em; }
+  .asof { color: var(--muted); font-size: 14px; text-align: right; }
+  .price-row { display: flex; align-items: baseline; gap: 12px; margin: 2px 0 18px; }
+  .price { font-size: 40px; font-weight: 650; letter-spacing: -0.02em; }
+  .chg { font-size: 16px; font-weight: 600; }
+  .chg.up { color: var(--support); }
+  .chg.down { color: var(--danger); }
+  .chg.flat { color: var(--muted); }
+  .basis { color: var(--faint); font-size: 12.5px; margin-top: -12px; margin-bottom: 20px; }
+
+  /* ---- section ---- */
+  section { margin-bottom: 26px; }
+  .sec-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 12px; }
+  .sec-title { font-size: 15px; font-weight: 650; letter-spacing: 0.01em; }
+  .sec-meta { color: var(--muted); font-size: 12.5px; }
+
+  /* ---- ladder ---- */
+  .ladder { position: relative; padding-left: 4px; }
+  .rung {
+    position: relative; display: grid; grid-template-columns: 44px 1fr auto;
+    align-items: center; gap: 10px; height: 40px;
+  }
+  .rung + .rung { border-top: 1px solid var(--ink-line); }
+  .rung .tag { font-size: 12px; font-weight: 650; color: var(--muted); }
+  .rung .track { position: relative; height: 2px; background: var(--ink-line); border-radius: 2px; }
+  .rung .val { font-size: 17px; font-weight: 600; text-align: right; min-width: 84px; }
+  .rung .pct { color: var(--faint); font-size: 12px; font-weight: 500; margin-left: 8px; }
+
+  .rung.resist .tag, .rung.resist .track { color: var(--resist); }
+  .rung.resist .track { background: linear-gradient(90deg, var(--resist-soft), var(--resist)); }
+  .rung.support .tag { color: var(--support); }
+  .rung.support .track { background: linear-gradient(90deg, var(--support-soft), var(--support)); }
+  .rung.anchor .tag { color: var(--text); }
+  .rung.anchor .track { background: var(--faint); }
+
+  /* live price marker rung */
+  .rung.now {
+    background: linear-gradient(90deg, rgba(247,250,252,0.10), rgba(247,250,252,0));
+    border-radius: 8px; margin: 4px 0; height: 46px; border-top: none;
+  }
+  .rung.now + .rung { border-top: none; }
+  .rung.now .tag { color: var(--price); font-weight: 700; }
+  .rung.now .val { color: var(--price); font-weight: 750; font-size: 19px; }
+  .rung.now .track { background: var(--price); height: 3px; box-shadow: 0 0 12px rgba(247,250,252,0.5); }
+
+  /* ---- pivot toggle ---- */
+  .toggle { display: inline-flex; background: var(--ink-raised); border-radius: 999px; padding: 3px; gap: 2px; }
+  .toggle button {
+    appearance: none; border: 0; background: transparent; color: var(--muted);
+    font: inherit; font-size: 12.5px; font-weight: 600; padding: 6px 12px; border-radius: 999px; cursor: pointer;
+  }
+  .toggle button[aria-pressed="true"] { background: var(--ink-line); color: var(--text); }
+  .toggle button:focus-visible { outline: 2px solid var(--support); outline-offset: 2px; }
+
+  /* ---- horizon strip ---- */
+  .horizons { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .hcard { background: var(--ink-raised); border-radius: var(--radius); padding: 14px; }
+  .hcard h3 { margin: 0 0 8px; font-size: 13px; font-weight: 650; color: var(--muted); }
+  .hcard .rng { display: flex; justify-content: space-between; font-size: 15px; font-weight: 600; }
+  .hcard .rng .lo { color: var(--support); }
+  .hcard .rng .hi { color: var(--resist); }
+  .hcard .sub { color: var(--faint); font-size: 12px; margin-top: 6px; }
+
+  /* ---- states / footer ---- */
+  .note { color: var(--muted); font-size: 13px; background: var(--ink-raised); border-radius: var(--radius); padding: 16px; }
+  .note.err { color: var(--danger); }
+  footer { color: var(--faint); font-size: 11.5px; margin-top: 24px; display: flex; justify-content: space-between; gap: 10px; }
+  footer button {
+    appearance: none; border: 1px solid var(--ink-line); background: var(--ink-raised); color: var(--muted);
+    font: inherit; font-size: 11.5px; padding: 6px 12px; border-radius: 999px; cursor: pointer;
+  }
+  footer button:focus-visible { outline: 2px solid var(--support); outline-offset: 2px; }
+  .skeleton { color: var(--faint); }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+  <header>
+    <div class="sym">SPY</div>
+    <div class="asof" id="asof">—</div>
+  </header>
+  <div class="price-row">
+    <div class="price num" id="price">—</div>
+    <div class="chg flat num" id="chg"></div>
+  </div>
+  <div class="basis" id="basis"></div>
+
+  <div id="content" hidden>
+    <section id="em-section">
+      <div class="sec-head">
+        <div class="sec-title">Expected move · today</div>
+        <div class="sec-meta" id="em-meta"></div>
+      </div>
+      <div class="ladder" id="em-ladder"></div>
+    </section>
+
+    <section id="pivot-section">
+      <div class="sec-head">
+        <div class="sec-title">Pivots</div>
+        <div class="toggle" role="group" aria-label="Pivot method">
+          <button data-method="standard" aria-pressed="true">Classic</button>
+          <button data-method="fibonacci" aria-pressed="false">Fib</button>
+          <button data-method="camarilla" aria-pressed="false">Camarilla</button>
+        </div>
+      </div>
+      <div class="ladder" id="pivot-ladder"></div>
+    </section>
+
+    <section id="horizon-section">
+      <div class="sec-head"><div class="sec-title">Wider horizons</div></div>
+      <div class="horizons" id="horizons"></div>
+    </section>
+  </div>
+
+  <div id="status" class="note skeleton">Loading SPY levels…</div>
+
+  <footer>
+    <span id="stamp"></span>
+    <button id="refresh" type="button">Refresh</button>
+  </footer>
+
+<script type="module">
+import { MultiHorizonVolatilityLevels } from '/app/levels/volatility_levels.js';
+
+const SYMBOL = 'SPY';
+const REFRESH_MS = 60_000;
+let pivotMethod = 'standard';
+let lastData = null;   // { bars, priorBar, currentPrice, priorClose, asOf }
+
+const $ = (id) => document.getElementById(id);
+const fmt = (v, d = 2) => (Number.isFinite(v) ? v.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d }) : '—');
+const pct = (v) => `${v >= 0 ? '+' : ''}${(v * 100).toFixed(2)}%`;
+const utcDateKey = (d) => d.toISOString().slice(0, 10);
+
+function setStatus(msg, isErr = false) {
+  const el = $('status');
+  el.hidden = !msg;
+  el.textContent = msg || '';
+  el.classList.toggle('err', isErr);
+  el.classList.toggle('skeleton', !isErr);
+}
+
+async function fetchMarket() {
+  const q = new URLSearchParams({ symbol: SYMBOL, range: '1y', interval: '1d' });
+  const res = await fetch(`/api/market?${q}`, { headers: { accept: 'application/json' } });
+  if (!res.ok) throw new Error(`market data ${res.status}`);
+  return res.json();
+}
+
+// Build the strictly-increasing, one-per-session bar series the engine expects.
+function toBars(candles) {
+  const seen = new Set();
+  const bars = [];
+  for (const c of candles) {
+    if (!Number.isFinite(c.close) || c.close <= 0 || !Number.isFinite(c.time)) continue;
+    const ts = new Date(c.time * 1000);
+    const key = utcDateKey(ts);
+    if (seen.has(key)) continue;            // one close per session date
+    seen.add(key);
+    bars.push({ timestamp: ts.toISOString(), close: c.close, _key: key, ohlc: c });
+  }
+  bars.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+  return bars;
+}
+
+function calculatePivots(method, high, low, close) {
+  const pp = (high + low + close) / 3;
+  const range = high - low;
+  if (method === 'fibonacci') {
+    return [
+      ['R3', pp + range, 'resist'], ['R2', pp + range * 0.618, 'resist'], ['R1', pp + range * 0.382, 'resist'],
+      ['PP', pp, 'anchor'],
+      ['S1', pp - range * 0.382, 'support'], ['S2', pp - range * 0.618, 'support'], ['S3', pp - range, 'support'],
+    ];
+  }
+  if (method === 'camarilla') {
+    return [
+      ['R4', close + range * 1.1 / 2, 'resist'], ['R3', close + range * 1.1 / 4, 'resist'],
+      ['R2', close + range * 1.1 / 6, 'resist'], ['R1', close + range * 1.1 / 12, 'resist'],
+      ['PP', close, 'anchor'],
+      ['S1', close - range * 1.1 / 12, 'support'], ['S2', close - range * 1.1 / 6, 'support'],
+      ['S3', close - range * 1.1 / 4, 'support'], ['S4', close - range * 1.1 / 2, 'support'],
+    ];
+  }
+  return [
+    ['R3', high + 2 * (pp - low), 'resist'], ['R2', pp + range, 'resist'], ['R1', 2 * pp - low, 'resist'],
+    ['PP', pp, 'anchor'],
+    ['S1', 2 * pp - high, 'support'], ['S2', pp - range, 'support'], ['S3', low - 2 * (high - pp), 'support'],
+  ];
+}
+
+// Render a set of {tag, value, side} rows as a ladder, inserting the live price in order.
+function renderLadder(el, rows, price, anchor) {
+  const withPrice = [...rows, { tag: 'Now', value: price, side: 'now', now: true }];
+  withPrice.sort((a, b) => b.value - a.value);   // high price at top
+  el.replaceChildren();
+  for (const r of withPrice) {
+    const div = document.createElement('div');
+    div.className = `rung ${r.side}`;
+    const delta = anchor ? (r.value - anchor) / anchor : null;
+    const pctText = (!r.now && delta !== null) ? `<span class="pct">${pct(delta)}</span>` : '';
+    div.innerHTML =
+      `<div class="tag">${r.tag}</div>` +
+      `<div class="track"></div>` +
+      `<div class="val num">${fmt(r.value)}${pctText}</div>`;
+    el.appendChild(div);
+  }
+}
+
+function renderExpectedMove(daily, price) {
+  const meta = $('em-meta');
+  if (!daily || daily.status !== 'available' || !daily.levels) {
+    $('em-ladder').replaceChildren();
+    meta.textContent = daily?.reason ? daily.reason.replace(/_/g, ' ') : 'unavailable';
+    return;
+  }
+  const L = daily.levels;
+  const rows = [
+    { tag: '+2σ', value: L.upper2Sigma, side: 'resist' },
+    { tag: '+1σ', value: L.upper1Sigma, side: 'resist' },
+    { tag: 'Close', value: L.anchor, side: 'anchor' },
+    { tag: '−1σ', value: L.lower1Sigma, side: 'support' },
+    { tag: '−2σ', value: L.lower2Sigma, side: 'support' },
+  ];
+  renderLadder($('em-ladder'), rows, price, L.anchor);
+  const rv = daily.realizedVolatility;
+  const annPct = rv ? `${(rv.annualized * 100).toFixed(1)}%/yr` : '';
+  const win = daily.quality?.usedWindow ? `${daily.quality.usedWindow}d` : '';
+  const sess = Number.isFinite(daily.sessionsRemaining) ? `${daily.sessionsRemaining} sess` : '';
+  meta.textContent = [`σ ${annPct} (${win})`, sess].filter(Boolean).join(' · ');
+}
+
+function renderPivots(priorBar, price) {
+  if (!priorBar) { $('pivot-ladder').replaceChildren(); return; }
+  const { high, low, close } = priorBar.ohlc;
+  const rows = calculatePivots(pivotMethod, high, low, close)
+    .map(([tag, value, side]) => ({ tag, value, side }));
+  renderLadder($('pivot-ladder'), rows, price, close);
+}
+
+function renderHorizons(result) {
+  const el = $('horizons');
+  el.replaceChildren();
+  for (const key of ['weekly', 'monthly']) {
+    const h = result.horizons?.[key];
+    const card = document.createElement('div');
+    card.className = 'hcard';
+    if (h?.status === 'available' && h.levels) {
+      card.innerHTML =
+        `<h3>${key[0].toUpperCase() + key.slice(1)}</h3>` +
+        `<div class="rng"><span class="lo num">${fmt(h.levels.lower1Sigma)}</span>` +
+        `<span class="hi num">${fmt(h.levels.upper1Sigma)}</span></div>` +
+        `<div class="sub">±1σ · ${h.sessionsRemaining} sess left</div>`;
+    } else {
+      card.innerHTML = `<h3>${key[0].toUpperCase() + key.slice(1)}</h3><div class="sub">unavailable</div>`;
+    }
+    el.appendChild(card);
+  }
+}
+
+function renderPrice(price, priorClose) {
+  $('price').textContent = fmt(price);
+  const chg = $('chg');
+  if (Number.isFinite(price) && Number.isFinite(priorClose) && priorClose > 0) {
+    const d = (price - priorClose) / priorClose;
+    chg.textContent = pct(d);
+    chg.className = `chg num ${d > 0.0002 ? 'up' : d < -0.0002 ? 'down' : 'flat'}`;
+  } else { chg.textContent = ''; }
+}
+
+function renderAll() {
+  if (!lastData) return;
+  const { result, priorBar, currentPrice, priorClose, asOf } = lastData;
+  $('asof').textContent = new Date(`${asOf}T00:00:00Z`).toLocaleDateString('en-US',
+    { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
+  renderPrice(currentPrice, priorClose);
+  $('basis').textContent = priorBar
+    ? `Prior session close ${fmt(priorClose)} · levels anchored there`
+    : '';
+  renderExpectedMove(result.horizons?.daily, currentPrice);
+  renderPivots(priorBar, currentPrice);
+  renderHorizons(result);
+  $('content').hidden = false;
+  setStatus('');
+  $('stamp').textContent = `Updated ${new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}`;
+}
+
+async function load() {
+  try {
+    const data = await fetchMarket();
+    const candles = Array.isArray(data.candles) ? data.candles : [];
+    if (candles.length < 30) throw new Error('not enough history');
+    const bars = toBars(candles);
+    const todayKey = utcDateKey(new Date());
+    // prior completed session = latest bar strictly before today (for pivots + basis)
+    const completed = bars.filter((b) => b._key < todayKey);
+    const priorBar = (completed.length ? completed[completed.length - 1] : bars[bars.length - 1]);
+    const currentPrice = Number.isFinite(data.currentPrice) ? data.currentPrice
+      : bars[bars.length - 1].close;
+    const result = MultiHorizonVolatilityLevels.calculate(
+      bars.map((b) => ({ timestamp: b.timestamp, close: b.close })),
+      { symbol: SYMBOL, asOf: todayKey, generatedAt: new Date().toISOString(), volatilityWindows: [20, 60] },
+    );
+    lastData = { result, priorBar, currentPrice, priorClose: priorBar.close, asOf: todayKey };
+    renderAll();
+  } catch (err) {
+    if (!lastData) setStatus(`Couldn't load levels — ${err.message}. Tap Refresh to retry.`, true);
+    else $('stamp').textContent = `Stale — retry failed (${err.message})`;
+  }
+}
+
+// pivot method toggle
+document.querySelectorAll('.toggle button').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    pivotMethod = btn.dataset.method;
+    document.querySelectorAll('.toggle button').forEach((b) =>
+      b.setAttribute('aria-pressed', String(b === btn)));
+    if (lastData) renderPivots(lastData.priorBar, lastData.currentPrice);
+  });
+});
+$('refresh').addEventListener('click', () => { setStatus(lastData ? '' : 'Loading…'); load(); });
+document.addEventListener('visibilitychange', () => { if (!document.hidden) load(); });
+setInterval(() => { if (!document.hidden) load(); }, REFRESH_MS);
+load();
+</script>
+</body>
+</html>
