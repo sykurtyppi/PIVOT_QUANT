@@ -8,19 +8,12 @@ __pycache__/
 *.pyo
 *.egg-info/
 
-# Data files (large binaries, regenerable)
-data/*.sqlite
-data/*.duckdb
-data/events.jsonl
-data/exports/
-data/models/*.pkl
-data/models/manifest_runtime_latest.json
-data/models/manifest_active.json
-data/models/manifest_active_prev.json
-data/models/model_registry.json
-data/models/metadata_runtime/
-data/models/metadata_v*.json
-data/models/manifest_latest.json
+# Data files — the entire data/ tree is regenerable artifacts: model
+# binaries (*.pkl), runtime DBs (*.sqlite/*.duckdb), parquet exports,
+# and research syncs that also contain .env credentials. Nothing under
+# data/ is tracked, so ignore it wholesale (supersedes the old granular
+# rules that missed data/air_research_sync, data/t9_*, data/model_lab, etc.).
+data/
 
 # SQLite transient files
 *.sqlite-wal
@@ -30,6 +23,10 @@ data/models/manifest_latest.json
 
 # Local agent / model caches
 .minimax/
+.claude/worktrees/
+
+# Test artifacts
+test-results/
 
 # Logs
 logs/
@@ -51,9 +48,10 @@ dist/
 build/
 coverage/
 
-# Environment
+# Environment — never track credential files anywhere in the tree
 .env
 .env.local
+*.env
 
 # Package lock (optional - uncomment if you want to track it)
 # package-lock.json
