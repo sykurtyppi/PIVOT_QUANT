@@ -20,6 +20,12 @@ mod = importlib.util.module_from_spec(spec)
 assert spec and spec.loader
 spec.loader.exec_module(mod)
 
+RC_SCRIPT = ROOT / "scripts" / "levels_evidence" / "regime_calibration.py"
+_rc_spec = importlib.util.spec_from_file_location("regime_calibration", RC_SCRIPT)
+rc = importlib.util.module_from_spec(_rc_spec)
+assert _rc_spec and _rc_spec.loader
+_rc_spec.loader.exec_module(rc)
+
 
 def make_bars(closes, highs=None, lows=None):
     bars = []
@@ -94,6 +100,37 @@ class BandTest(unittest.TestCase):
         self.assertEqual(mod.build_events(make_bars(closes, highs=highs))[-1]["touch_u1"], 0)
         highs[-1] = u1 + 0.01
         self.assertEqual(mod.build_events(make_bars(closes, highs=highs))[-1]["touch_u1"], 1)
+
+
+class RegimeCalibrationTest(unittest.TestCase):
+    def test_brownian_one_sided_touch_values(self):
+        self.assertAlmostEqual(rc.BROWNIAN_TOUCH[1], 0.3173, places=3)
+        self.assertAlmostEqual(rc.BROWNIAN_TOUCH[2], 0.0455, places=3)
+
+    def test_brier(self):
+        self.assertAlmostEqual(rc.brier([0.3, 0.3], [0, 1]), (0.09 + 0.49) / 2, places=9)
+        self.assertEqual(rc.brier([1.0, 0.0], [1, 0]), 0.0)
+
+    def test_tercile_cuts_monotone(self):
+        lo, hi = rc.tercile_cuts([float(x) for x in range(9)])
+        self.assertLessEqual(lo, hi)
+        self.assertEqual(rc.vol_bucket(lo - 1, lo, hi), "low")
+        self.assertEqual(rc.vol_bucket(hi + 1, lo, hi), "high")
+
+    def test_features_are_point_in_time(self):
+        # An earlier session's regime features must not change when a LATER bar is mutated.
+        closes = [100.0 * math.exp(0.01 * (1 if i % 2 else -1)) for i in range(80)]
+        bars = make_bars(closes)
+        base = rc.build_augmented(bars)
+        bars2 = [dict(b) for b in bars]
+        bars2[-1]["close"] *= 1.5
+        bars2[-1]["open"] *= 1.5
+        bars2[-1]["high"] *= 1.5
+        mutated = rc.build_augmented(bars2)
+        # compare the first evaluated event (well before the mutated last bar)
+        self.assertEqual(base[0]["trend"], mutated[0]["trend"])
+        self.assertEqual(base[0]["gap"], mutated[0]["gap"])
+        self.assertAlmostEqual(base[0]["sigma"], mutated[0]["sigma"], places=9)
 
 
 if __name__ == "__main__":
