@@ -48,8 +48,10 @@ class DailyLevelsPageContractTest(unittest.TestCase):
         self.assertIn("regularMarketTime", self.html)  # quote-as-of timestamp
         self.assertIn("isLastSessionComplete", self.html)
         self.assertIn("Yahoo, delayed", self.html)  # explicit source + delay
-        # price label switches Last/Now rather than always claiming "Now"
-        self.assertIn("(state === 'REGULAR') ? 'Now' : 'Last'", self.html)
+        # price label switches Last/Now (live inferred from a fresh same-session quote
+        # so it doesn't wrongly say "Last" when Yahoo omits marketState)
+        self.assertIn("live ? 'Now' : 'Last'", self.html)
+        self.assertIn("state === 'REGULAR'", self.html)
 
     def test_uses_exchange_timezone_not_utc_for_session_dates(self):
         self.assertIn("America/New_York", self.html)
