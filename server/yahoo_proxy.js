@@ -43,6 +43,7 @@ const REPLAY_WORKSPACE_FILE = path.join(ROOT_DIR, 'app', 'replay', 'index.js');
 const OPS_WORKSPACE_FILE = path.join(ROOT_DIR, 'app', 'ops', 'index.js');
 const DAILY_LEVELS_FILE = path.join(ROOT_DIR, 'daily_levels.html');
 const VOLATILITY_LEVELS_JS = path.join(ROOT_DIR, 'src', 'math', 'MultiHorizonVolatilityLevels.js');
+const NYSE_CALENDAR_JS = path.join(ROOT_DIR, 'src', 'forecast', 'nyseCalendar.js');
 const LOCAL_CHART_PATH = path.join(
   ROOT_DIR,
   'node_modules',
@@ -1102,6 +1103,7 @@ function buildRouteDeps(requestIsLocal) {
     OPS_WORKSPACE_FILE,
     DAILY_LEVELS_FILE,
     VOLATILITY_LEVELS_JS,
+    NYSE_CALENDAR_JS,
     LOCAL_CHART_PATH,
     METRICS_FILE,
     CALIB_FILE,

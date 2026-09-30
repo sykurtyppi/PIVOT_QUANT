@@ -13,6 +13,7 @@ export async function handleStaticRoutes(req, res, url, deps) {
     OPS_WORKSPACE_FILE,
     DAILY_LEVELS_FILE,
     VOLATILITY_LEVELS_JS,
+    NYSE_CALENDAR_JS,
     LOCAL_CHART_PATH,
     methodAllowed,
     methodNotAllowed,
@@ -107,6 +108,15 @@ export async function handleStaticRoutes(req, res, url, deps) {
       return true;
     }
     sendJs(res, VOLATILITY_LEVELS_JS);
+    return true;
+  }
+
+  if (url.pathname === '/app/levels/nyse_calendar.js') {
+    if (!methodAllowed(req, 'GET')) {
+      methodNotAllowed(res, 'GET');
+      return true;
+    }
+    sendJs(res, NYSE_CALENDAR_JS);
     return true;
   }
 
