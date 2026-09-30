@@ -88,6 +88,15 @@
   .sec-sub { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
   .disclaimer { color: var(--faint); font-size: 11.5px; font-style: italic; margin: 6px 0 14px; }
 
+  /* ---- today's-setup line (gap-conditioned historical behaviour) ---- */
+  .setup { background: var(--ink-raised); border-radius: 10px; padding: 11px 14px; margin: 2px 0 16px; border-left: 3px solid var(--faint); }
+  .setup[hidden] { display: none; }
+  .setup-head { font-size: 11px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); margin-bottom: 3px; }
+  .setup-body { font-size: 13.5px; color: var(--text); line-height: 1.5; }
+  .setup-body b.up { color: var(--above); }
+  .setup-body b.dn { color: var(--below); }
+  .setup-n { color: var(--faint); font-size: 11.5px; }
+
   /* ---- historical-behaviour drawer (secondary evidence) ---- */
   .evidence { margin-top: 14px; border-top: 1px solid var(--ink-line); padding-top: 12px; }
   .evidence[hidden] { display: none; }
@@ -182,6 +191,7 @@
         <div class="sec-sub" id="rv-sub">Prior close · 20-session close-to-close RV</div>
       </div>
       <div class="disclaimer">Statistical reference bands — not price targets or guaranteed containment ranges.</div>
+      <div class="setup" id="rv-setup" hidden></div>
       <div class="ladder" id="rv-ladder"></div>
       <details class="evidence" id="evidence-daily" hidden>
         <summary>Historical behaviour</summary>
@@ -464,6 +474,7 @@ function renderAll() {
   const priorClose = priorBar ? priorBar.close : (Number.isFinite(data.previousClose) ? data.previousClose : data.currentPrice);
   const price = renderHeader(data, asOf, priorClose);
   renderNearest(result, priorBar, price);
+  renderSetup(data, asOf, priorClose);
   renderRvBands(result?.horizons?.daily, price);
   renderPivots(priorBar, price);
   if (result) renderHorizons(result);
@@ -506,6 +517,58 @@ function renderEvidence() {
     + `<div class="ev-note">Point-in-time · 20-session RV band · touch = intraday high/low reached the level · `
     + `${evidence.n_sessions} sessions (${evidence.session_span}). Base rates, not a prediction for today.</div>`;
   $('evidence-daily').hidden = false;
+}
+
+// --- today's setup: gap-conditioned historical touch rate (the out-of-sample edge) ---
+let regimeRates = null;
+async function loadRegime() {
+  try {
+    const res = await fetch('/app/levels/regime_rates.json', { headers: { accept: 'application/json' } });
+    if (res.ok) { regimeRates = await res.json(); if (lastData) renderSetupFromLast(); }
+  } catch { /* setup line stays hidden when unavailable */ }
+}
+function gapBucket(g) { return g > 0.003 ? 'up' : (g < -0.003 ? 'down' : 'flat'); }
+function findGapRate(outcome, bucket) {
+  const rows = regimeRates?.descriptive?.[outcome]?.gap || [];
+  return rows.find((r) => r.bucket === bucket) || null;
+}
+function baseRate(metric) {
+  const m = (evidence?.metrics || []).find((x) => x.metric === metric);
+  return m ? m.rate : null;
+}
+function renderSetup(data, asOf, priorClose) {
+  const el = $('rv-setup');
+  el.hidden = true;
+  if (!regimeRates || !Number.isFinite(priorClose) || priorClose <= 0) return;
+  // today's open is only known once the session has opened
+  const todayBar = (data.candles || []).find(
+    (c) => new Date(c.time * 1000).toLocaleDateString('en-CA', { timeZone: TZ }) === asOf);
+  if (!todayBar || !Number.isFinite(todayBar.open)) return;
+  const gap = (todayBar.open - priorClose) / priorClose;
+  const bucket = gapBucket(gap);
+  const u = findGapRate('touch_u1', bucket);
+  const l = findGapRate('touch_l1', bucket);
+  if (!u || !l || !u.sufficient) return;
+  const head = bucket === 'up' ? `Gapped up ${pct(gap)}`
+    : bucket === 'down' ? `Gapped down ${pct(gap)}` : `Flat open ${pct(gap)}`;
+  const kind = bucket === 'flat' ? 'flat-open' : `gap-${bucket}`;
+  const bu = baseRate('touch_u1');
+  const bl = baseRate('touch_l1');
+  const baseTxt = (bu != null && bl != null)
+    ? ` · base +1σ ${(bu * 100).toFixed(0)}% / −1σ ${(bl * 100).toFixed(0)}%` : '';
+  el.innerHTML =
+    `<div class="setup-head">${head}</div>`
+    + `<div class="setup-body">Comparable ${kind} sessions historically reached `
+    + `<b class="up">+1σ ${(u.rate * 100).toFixed(0)}%</b> · `
+    + `<b class="dn">−1σ ${(l.rate * 100).toFixed(0)}%</b>`
+    + ` <span class="setup-n">(n=${u.n}${baseTxt}). Historical, not a forecast.</span></div>`;
+  el.hidden = false;
+}
+function renderSetupFromLast() {
+  if (!lastData) return;
+  const { data, priorBar, asOf } = lastData;
+  const priorClose = priorBar ? priorBar.close : data.previousClose;
+  renderSetup(data, asOf, priorClose);
 }
 
 async function load() {
@@ -560,6 +623,7 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) load
 setInterval(() => { if (!document.hidden) load(); }, REFRESH_MS);
 load();
 loadEvidence();
+loadRegime();
 </script>
 </body>
 </html>

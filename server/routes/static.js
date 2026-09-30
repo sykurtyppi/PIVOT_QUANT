@@ -15,6 +15,7 @@ export async function handleStaticRoutes(req, res, url, deps) {
     VOLATILITY_LEVELS_JS,
     NYSE_CALENDAR_JS,
     TOUCH_RATES_FILE,
+    REGIME_RATES_FILE,
     LOCAL_CHART_PATH,
     methodAllowed,
     methodNotAllowed,
@@ -128,6 +129,15 @@ export async function handleStaticRoutes(req, res, url, deps) {
       return true;
     }
     sendJsonFile(res, TOUCH_RATES_FILE);
+    return true;
+  }
+
+  if (url.pathname === '/app/levels/regime_rates.json') {
+    if (!methodAllowed(req, 'GET')) {
+      methodNotAllowed(res, 'GET');
+      return true;
+    }
+    sendJsonFile(res, REGIME_RATES_FILE);
     return true;
   }
 

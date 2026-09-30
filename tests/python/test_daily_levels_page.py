@@ -116,6 +116,22 @@ class DailyLevelsPageContractTest(unittest.TestCase):
         self.assertIn("'/app/levels/touch_rates.json'", self.routes)
         self.assertIn("TOUCH_RATES_FILE", self.routes)
 
+    # --- gap-conditioned "today's setup" line (the out-of-sample edge, surfaced honestly) ---
+    def test_gap_setup_line_present(self):
+        self.assertIn('id="rv-setup"', self.html)
+        self.assertIn("/app/levels/regime_rates.json", self.html)
+        self.assertIn("function renderSetup", self.html)
+        self.assertIn("function gapBucket", self.html)
+
+    def test_gap_setup_uses_open_and_is_labelled_historical(self):
+        self.assertIn("todayBar.open", self.html)                 # gap needs the session open
+        self.assertIn("Historical, not a forecast.", self.html)   # not a prediction
+        self.assertIn("Comparable ", self.html)                   # framed as comparable sessions
+
+    def test_regime_rates_route_registered(self):
+        self.assertIn("'/app/levels/regime_rates.json'", self.routes)
+        self.assertIn("REGIME_RATES_FILE", self.routes)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -45,6 +45,7 @@ const DAILY_LEVELS_FILE = path.join(ROOT_DIR, 'daily_levels.html');
 const VOLATILITY_LEVELS_JS = path.join(ROOT_DIR, 'src', 'math', 'MultiHorizonVolatilityLevels.js');
 const NYSE_CALENDAR_JS = path.join(ROOT_DIR, 'src', 'forecast', 'nyseCalendar.js');
 const TOUCH_RATES_FILE = path.join(ROOT_DIR, 'research', 'levels_evidence', 'daily_touch_rates.json');
+const REGIME_RATES_FILE = path.join(ROOT_DIR, 'research', 'levels_evidence', 'regime_calibration.json');
 const LOCAL_CHART_PATH = path.join(
   ROOT_DIR,
   'node_modules',
@@ -1106,6 +1107,7 @@ function buildRouteDeps(requestIsLocal) {
     VOLATILITY_LEVELS_JS,
     NYSE_CALENDAR_JS,
     TOUCH_RATES_FILE,
+    REGIME_RATES_FILE,
     LOCAL_CHART_PATH,
     METRICS_FILE,
     CALIB_FILE,
