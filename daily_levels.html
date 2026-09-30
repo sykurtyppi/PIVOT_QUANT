@@ -424,10 +424,10 @@ function renderNearest(result, priorBar, price) {
   }
 }
 
-function marketStateChip(state, quoteAgeMin, isClosed) {
+function marketStateChip(state, quoteAgeMin, isClosed, live) {
   const s = String(state || '').toUpperCase();
-  if (s === 'REGULAR') {
-    if (Number.isFinite(quoteAgeMin) && quoteAgeMin > 20) return { text: 'Delayed quote', cls: 'stale' };
+  if (s === 'REGULAR' || live) {
+    if (Number.isFinite(quoteAgeMin) && quoteAgeMin > 30) return { text: 'Delayed quote', cls: 'stale' };
     return { text: 'Market open', cls: 'open' };
   }
   if (s === 'PRE' || s === 'PREPRE') return { text: 'Pre-market', cls: 'pre' };
@@ -442,11 +442,17 @@ function renderHeader(data, asOf, priorClose) {
   const quoteEpoch = Number(data.meta?.regularMarketTime);
   const quoteAgeMin = Number.isFinite(quoteEpoch) ? (Date.now() / 1000 - quoteEpoch) / 60 : NaN;
   const price = Number.isFinite(data.currentPrice) ? data.currentPrice : priorClose;
+  // Infer "live" when Yahoo omits marketState: a fresh, same-session quote during an
+  // open (not-closed) trading session counts as live.
+  const quoteDateET = Number.isFinite(quoteEpoch)
+    ? new Date(quoteEpoch * 1000).toLocaleDateString('en-CA', { timeZone: TZ }) : null;
+  const live = state === 'REGULAR'
+    || (!isClosed && Number.isFinite(quoteAgeMin) && quoteAgeMin < 30 && quoteDateET === asOf);
 
-  const chip = marketStateChip(state, quoteAgeMin, isClosed);
+  const chip = marketStateChip(state, quoteAgeMin, isClosed, live);
   const stateEl = $('state'); stateEl.textContent = chip.text; stateEl.className = `state ${chip.cls}`;
 
-  $('price-label').textContent = (state === 'REGULAR') ? 'Now' : 'Last';
+  $('price-label').textContent = live ? 'Now' : 'Last';
   $('price').textContent = fmt(price);
   const chg = $('chg');
   if (Number.isFinite(price) && Number.isFinite(priorClose) && priorClose > 0) {
