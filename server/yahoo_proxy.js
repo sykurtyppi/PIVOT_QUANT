@@ -44,6 +44,7 @@ const OPS_WORKSPACE_FILE = path.join(ROOT_DIR, 'app', 'ops', 'index.js');
 const DAILY_LEVELS_FILE = path.join(ROOT_DIR, 'daily_levels.html');
 const VOLATILITY_LEVELS_JS = path.join(ROOT_DIR, 'src', 'math', 'MultiHorizonVolatilityLevels.js');
 const NYSE_CALENDAR_JS = path.join(ROOT_DIR, 'src', 'forecast', 'nyseCalendar.js');
+const TOUCH_RATES_FILE = path.join(ROOT_DIR, 'research', 'levels_evidence', 'daily_touch_rates.json');
 const LOCAL_CHART_PATH = path.join(
   ROOT_DIR,
   'node_modules',
@@ -1104,6 +1105,7 @@ function buildRouteDeps(requestIsLocal) {
     DAILY_LEVELS_FILE,
     VOLATILITY_LEVELS_JS,
     NYSE_CALENDAR_JS,
+    TOUCH_RATES_FILE,
     LOCAL_CHART_PATH,
     METRICS_FILE,
     CALIB_FILE,
@@ -1116,6 +1118,7 @@ function buildRouteDeps(requestIsLocal) {
     methodAllowed,
     methodNotAllowed,
     sendJson,
+    sendJsonFile,
     sendProxyError,
     sendJs,
     sendFile,
@@ -2168,6 +2171,21 @@ function sendJs(res, filePath) {
     }
     res.writeHead(200, withSecurityHeaders({
       'Content-Type': 'application/javascript; charset=utf-8',
+      'Cache-Control': 'no-store',
+    }));
+    res.end(data);
+  });
+}
+
+function sendJsonFile(res, filePath) {
+  fs.readFile(filePath, (error, data) => {
+    if (error) {
+      res.writeHead(404, withSecurityHeaders({ 'Content-Type': 'text/plain' }));
+      res.end('Not found');
+      return;
+    }
+    res.writeHead(200, withSecurityHeaders({
+      'Content-Type': 'application/json; charset=utf-8',
       'Cache-Control': 'no-store',
     }));
     res.end(data);

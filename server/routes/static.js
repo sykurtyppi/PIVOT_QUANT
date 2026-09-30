@@ -14,10 +14,12 @@ export async function handleStaticRoutes(req, res, url, deps) {
     DAILY_LEVELS_FILE,
     VOLATILITY_LEVELS_JS,
     NYSE_CALENDAR_JS,
+    TOUCH_RATES_FILE,
     LOCAL_CHART_PATH,
     methodAllowed,
     methodNotAllowed,
     sendJs,
+    sendJsonFile,
     sendFile,
     withSecurityHeaders,
   } = deps;
@@ -117,6 +119,15 @@ export async function handleStaticRoutes(req, res, url, deps) {
       return true;
     }
     sendJs(res, NYSE_CALENDAR_JS);
+    return true;
+  }
+
+  if (url.pathname === '/app/levels/touch_rates.json') {
+    if (!methodAllowed(req, 'GET')) {
+      methodNotAllowed(res, 'GET');
+      return true;
+    }
+    sendJsonFile(res, TOUCH_RATES_FILE);
     return true;
   }
 

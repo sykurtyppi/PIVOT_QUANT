@@ -99,6 +99,23 @@ class DailyLevelsPageContractTest(unittest.TestCase):
         self.assertIn('class="fam"', self.html)                     # level family shown
         self.assertIn("Confluence", self.html)
 
+    # --- evidence layer: historical base rates surfaced as SECONDARY, honest context ---
+    def test_historical_behaviour_drawer_present(self):
+        self.assertIn('id="evidence-daily"', self.html)
+        self.assertIn("Historical behaviour", self.html)
+        self.assertIn("/app/levels/touch_rates.json", self.html)   # canonical, from the pipeline
+        self.assertIn("function renderEvidence", self.html)
+
+    def test_evidence_is_labelled_as_base_rates_not_prediction(self):
+        self.assertIn("Base rates, not a prediction for today.", self.html)
+        self.assertIn("touch = intraday high/low reached the level", self.html)
+        self.assertIn("Reached +1σ before close", self.html)
+        self.assertIn("Closed inside ±1σ", self.html)     # keep touch vs close-inside distinct
+
+    def test_touch_rates_route_registered(self):
+        self.assertIn("'/app/levels/touch_rates.json'", self.routes)
+        self.assertIn("TOUCH_RATES_FILE", self.routes)
+
 
 if __name__ == "__main__":
     unittest.main()
