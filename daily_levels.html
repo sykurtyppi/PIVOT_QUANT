@@ -58,6 +58,29 @@
   .forwhich { color: var(--muted); font-size: 13px; margin: 12px 0 20px; }
   .forwhich strong { color: var(--text); font-weight: 650; }
 
+  /* ---- nearest-level hero ---- */
+  .nearest { display: grid; gap: 8px; margin-bottom: 26px; }
+  .near {
+    background: var(--ink-raised); border-radius: var(--radius); padding: 13px 16px;
+    display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 2px 12px;
+    border-left: 3px solid transparent;
+  }
+  .near.above { border-left-color: var(--above); }
+  .near.below { border-left-color: var(--below); }
+  .near[hidden] { display: none; }
+  .near .cap { grid-column: 1; grid-row: 1; font-size: 11px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; }
+  .near.above .cap { color: var(--above); }
+  .near.below .cap { color: var(--below); }
+  .near .move { grid-column: 2; grid-row: 1 / span 2; text-align: right; align-self: center; }
+  .near .move .p { font-size: 25px; font-weight: 750; letter-spacing: -0.01em; display: block; }
+  .near .move .d { font-size: 12px; color: var(--faint); }
+  .near.above .move .p { color: var(--above); }
+  .near.below .move .p { color: var(--below); }
+  .near .lvl { grid-column: 1; grid-row: 2; font-size: 19px; font-weight: 650; }
+  .near .lvl .fam { color: var(--muted); font-size: 13px; font-weight: 500; margin-left: 8px; }
+  .near .conf { grid-column: 1 / -1; grid-row: 3; margin-top: 6px; font-size: 11.5px; color: var(--faint); }
+  .near .conf b { color: var(--text); font-weight: 600; }
+
   /* ---- section ---- */
   section { margin-bottom: 26px; }
   .sec-head { margin-bottom: 4px; }
@@ -132,6 +155,13 @@
   <div class="forwhich" id="forwhich"></div>
 
   <div id="content" hidden>
+    <section id="nearest-section">
+      <div class="nearest">
+        <div class="near above" id="near-above"></div>
+        <div class="near below" id="near-below"></div>
+      </div>
+    </section>
+
     <section id="rv-section">
       <div class="sec-head">
         <div class="sec-title">Today’s realized-volatility bands</div>
@@ -310,6 +340,62 @@ function renderHorizons(result) {
   }
 }
 
+// --- nearest-level hero: closest wall above & below, with cross-family confluence ---
+const PIVOT_FAMILIES = { standard: 'Classic', fibonacci: 'Fib', camarilla: 'Camarilla' };
+const ALL_METHODS = Object.entries(PIVOT_FAMILIES);
+
+function levelsFor(result, priorBar, methods) {
+  const out = [];
+  const d = result?.horizons?.daily;
+  if (d?.status === 'available' && d.levels) {
+    const L = d.levels;
+    out.push({ family: 'RV', label: '+2σ', value: L.upper2Sigma }, { family: 'RV', label: '+1σ', value: L.upper1Sigma },
+      { family: 'RV', label: '−1σ', value: L.lower1Sigma }, { family: 'RV', label: '−2σ', value: L.lower2Sigma });
+  }
+  if (priorBar) {
+    const { high, low, close } = priorBar.ohlc;
+    for (const [m, fam] of methods) {
+      for (const [label, value] of calculatePivots(m, high, low, close)) out.push({ family: fam, label, value });
+    }
+  }
+  return out.filter((x) => Number.isFinite(x.value));
+}
+
+function confluenceFor(target, pool, price) {
+  if (!target) return [];
+  const thr = price * 0.0015; // within 0.15%
+  const fams = new Map();
+  for (const x of pool) {
+    if (x.family === target.family) continue; // confluence must come from an independent family
+    // skip structurally-identical levels (e.g. Classic PP == Fib PP share the (H+L+C)/3 formula)
+    if (x.label === target.label && Math.abs(x.value - target.value) < 0.02) continue;
+    if (Math.abs(x.value - target.value) <= thr && !fams.has(x.family)) fams.set(x.family, x.label);
+  }
+  return [...fams].map(([f, l]) => `${f} ${l}`);
+}
+
+function renderNearest(result, priorBar, price) {
+  // nearest is drawn from the σ bands + the currently selected pivot method (matches the ladder);
+  // confluence is checked against every family so it flags independent confirmation.
+  const shown = levelsFor(result, priorBar, [[pivotMethod, PIVOT_FAMILIES[pivotMethod]]]);
+  const pool = levelsFor(result, priorBar, ALL_METHODS);
+  const above = shown.filter((x) => x.value > price).sort((a, b) => a.value - b.value)[0] || null;
+  const below = shown.filter((x) => x.value <= price).sort((a, b) => b.value - a.value)[0] || null;
+  for (const [id, lvl, side] of [['near-above', above, 'above'], ['near-below', below, 'below']]) {
+    const el = $(id);
+    if (!lvl || !Number.isFinite(price)) { el.hidden = true; continue; }
+    el.hidden = false;
+    el.className = `near ${side}`;
+    const conf = confluenceFor(lvl, pool, price);
+    el.innerHTML =
+      `<div class="cap">Nearest ${side}</div>` +
+      `<div class="move"><span class="p num">${pct((lvl.value - price) / price)}</span>` +
+      `<span class="d num">${signedMoney(lvl.value - price)}</span></div>` +
+      `<div class="lvl num">${fmt(lvl.value)}<span class="fam">${lvl.family} ${lvl.label}</span></div>` +
+      (conf.length ? `<div class="conf"><b>Confluence</b> · ${conf.slice(0, 3).join(' · ')}</div>` : '');
+  }
+}
+
 function marketStateChip(state, quoteAgeMin, isClosed) {
   const s = String(state || '').toUpperCase();
   if (s === 'REGULAR') {
@@ -359,6 +445,7 @@ function renderAll() {
   const { data, result, priorBar, asOf } = lastData;
   const priorClose = priorBar ? priorBar.close : (Number.isFinite(data.previousClose) ? data.previousClose : data.currentPrice);
   const price = renderHeader(data, asOf, priorClose);
+  renderNearest(result, priorBar, price);
   renderRvBands(result?.horizons?.daily, price);
   renderPivots(priorBar, price);
   if (result) renderHorizons(result);
@@ -410,6 +497,7 @@ document.querySelectorAll('.toggle button').forEach((btn) => {
       const priorClose = lastData.priorBar ? lastData.priorBar.close : lastData.data.previousClose;
       const price = Number.isFinite(lastData.data.currentPrice) ? lastData.data.currentPrice : priorClose;
       renderPivots(lastData.priorBar, price);
+      renderNearest(lastData.result, lastData.priorBar, price);
     }
   });
 });

@@ -86,6 +86,19 @@ class DailyLevelsPageContractTest(unittest.TestCase):
         self.assertIn("Lower −1σ", self.html)
         self.assertIn("anchor ", self.html)
 
+    # --- #4 nearest-level hero card ---
+    def test_nearest_level_card_present(self):
+        self.assertIn('id="near-above"', self.html)
+        self.assertIn('id="near-below"', self.html)
+        self.assertIn("Nearest ${side}", self.html)
+        self.assertIn("function renderNearest", self.html)
+
+    def test_nearest_card_shows_distance_family_and_confluence(self):
+        self.assertIn("function confluenceFor", self.html)          # cross-family confluence
+        self.assertIn("confluence must come from an independent family", self.html)
+        self.assertIn('class="fam"', self.html)                     # level family shown
+        self.assertIn("Confluence", self.html)
+
 
 if __name__ == "__main__":
     unittest.main()
