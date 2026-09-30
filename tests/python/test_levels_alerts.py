@@ -57,5 +57,12 @@ class EvaluateTest(unittest.TestCase):
         self.assertIn("\U0001F514", msg)
 
 
+class SlackFormatTest(unittest.TestCase):
+    def test_discord_bold_becomes_slack_bold(self):
+        self.assertEqual(w.notify._slack_text("**SPY 768** near **+1σ**"),
+                         "*SPY 768* near *+1σ*")
+        self.assertEqual(w.notify._slack_text("no bold here"), "no bold here")
+
+
 if __name__ == "__main__":
     unittest.main()

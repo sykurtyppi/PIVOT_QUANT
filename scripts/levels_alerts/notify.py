@@ -88,6 +88,12 @@ def email_post(subject: str, body: str, *, dry_run: bool = False) -> bool:
     return True
 
 
+def _slack_text(content: str) -> str:
+    """Convert Discord-style **bold** to Slack mrkdwn *bold*."""
+    import re
+    return re.sub(r"\*\*(.+?)\*\*", r"*\1*", content)
+
+
 def post(content: str, *, username: str = "PivotQuant Levels", timeout: float = 8.0) -> bool:
     """Best-effort deliver. Returns True if delivered, False on dry-run OR failure.
 
@@ -100,11 +106,16 @@ def post(content: str, *, username: str = "PivotQuant Levels", timeout: float = 
     url = (os.getenv(WEBHOOK_ENV) or "").strip()
     if not url:
         print("─" * 60)
-        print(f"[DRY RUN — set {WEBHOOK_ENV} to deliver]\n")
+        print(f"[DRY RUN — set {WEBHOOK_ENV} to deliver (Slack or Discord webhook)]\n")
         print(content)
         print("─" * 60)
         return False
-    body = json.dumps({"content": content, "username": username}).encode()
+    if "hooks.slack.com" in url:
+        # Slack incoming webhook: {"text": ...} with Slack mrkdwn (*bold*, not **bold**)
+        body = json.dumps({"text": _slack_text(content)}).encode()
+    else:
+        # Discord (or generic) webhook: {"content": ...}
+        body = json.dumps({"content": content, "username": username}).encode()
     req = urllib.request.Request(url, data=body, method="POST",
                                  headers={"Content-Type": "application/json"})
     try:
