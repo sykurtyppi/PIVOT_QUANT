@@ -86,14 +86,22 @@ class ReproducibilityTest(unittest.TestCase):
 
     def test_regime_calibration_brier_reproduces(self):
         events = rc.build_augmented(self.bars)
-        for outcome in ("touch_u1", "touch_l1"):
-            c = self.regime["calibration"][outcome]
-            got = rc.calibration(events, outcome, 1)
+        self.assertTrue(self.regime["calibration"], "no calibration outcomes committed")
+        for outcome, c in self.regime["calibration"].items():
+            k = 2 if outcome.endswith("2") else 1
+            got = rc.calibration(events, outcome, k)
             self.assertEqual(got["scored_sessions"], c["scored_sessions"], outcome)
             self.assertAlmostEqual(got["realized_rate"], c["realized_rate"], delta=FLOAT_TOL)
             for predictor, bval in c["brier"].items():
                 self.assertAlmostEqual(got["brier"][predictor], bval, delta=FLOAT_TOL,
                                        msg=f"{outcome}.{predictor}")
+            # The §7/§10 verdict fields the display layer relies on must be present and
+            # self-consistent with the Brier scores.
+            for field in ("best_predictor", "gap_beats_unconditional", "gap_rel_improvement"):
+                self.assertIn(field, c, f"{outcome} missing {field}")
+            self.assertEqual(got["best_predictor"], min(got["brier"], key=got["brier"].get), outcome)
+            self.assertEqual(got["gap_beats_unconditional"],
+                             got["brier"]["gap_at_open"] < got["brier"]["unconditional"], outcome)
         # Sanity: the documented honest edge actually holds in the committed numbers.
         u1 = self.regime["calibration"]["touch_u1"]["brier"]
         self.assertLess(u1["gap_at_open"], u1["unconditional"])

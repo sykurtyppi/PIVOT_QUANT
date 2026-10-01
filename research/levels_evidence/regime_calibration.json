@@ -180,6 +180,534 @@
           "sufficient": true
         }
       ]
+    },
+    "touch_u2": {
+      "vol": [
+        {
+          "bucket": "high",
+          "label": "high",
+          "hits": 27,
+          "n": 820,
+          "rate": 0.032926829268292684,
+          "ci_low": 0.02272647469396211,
+          "ci_high": 0.04748297908066651,
+          "sufficient": true
+        },
+        {
+          "bucket": "low",
+          "label": "low",
+          "hits": 67,
+          "n": 821,
+          "rate": 0.08160779537149818,
+          "ci_low": 0.06477216330136201,
+          "ci_high": 0.10234050707504108,
+          "sufficient": true
+        },
+        {
+          "bucket": "mid",
+          "label": "mid",
+          "hits": 50,
+          "n": 821,
+          "rate": 0.06090133982947625,
+          "ci_low": 0.04649825305070776,
+          "ci_high": 0.07939437481157263,
+          "sufficient": true
+        }
+      ],
+      "trend": [
+        {
+          "bucket": "down",
+          "label": "down",
+          "hits": 50,
+          "n": 654,
+          "rate": 0.0764525993883792,
+          "ci_low": 0.05847034827302964,
+          "ci_high": 0.09938145238248036,
+          "sufficient": true
+        },
+        {
+          "bucket": "up",
+          "label": "up",
+          "hits": 94,
+          "n": 1808,
+          "rate": 0.051991150442477874,
+          "ci_low": 0.04267443956374488,
+          "ci_high": 0.06320759436739248,
+          "sufficient": true
+        }
+      ],
+      "gap": [
+        {
+          "bucket": "down",
+          "label": "down",
+          "hits": 5,
+          "n": 517,
+          "rate": 0.009671179883945842,
+          "ci_low": 0.004137825206970404,
+          "ci_high": 0.022437361130988175,
+          "sufficient": true
+        },
+        {
+          "bucket": "flat",
+          "label": "flat",
+          "hits": 28,
+          "n": 1243,
+          "rate": 0.02252614641995173,
+          "ci_low": 0.015630460184374,
+          "ci_high": 0.03236398080677996,
+          "sufficient": true
+        },
+        {
+          "bucket": "up",
+          "label": "up",
+          "hits": 111,
+          "n": 702,
+          "rate": 0.1581196581196581,
+          "ci_low": 0.1329999368091913,
+          "ci_high": 0.1869606662390138,
+          "sufficient": true
+        }
+      ]
+    },
+    "touch_l2": {
+      "vol": [
+        {
+          "bucket": "high",
+          "label": "high",
+          "hits": 51,
+          "n": 820,
+          "rate": 0.06219512195121951,
+          "ci_low": 0.04761915622553158,
+          "ci_high": 0.08085393491047799,
+          "sufficient": true
+        },
+        {
+          "bucket": "low",
+          "label": "low",
+          "hits": 85,
+          "n": 821,
+          "rate": 0.10353227771010962,
+          "ci_low": 0.08450623034582867,
+          "ci_high": 0.12625119092788079,
+          "sufficient": true
+        },
+        {
+          "bucket": "mid",
+          "label": "mid",
+          "hits": 62,
+          "n": 821,
+          "rate": 0.07551766138855055,
+          "ci_low": 0.05935482941491113,
+          "ci_high": 0.09563429904557352,
+          "sufficient": true
+        }
+      ],
+      "trend": [
+        {
+          "bucket": "down",
+          "label": "down",
+          "hits": 69,
+          "n": 654,
+          "rate": 0.10550458715596331,
+          "ci_low": 0.08422012389947849,
+          "ci_high": 0.13139635468940808,
+          "sufficient": true
+        },
+        {
+          "bucket": "up",
+          "label": "up",
+          "hits": 129,
+          "n": 1808,
+          "rate": 0.0713495575221239,
+          "ci_low": 0.06037109348751084,
+          "ci_high": 0.084145667372528,
+          "sufficient": true
+        }
+      ],
+      "gap": [
+        {
+          "bucket": "down",
+          "label": "down",
+          "hits": 139,
+          "n": 517,
+          "rate": 0.2688588007736944,
+          "ci_low": 0.2324488426839764,
+          "ci_high": 0.3086783161617279,
+          "sufficient": true
+        },
+        {
+          "bucket": "flat",
+          "label": "flat",
+          "hits": 47,
+          "n": 1243,
+          "rate": 0.03781174577634755,
+          "ci_low": 0.028553077447156565,
+          "ci_high": 0.0499183738576757,
+          "sufficient": true
+        },
+        {
+          "bucket": "up",
+          "label": "up",
+          "hits": 12,
+          "n": 702,
+          "rate": 0.017094017094017096,
+          "ci_low": 0.00980506465816794,
+          "ci_high": 0.029639287147421783,
+          "sufficient": true
+        }
+      ]
+    },
+    "close_above_u1": {
+      "vol": [
+        {
+          "bucket": "high",
+          "label": "high",
+          "hits": 121,
+          "n": 820,
+          "rate": 0.1475609756097561,
+          "ci_low": 0.124930355126233,
+          "ci_high": 0.1734783449804711,
+          "sufficient": true
+        },
+        {
+          "bucket": "low",
+          "label": "low",
+          "hits": 158,
+          "n": 821,
+          "rate": 0.19244823386114496,
+          "ci_low": 0.16693919913197744,
+          "ci_high": 0.22082193411414133,
+          "sufficient": true
+        },
+        {
+          "bucket": "mid",
+          "label": "mid",
+          "hits": 149,
+          "n": 821,
+          "rate": 0.1814859926918392,
+          "ci_low": 0.15662505645025285,
+          "ci_high": 0.2093137013472127,
+          "sufficient": true
+        }
+      ],
+      "trend": [
+        {
+          "bucket": "down",
+          "label": "down",
+          "hits": 145,
+          "n": 654,
+          "rate": 0.2217125382262997,
+          "ci_low": 0.19155268653270954,
+          "ci_high": 0.25512250378968326,
+          "sufficient": true
+        },
+        {
+          "bucket": "up",
+          "label": "up",
+          "hits": 283,
+          "n": 1808,
+          "rate": 0.15652654867256638,
+          "ci_low": 0.14050810004806585,
+          "ci_high": 0.17400145929913952,
+          "sufficient": true
+        }
+      ],
+      "gap": [
+        {
+          "bucket": "down",
+          "label": "down",
+          "hits": 15,
+          "n": 517,
+          "rate": 0.029013539651837523,
+          "ci_low": 0.01766004366881809,
+          "ci_high": 0.04731454360255435,
+          "sufficient": true
+        },
+        {
+          "bucket": "flat",
+          "label": "flat",
+          "hits": 137,
+          "n": 1243,
+          "rate": 0.11021721641190668,
+          "ci_low": 0.0939943062358298,
+          "ci_high": 0.12884193076537337,
+          "sufficient": true
+        },
+        {
+          "bucket": "up",
+          "label": "up",
+          "hits": 276,
+          "n": 702,
+          "rate": 0.39316239316239315,
+          "ci_low": 0.3577047996401582,
+          "ci_high": 0.4297828888124059,
+          "sufficient": true
+        }
+      ]
+    },
+    "close_below_l1": {
+      "vol": [
+        {
+          "bucket": "high",
+          "label": "high",
+          "hits": 113,
+          "n": 820,
+          "rate": 0.1378048780487805,
+          "ci_low": 0.1158956770183539,
+          "ci_high": 0.16309181063455658,
+          "sufficient": true
+        },
+        {
+          "bucket": "low",
+          "label": "low",
+          "hits": 126,
+          "n": 821,
+          "rate": 0.15347137637028013,
+          "ci_low": 0.1304344846998461,
+          "ci_high": 0.17973598028439458,
+          "sufficient": true
+        },
+        {
+          "bucket": "mid",
+          "label": "mid",
+          "hits": 110,
+          "n": 821,
+          "rate": 0.13398294762484775,
+          "ci_low": 0.11237901089441873,
+          "ci_high": 0.158996119958883,
+          "sufficient": true
+        }
+      ],
+      "trend": [
+        {
+          "bucket": "down",
+          "label": "down",
+          "hits": 118,
+          "n": 654,
+          "rate": 0.18042813455657492,
+          "ci_low": 0.15284957369052818,
+          "ci_high": 0.2117389690423295,
+          "sufficient": true
+        },
+        {
+          "bucket": "up",
+          "label": "up",
+          "hits": 231,
+          "n": 1808,
+          "rate": 0.1277654867256637,
+          "ci_low": 0.11316312140441197,
+          "ci_high": 0.143946272219854,
+          "sufficient": true
+        }
+      ],
+      "gap": [
+        {
+          "bucket": "down",
+          "label": "down",
+          "hits": 195,
+          "n": 517,
+          "rate": 0.3771760154738878,
+          "ci_low": 0.33644745114367897,
+          "ci_high": 0.41971635292914294,
+          "sufficient": true
+        },
+        {
+          "bucket": "flat",
+          "label": "flat",
+          "hits": 120,
+          "n": 1243,
+          "rate": 0.09654062751407884,
+          "ci_low": 0.08134385397785555,
+          "ci_high": 0.11422347905847756,
+          "sufficient": true
+        },
+        {
+          "bucket": "up",
+          "label": "up",
+          "hits": 34,
+          "n": 702,
+          "rate": 0.04843304843304843,
+          "ci_low": 0.034863657809375385,
+          "ci_high": 0.06691763871679551,
+          "sufficient": true
+        }
+      ]
+    },
+    "close_above_u2": {
+      "vol": [
+        {
+          "bucket": "high",
+          "label": "high",
+          "hits": 16,
+          "n": 820,
+          "rate": 0.01951219512195122,
+          "ci_low": 0.012045583794464796,
+          "ci_high": 0.031459702856197536,
+          "sufficient": true
+        },
+        {
+          "bucket": "low",
+          "label": "low",
+          "hits": 37,
+          "n": 821,
+          "rate": 0.04506699147381242,
+          "ci_low": 0.03287080801511564,
+          "ci_high": 0.0615006108657768,
+          "sufficient": true
+        },
+        {
+          "bucket": "mid",
+          "label": "mid",
+          "hits": 23,
+          "n": 821,
+          "rate": 0.028014616321559074,
+          "ci_low": 0.01873901355795858,
+          "ci_high": 0.04168648795836224,
+          "sufficient": true
+        }
+      ],
+      "trend": [
+        {
+          "bucket": "down",
+          "label": "down",
+          "hits": 27,
+          "n": 654,
+          "rate": 0.04128440366972477,
+          "ci_low": 0.028526026362689434,
+          "ci_high": 0.05940011153136475,
+          "sufficient": true
+        },
+        {
+          "bucket": "up",
+          "label": "up",
+          "hits": 49,
+          "n": 1808,
+          "rate": 0.027101769911504425,
+          "ci_low": 0.020560598373120877,
+          "ci_high": 0.03564821522085745,
+          "sufficient": true
+        }
+      ],
+      "gap": [
+        {
+          "bucket": "down",
+          "label": "down",
+          "hits": 2,
+          "n": 517,
+          "rate": 0.0038684719535783366,
+          "ci_low": 0.0010615163724319162,
+          "ci_high": 0.013993849685502501,
+          "sufficient": true
+        },
+        {
+          "bucket": "flat",
+          "label": "flat",
+          "hits": 12,
+          "n": 1243,
+          "rate": 0.009654062751407884,
+          "ci_low": 0.005531069013737455,
+          "ci_high": 0.01679852118695056,
+          "sufficient": true
+        },
+        {
+          "bucket": "up",
+          "label": "up",
+          "hits": 62,
+          "n": 702,
+          "rate": 0.08831908831908832,
+          "ci_low": 0.069506485946031,
+          "ci_high": 0.11161274022451596,
+          "sufficient": true
+        }
+      ]
+    },
+    "close_below_l2": {
+      "vol": [
+        {
+          "bucket": "high",
+          "label": "high",
+          "hits": 26,
+          "n": 820,
+          "rate": 0.03170731707317073,
+          "ci_low": 0.02172837470619463,
+          "ci_high": 0.04605342751170978,
+          "sufficient": true
+        },
+        {
+          "bucket": "low",
+          "label": "low",
+          "hits": 44,
+          "n": 821,
+          "rate": 0.0535931790499391,
+          "ci_low": 0.04016282605425051,
+          "ci_high": 0.07118155150892777,
+          "sufficient": true
+        },
+        {
+          "bucket": "mid",
+          "label": "mid",
+          "hits": 25,
+          "n": 821,
+          "rate": 0.030450669914738125,
+          "ci_low": 0.020709391129084334,
+          "ci_high": 0.04456552715360386,
+          "sufficient": true
+        }
+      ],
+      "trend": [
+        {
+          "bucket": "down",
+          "label": "down",
+          "hits": 34,
+          "n": 654,
+          "rate": 0.05198776758409786,
+          "ci_low": 0.03743873855977234,
+          "ci_high": 0.07176912278342057,
+          "sufficient": true
+        },
+        {
+          "bucket": "up",
+          "label": "up",
+          "hits": 61,
+          "n": 1808,
+          "rate": 0.03373893805309734,
+          "ci_low": 0.026355109786789448,
+          "ci_high": 0.043099895897097944,
+          "sufficient": true
+        }
+      ],
+      "gap": [
+        {
+          "bucket": "down",
+          "label": "down",
+          "hits": 64,
+          "n": 517,
+          "rate": 0.12379110251450677,
+          "ci_low": 0.09814585189657944,
+          "ci_high": 0.15498579994852096,
+          "sufficient": true
+        },
+        {
+          "bucket": "flat",
+          "label": "flat",
+          "hits": 25,
+          "n": 1243,
+          "rate": 0.02011263073209976,
+          "ci_low": 0.013659826621473317,
+          "ci_high": 0.02952245484646828,
+          "sufficient": true
+        },
+        {
+          "bucket": "up",
+          "label": "up",
+          "hits": 6,
+          "n": 702,
+          "rate": 0.008547008547008548,
+          "ci_low": 0.003922889189646586,
+          "ci_high": 0.018520477692148263,
+          "sufficient": true
+        }
+      ]
     }
   },
   "calibration": {
@@ -188,12 +716,15 @@
       "scored_sessions": 2210,
       "realized_rate": 0.27239819004524884,
       "brier": {
-        "unconditional": 0.19841343325426794,
-        "vol_bucket": 0.19740484003256767,
-        "vol_trend": 0.19279472053679553,
-        "gap_at_open": 0.1553132024849332,
-        "brownian": 0.20021453239707618
-      }
+        "unconditional": 0.19841343325426752,
+        "vol_bucket": 0.19740484003256734,
+        "vol_trend": 0.19279472053679544,
+        "gap_at_open": 0.15531320248493288,
+        "brownian": 0.20021453239707632
+      },
+      "best_predictor": "gap_at_open",
+      "gap_beats_unconditional": true,
+      "gap_rel_improvement": 0.21722435856498457
     },
     "touch_l1": {
       "outcome": "touch_l1",
@@ -201,11 +732,104 @@
       "realized_rate": 0.2678733031674208,
       "brier": {
         "unconditional": 0.19646526710168102,
-        "vol_bucket": 0.19637385171705724,
-        "vol_trend": 0.19476289508792985,
-        "gap_at_open": 0.15138471122165365,
-        "brownian": 0.19856123382569985
-      }
+        "vol_bucket": 0.19637385171705693,
+        "vol_trend": 0.1947628950879299,
+        "gap_at_open": 0.15138471122165392,
+        "brownian": 0.19856123382569998
+      },
+      "best_predictor": "gap_at_open",
+      "gap_beats_unconditional": true,
+      "gap_rel_improvement": 0.22945814568177877
+    },
+    "touch_u2": {
+      "outcome": "touch_u2",
+      "scored_sessions": 2210,
+      "realized_rate": 0.05656108597285068,
+      "brier": {
+        "unconditional": 0.05345632886558173,
+        "vol_bucket": 0.05264686245955776,
+        "vol_trend": 0.05190416533995783,
+        "gap_at_open": 0.05122386257931113,
+        "brownian": 0.053484271311430284
+      },
+      "best_predictor": "gap_at_open",
+      "gap_beats_unconditional": true,
+      "gap_rel_improvement": 0.04176243175778557
+    },
+    "touch_l2": {
+      "outcome": "touch_l2",
+      "scored_sessions": 2210,
+      "realized_rate": 0.08235294117647059,
+      "brier": {
+        "unconditional": 0.07568955606166328,
+        "vol_bucket": 0.07568007060774397,
+        "vol_trend": 0.07517263681383898,
+        "gap_at_open": 0.06668106374062244,
+        "brownian": 0.07692905407876745
+      },
+      "best_predictor": "gap_at_open",
+      "gap_beats_unconditional": true,
+      "gap_rel_improvement": 0.11901896100040196
+    },
+    "close_above_u1": {
+      "outcome": "close_above_u1",
+      "scored_sessions": 2210,
+      "realized_rate": 0.1755656108597285,
+      "brier": {
+        "unconditional": 0.1449220393605492,
+        "vol_bucket": 0.14486016350595235,
+        "vol_trend": 0.14389484998901425,
+        "gap_at_open": 0.1260883639067679,
+        "brownian": 0.14502828731462042
+      },
+      "best_predictor": "gap_at_open",
+      "gap_beats_unconditional": true,
+      "gap_rel_improvement": 0.12995728970474474
+    },
+    "close_below_l1": {
+      "outcome": "close_below_l1",
+      "scored_sessions": 2210,
+      "realized_rate": 0.14751131221719457,
+      "brier": {
+        "unconditional": 0.12620492283455823,
+        "vol_bucket": 0.1266294473269993,
+        "vol_trend": 0.1256656927773278,
+        "gap_at_open": 0.11108464619307298,
+        "brownian": 0.1258759124220868
+      },
+      "best_predictor": "gap_at_open",
+      "gap_beats_unconditional": true,
+      "gap_rel_improvement": 0.11980734429279262
+    },
+    "close_above_u2": {
+      "outcome": "close_above_u2",
+      "scored_sessions": 2210,
+      "realized_rate": 0.02850678733031674,
+      "brier": {
+        "unconditional": 0.02778167912459893,
+        "vol_bucket": 0.02753864383910399,
+        "vol_trend": 0.02744712672128777,
+        "gap_at_open": 0.02774192198868306,
+        "brownian": 0.027727289487609528
+      },
+      "best_predictor": "vol_trend",
+      "gap_beats_unconditional": true,
+      "gap_rel_improvement": 0.0014310559033369503
+    },
+    "close_below_l2": {
+      "outcome": "close_below_l2",
+      "scored_sessions": 2210,
+      "realized_rate": 0.040271493212669686,
+      "brier": {
+        "unconditional": 0.0387202881096789,
+        "vol_bucket": 0.038634872335093905,
+        "vol_trend": 0.03854417547370628,
+        "gap_at_open": 0.03683995926623096,
+        "brownian": 0.03895669814765237
+      },
+      "best_predictor": "gap_at_open",
+      "gap_beats_unconditional": true,
+      "gap_rel_improvement": 0.04856185052450368
     }
   }
 }

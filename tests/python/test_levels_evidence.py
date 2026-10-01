@@ -107,6 +107,23 @@ class RegimeCalibrationTest(unittest.TestCase):
         self.assertAlmostEqual(rc.BROWNIAN_TOUCH[1], 0.3173, places=3)
         self.assertAlmostEqual(rc.BROWNIAN_TOUCH[2], 0.0455, places=3)
 
+    def test_brownian_close_terminal_values(self):
+        # Close-beyond is a terminal event: one-sided 1-Φ(k), not the path 2·(1-Φ(k)).
+        self.assertAlmostEqual(rc.BROWNIAN_CLOSE[1], 0.1587, places=3)
+        self.assertAlmostEqual(rc.BROWNIAN_CLOSE[2], 0.0228, places=3)
+
+    def test_close_outcome_uses_terminal_brownian_baseline(self):
+        # A close-beyond calibration must use BROWNIAN_CLOSE; a touch calibration must
+        # use BROWNIAN_TOUCH. Guards against regressing the two baselines back into one.
+        closes = [100.0 * math.exp(0.01 * (1 if i % 2 else -1)) for i in range(rc.BURN_IN + 120)]
+        bars = make_bars(closes, highs=[c * 1.001 for c in closes], lows=[c * 0.999 for c in closes])
+        ev = rc.build_augmented(bars)
+        self.assertTrue(ev)
+        close_out = rc.calibration(ev, "close_above_u1", 1, return_preds=True)
+        self.assertTrue(all(abs(p - rc.BROWNIAN_CLOSE[1]) < 1e-12 for p in close_out["preds"]["brownian"]))
+        touch_out = rc.calibration(ev, "touch_u1", 1, return_preds=True)
+        self.assertTrue(all(abs(p - rc.BROWNIAN_TOUCH[1]) < 1e-12 for p in touch_out["preds"]["brownian"]))
+
     def test_brier(self):
         self.assertAlmostEqual(rc.brier([0.3, 0.3], [0, 1]), (0.09 + 0.49) / 2, places=9)
         self.assertEqual(rc.brier([1.0, 0.0], [1, 0]), 0.0)
