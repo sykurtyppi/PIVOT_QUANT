@@ -26,25 +26,27 @@ Deterministic; offline (Mac Mini). Writes research/levels_evidence/intraday_outc
 """
 from __future__ import annotations
 
+import datetime as dt
 import importlib.util
 import json
 import os
 import sqlite3
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[2]
 SNAPSHOT = ROOT / "data" / "levels_evidence" / "spy_intraday_snapshot.json"
 OUT = ROOT / "research" / "levels_evidence" / "intraday_outcomes.json"
-# Read-only source DB (only used when the snapshot must be (re)built). Env override
-# lets the offline machine point at the live runtime DB without hardcoding a path.
-DB_PATH = Path(os.environ.get(
-    "LEVELS_INTRADAY_DB", str(ROOT / "data" / "pivot_events.sqlite")))
+# Read-only source DB(s), only used when the snapshot must be (re)built. Env override
+# (os.pathsep-separated for several sources, listed authoritative-first) lets the offline
+# machine union the live runtime DB with the ~1.5y macbook_final salvage.
+DB_PATHS = [Path(p) for p in os.environ.get(
+    "LEVELS_INTRADAY_DB", str(ROOT / "data" / "pivot_events.sqlite")).split(os.pathsep) if p]
 
+ET = ZoneInfo("America/New_York")   # RTH is defined in exchange local time (DST-correct)
 R_FRAC = 0.002                  # 0.20% post-touch threshold (prereg §3, FROZEN)
 HORIZONS_N = [15, 30, 60]       # minutes (FROZEN)
 MIN_UNCOND = 100                # prereg §5 unconditional sample gate
-RTH_START = "13:30"             # 09:30 ET in UTC (EDT window Apr–Sep)
-RTH_END = "20:00"               # 16:00 ET in UTC
 
 _spec = importlib.util.spec_from_file_location(
     "levels_evidence_build", ROOT / "scripts" / "levels_evidence" / "build_daily_event_table.py")
@@ -56,14 +58,18 @@ _spec.loader.exec_module(_b)
 LEVELS = [("u1", "upper"), ("u2", "upper"), ("l1", "lower"), ("l2", "lower")]
 
 
+def _et(ts_ms: int) -> dt.datetime:
+    return dt.datetime.fromtimestamp(ts_ms / 1000, ET)
+
+
 def _et_date(ts_ms: int) -> str:
-    import datetime as dt
-    return dt.datetime.fromtimestamp(ts_ms / 1000, dt.timezone.utc).strftime("%Y-%m-%d")
+    return _et(ts_ms).strftime("%Y-%m-%d")
 
 
-def _utc_hhmm(ts_ms: int) -> str:
-    import datetime as dt
-    return dt.datetime.fromtimestamp(ts_ms / 1000, dt.timezone.utc).strftime("%H:%M")
+def _is_rth(ts_ms: int) -> bool:
+    """09:30–16:00 America/New_York, inclusive — DST-correct across EST/EDT."""
+    t = _et(ts_ms)
+    return (9, 30) <= (t.hour, t.minute) <= (16, 0)
 
 
 def fetch_or_load_intraday_snapshot() -> tuple[list[dict], str]:
@@ -72,25 +78,32 @@ def fetch_or_load_intraday_snapshot() -> tuple[list[dict], str]:
     if SNAPSHOT.exists():
         raw = SNAPSHOT.read_text(encoding="utf-8")
     else:
-        if not DB_PATH.exists():
+        existing = [p for p in DB_PATHS if p.exists()]
+        if not existing:
             raise SystemExit(
-                f"no intraday snapshot and no DB at {DB_PATH}; set LEVELS_INTRADAY_DB")
-        uri = f"file:{DB_PATH}?mode=ro"
-        con = sqlite3.connect(uri, uri=True)
-        try:
-            rows = con.execute(
-                "SELECT ts, open, high, low, close FROM bar_data "
-                "WHERE symbol='SPY' AND bar_interval_sec=60 AND (ts % 60000)=0 "
-                "AND strftime('%H:%M', ts/1000, 'unixepoch') >= ? "
-                "AND strftime('%H:%M', ts/1000, 'unixepoch') <= ? "
-                "ORDER BY ts", (RTH_START, RTH_END)).fetchall()
-        finally:
-            con.close()
-        candles = [{"ts": int(r[0]), "open": r[1], "high": r[2], "low": r[3], "close": r[4]}
-                   for r in rows if all(isinstance(x, (int, float)) for x in r[1:])]
+                f"no intraday snapshot and no source DB in {DB_PATHS}; set LEVELS_INTRADAY_DB")
+        by_ts: dict[int, dict] = {}   # union across sources; first (authoritative) source wins per ts
+        for db in existing:
+            con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            try:
+                rows = con.execute(
+                    "SELECT ts, open, high, low, close FROM bar_data "
+                    "WHERE symbol='SPY' AND bar_interval_sec=60 AND (ts % 60000)=0 "
+                    "ORDER BY ts").fetchall()
+            finally:
+                con.close()
+            for r in rows:
+                ts = int(r[0])
+                if ts in by_ts or not all(isinstance(x, (int, float)) for x in r[1:]):
+                    continue
+                if not _is_rth(ts):
+                    continue
+                by_ts[ts] = {"ts": ts, "open": r[1], "high": r[2], "low": r[3], "close": r[4]}
+        candles = [by_ts[t] for t in sorted(by_ts)]
         if len(candles) < 1000:
             raise SystemExit(f"only {len(candles)} intraday bars; refusing to build")
-        snap = {"symbol": "SPY", "interval_sec": 60, "source": "pivot_events.sqlite bar_data",
+        snap = {"symbol": "SPY", "interval_sec": 60,
+                "source": f"pivot_events.sqlite bar_data (union of {len(existing)} source(s))",
                 "bar_count": len(candles), "candles": candles}
         SNAPSHOT.parent.mkdir(parents=True, exist_ok=True)
         raw = json.dumps(snap, separators=(",", ":"), sort_keys=True)
@@ -101,12 +114,9 @@ def fetch_or_load_intraday_snapshot() -> tuple[list[dict], str]:
 
 
 def group_sessions(candles: list[dict]) -> dict:
-    """ET session date -> ordered list of RTH minute bars."""
+    """ET session date -> ordered list of RTH minute bars (snapshot is already RTH-only)."""
     sessions: dict[str, list[dict]] = {}
     for c in candles:
-        hhmm = _utc_hhmm(c["ts"])
-        if hhmm < RTH_START or hhmm > RTH_END:
-            continue
         sessions.setdefault(_et_date(c["ts"]), []).append(c)
     for d in sessions:
         sessions[d].sort(key=lambda b: b["ts"])
