@@ -1,0 +1,435 @@
+{
+  "generated_from": "research/levels_evidence/prereg_level_behavior.md \u00a73",
+  "intraday_snapshot_sha256_16": "b85e0a0b33eb669e",
+  "daily_snapshot_sha256_16": "34b8ed65a2fd9c61",
+  "n_sessions": 125,
+  "session_span": "2026-04-02 .. 2026-09-30",
+  "post_touch_threshold_pct": 0.002,
+  "horizons_min": [
+    15,
+    30,
+    60
+  ],
+  "unconditional_min_n": 100,
+  "labelling": "Intraday post-touch behaviour, point-in-time band levels. v1 runtime window is small (~125 sessions); per-touch rates abstain when n < 100 (prereg \u00a74/\u00a75). Historical, not a forecast.",
+  "first_side_touched": {
+    "u1_first": 32,
+    "l1_first": 31,
+    "neither": 62,
+    "n": 125
+  },
+  "levels": {
+    "u1": {
+      "label": "+1\u03c3 (upper)",
+      "intraday_touch": {
+        "hits": 32,
+        "n": 125,
+        "rate": 0.256,
+        "ci_low": 0.18756706920350186,
+        "ci_high": 0.33898284292616154,
+        "sufficient": true
+      },
+      "post_touch_by_N": {
+        "15": {
+          "acceptance": {
+            "hits": 8,
+            "n": 32,
+            "rate": 0.25,
+            "ci_low": 0.1325240091850904,
+            "ci_high": 0.4210655899424448,
+            "sufficient": false
+          },
+          "rejection": {
+            "hits": 1,
+            "n": 32,
+            "rate": 0.03125,
+            "ci_low": 0.005537860164003122,
+            "ci_high": 0.15744263820012558,
+            "sufficient": false
+          },
+          "undetermined": {
+            "hits": 23,
+            "n": 32,
+            "rate": 0.71875,
+            "ci_low": 0.5462549057408342,
+            "ci_high": 0.8443541950225723,
+            "sufficient": false
+          }
+        },
+        "30": {
+          "acceptance": {
+            "hits": 10,
+            "n": 32,
+            "rate": 0.3125,
+            "ci_low": 0.17952541633609734,
+            "ci_high": 0.4856667830095541,
+            "sufficient": false
+          },
+          "rejection": {
+            "hits": 5,
+            "n": 32,
+            "rate": 0.15625,
+            "ci_low": 0.0686442028250571,
+            "ci_high": 0.3175414959753039,
+            "sufficient": false
+          },
+          "undetermined": {
+            "hits": 17,
+            "n": 32,
+            "rate": 0.53125,
+            "ci_low": 0.3644951711897464,
+            "ci_high": 0.6913061289193116,
+            "sufficient": false
+          }
+        },
+        "60": {
+          "acceptance": {
+            "hits": 16,
+            "n": 32,
+            "rate": 0.5,
+            "ci_low": 0.33630882869327483,
+            "ci_high": 0.6636911713067252,
+            "sufficient": false
+          },
+          "rejection": {
+            "hits": 7,
+            "n": 32,
+            "rate": 0.21875,
+            "ci_low": 0.11023836252604186,
+            "ci_high": 0.3875499364924353,
+            "sufficient": false
+          },
+          "undetermined": {
+            "hits": 9,
+            "n": 32,
+            "rate": 0.28125,
+            "ci_low": 0.15564580497742764,
+            "ci_high": 0.45374509425916565,
+            "sufficient": false
+          }
+        }
+      },
+      "time_to_touch_min": {
+        "median": 29.0,
+        "n": 32
+      },
+      "mfe_pct": {
+        "median": 0.002678930438347822,
+        "n": 32
+      },
+      "mae_pct": {
+        "median": 0.001480296611838119,
+        "n": 32
+      }
+    },
+    "u2": {
+      "label": "+2\u03c3 (upper)",
+      "intraday_touch": {
+        "hits": 9,
+        "n": 125,
+        "rate": 0.072,
+        "ci_low": 0.0383391383318906,
+        "ci_high": 0.13118283868243685,
+        "sufficient": true
+      },
+      "post_touch_by_N": {
+        "15": {
+          "acceptance": {
+            "hits": 2,
+            "n": 9,
+            "rate": 0.2222222222222222,
+            "ci_low": 0.06322510711784671,
+            "ci_high": 0.5474110308930111,
+            "sufficient": false
+          },
+          "rejection": {
+            "hits": 1,
+            "n": 9,
+            "rate": 0.1111111111111111,
+            "ci_low": 0.019890887638544907,
+            "ci_high": 0.434999705576656,
+            "sufficient": false
+          },
+          "undetermined": {
+            "hits": 6,
+            "n": 9,
+            "rate": 0.6666666666666666,
+            "ci_low": 0.3542021355803963,
+            "ci_high": 0.879416181613089,
+            "sufficient": false
+          }
+        },
+        "30": {
+          "acceptance": {
+            "hits": 2,
+            "n": 9,
+            "rate": 0.2222222222222222,
+            "ci_low": 0.06322510711784671,
+            "ci_high": 0.5474110308930111,
+            "sufficient": false
+          },
+          "rejection": {
+            "hits": 1,
+            "n": 9,
+            "rate": 0.1111111111111111,
+            "ci_low": 0.019890887638544907,
+            "ci_high": 0.434999705576656,
+            "sufficient": false
+          },
+          "undetermined": {
+            "hits": 6,
+            "n": 9,
+            "rate": 0.6666666666666666,
+            "ci_low": 0.3542021355803963,
+            "ci_high": 0.879416181613089,
+            "sufficient": false
+          }
+        },
+        "60": {
+          "acceptance": {
+            "hits": 4,
+            "n": 9,
+            "rate": 0.4444444444444444,
+            "ci_low": 0.18877852109766452,
+            "ci_high": 0.733348706504507,
+            "sufficient": false
+          },
+          "rejection": {
+            "hits": 2,
+            "n": 9,
+            "rate": 0.2222222222222222,
+            "ci_low": 0.06322510711784671,
+            "ci_high": 0.5474110308930111,
+            "sufficient": false
+          },
+          "undetermined": {
+            "hits": 3,
+            "n": 9,
+            "rate": 0.3333333333333333,
+            "ci_low": 0.1205838183869109,
+            "ci_high": 0.6457978644196036,
+            "sufficient": false
+          }
+        }
+      },
+      "time_to_touch_min": {
+        "median": 129.0,
+        "n": 9
+      },
+      "mfe_pct": {
+        "median": 0.002235381541080203,
+        "n": 9
+      },
+      "mae_pct": {
+        "median": 0.001488457395548367,
+        "n": 9
+      }
+    },
+    "l1": {
+      "label": "\u22121\u03c3 (lower)",
+      "intraday_touch": {
+        "hits": 33,
+        "n": 125,
+        "rate": 0.264,
+        "ci_low": 0.19459847344951559,
+        "ci_high": 0.3474743923808146,
+        "sufficient": true
+      },
+      "post_touch_by_N": {
+        "15": {
+          "acceptance": {
+            "hits": 13,
+            "n": 33,
+            "rate": 0.3939393939393939,
+            "ci_low": 0.2468310743447709,
+            "ci_high": 0.5631655918005977,
+            "sufficient": false
+          },
+          "rejection": {
+            "hits": 6,
+            "n": 33,
+            "rate": 0.18181818181818182,
+            "ci_low": 0.08610768208940667,
+            "ci_high": 0.3438823163466992,
+            "sufficient": false
+          },
+          "undetermined": {
+            "hits": 14,
+            "n": 33,
+            "rate": 0.42424242424242425,
+            "ci_low": 0.2723559663341021,
+            "ci_high": 0.5919273666268755,
+            "sufficient": false
+          }
+        },
+        "30": {
+          "acceptance": {
+            "hits": 14,
+            "n": 33,
+            "rate": 0.42424242424242425,
+            "ci_low": 0.2723559663341021,
+            "ci_high": 0.5919273666268755,
+            "sufficient": false
+          },
+          "rejection": {
+            "hits": 9,
+            "n": 33,
+            "rate": 0.2727272727272727,
+            "ci_low": 0.1506744088542064,
+            "ci_high": 0.44217559002872625,
+            "sufficient": false
+          },
+          "undetermined": {
+            "hits": 10,
+            "n": 33,
+            "rate": 0.30303030303030304,
+            "ci_low": 0.17375531424053606,
+            "ci_high": 0.47338135145800575,
+            "sufficient": false
+          }
+        },
+        "60": {
+          "acceptance": {
+            "hits": 15,
+            "n": 33,
+            "rate": 0.45454545454545453,
+            "ci_low": 0.29842938513876116,
+            "ci_high": 0.6201406146378254,
+            "sufficient": false
+          },
+          "rejection": {
+            "hits": 13,
+            "n": 33,
+            "rate": 0.3939393939393939,
+            "ci_low": 0.2468310743447709,
+            "ci_high": 0.5631655918005977,
+            "sufficient": false
+          },
+          "undetermined": {
+            "hits": 5,
+            "n": 33,
+            "rate": 0.15151515151515152,
+            "ci_low": 0.06650457281607568,
+            "ci_high": 0.3091987588044212,
+            "sufficient": false
+          }
+        }
+      },
+      "time_to_touch_min": {
+        "median": 92.0,
+        "n": 33
+      },
+      "mfe_pct": {
+        "median": 0.002302347680537643,
+        "n": 33
+      },
+      "mae_pct": {
+        "median": 0.0028203290427234935,
+        "n": 33
+      }
+    },
+    "l2": {
+      "label": "\u22122\u03c3 (lower)",
+      "intraday_touch": {
+        "hits": 6,
+        "n": 125,
+        "rate": 0.048,
+        "ci_low": 0.022182005595288892,
+        "ci_high": 0.10077111031703824,
+        "sufficient": true
+      },
+      "post_touch_by_N": {
+        "15": {
+          "acceptance": {
+            "hits": 1,
+            "n": 6,
+            "rate": 0.16666666666666666,
+            "ci_low": 0.030053369748306635,
+            "ci_high": 0.5635028221864702,
+            "sufficient": false
+          },
+          "rejection": {
+            "hits": 4,
+            "n": 6,
+            "rate": 0.6666666666666666,
+            "ci_low": 0.299993315138392,
+            "ci_high": 0.9032285888942195,
+            "sufficient": false
+          },
+          "undetermined": {
+            "hits": 1,
+            "n": 6,
+            "rate": 0.16666666666666666,
+            "ci_low": 0.030053369748306635,
+            "ci_high": 0.5635028221864702,
+            "sufficient": false
+          }
+        },
+        "30": {
+          "acceptance": {
+            "hits": 2,
+            "n": 6,
+            "rate": 0.3333333333333333,
+            "ci_low": 0.09677141110578041,
+            "ci_high": 0.700006684861608,
+            "sufficient": false
+          },
+          "rejection": {
+            "hits": 4,
+            "n": 6,
+            "rate": 0.6666666666666666,
+            "ci_low": 0.299993315138392,
+            "ci_high": 0.9032285888942195,
+            "sufficient": false
+          },
+          "undetermined": {
+            "hits": 0,
+            "n": 6,
+            "rate": 0.0,
+            "ci_low": 2.7755575615628914e-17,
+            "ci_high": 0.3903342879021653,
+            "sufficient": false
+          }
+        },
+        "60": {
+          "acceptance": {
+            "hits": 2,
+            "n": 6,
+            "rate": 0.3333333333333333,
+            "ci_low": 0.09677141110578041,
+            "ci_high": 0.700006684861608,
+            "sufficient": false
+          },
+          "rejection": {
+            "hits": 4,
+            "n": 6,
+            "rate": 0.6666666666666666,
+            "ci_low": 0.299993315138392,
+            "ci_high": 0.9032285888942195,
+            "sufficient": false
+          },
+          "undetermined": {
+            "hits": 0,
+            "n": 6,
+            "rate": 0.0,
+            "ci_low": 2.7755575615628914e-17,
+            "ci_high": 0.3903342879021653,
+            "sufficient": false
+          }
+        }
+      },
+      "time_to_touch_min": {
+        "median": 130.0,
+        "n": 6
+      },
+      "mfe_pct": {
+        "median": 0.003400802963109512,
+        "n": 6
+      },
+      "mae_pct": {
+        "median": 0.010110555248402467,
+        "n": 6
+      }
+    }
+  }
+}
