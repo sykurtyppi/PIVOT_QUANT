@@ -111,6 +111,16 @@
   .ev-row .ev-ci { color: var(--faint); font-size: 11.5px; text-align: right; }
   .ev-note { color: var(--faint); font-size: 11px; margin-top: 10px; line-height: 1.55; }
 
+  /* ---- per-level behaviour rows (gap-conditioned, honest secondary context) ---- */
+  .lvl-row { padding: 9px 0; }
+  .lvl-row + .lvl-row { border-top: 1px solid var(--ink-line); }
+  .lvl-name { font-size: 13px; font-weight: 650; color: var(--text); margin-bottom: 4px; }
+  .lvl-cell { display: grid; grid-template-columns: 82px 42px 1fr; gap: 8px; align-items: baseline; font-size: 12.5px; padding: 1px 0; }
+  .lvl-cell .lvl-lab { color: var(--muted); }
+  .lvl-cell .lvl-v { font-weight: 650; text-align: right; color: var(--text); }
+  .lvl-cell .lvl-meta { color: var(--faint); font-size: 11px; }
+  .lvl-cell .lvl-meta.edge { color: var(--below); }
+
   /* pivot method toggle sits on its own row */
   .sec-head.with-toggle { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
   .toggle { display: inline-flex; background: var(--ink-raised); border-radius: 999px; padding: 3px; gap: 2px; }
@@ -193,6 +203,10 @@
       <div class="disclaimer">Statistical reference bands — not price targets or guaranteed containment ranges.</div>
       <div class="setup" id="rv-setup" hidden></div>
       <div class="ladder" id="rv-ladder"></div>
+      <details class="evidence" id="evidence-levels" hidden>
+        <summary>Level behaviour</summary>
+        <div id="lvl-body"></div>
+      </details>
       <details class="evidence" id="evidence-daily" hidden>
         <summary>Historical behaviour</summary>
         <div id="ev-body"></div>
@@ -433,6 +447,13 @@ function marketStateChip(state, quoteAgeMin, isClosed, live) {
   if (s === 'PRE' || s === 'PREPRE') return { text: 'Pre-market', cls: 'pre' };
   if (s === 'POST' || s === 'POSTPOST') return { text: 'After hours', cls: 'post' };
   if (s === 'CLOSED' || isClosed) return { text: 'Market closed', cls: '' };
+  // UNKNOWN state during an open (not-closed) session: show a meaningful chip rather
+  // than a bare dash — a stale quote reads as delayed, a fresh one as open.
+  if (!isClosed) {
+    return (Number.isFinite(quoteAgeMin) && quoteAgeMin > 30)
+      ? { text: 'Delayed quote', cls: 'stale' }
+      : { text: 'Market open', cls: 'open' };
+  }
   return { text: '—', cls: '' };
 }
 
@@ -481,6 +502,7 @@ function renderAll() {
   const price = renderHeader(data, asOf, priorClose);
   renderNearest(result, priorBar, price);
   renderSetup(data, asOf, priorClose);
+  renderLevelBehaviour();
   renderRvBands(result?.horizons?.daily, price);
   renderPivots(priorBar, price);
   if (result) renderHorizons(result);
@@ -502,6 +524,7 @@ async function loadEvidence() {
 }
 function renderEvidence() {
   if (!evidence || !Array.isArray(evidence.metrics)) return;
+  if (levelProbs) { $('evidence-daily').hidden = true; return; } // superseded by the per-level drawer
   const by = {};
   for (const m of evidence.metrics) by[m.metric] = m;
   const row = (label, m) => (m
@@ -577,6 +600,69 @@ function renderSetupFromLast() {
   renderSetup(data, asOf, priorClose);
 }
 
+// --- per-level behaviour: gap-conditioned touch & close-beyond, honest fallback (prereg §8) ---
+let levelProbs = null;
+const GAP_EDGE_MIN = 0.05; // match the evidence layer's "material edge" threshold
+async function loadLevelProbabilities() {
+  try {
+    const res = await fetch('/app/levels/level_probabilities.json', { headers: { accept: 'application/json' } });
+    if (res.ok) { levelProbs = await res.json(); if (lastData) renderLevelBehaviour(); }
+  } catch { /* drawer stays hidden when the artifact is unavailable */ }
+}
+function currentGap() {
+  if (!lastData) return null;
+  const { data, asOf, priorBar } = lastData;
+  const priorClose = priorBar ? priorBar.close : data.previousClose;
+  if (!Number.isFinite(priorClose) || priorClose <= 0) return null;
+  const todayBar = (data.candles || []).find(
+    (c) => new Date(c.time * 1000).toLocaleDateString('en-CA', { timeZone: TZ }) === asOf);
+  if (!todayBar || !Number.isFinite(todayBar.open)) return null; // gap only known once the open prints
+  const gap = (todayBar.open - priorClose) / priorClose;
+  return { gap, bucket: gapBucket(gap) };
+}
+// Pick the honest display for an outcome: the gap-conditioned rate ONLY when it beats
+// unconditional out-of-sample (§7 verdict) AND today's bucket is sufficiently sampled;
+// otherwise the all-sessions base rate.
+function pickOutcome(block, gi) {
+  const c = block.calibration || {};
+  if (gi && c.gap_beats_unconditional && c.gap_rel_improvement >= GAP_EDGE_MIN) {
+    const row = block.by_gap && block.by_gap[gi.bucket];
+    if (row && row.sufficient) return { ...row, mode: 'gap' };
+  }
+  return { ...block.unconditional, mode: 'base' };
+}
+function renderLevelBehaviour() {
+  if (!levelProbs || !levelProbs.levels) return;
+  const gi = currentGap();
+  const pctInt = (r) => `${Math.round(r * 100)}%`;
+  const ciTxt = (d) => `${Math.round(d.ci_low * 100)}–${Math.round(d.ci_high * 100)}%`;
+  const condLabel = (d) => d.mode === 'gap'
+    ? (gi.bucket === 'flat' ? 'flat open' : `gap ${gi.bucket}`)
+    : 'all sessions';
+  const cell = (lab, d) =>
+    `<div class="lvl-cell"><span class="lvl-lab">${lab}</span>`
+    + `<span class="lvl-v num">${pctInt(d.rate)}</span>`
+    + `<span class="lvl-meta num${d.mode === 'gap' ? ' edge' : ''}">${condLabel(d)} · n=${d.n} · ${ciTxt(d)}</span></div>`;
+  const parts = [];
+  for (const lid of ['u2', 'u1', 'l1', 'l2']) {
+    const L = levelProbs.levels[lid];
+    if (!L) continue;
+    parts.push(
+      `<div class="lvl-row"><div class="lvl-name">${L.label}</div>`
+      + cell('touch', pickOutcome(L.touch, gi))
+      + cell('close beyond', pickOutcome(L.close, gi))
+      + '</div>');
+  }
+  const note = gi
+    ? `Conditioned on today’s ${gi.bucket === 'flat' ? 'flat open' : 'gap ' + gi.bucket} where that beats the base rate out-of-sample; otherwise the all-sessions base rate.`
+    : 'Pre-open: all-sessions base rates (the gap edge applies only once the session has opened).';
+  $('lvl-body').innerHTML = parts.join('')
+    + `<div class="ev-note">${note} Point-in-time · ${levelProbs.n_sessions_unconditional} sessions · Wilson 95% CI. `
+    + 'Historical, not a forecast; abstains when a bucket is thin.</div>';
+  $('evidence-levels').hidden = false;
+  $('evidence-daily').hidden = true; // the per-level view supersedes the unconditional drawer
+}
+
 async function load() {
   try {
     const data = await fetchMarket();
@@ -630,6 +716,7 @@ setInterval(() => { if (!document.hidden) load(); }, REFRESH_MS);
 load();
 loadEvidence();
 loadRegime();
+loadLevelProbabilities();
 </script>
 </body>
 </html>
