@@ -1,0 +1,635 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="color-scheme" content="dark" />
+<title>SPY Daily Levels</title>
+<style>
+  :root {
+    --ink: #0d1420;
+    --ink-raised: #131c2b;
+    --ink-line: #1f2c3f;
+    --text: #eef2f7;
+    --muted: #8493a8;
+    --faint: #56647a;
+    --above: #e6a54e;      /* warm amber — level ABOVE the current price */
+    --below: #4ec9c3;      /* cool teal  — level BELOW the current price */
+    --price: #f7fafc;      /* live/last price marker */
+    --danger: #e07a6b;
+    --ok: #4ec9c3;
+    --warn: #e6a54e;
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--ink);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.4;
+    padding: max(14px, env(safe-area-inset-top)) 16px calc(28px + env(safe-area-inset-bottom));
+    max-width: 560px;
+    margin: 0 auto;
+  }
+  .num { font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1; }
+
+  /* ---- header ---- */
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .sym { font-size: 30px; font-weight: 700; letter-spacing: -0.02em; }
+  .state {
+    font-size: 12px; font-weight: 650; padding: 4px 10px; border-radius: 999px;
+    background: var(--ink-raised); color: var(--muted); white-space: nowrap;
+  }
+  .state.open { color: var(--ok); }
+  .state.pre, .state.post { color: var(--warn); }
+  .state.stale { color: var(--danger); }
+  .price-row { display: flex; align-items: baseline; gap: 12px; margin: 6px 0 2px; }
+  .price-label { font-size: 12px; font-weight: 650; color: var(--faint); text-transform: none; }
+  .price { font-size: 40px; font-weight: 650; letter-spacing: -0.02em; }
+  .chg { font-size: 16px; font-weight: 600; }
+  .chg.up { color: var(--below); }
+  .chg.down { color: var(--danger); }
+  .chg.flat { color: var(--muted); }
+  .quote { color: var(--faint); font-size: 12.5px; margin: 2px 0 4px; }
+  .quote .staleflag { color: var(--danger); font-weight: 650; }
+  .forwhich { color: var(--muted); font-size: 13px; margin: 12px 0 20px; }
+  .forwhich strong { color: var(--text); font-weight: 650; }
+
+  /* ---- nearest-level hero ---- */
+  .nearest { display: grid; gap: 8px; margin-bottom: 26px; }
+  .near {
+    background: var(--ink-raised); border-radius: var(--radius); padding: 13px 16px;
+    display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 2px 12px;
+    border-left: 3px solid transparent;
+  }
+  .near.above { border-left-color: var(--above); }
+  .near.below { border-left-color: var(--below); }
+  .near[hidden] { display: none; }
+  .near .cap { grid-column: 1; grid-row: 1; font-size: 11px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; }
+  .near.above .cap { color: var(--above); }
+  .near.below .cap { color: var(--below); }
+  .near .move { grid-column: 2; grid-row: 1 / span 2; text-align: right; align-self: center; }
+  .near .move .p { font-size: 25px; font-weight: 750; letter-spacing: -0.01em; display: block; }
+  .near .move .d { font-size: 12px; color: var(--faint); }
+  .near.above .move .p { color: var(--above); }
+  .near.below .move .p { color: var(--below); }
+  .near .lvl { grid-column: 1; grid-row: 2; font-size: 19px; font-weight: 650; }
+  .near .lvl .fam { color: var(--muted); font-size: 13px; font-weight: 500; margin-left: 8px; }
+  .near .conf { grid-column: 1 / -1; grid-row: 3; margin-top: 6px; font-size: 11.5px; color: var(--faint); }
+  .near .conf b { color: var(--text); font-weight: 600; }
+
+  /* ---- section ---- */
+  section { margin-bottom: 26px; }
+  .sec-head { margin-bottom: 4px; }
+  .sec-title { font-size: 16px; font-weight: 650; letter-spacing: -0.01em; }
+  .sec-sub { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+  .disclaimer { color: var(--faint); font-size: 11.5px; font-style: italic; margin: 6px 0 14px; }
+
+  /* ---- today's-setup line (gap-conditioned historical behaviour) ---- */
+  .setup { background: var(--ink-raised); border-radius: 10px; padding: 11px 14px; margin: 2px 0 16px; border-left: 3px solid var(--faint); }
+  .setup[hidden] { display: none; }
+  .setup-head { font-size: 11px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); margin-bottom: 3px; }
+  .setup-body { font-size: 13.5px; color: var(--text); line-height: 1.5; }
+  .setup-body b.up { color: var(--above); }
+  .setup-body b.dn { color: var(--below); }
+  .setup-n { color: var(--faint); font-size: 11.5px; }
+
+  /* ---- historical-behaviour drawer (secondary evidence) ---- */
+  .evidence { margin-top: 14px; border-top: 1px solid var(--ink-line); padding-top: 12px; }
+  .evidence[hidden] { display: none; }
+  .evidence summary { cursor: pointer; color: var(--muted); font-size: 12.5px; font-weight: 650; list-style: none; }
+  .evidence summary::-webkit-details-marker { display: none; }
+  .evidence summary::before { content: '\25B8\00a0'; color: var(--faint); }
+  .evidence[open] summary::before { content: '\25BE\00a0'; }
+  .ev-row { display: grid; grid-template-columns: 1fr auto 64px; gap: 12px; align-items: baseline; padding: 6px 0; font-size: 13px; }
+  .ev-row + .ev-row { border-top: 1px solid var(--ink-line); }
+  .ev-row .ev-k { color: var(--text); }
+  .ev-row .ev-v { font-weight: 650; text-align: right; }
+  .ev-row .ev-ci { color: var(--faint); font-size: 11.5px; text-align: right; }
+  .ev-note { color: var(--faint); font-size: 11px; margin-top: 10px; line-height: 1.55; }
+
+  /* pivot method toggle sits on its own row */
+  .sec-head.with-toggle { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+  .toggle { display: inline-flex; background: var(--ink-raised); border-radius: 999px; padding: 3px; gap: 2px; }
+  .toggle button {
+    appearance: none; border: 0; background: transparent; color: var(--muted);
+    font: inherit; font-size: 12.5px; font-weight: 600; padding: 6px 12px; border-radius: 999px; cursor: pointer;
+  }
+  .toggle button[aria-pressed="true"] { background: var(--ink-line); color: var(--text); }
+  .toggle button:focus-visible { outline: 2px solid var(--below); outline-offset: 2px; }
+
+  /* ---- ladder ---- */
+  .ladder { position: relative; }
+  .rung { display: grid; grid-template-columns: 52px 1fr auto; align-items: center; gap: 10px; height: 42px; }
+  .rung + .rung { border-top: 1px solid var(--ink-line); }
+  .rung .tag { font-size: 12.5px; font-weight: 650; color: var(--muted); }
+  .rung .val { font-size: 18px; font-weight: 600; text-align: right; }
+  .rung .dist { color: var(--faint); font-size: 12px; font-weight: 500; text-align: right; }
+  .rung.above .tag { color: var(--above); }
+  .rung.below .tag { color: var(--below); }
+
+  .rung.now {
+    background: linear-gradient(90deg, rgba(247,250,252,0.10), rgba(247,250,252,0));
+    border-radius: 8px; height: 48px; border-top: none;
+  }
+  .rung.now + .rung { border-top: none; }
+  .rung.now .tag { color: var(--price); font-weight: 700; }
+  .rung.now .val { color: var(--price); font-weight: 750; font-size: 20px; }
+  .rung.now .dist { color: var(--muted); }
+
+  /* ---- horizon cards ---- */
+  .horizons { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .hcard { background: var(--ink-raised); border-radius: var(--radius); padding: 14px; }
+  .hcard h3 { margin: 0 0 10px; font-size: 13px; font-weight: 650; color: var(--text); }
+  .hcard .band { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 3px; }
+  .hcard .band .k { color: var(--faint); }
+  .hcard .band.lo .v { color: var(--below); font-weight: 600; }
+  .hcard .band.hi .v { color: var(--above); font-weight: 600; }
+  .hcard .sub { color: var(--faint); font-size: 11.5px; margin-top: 8px; }
+
+  /* ---- states / footer ---- */
+  .note { color: var(--muted); font-size: 13px; background: var(--ink-raised); border-radius: var(--radius); padding: 16px; }
+  .note.err { color: var(--danger); }
+  footer { color: var(--faint); font-size: 11.5px; margin-top: 24px; display: flex; justify-content: space-between; gap: 10px; align-items: center; }
+  footer button {
+    appearance: none; border: 1px solid var(--ink-line); background: var(--ink-raised); color: var(--muted);
+    font: inherit; font-size: 11.5px; padding: 6px 12px; border-radius: 999px; cursor: pointer;
+  }
+  footer button:focus-visible { outline: 2px solid var(--below); outline-offset: 2px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+  <header>
+    <div class="sym">SPY</div>
+    <div class="state" id="state">—</div>
+  </header>
+  <div class="price-row">
+    <div>
+      <div class="price-label" id="price-label">Last</div>
+      <div class="price num" id="price">—</div>
+    </div>
+    <div class="chg flat num" id="chg"></div>
+  </div>
+  <div class="quote" id="quote"></div>
+  <div class="forwhich" id="forwhich"></div>
+
+  <div id="content" hidden>
+    <section id="nearest-section">
+      <div class="nearest">
+        <div class="near above" id="near-above"></div>
+        <div class="near below" id="near-below"></div>
+      </div>
+    </section>
+
+    <section id="rv-section">
+      <div class="sec-head">
+        <div class="sec-title">Today’s realized-volatility bands</div>
+        <div class="sec-sub" id="rv-sub">Prior close · 20-session close-to-close RV</div>
+      </div>
+      <div class="disclaimer">Statistical reference bands — not price targets or guaranteed containment ranges.</div>
+      <div class="setup" id="rv-setup" hidden></div>
+      <div class="ladder" id="rv-ladder"></div>
+      <details class="evidence" id="evidence-daily" hidden>
+        <summary>Historical behaviour</summary>
+        <div id="ev-body"></div>
+      </details>
+    </section>
+
+    <section id="pivot-section">
+      <div class="sec-head with-toggle">
+        <div>
+          <div class="sec-title">Pivots</div>
+          <div class="sec-sub">From prior session high · low · close</div>
+        </div>
+        <div class="toggle" role="group" aria-label="Pivot method">
+          <button data-method="standard" aria-pressed="true">Classic</button>
+          <button data-method="fibonacci" aria-pressed="false">Fib</button>
+          <button data-method="camarilla" aria-pressed="false">Camarilla</button>
+        </div>
+      </div>
+      <div class="ladder" id="pivot-ladder"></div>
+    </section>
+
+    <section id="horizon-section">
+      <div class="sec-head"><div class="sec-title">Wider horizons</div>
+      <div class="sec-sub">±1σ realized-vol range to period end</div></div>
+      <div class="horizons" id="horizons"></div>
+    </section>
+  </div>
+
+  <div id="status" class="note">Loading SPY levels…</div>
+
+  <footer>
+    <span id="stamp"></span>
+    <button id="refresh" type="button">Refresh</button>
+  </footer>
+
+<script type="module">
+import { MultiHorizonVolatilityLevels } from '/app/levels/volatility_levels.js';
+import { isTradingSession, nextTradingSession, holidaysInRange } from '/app/levels/nyse_calendar.js';
+
+const SYMBOL = 'SPY';
+const REFRESH_MS = 60_000;
+const TZ = 'America/New_York';
+const RV_WINDOW = 20;
+let pivotMethod = 'standard';
+let lastData = null;
+
+const $ = (id) => document.getElementById(id);
+const fmt = (v, d = 2) => (Number.isFinite(v) ? v.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d }) : '—');
+// pct: render a signed percent; values that round to zero show "0.00%" (never "-0.00%")
+function pct(v) {
+  const p = v * 100;
+  const r = Number(p.toFixed(2));
+  if (r === 0) return '0.00%';
+  return `${r > 0 ? '+' : ''}${r.toFixed(2)}%`;
+}
+function signedMoney(v) {
+  const r = Number(v.toFixed(2));
+  if (r === 0) return '0.00';
+  return `${r > 0 ? '+' : ''}${r.toFixed(2)}`;
+}
+// date key (YYYY-MM-DD) for a Date in the exchange timezone
+const etDateKey = (d = new Date()) => d.toLocaleDateString('en-CA', { timeZone: TZ });
+const fmtDate = (key) => new Date(`${key}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
+const fmtQuoteTime = (epochSec) => new Date(epochSec * 1000).toLocaleString('en-US', { timeZone: TZ, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) + ' ET';
+
+function setStatus(msg, isErr = false) {
+  const el = $('status');
+  el.hidden = !msg;
+  el.textContent = msg || '';
+  el.classList.toggle('err', isErr);
+}
+
+async function fetchMarket() {
+  const q = new URLSearchParams({ symbol: SYMBOL, range: '1y', interval: '1d' });
+  const res = await fetch(`/api/market?${q}`, { headers: { accept: 'application/json' } });
+  if (!res.ok) throw new Error(`market data ${res.status}`);
+  return res.json();
+}
+
+function toBars(candles) {
+  const seen = new Set();
+  const bars = [];
+  for (const c of candles) {
+    if (!Number.isFinite(c.close) || c.close <= 0 || !Number.isFinite(c.time)) continue;
+    const key = new Date(c.time * 1000).toLocaleDateString('en-CA', { timeZone: TZ });
+    if (seen.has(key)) continue;
+    seen.add(key);
+    bars.push({ key, iso: new Date(c.time * 1000).toISOString(), close: c.close, ohlc: c });
+  }
+  bars.sort((a, b) => (a.key < b.key ? -1 : 1));
+  return bars;
+}
+
+function calculatePivots(method, high, low, close) {
+  const pp = (high + low + close) / 3;
+  const range = high - low;
+  if (method === 'fibonacci') {
+    return [['R3', pp + range], ['R2', pp + range * 0.618], ['R1', pp + range * 0.382],
+      ['PP', pp], ['S1', pp - range * 0.382], ['S2', pp - range * 0.618], ['S3', pp - range]];
+  }
+  if (method === 'camarilla') {
+    return [['R4', close + range * 1.1 / 2], ['R3', close + range * 1.1 / 4], ['R2', close + range * 1.1 / 6],
+      ['R1', close + range * 1.1 / 12], ['PP', close], ['S1', close - range * 1.1 / 12],
+      ['S2', close - range * 1.1 / 6], ['S3', close - range * 1.1 / 4], ['S4', close - range * 1.1 / 2]];
+  }
+  return [['R3', high + 2 * (pp - low)], ['R2', pp + range], ['R1', 2 * pp - low],
+    ['PP', pp], ['S1', 2 * pp - high], ['S2', pp - range], ['S3', low - 2 * (high - pp)]];
+}
+
+// Render a ladder of {tag, value} rows, colouring each by its position relative to
+// the CURRENT price (above = amber, below = teal), with the live price inserted in order
+// and each level's distance from the current price shown.
+function renderLadder(el, rows, price) {
+  const all = [...rows.map(([tag, value]) => ({ tag, value })), { tag: 'Now', value: price, now: true }];
+  all.sort((a, b) => b.value - a.value);
+  el.replaceChildren();
+  for (const r of all) {
+    const div = document.createElement('div');
+    const side = r.now ? 'now' : (r.value >= price ? 'above' : 'below');
+    div.className = `rung ${side}`;
+    const tag = document.createElement('div'); tag.className = 'tag'; tag.textContent = r.tag;
+    const val = document.createElement('div'); val.className = 'val num'; val.textContent = fmt(r.value);
+    const dist = document.createElement('div'); dist.className = 'dist num';
+    dist.textContent = r.now ? 'current price' : `${signedMoney(r.value - price)} · ${pct((r.value - price) / price)}`;
+    div.append(tag, val, dist);
+    el.appendChild(div);
+  }
+}
+
+function renderRvBands(daily, price) {
+  const sub = $('rv-sub');
+  if (!daily || daily.status !== 'available' || !daily.levels) {
+    $('rv-ladder').replaceChildren();
+    sub.textContent = daily?.reason ? `Unavailable — ${daily.reason.replace(/_/g, ' ')}` : 'Unavailable';
+    return;
+  }
+  const L = daily.levels;
+  renderLadder($('rv-ladder'), [
+    ['+2σ', L.upper2Sigma], ['+1σ', L.upper1Sigma], ['Close', L.anchor],
+    ['−1σ', L.lower1Sigma], ['−2σ', L.lower2Sigma],
+  ], price);
+  const rv = daily.realizedVolatility;
+  const win = daily.quality?.usedWindow || RV_WINDOW;
+  sub.textContent = rv
+    ? `Prior close · ${win}-session close-to-close RV (${(rv.annualized * 100).toFixed(1)}%/yr)`
+    : `Prior close · ${win}-session close-to-close RV`;
+}
+
+function renderPivots(priorBar, price) {
+  if (!priorBar) { $('pivot-ladder').replaceChildren(); return; }
+  const { high, low, close } = priorBar.ohlc;
+  renderLadder($('pivot-ladder'), calculatePivots(pivotMethod, high, low, close), price);
+}
+
+function renderHorizons(result) {
+  const el = $('horizons');
+  el.replaceChildren();
+  for (const key of ['weekly', 'monthly']) {
+    const h = result.horizons?.[key];
+    const card = document.createElement('div'); card.className = 'hcard';
+    const title = key[0].toUpperCase() + key.slice(1);
+    if (h?.status === 'available' && h.levels) {
+      const anchorTs = h.anchor?.timestamp ? new Date(h.anchor.timestamp).toLocaleDateString('en-US', { timeZone: TZ, month: 'short', day: 'numeric' }) : '—';
+      card.innerHTML =
+        `<h3>${title}</h3>` +
+        `<div class="band hi"><span class="k">Upper +1σ</span><span class="v num">${fmt(h.levels.upper1Sigma)}</span></div>` +
+        `<div class="band lo"><span class="k">Lower −1σ</span><span class="v num">${fmt(h.levels.lower1Sigma)}</span></div>` +
+        `<div class="sub">anchor ${anchorTs} close · ${h.sessionsRemaining} session${h.sessionsRemaining === 1 ? '' : 's'} left</div>`;
+    } else {
+      card.innerHTML = `<h3>${title}</h3><div class="sub">unavailable</div>`;
+    }
+    el.appendChild(card);
+  }
+}
+
+// --- nearest-level hero: closest wall above & below, with cross-family confluence ---
+const PIVOT_FAMILIES = { standard: 'Classic', fibonacci: 'Fib', camarilla: 'Camarilla' };
+const ALL_METHODS = Object.entries(PIVOT_FAMILIES);
+
+function levelsFor(result, priorBar, methods) {
+  const out = [];
+  const d = result?.horizons?.daily;
+  if (d?.status === 'available' && d.levels) {
+    const L = d.levels;
+    out.push({ family: 'RV', label: '+2σ', value: L.upper2Sigma }, { family: 'RV', label: '+1σ', value: L.upper1Sigma },
+      { family: 'RV', label: '−1σ', value: L.lower1Sigma }, { family: 'RV', label: '−2σ', value: L.lower2Sigma });
+  }
+  if (priorBar) {
+    const { high, low, close } = priorBar.ohlc;
+    for (const [m, fam] of methods) {
+      for (const [label, value] of calculatePivots(m, high, low, close)) out.push({ family: fam, label, value });
+    }
+  }
+  return out.filter((x) => Number.isFinite(x.value));
+}
+
+function confluenceFor(target, pool, price) {
+  if (!target) return [];
+  const thr = price * 0.0015; // within 0.15%
+  const fams = new Map();
+  for (const x of pool) {
+    if (x.family === target.family) continue; // confluence must come from an independent family
+    // skip structurally-identical levels (e.g. Classic PP == Fib PP share the (H+L+C)/3 formula)
+    if (x.label === target.label && Math.abs(x.value - target.value) < 0.02) continue;
+    if (Math.abs(x.value - target.value) <= thr && !fams.has(x.family)) fams.set(x.family, x.label);
+  }
+  return [...fams].map(([f, l]) => `${f} ${l}`);
+}
+
+function renderNearest(result, priorBar, price) {
+  // nearest is drawn from the σ bands + the currently selected pivot method (matches the ladder);
+  // confluence is checked against every family so it flags independent confirmation.
+  const shown = levelsFor(result, priorBar, [[pivotMethod, PIVOT_FAMILIES[pivotMethod]]]);
+  const pool = levelsFor(result, priorBar, ALL_METHODS);
+  const above = shown.filter((x) => x.value > price).sort((a, b) => a.value - b.value)[0] || null;
+  const below = shown.filter((x) => x.value <= price).sort((a, b) => b.value - a.value)[0] || null;
+  for (const [id, lvl, side] of [['near-above', above, 'above'], ['near-below', below, 'below']]) {
+    const el = $(id);
+    if (!lvl || !Number.isFinite(price)) { el.hidden = true; continue; }
+    el.hidden = false;
+    el.className = `near ${side}`;
+    const conf = confluenceFor(lvl, pool, price);
+    el.innerHTML =
+      `<div class="cap">Nearest ${side}</div>` +
+      `<div class="move"><span class="p num">${pct((lvl.value - price) / price)}</span>` +
+      `<span class="d num">${signedMoney(lvl.value - price)}</span></div>` +
+      `<div class="lvl num">${fmt(lvl.value)}<span class="fam">${lvl.family} ${lvl.label}</span></div>` +
+      (conf.length ? `<div class="conf"><b>Confluence</b> · ${conf.slice(0, 3).join(' · ')}</div>` : '');
+  }
+}
+
+function marketStateChip(state, quoteAgeMin, isClosed, live) {
+  const s = String(state || '').toUpperCase();
+  if (s === 'REGULAR' || live) {
+    if (Number.isFinite(quoteAgeMin) && quoteAgeMin > 30) return { text: 'Delayed quote', cls: 'stale' };
+    return { text: 'Market open', cls: 'open' };
+  }
+  if (s === 'PRE' || s === 'PREPRE') return { text: 'Pre-market', cls: 'pre' };
+  if (s === 'POST' || s === 'POSTPOST') return { text: 'After hours', cls: 'post' };
+  if (s === 'CLOSED' || isClosed) return { text: 'Market closed', cls: '' };
+  return { text: '—', cls: '' };
+}
+
+function renderHeader(data, asOf, priorClose) {
+  const state = String(data.marketState || '').toUpperCase();
+  const isClosed = data.session?.isLastSessionComplete || state === 'CLOSED';
+  const quoteEpoch = Number(data.meta?.regularMarketTime);
+  const quoteAgeMin = Number.isFinite(quoteEpoch) ? (Date.now() / 1000 - quoteEpoch) / 60 : NaN;
+  const price = Number.isFinite(data.currentPrice) ? data.currentPrice : priorClose;
+  // Infer "live" when Yahoo omits marketState: a fresh, same-session quote during an
+  // open (not-closed) trading session counts as live.
+  const quoteDateET = Number.isFinite(quoteEpoch)
+    ? new Date(quoteEpoch * 1000).toLocaleDateString('en-CA', { timeZone: TZ }) : null;
+  const live = state === 'REGULAR'
+    || (!isClosed && Number.isFinite(quoteAgeMin) && quoteAgeMin < 30 && quoteDateET === asOf);
+
+  const chip = marketStateChip(state, quoteAgeMin, isClosed, live);
+  const stateEl = $('state'); stateEl.textContent = chip.text; stateEl.className = `state ${chip.cls}`;
+
+  $('price-label').textContent = live ? 'Now' : 'Last';
+  $('price').textContent = fmt(price);
+  const chg = $('chg');
+  if (Number.isFinite(price) && Number.isFinite(priorClose) && priorClose > 0) {
+    const d = (price - priorClose) / priorClose;
+    if (Number(( d * 100).toFixed(2)) === 0) { chg.textContent = 'Unchanged'; chg.className = 'chg flat num'; }
+    else { chg.textContent = pct(d); chg.className = `chg num ${d > 0 ? 'up' : 'down'}`; }
+  } else { chg.textContent = ''; }
+
+  const parts = [];
+  if (Number.isFinite(quoteEpoch)) parts.push(`Quote ${fmtQuoteTime(quoteEpoch)}`);
+  parts.push('Yahoo, delayed');
+  let quoteHtml = parts.join(' · ');
+  if (state === 'REGULAR' && Number.isFinite(quoteAgeMin) && quoteAgeMin > 20) {
+    quoteHtml += ` · <span class="staleflag">stale (${Math.round(quoteAgeMin)} min old)</span>`;
+  }
+  $('quote').innerHTML = quoteHtml;
+
+  $('forwhich').innerHTML = `Levels for <strong>${fmtDate(asOf)}</strong> · anchored to prior close ${fmt(priorClose)}`;
+  return price;
+}
+
+function renderAll() {
+  if (!lastData) return;
+  const { data, result, priorBar, asOf } = lastData;
+  const priorClose = priorBar ? priorBar.close : (Number.isFinite(data.previousClose) ? data.previousClose : data.currentPrice);
+  const price = renderHeader(data, asOf, priorClose);
+  renderNearest(result, priorBar, price);
+  renderSetup(data, asOf, priorClose);
+  renderRvBands(result?.horizons?.daily, price);
+  renderPivots(priorBar, price);
+  if (result) renderHorizons(result);
+  $('content').hidden = false;
+  setStatus('');
+  $('stamp').textContent = `Refreshed ${new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}`;
+}
+
+// --- historical-behaviour drawer: unconditional base rates from the committed pipeline ---
+let evidence = null;
+async function loadEvidence() {
+  if (evidence) return;
+  try {
+    const res = await fetch('/app/levels/touch_rates.json', { headers: { accept: 'application/json' } });
+    if (!res.ok) return;
+    evidence = await res.json();
+    renderEvidence();
+  } catch { /* drawer stays hidden when the artifact is unavailable */ }
+}
+function renderEvidence() {
+  if (!evidence || !Array.isArray(evidence.metrics)) return;
+  const by = {};
+  for (const m of evidence.metrics) by[m.metric] = m;
+  const row = (label, m) => (m
+    ? `<div class="ev-row"><span class="ev-k">${label}</span>`
+      + `<span class="ev-v num">${(m.rate * 100).toFixed(1)}%</span>`
+      + `<span class="ev-ci num">${(m.ci_low * 100).toFixed(0)}–${(m.ci_high * 100).toFixed(0)}%</span></div>`
+    : '');
+  const inside = (by.close_above_u1 && by.close_below_l1)
+    ? `<div class="ev-row"><span class="ev-k">Closed inside ±1σ</span>`
+      + `<span class="ev-v num">${((1 - by.close_above_u1.rate - by.close_below_l1.rate) * 100).toFixed(1)}%</span>`
+      + `<span class="ev-ci"></span></div>`
+    : '';
+  $('ev-body').innerHTML =
+    row('Reached +1σ before close', by.touch_u1)
+    + row('Reached −1σ', by.touch_l1)
+    + row('Reached +2σ', by.touch_u2)
+    + row('Reached −2σ', by.touch_l2)
+    + inside
+    + `<div class="ev-note">Point-in-time · 20-session RV band · touch = intraday high/low reached the level · `
+    + `${evidence.n_sessions} sessions (${evidence.session_span}). Base rates, not a prediction for today.</div>`;
+  $('evidence-daily').hidden = false;
+}
+
+// --- today's setup: gap-conditioned historical touch rate (the out-of-sample edge) ---
+let regimeRates = null;
+async function loadRegime() {
+  try {
+    const res = await fetch('/app/levels/regime_rates.json', { headers: { accept: 'application/json' } });
+    if (res.ok) { regimeRates = await res.json(); if (lastData) renderSetupFromLast(); }
+  } catch { /* setup line stays hidden when unavailable */ }
+}
+function gapBucket(g) { return g > 0.003 ? 'up' : (g < -0.003 ? 'down' : 'flat'); }
+function findGapRate(outcome, bucket) {
+  const rows = regimeRates?.descriptive?.[outcome]?.gap || [];
+  return rows.find((r) => r.bucket === bucket) || null;
+}
+function baseRate(metric) {
+  const m = (evidence?.metrics || []).find((x) => x.metric === metric);
+  return m ? m.rate : null;
+}
+function renderSetup(data, asOf, priorClose) {
+  const el = $('rv-setup');
+  el.hidden = true;
+  if (!regimeRates || !Number.isFinite(priorClose) || priorClose <= 0) return;
+  // today's open is only known once the session has opened
+  const todayBar = (data.candles || []).find(
+    (c) => new Date(c.time * 1000).toLocaleDateString('en-CA', { timeZone: TZ }) === asOf);
+  if (!todayBar || !Number.isFinite(todayBar.open)) return;
+  const gap = (todayBar.open - priorClose) / priorClose;
+  const bucket = gapBucket(gap);
+  const u = findGapRate('touch_u1', bucket);
+  const l = findGapRate('touch_l1', bucket);
+  if (!u || !l || !u.sufficient) return;
+  const head = bucket === 'up' ? `Gapped up ${pct(gap)}`
+    : bucket === 'down' ? `Gapped down ${pct(gap)}` : `Flat open ${pct(gap)}`;
+  const kind = bucket === 'flat' ? 'flat-open' : `gap-${bucket}`;
+  const bu = baseRate('touch_u1');
+  const bl = baseRate('touch_l1');
+  const baseTxt = (bu != null && bl != null)
+    ? ` · base +1σ ${(bu * 100).toFixed(0)}% / −1σ ${(bl * 100).toFixed(0)}%` : '';
+  el.innerHTML =
+    `<div class="setup-head">${head}</div>`
+    + `<div class="setup-body">Comparable ${kind} sessions historically reached `
+    + `<b class="up">+1σ ${(u.rate * 100).toFixed(0)}%</b> · `
+    + `<b class="dn">−1σ ${(l.rate * 100).toFixed(0)}%</b>`
+    + ` <span class="setup-n">(n=${u.n}${baseTxt}). Historical, not a forecast.</span></div>`;
+  el.hidden = false;
+}
+function renderSetupFromLast() {
+  if (!lastData) return;
+  const { data, priorBar, asOf } = lastData;
+  const priorClose = priorBar ? priorBar.close : data.previousClose;
+  renderSetup(data, asOf, priorClose);
+}
+
+async function load() {
+  try {
+    const data = await fetchMarket();
+    const candles = Array.isArray(data.candles) ? data.candles : [];
+    if (candles.length < 30) throw new Error('not enough history');
+    const bars = toBars(candles);
+
+    // Session dates in America/New_York; use an authoritative NYSE calendar.
+    const todayKey = etDateKey();
+    const asOf = isTradingSession(todayKey) ? todayKey : nextTradingSession(todayKey);
+    // Prior completed session = latest bar strictly before asOf (pivots + RV anchor + basis).
+    const completed = bars.filter((b) => b.key < asOf);
+    const priorBar = completed.length ? completed[completed.length - 1] : bars[bars.length - 1];
+
+    let result = null;
+    try {
+      const holidays = holidaysInRange(bars[0].key, asOf);
+      result = MultiHorizonVolatilityLevels.calculate(
+        bars.map((b) => ({ timestamp: b.iso, close: b.close })),
+        { symbol: SYMBOL, asOf, generatedAt: new Date().toISOString(), volatilityWindows: [RV_WINDOW, 60], holidays },
+      );
+    } catch (calcErr) {
+      // Levels engine could not produce a result (e.g. thin history); pivots still render.
+      result = null;
+      console.warn('levels engine:', calcErr.message);
+    }
+
+    lastData = { data, result, priorBar, asOf };
+    renderAll();
+  } catch (err) {
+    if (!lastData) setStatus(`Couldn’t load levels — ${err.message}. Tap Refresh to retry.`, true);
+    else $('stamp').textContent = `Stale — retry failed (${err.message})`;
+  }
+}
+
+document.querySelectorAll('.toggle button').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    pivotMethod = btn.dataset.method;
+    document.querySelectorAll('.toggle button').forEach((b) => b.setAttribute('aria-pressed', String(b === btn)));
+    if (lastData) {
+      const priorClose = lastData.priorBar ? lastData.priorBar.close : lastData.data.previousClose;
+      const price = Number.isFinite(lastData.data.currentPrice) ? lastData.data.currentPrice : priorClose;
+      renderPivots(lastData.priorBar, price);
+      renderNearest(lastData.result, lastData.priorBar, price);
+    }
+  });
+});
+$('refresh').addEventListener('click', () => { if (!lastData) setStatus('Loading…'); load(); });
+document.addEventListener('visibilitychange', () => { if (!document.hidden) load(); });
+setInterval(() => { if (!document.hidden) load(); }, REFRESH_MS);
+load();
+loadEvidence();
+loadRegime();
+</script>
+</body>
+</html>

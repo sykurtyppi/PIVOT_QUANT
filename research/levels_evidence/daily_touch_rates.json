@@ -1,0 +1,100 @@
+{
+  "generated_from": "research/levels_evidence/prereg_level_behavior.md",
+  "estimator": "realized_vol band prior_close*exp(+/-k*sigma), sigma=std(ddof=1) of trailing 20 close-to-close log returns, point-in-time (data < T)",
+  "data_source": "SPY daily OHLC, yahoo via market proxy",
+  "data_snapshot_sha256_16": "34b8ed65a2fd9c61",
+  "session_span": "2016-10-31 .. 2026-09-30",
+  "n_sessions": 2492,
+  "metrics": [
+    {
+      "metric": "touch_u1",
+      "label": "Upper +1\u03c3 touched (session high)",
+      "hits": 679,
+      "n": 2492,
+      "rate": 0.27247191011235955,
+      "ci_low": 0.2553513158429859,
+      "ci_high": 0.29029290126372714
+    },
+    {
+      "metric": "touch_l1",
+      "label": "Lower \u22121\u03c3 touched (session low)",
+      "hits": 655,
+      "n": 2492,
+      "rate": 0.2628410914927769,
+      "ci_low": 0.24593327190051995,
+      "ci_high": 0.2804789543958953
+    },
+    {
+      "metric": "touch_either_1sigma",
+      "label": "Either \u00b11\u03c3 touched",
+      "hits": 1289,
+      "n": 2492,
+      "rate": 0.5172552166934189,
+      "ci_low": 0.4976243635434092,
+      "ci_high": 0.5368329533250411
+    },
+    {
+      "metric": "touch_u2",
+      "label": "Upper +2\u03c3 touched",
+      "hits": 147,
+      "n": 2492,
+      "rate": 0.05898876404494382,
+      "ci_low": 0.050399468895925705,
+      "ci_high": 0.06893561858251801
+    },
+    {
+      "metric": "touch_l2",
+      "label": "Lower \u22122\u03c3 touched",
+      "hits": 199,
+      "n": 2492,
+      "rate": 0.07985553772070626,
+      "ci_low": 0.06984798301340334,
+      "ci_high": 0.09115641788735246
+    },
+    {
+      "metric": "touch_either_2sigma",
+      "label": "Either \u00b12\u03c3 touched",
+      "hits": 344,
+      "n": 2492,
+      "rate": 0.13804173354735153,
+      "ci_low": 0.12505456915392862,
+      "ci_high": 0.1521431095590434
+    },
+    {
+      "metric": "close_above_u1",
+      "label": "Close above +1\u03c3",
+      "hits": 434,
+      "n": 2492,
+      "rate": 0.17415730337078653,
+      "ci_low": 0.1597718735176335,
+      "ci_high": 0.18954577073395557
+    },
+    {
+      "metric": "close_below_l1",
+      "label": "Close below \u22121\u03c3",
+      "hits": 352,
+      "n": 2492,
+      "rate": 0.14125200642054575,
+      "ci_low": 0.1281292731519933,
+      "ci_high": 0.1554790691644114
+    },
+    {
+      "metric": "close_above_u2",
+      "label": "Close above +2\u03c3",
+      "hits": 78,
+      "n": 2492,
+      "rate": 0.03130016051364366,
+      "ci_low": 0.02515220759841795,
+      "ci_high": 0.03889090630041943
+    },
+    {
+      "metric": "close_below_l2",
+      "label": "Close below \u22122\u03c3",
+      "hits": 95,
+      "n": 2492,
+      "rate": 0.03812199036918138,
+      "ci_low": 0.03128677666953099,
+      "ci_high": 0.0463789973866007
+    }
+  ]
+}
