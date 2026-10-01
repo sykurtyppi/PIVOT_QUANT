@@ -29,6 +29,13 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT_DIR = path.resolve(__dirname, '..');
 const DASHBOARD_FILE = path.join(ROOT_DIR, 'production_pivot_dashboard.html');
+// /levels mobile product surface: the page plus the browser modules and
+// evidence artifacts it fetches. Served behind the same dashboard auth gate.
+const DAILY_LEVELS_FILE = path.join(ROOT_DIR, 'daily_levels.html');
+const VOLATILITY_LEVELS_JS = path.join(ROOT_DIR, 'src', 'math', 'MultiHorizonVolatilityLevels.js');
+const NYSE_CALENDAR_JS = path.join(ROOT_DIR, 'src', 'forecast', 'nyseCalendar.js');
+const TOUCH_RATES_FILE = path.join(ROOT_DIR, 'research', 'levels_evidence', 'daily_touch_rates.json');
+const REGIME_RATES_FILE = path.join(ROOT_DIR, 'research', 'levels_evidence', 'regime_calibration.json');
 const LOCAL_CHART_PATH = path.join(
   ROOT_DIR,
   'node_modules',
@@ -2207,6 +2214,21 @@ function sendJs(res, filePath) {
   });
 }
 
+function sendJsonFile(res, filePath) {
+  fs.readFile(filePath, (error, data) => {
+    if (error) {
+      res.writeHead(404, withSecurityHeaders({ 'Content-Type': 'text/plain' }));
+      res.end('Not found');
+      return;
+    }
+    res.writeHead(200, withSecurityHeaders({
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store',
+    }));
+    res.end(data);
+  });
+}
+
 /**
  * Read request body with a size limit to prevent memory abuse.
  */
@@ -3557,6 +3579,51 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(404, withSecurityHeaders({ 'Content-Type': 'text/plain' }));
       res.end('lightweight-charts not installed');
     }
+    return;
+  }
+
+  if (url.pathname === '/app/levels/volatility_levels.js') {
+    if (!methodAllowed(req, 'GET')) {
+      methodNotAllowed(res, 'GET');
+      return;
+    }
+    sendJs(res, VOLATILITY_LEVELS_JS);
+    return;
+  }
+
+  if (url.pathname === '/app/levels/nyse_calendar.js') {
+    if (!methodAllowed(req, 'GET')) {
+      methodNotAllowed(res, 'GET');
+      return;
+    }
+    sendJs(res, NYSE_CALENDAR_JS);
+    return;
+  }
+
+  if (url.pathname === '/app/levels/touch_rates.json') {
+    if (!methodAllowed(req, 'GET')) {
+      methodNotAllowed(res, 'GET');
+      return;
+    }
+    sendJsonFile(res, TOUCH_RATES_FILE);
+    return;
+  }
+
+  if (url.pathname === '/app/levels/regime_rates.json') {
+    if (!methodAllowed(req, 'GET')) {
+      methodNotAllowed(res, 'GET');
+      return;
+    }
+    sendJsonFile(res, REGIME_RATES_FILE);
+    return;
+  }
+
+  if (url.pathname === '/levels' || url.pathname === '/daily_levels.html') {
+    if (!methodAllowed(req, 'GET')) {
+      methodNotAllowed(res, 'GET');
+      return;
+    }
+    sendFile(res, DAILY_LEVELS_FILE);
     return;
   }
 
