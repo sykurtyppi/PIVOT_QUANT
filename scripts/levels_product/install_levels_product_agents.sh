@@ -56,6 +56,14 @@ unload() {
   rm -f "${LA_DIR}/${label}.plist"
 }
 
+# Clear any loaded instance of a label WITHOUT removing its plist — used right before
+# bootstrap so we never delete the freshly-written plist we are about to load (deleting
+# it made `launchctl bootstrap` fail with "5: Input/output error").
+bootout_only() {
+  local label="$1"
+  launchctl bootout "gui/${UID_NUM}/${label}" 2>/dev/null || true
+}
+
 if [[ "${ACTION}" == "uninstall" ]]; then
   unload "${daily_label}"; unload "${intraday_label}"
   echo "uninstalled levels-product agents"
@@ -128,13 +136,13 @@ EOF
 fi
 
 chmod 600 "${LA_DIR}/${daily_label}.plist"  # plist holds the webhook secret
-unload "${daily_label}"
+bootout_only "${daily_label}"
 launchctl bootstrap "gui/${UID_NUM}" "${LA_DIR}/${daily_label}.plist"
 echo "installed:"
 echo "  ${daily_label}     weekdays ${DAILY_HOUR}:$(printf '%02d' "${DAILY_MINUTE}") (forward log + morning post + track record; LEVELS_SKIP_LABELS=${SKIP_LABELS})"
 if [[ "${INSTALL_INTRADAY}" == "1" ]]; then
   chmod 600 "${LA_DIR}/${intraday_label}.plist"
-  unload "${intraday_label}"
+  bootout_only "${intraday_label}"
   launchctl bootstrap "gui/${UID_NUM}" "${LA_DIR}/${intraday_label}.plist"
   echo "  ${intraday_label}  every ${INTRADAY_INTERVAL}s (confluence alert poller)"
 else
