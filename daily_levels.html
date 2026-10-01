@@ -175,7 +175,11 @@
 </head>
 <body>
   <header>
-    <div class="sym">SPY</div>
+    <div class="sym" id="sym">SPY</div>
+    <div class="toggle" role="group" aria-label="Instrument" id="symbol-toggle">
+      <button type="button" data-symbol="SPY" aria-pressed="true">SPY</button>
+      <button type="button" data-symbol="QQQ" aria-pressed="false">QQQ</button>
+    </div>
     <div class="state" id="state">—</div>
   </header>
   <div class="price-row">
@@ -252,7 +256,7 @@ import { MultiHorizonVolatilityLevels } from '/app/levels/volatility_levels.js';
 import { isTradingSession, nextTradingSession, holidaysInRange } from '/app/levels/nyse_calendar.js';
 import { pickOutcome, GAP_EDGE_MIN } from '/app/levels/gate.js';
 
-const SYMBOL = 'SPY';
+let symbol = 'SPY';   // selected instrument (SPY | QQQ); drives market + evidence fetches
 const REFRESH_MS = 60_000;
 const TZ = 'America/New_York';
 const RV_WINDOW = 20;
@@ -286,7 +290,7 @@ function setStatus(msg, isErr = false) {
 }
 
 async function fetchMarket() {
-  const q = new URLSearchParams({ symbol: SYMBOL, range: '1y', interval: '1d' });
+  const q = new URLSearchParams({ symbol, range: '1y', interval: '1d' });
   const res = await fetch(`/api/market?${q}`, { headers: { accept: 'application/json' } });
   if (!res.ok) throw new Error(`market data ${res.status}`);
   return res.json();
@@ -522,7 +526,7 @@ let evidence = null;
 async function loadEvidence() {
   if (evidence) return;
   try {
-    const res = await fetch('/app/levels/touch_rates.json', { headers: { accept: 'application/json' } });
+    const res = await fetch(`/app/levels/${symbol}/daily_touch_rates.json`, { headers: { accept: 'application/json' } });
     if (!res.ok) return;
     evidence = await res.json();
     renderEvidence();
@@ -558,7 +562,7 @@ function renderEvidence() {
 let regimeRates = null;
 async function loadRegime() {
   try {
-    const res = await fetch('/app/levels/regime_rates.json', { headers: { accept: 'application/json' } });
+    const res = await fetch(`/app/levels/${symbol}/regime_calibration.json`, { headers: { accept: 'application/json' } });
     if (res.ok) { regimeRates = await res.json(); if (lastData) renderSetupFromLast(); }
   } catch { /* setup line stays hidden when unavailable */ }
 }
@@ -615,7 +619,7 @@ function renderSetupFromLast() {
 let levelProbs = null;
 async function loadLevelProbabilities() {
   try {
-    const res = await fetch('/app/levels/level_probabilities.json', { headers: { accept: 'application/json' } });
+    const res = await fetch(`/app/levels/${symbol}/level_probabilities.json`, { headers: { accept: 'application/json' } });
     if (res.ok) { levelProbs = await res.json(); if (lastData) renderLevelBehaviour(); }
   } catch { /* drawer stays hidden when the artifact is unavailable */ }
 }
@@ -666,7 +670,7 @@ function renderLevelBehaviour() {
 let intraday = null;
 async function loadIntraday() {
   try {
-    const res = await fetch('/app/levels/intraday_outcomes.json', { headers: { accept: 'application/json' } });
+    const res = await fetch(`/app/levels/${symbol}/intraday_outcomes.json`, { headers: { accept: 'application/json' } });
     if (res.ok) { intraday = await res.json(); renderIntraday(); }
   } catch { /* drawer stays hidden when the artifact is unavailable */ }
 }
@@ -726,7 +730,7 @@ async function load() {
       const holidays = holidaysInRange(bars[0].key, asOf);
       result = MultiHorizonVolatilityLevels.calculate(
         bars.map((b) => ({ timestamp: b.iso, close: b.close })),
-        { symbol: SYMBOL, asOf, generatedAt: new Date().toISOString(), volatilityWindows: [RV_WINDOW, 60], holidays },
+        { symbol, asOf, generatedAt: new Date().toISOString(), volatilityWindows: [RV_WINDOW, 60], holidays },
       );
     } catch (calcErr) {
       // Levels engine could not produce a result (e.g. thin history); pivots still render.
@@ -742,10 +746,10 @@ async function load() {
   }
 }
 
-document.querySelectorAll('.toggle button').forEach((btn) => {
+document.querySelectorAll('[aria-label="Pivot method"] button').forEach((btn) => {
   btn.addEventListener('click', () => {
     pivotMethod = btn.dataset.method;
-    document.querySelectorAll('.toggle button').forEach((b) => b.setAttribute('aria-pressed', String(b === btn)));
+    document.querySelectorAll('[aria-label="Pivot method"] button').forEach((b) => b.setAttribute('aria-pressed', String(b === btn)));
     if (lastData) {
       const priorClose = lastData.priorBar ? lastData.priorBar.close : lastData.data.previousClose;
       const price = Number.isFinite(lastData.data.currentPrice) ? lastData.data.currentPrice : priorClose;
@@ -754,6 +758,29 @@ document.querySelectorAll('.toggle button').forEach((btn) => {
     }
   });
 });
+
+// Instrument switch (SPY | QQQ): reset per-symbol state, hide prior content, re-fetch.
+function selectSymbol(sym) {
+  if (sym === symbol) return;
+  symbol = sym;
+  $('sym').textContent = sym;
+  document.querySelectorAll('#symbol-toggle button').forEach((b) =>
+    b.setAttribute('aria-pressed', String(b.dataset.symbol === sym)));
+  lastData = null; evidence = null; regimeRates = null; levelProbs = null; intraday = null;
+  for (const id of ['content', 'rv-setup', 'evidence-levels', 'evidence-intraday', 'evidence-daily']) {
+    const el = $(id); if (el) el.hidden = true;
+  }
+  setStatus(`Loading ${sym} levels…`);
+  load();
+  loadEvidence();
+  loadRegime();
+  loadLevelProbabilities();
+  loadIntraday();
+}
+document.querySelectorAll('#symbol-toggle button').forEach((btn) => {
+  btn.addEventListener('click', () => selectSymbol(btn.dataset.symbol));
+});
+
 $('refresh').addEventListener('click', () => { if (!lastData) setStatus('Loading…'); load(); });
 document.addEventListener('visibilitychange', () => { if (!document.hidden) load(); });
 setInterval(() => { if (!document.hidden) load(); }, REFRESH_MS);
