@@ -119,8 +119,12 @@ def brier(preds: list[float], y: list[int]) -> float:
     return sum((p - t) ** 2 for p, t in zip(preds, y)) / len(y)
 
 
-def calibration(events: list[dict], outcome: str, k: int) -> dict:
-    """Walk-forward, point-in-time. Returns Brier per predictor over scored sessions."""
+def calibration(events: list[dict], outcome: str, k: int, return_preds: bool = False) -> dict:
+    """Walk-forward, point-in-time. Returns Brier per predictor over scored sessions.
+
+    With return_preds=True the per-session predictor vectors and realized labels are
+    included (keys "preds", "y") so the point-in-time discipline and the n>=MIN_BUCKET
+    abstention fallback can be asserted directly in tests (prereg §5, §7)."""
     # pre-session predictors use only info known at the prior close; gap_at_open also
     # uses the session open (known intraday, before any touch) — labelled accordingly.
     preds = {"unconditional": [], "vol_bucket": [], "vol_trend": [], "gap_at_open": [], "brownian": []}
@@ -150,7 +154,11 @@ def calibration(events: list[dict], outcome: str, k: int) -> dict:
     n = len(y)
     briers = {name: brier(p, y) for name, p in preds.items()}
     base_rate = sum(y) / n
-    return {"outcome": outcome, "scored_sessions": n, "realized_rate": base_rate, "brier": briers}
+    result = {"outcome": outcome, "scored_sessions": n, "realized_rate": base_rate, "brier": briers}
+    if return_preds:
+        result["preds"] = preds
+        result["y"] = y
+    return result
 
 
 def main() -> int:

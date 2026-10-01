@@ -73,6 +73,16 @@ data/models/metadata_runtime/
 data/models/metadata_v*.json
 data/models/manifest_latest.json
 
+# Derived evidence table (regenerable from the snapshot; inspection only).
+data/levels_evidence/daily_event_table.csv
+
+# Evidence reproducibility anchor: the point-in-time SPY daily OHLC snapshot the
+# levels_evidence pipeline recomputes from. Its sha256 is stamped into the
+# committed report JSONs; committed deliberately so the evidence numbers (incl.
+# the gap-conditioned touch edge) stay reproducible from the tree.
+# See research/levels_evidence/prereg_level_behavior.md.
+!data/levels_evidence/spy_daily_snapshot.json
+
 # SQLite transient files
 *.sqlite-wal
 *.sqlite-shm
