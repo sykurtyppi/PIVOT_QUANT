@@ -95,13 +95,13 @@ class ReproducibilityTest(unittest.TestCase):
             for predictor, bval in c["brier"].items():
                 self.assertAlmostEqual(got["brier"][predictor], bval, delta=FLOAT_TOL,
                                        msg=f"{outcome}.{predictor}")
-            # The §7/§10 verdict fields the display layer relies on must be present and
-            # self-consistent with the Brier scores.
+            # The §7/§10 verdict fields must be present AND reproduce the COMMITTED verdict
+            # (recomputed vs committed — not a value re-derived from its own definition).
             for field in ("best_predictor", "gap_beats_unconditional", "gap_rel_improvement"):
                 self.assertIn(field, c, f"{outcome} missing {field}")
-            self.assertEqual(got["best_predictor"], min(got["brier"], key=got["brier"].get), outcome)
-            self.assertEqual(got["gap_beats_unconditional"],
-                             got["brier"]["gap_at_open"] < got["brier"]["unconditional"], outcome)
+            self.assertEqual(got["best_predictor"], c["best_predictor"], outcome)
+            self.assertEqual(got["gap_beats_unconditional"], c["gap_beats_unconditional"], outcome)
+            self.assertAlmostEqual(got["gap_rel_improvement"], c["gap_rel_improvement"], delta=FLOAT_TOL)
         # Sanity: the documented honest edge actually holds in the committed numbers.
         u1 = self.regime["calibration"]["touch_u1"]["brier"]
         self.assertLess(u1["gap_at_open"], u1["unconditional"])

@@ -250,6 +250,7 @@
 <script type="module">
 import { MultiHorizonVolatilityLevels } from '/app/levels/volatility_levels.js';
 import { isTradingSession, nextTradingSession, holidaysInRange } from '/app/levels/nyse_calendar.js';
+import { pickOutcome, GAP_EDGE_MIN } from '/app/levels/gate.js';
 
 const SYMBOL = 'SPY';
 const REFRESH_MS = 60_000;
@@ -583,6 +584,11 @@ function renderSetup(data, asOf, priorClose) {
   const u = findGapRate('touch_u1', bucket);
   const l = findGapRate('touch_l1', bucket);
   if (!u || !l || !u.sufficient) return;
+  // §7/§10: the descriptive gap rate is in-sample; only present it when it beats the
+  // unconditional base rate out-of-sample (same gate as the per-level drawer), so this
+  // summary never claims a regime edge the drawer abstains from.
+  const gated = (c) => c && c.gap_beats_unconditional && c.gap_rel_improvement >= GAP_EDGE_MIN;
+  if (!gated(regimeRates.calibration?.touch_u1) || !gated(regimeRates.calibration?.touch_l1)) return;
   const head = bucket === 'up' ? `Gapped up ${pct(gap)}`
     : bucket === 'down' ? `Gapped down ${pct(gap)}` : `Flat open ${pct(gap)}`;
   const kind = bucket === 'flat' ? 'flat-open' : `gap-${bucket}`;
@@ -607,7 +613,6 @@ function renderSetupFromLast() {
 
 // --- per-level behaviour: gap-conditioned touch & close-beyond, honest fallback (prereg §8) ---
 let levelProbs = null;
-const GAP_EDGE_MIN = 0.05; // match the evidence layer's "material edge" threshold
 async function loadLevelProbabilities() {
   try {
     const res = await fetch('/app/levels/level_probabilities.json', { headers: { accept: 'application/json' } });
@@ -624,17 +629,6 @@ function currentGap() {
   if (!todayBar || !Number.isFinite(todayBar.open)) return null; // gap only known once the open prints
   const gap = (todayBar.open - priorClose) / priorClose;
   return { gap, bucket: gapBucket(gap) };
-}
-// Pick the honest display for an outcome: the gap-conditioned rate ONLY when it beats
-// unconditional out-of-sample (§7 verdict) AND today's bucket is sufficiently sampled;
-// otherwise the all-sessions base rate.
-function pickOutcome(block, gi) {
-  const c = block.calibration || {};
-  if (gi && c.gap_beats_unconditional && c.gap_rel_improvement >= GAP_EDGE_MIN) {
-    const row = block.by_gap && block.by_gap[gi.bucket];
-    if (row && row.sufficient) return { ...row, mode: 'gap' };
-  }
-  return { ...block.unconditional, mode: 'base' };
 }
 function renderLevelBehaviour() {
   if (!levelProbs || !levelProbs.levels) return;

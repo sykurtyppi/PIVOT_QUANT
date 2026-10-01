@@ -7,10 +7,12 @@ abstention are checked directly.
 """
 from __future__ import annotations
 
+import datetime as dt
 import importlib.util
 import json
 import unittest
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "levels_evidence" / "build_intraday_outcomes.py"
@@ -93,6 +95,44 @@ class FirstSideTest(unittest.TestCase):
         self.assertEqual(m.first_side_of(10, 10), "neither")
 
 
+ET_TZ = ZoneInfo("America/New_York")
+
+
+def _et_ts(y, mo, d, h, mi):
+    return int(dt.datetime(y, mo, d, h, mi, tzinfo=ET_TZ).timestamp() * 1000)
+
+
+class SessionAssemblyTest(unittest.TestCase):
+    """DST-aware RTH windowing, ET-date bucketing, and the authoritative-first union —
+    the session-assembly layer the ~1.5y salvage union rides on (none DB-dependent)."""
+
+    def test_is_rth_bounds_across_dst(self):
+        self.assertTrue(m._is_rth(_et_ts(2025, 7, 15, 9, 30)))    # EDT open
+        self.assertTrue(m._is_rth(_et_ts(2026, 1, 15, 9, 30)))    # EST open
+        self.assertTrue(m._is_rth(_et_ts(2026, 1, 15, 15, 59)))   # last RTH minute
+        self.assertFalse(m._is_rth(_et_ts(2026, 1, 15, 9, 29)))   # before the open
+        self.assertFalse(m._is_rth(_et_ts(2026, 1, 15, 16, 0)))   # 16:00 close print excluded
+
+    def test_group_sessions_buckets_by_et_date_and_drops_non_rth(self):
+        def bar(y, mo, d, h, mi):
+            return {"ts": _et_ts(y, mo, d, h, mi), "open": 100, "high": 100, "low": 100, "close": 100}
+        cands = [bar(2026, 1, 15, 9, 29), bar(2026, 1, 15, 9, 30),
+                 bar(2026, 1, 15, 16, 0), bar(2026, 7, 15, 9, 30)]
+        sess = m.group_sessions(cands)
+        self.assertEqual(set(sess), {"2026-01-15", "2026-07-15"})
+        self.assertEqual(len(sess["2026-01-15"]), 1)   # 09:29 and 16:00 filtered out
+        self.assertEqual(m._et_date(sess["2026-01-15"][0]["ts"]), "2026-01-15")
+
+    def test_union_is_authoritative_first_and_rth_only(self):
+        ts = _et_ts(2026, 1, 15, 10, 0)
+        authoritative = [(ts, 1, 1, 1, 1)]
+        secondary = [(ts, 9, 9, 9, 9),                               # duplicate ts -> ignored
+                     (_et_ts(2026, 1, 15, 16, 0), 2, 2, 2, 2)]       # 16:00 -> dropped (non-RTH)
+        merged = m.merge_bar_rows([authoritative, secondary])
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["close"], 1)        # the authoritative source won the ts
+
+
 class ArtifactShapeTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -133,9 +173,17 @@ class ReproductionTest(unittest.TestCase):
         rep = m.build()
         committed = json.loads(ARTIFACT.read_text(encoding="utf-8"))
         self.assertEqual(rep["n_sessions"], committed["n_sessions"])
+        self.assertEqual(rep["first_side_touched"], committed["first_side_touched"])
         for lid in committed["levels"]:
-            self.assertEqual(rep["levels"][lid]["intraday_touch"]["hits"],
-                             committed["levels"][lid]["intraday_touch"]["hits"], lid)
+            rl, cl = rep["levels"][lid], committed["levels"][lid]
+            self.assertEqual(rl["intraday_touch"]["hits"], cl["intraday_touch"]["hits"], lid)
+            # the SURFACED post-touch splits must reproduce, not only the touch counts
+            for N in ("15", "30", "60"):
+                for k in ("acceptance", "rejection", "undetermined"):
+                    self.assertEqual(rl["post_touch_by_N"][N][k]["hits"],
+                                     cl["post_touch_by_N"][N][k]["hits"], f"{lid}.{N}.{k}")
+            self.assertEqual(rl["time_to_touch_min"]["median"],
+                             cl["time_to_touch_min"]["median"], lid)
 
 
 if __name__ == "__main__":

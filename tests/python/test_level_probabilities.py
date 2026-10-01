@@ -56,13 +56,22 @@ class LevelProbabilitiesTest(unittest.TestCase):
         # displayed bucket won't correspond to the computed rate.
         self.assertAlmostEqual(self.rep["gap_cut"], 0.003, places=9)
 
-    def test_verdict_fields_self_consistent(self):
-        for lid, L in self.rep["levels"].items():
-            for outcome in ("touch", "close"):
-                c = L[outcome]["calibration"]
-                self.assertEqual(c["gap_beats_unconditional"],
-                                 c["brier_gap_at_open"] < c["brier_unconditional"],
-                                 f"{lid}.{outcome}")
+    def test_material_edge_decision_pinned(self):
+        # Pin the load-bearing §7/§10 decision rather than re-deriving a boolean from its
+        # own definition: touch_u1 earns a clear out-of-sample edge (shown gap-conditioned),
+        # while the sub-0.05 cases — where gap technically beats unconditional but only
+        # immaterially — MUST fall back to the base rate. A gate/threshold regression
+        # (the 0.05 cut) flips one of these.
+        u1 = self.rep["levels"]["u1"]["touch"]["calibration"]
+        self.assertTrue(u1["gap_beats_unconditional"])
+        self.assertGreater(u1["gap_rel_improvement"], 0.05)
+        subthreshold = [
+            ("u2", "touch"), ("u2", "close"), ("l2", "close"),
+        ]
+        for lid, outcome in subthreshold:
+            c = self.rep["levels"][lid][outcome]["calibration"]
+            self.assertLess(c["gap_rel_improvement"], 0.05,
+                            f"{lid}.{outcome} expected an immaterial (<5%) gap edge -> base-rate fallback")
 
     def test_gap_direction_edge(self):
         # Documented edge direction: a gap up lifts the upper +1σ touch well above

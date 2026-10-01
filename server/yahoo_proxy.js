@@ -34,6 +34,7 @@ const DASHBOARD_FILE = path.join(ROOT_DIR, 'production_pivot_dashboard.html');
 const DAILY_LEVELS_FILE = path.join(ROOT_DIR, 'daily_levels.html');
 const VOLATILITY_LEVELS_JS = path.join(ROOT_DIR, 'src', 'math', 'MultiHorizonVolatilityLevels.js');
 const NYSE_CALENDAR_JS = path.join(ROOT_DIR, 'src', 'forecast', 'nyseCalendar.js');
+const LEVELS_GATE_JS = path.join(ROOT_DIR, 'src', 'levels', 'gate.js');
 const TOUCH_RATES_FILE = path.join(ROOT_DIR, 'research', 'levels_evidence', 'daily_touch_rates.json');
 const REGIME_RATES_FILE = path.join(ROOT_DIR, 'research', 'levels_evidence', 'regime_calibration.json');
 const LEVEL_PROBS_FILE = path.join(ROOT_DIR, 'research', 'levels_evidence', 'level_probabilities.json');
@@ -3590,6 +3591,15 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     sendJs(res, VOLATILITY_LEVELS_JS);
+    return;
+  }
+
+  if (url.pathname === '/app/levels/gate.js') {
+    if (!methodAllowed(req, 'GET')) {
+      methodNotAllowed(res, 'GET');
+      return;
+    }
+    sendJs(res, LEVELS_GATE_JS);
     return;
   }
 

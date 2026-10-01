@@ -67,9 +67,26 @@ def _et_date(ts_ms: int) -> str:
 
 
 def _is_rth(ts_ms: int) -> bool:
-    """09:30–16:00 America/New_York, inclusive — DST-correct across EST/EDT."""
+    """09:30–15:59 America/New_York — the RTH minute bars, EXCLUDING the 16:00 closing
+    print (DST-correct across EST/EDT). Excluding 16:00 keeps every session a uniform
+    390-minute window regardless of which source supplied the bars."""
     t = _et(ts_ms)
-    return (9, 30) <= (t.hour, t.minute) <= (16, 0)
+    return (9, 30) <= (t.hour, t.minute) < (16, 0)
+
+
+def merge_bar_rows(row_lists: list) -> list[dict]:
+    """Union (ts, open, high, low, close) rows from sources given in PRIORITY order
+    (first/authoritative source wins per ts); keep only valid RTH bars; sorted by ts."""
+    by_ts: dict[int, dict] = {}
+    for rows in row_lists:
+        for r in rows:
+            ts = int(r[0])
+            if ts in by_ts or not all(isinstance(x, (int, float)) for x in r[1:]):
+                continue
+            if not _is_rth(ts):
+                continue
+            by_ts[ts] = {"ts": ts, "open": r[1], "high": r[2], "low": r[3], "close": r[4]}
+    return [by_ts[t] for t in sorted(by_ts)]
 
 
 def fetch_or_load_intraday_snapshot() -> tuple[list[dict], str]:
@@ -82,24 +99,17 @@ def fetch_or_load_intraday_snapshot() -> tuple[list[dict], str]:
         if not existing:
             raise SystemExit(
                 f"no intraday snapshot and no source DB in {DB_PATHS}; set LEVELS_INTRADAY_DB")
-        by_ts: dict[int, dict] = {}   # union across sources; first (authoritative) source wins per ts
-        for db in existing:
+        row_lists = []
+        for db in existing:   # listed authoritative-first
             con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
             try:
-                rows = con.execute(
+                row_lists.append(con.execute(
                     "SELECT ts, open, high, low, close FROM bar_data "
                     "WHERE symbol='SPY' AND bar_interval_sec=60 AND (ts % 60000)=0 "
-                    "ORDER BY ts").fetchall()
+                    "ORDER BY ts").fetchall())
             finally:
                 con.close()
-            for r in rows:
-                ts = int(r[0])
-                if ts in by_ts or not all(isinstance(x, (int, float)) for x in r[1:]):
-                    continue
-                if not _is_rth(ts):
-                    continue
-                by_ts[ts] = {"ts": ts, "open": r[1], "high": r[2], "low": r[3], "close": r[4]}
-        candles = [by_ts[t] for t in sorted(by_ts)]
+        candles = merge_bar_rows(row_lists)
         if len(candles) < 1000:
             raise SystemExit(f"only {len(candles)} intraday bars; refusing to build")
         snap = {"symbol": "SPY", "interval_sec": 60,
@@ -114,9 +124,12 @@ def fetch_or_load_intraday_snapshot() -> tuple[list[dict], str]:
 
 
 def group_sessions(candles: list[dict]) -> dict:
-    """ET session date -> ordered list of RTH minute bars (snapshot is already RTH-only)."""
+    """ET session date -> ordered RTH minute bars. Re-applies the RTH filter so the
+    09:30–15:59 window stays uniform even if a snapshot was built with a looser bound."""
     sessions: dict[str, list[dict]] = {}
     for c in candles:
+        if not _is_rth(c["ts"]):
+            continue
         sessions.setdefault(_et_date(c["ts"]), []).append(c)
     for d in sessions:
         sessions[d].sort(key=lambda b: b["ts"])
@@ -203,6 +216,10 @@ def build() -> dict:
     for d in dates:
         bars = sessions[d]
         ev = daily_by_date[d]
+        # Anchor time-to-touch to the session's true 09:30 ET open (prereg §3), robust to
+        # a missing open-minute bar rather than trusting bars[0] to be the 09:30 bar.
+        open_ts = int(dt.datetime.combine(
+            dt.date.fromisoformat(d), dt.time(9, 30), ET).timestamp() * 1000)
         touch_ts = {}
         for lid, side in LEVELS:
             P = ev[lid]
@@ -211,7 +228,7 @@ def build() -> dict:
                 continue
             acc = per_level[lid]
             acc["touched"] += 1
-            acc["ttt"].append((bars[ti]["ts"] - bars[0]["ts"]) / 60000.0)
+            acc["ttt"].append((bars[ti]["ts"] - open_ts) / 60000.0)
             f, a = mfe_mae(bars, ti, P, side)
             acc["mfe"].append(f)
             acc["mae"].append(a)
