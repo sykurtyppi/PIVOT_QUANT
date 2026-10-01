@@ -102,7 +102,8 @@ def fetch_or_load_snapshot() -> tuple[list[dict], str]:
 
 def _date(epoch_sec: float) -> str:
     import datetime as dt
-    return dt.datetime.utcfromtimestamp(int(epoch_sec)).strftime("%Y-%m-%d")
+    # timezone-aware UTC (utcfromtimestamp is deprecated); value-identical date string.
+    return dt.datetime.fromtimestamp(int(epoch_sec), dt.timezone.utc).strftime("%Y-%m-%d")
 
 
 def build_events(bars: list[dict]) -> list[dict]:

@@ -48,6 +48,23 @@ def phi(x: float) -> float:
 
 
 BROWNIAN_TOUCH = {1: 2 * (1 - phi(1.0)), 2: 2 * (1 - phi(2.0))}  # 0.3173, 0.0455
+# Driftless-Brownian TERMINAL close-beyond (one-sided, no reflection): 1-Φ(k).
+# Distinct from the touch baseline — a close beyond is a terminal event, not a path event.
+BROWNIAN_CLOSE = {1: 1 - phi(1.0), 2: 1 - phi(2.0)}              # 0.1587, 0.0228
+
+# Outcomes carried through regime conditioning + out-of-sample calibration:
+# touch and close-beyond at ±1σ and ±2σ. (name, sigma multiple k, human label.)
+OUTCOMES = [
+    ("touch_u1", 1, "+1σ upper touch"),
+    ("touch_l1", 1, "−1σ lower touch"),
+    ("touch_u2", 2, "+2σ upper touch"),
+    ("touch_l2", 2, "−2σ lower touch"),
+    ("close_above_u1", 1, "close above +1σ"),
+    ("close_below_l1", 1, "close below −1σ"),
+    ("close_above_u2", 2, "close above +2σ"),
+    ("close_below_l2", 2, "close below −2σ"),
+]
+OUTCOME_LABEL = {name: label for name, _, label in OUTCOMES}
 
 
 def tercile_cuts(values: list[float]) -> tuple[float, float]:
@@ -84,6 +101,8 @@ def build_augmented(bars: list[dict]) -> list[dict]:
             "date": T["date"], "sigma": sigma, "anchor": anchor,
             "touch_u1": int(T["high"] >= u1), "touch_l1": int(T["low"] <= l1),
             "touch_u2": int(T["high"] >= u2), "touch_l2": int(T["low"] <= l2),
+            "close_above_u1": int(T["close"] >= u1), "close_below_l1": int(T["close"] <= l1),
+            "close_above_u2": int(T["close"] >= u2), "close_below_l2": int(T["close"] <= l2),
             "trend": "up" if anchor >= sma else "down",     # point-in-time
             "gap": "up" if gap > GAP_CUT else ("down" if gap < -GAP_CUT else "flat"),
         })
@@ -102,7 +121,7 @@ def descriptive(events: list[dict]) -> dict:
     for e in events:
         e["vol"] = vol_bucket(e["sigma"], lo, hi)
     out = {}
-    for outcome in ("touch_u1", "touch_l1"):
+    for outcome in [name for name, _, _ in OUTCOMES]:
         blocks = {}
         for dim in ("vol", "trend", "gap"):
             vals = sorted({e[dim] for e in events})
@@ -119,11 +138,17 @@ def brier(preds: list[float], y: list[int]) -> float:
     return sum((p - t) ** 2 for p, t in zip(preds, y)) / len(y)
 
 
-def calibration(events: list[dict], outcome: str, k: int) -> dict:
-    """Walk-forward, point-in-time. Returns Brier per predictor over scored sessions."""
+def calibration(events: list[dict], outcome: str, k: int, return_preds: bool = False) -> dict:
+    """Walk-forward, point-in-time. Returns Brier per predictor over scored sessions.
+
+    With return_preds=True the per-session predictor vectors and realized labels are
+    included (keys "preds", "y") so the point-in-time discipline and the n>=MIN_BUCKET
+    abstention fallback can be asserted directly in tests (prereg §5, §7)."""
     # pre-session predictors use only info known at the prior close; gap_at_open also
     # uses the session open (known intraday, before any touch) — labelled accordingly.
     preds = {"unconditional": [], "vol_bucket": [], "vol_trend": [], "gap_at_open": [], "brownian": []}
+    # Close-beyond is a terminal event (1-Φ(k)); touch is a path event (2·(1-Φ(k))).
+    brownian_p = (BROWNIAN_CLOSE if outcome.startswith("close_") else BROWNIAN_TOUCH)[k]
     y = []
     for j in range(len(events)):
         if j < BURN_IN:
@@ -145,22 +170,33 @@ def calibration(events: list[dict], outcome: str, k: int) -> dict:
         preds["vol_bucket"].append(vrate)
         preds["vol_trend"].append(trate)
         preds["gap_at_open"].append(grate)
-        preds["brownian"].append(BROWNIAN_TOUCH[k])
+        preds["brownian"].append(brownian_p)
         y.append(e[outcome])
     n = len(y)
     briers = {name: brier(p, y) for name, p in preds.items()}
     base_rate = sum(y) / n
-    return {"outcome": outcome, "scored_sessions": n, "realized_rate": base_rate, "brier": briers}
+    uncond_b = briers["unconditional"]
+    gap_rel = (uncond_b - briers["gap_at_open"]) / uncond_b if uncond_b else 0.0
+    # Machine-readable §7/§10 verdict so the display layer can fall back to the
+    # unconditional rate for any outcome where gap conditioning earns no edge,
+    # instead of re-deriving the decision in JS.
+    result = {
+        "outcome": outcome, "scored_sessions": n, "realized_rate": base_rate, "brier": briers,
+        "best_predictor": min(briers, key=briers.get),
+        "gap_beats_unconditional": briers["gap_at_open"] < uncond_b,
+        "gap_rel_improvement": gap_rel,
+    }
+    if return_preds:
+        result["preds"] = preds
+        result["y"] = y
+    return result
 
 
 def main() -> int:
     bars, data_hash = _b.fetch_or_load_snapshot()
     events = build_augmented(bars)
     desc = descriptive(events)
-    calib = {
-        "touch_u1": calibration(events, "touch_u1", 1),
-        "touch_l1": calibration(events, "touch_l1", 1),
-    }
+    calib = {name: calibration(events, name, k) for name, k, _ in OUTCOMES}
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     report = {"data_snapshot_sha256_16": data_hash, "n_events": len(events),
               "span": f"{events[0]['date']} .. {events[-1]['date']}",
@@ -173,10 +209,13 @@ def main() -> int:
              f"Snapshot `{data_hash}` · {len(events)} events · {report['span']} · "
              f"burn-in {BURN_IN}, bucket gate n≥{MIN_BUCKET}.", ""]
 
-    lines.append("## A. Descriptive conditional touch rates (full-sample partition)")
+    lines.append("## A. Descriptive conditional rates by regime (full-sample partition)")
+    lines.append("")
+    lines.append("_Full-sample (in-sample) partition, for description only. The honest, "
+                 "point-in-time edge is the out-of-sample Brier in Section B; do not cite a "
+                 "Section A bucket rate as validated without its Section B verdict._")
     for outcome, blocks in desc.items():
-        lines.append(f"\n**{outcome}** (upper +1σ touch)" if outcome == "touch_u1"
-                     else f"\n**{outcome}** (lower −1σ touch)")
+        lines.append(f"\n**{outcome}** ({OUTCOME_LABEL.get(outcome, outcome)})")
         for dim, rows in blocks.items():
             cells = " · ".join(
                 (f"{r['bucket']}={pct(r['rate'])} (n={r['n']})" if r["sufficient"]
@@ -194,18 +233,21 @@ def main() -> int:
                      f"{b['vol_bucket']:.4f} | {b['vol_trend']:.4f} | {b['gap_at_open']:.4f} | {b['brownian']:.4f} |")
 
     lines.append("")
-    lines.append("**Verdict (prereg §10):**")
+    lines.append("**Verdict (prereg §10) — honest per outcome; gap applies only post-open:**")
     for key, c in calib.items():
         b = c["brier"]
-        best = min(b, key=b.get)
+        best = c["best_predictor"]
+        rel = c["gap_rel_improvement"]
         pre_wins = b["vol_trend"] < b["unconditional"]
-        gap_wins = b["gap_at_open"] < b["unconditional"]
-        lines.append(
-            f"- {key}: best predictor = **{best}** (Brier {b[best]:.4f}). "
-            + ("Pre-session (vol×trend) beats unconditional out-of-sample. " if pre_wins
-               else "Pre-session conditioning does NOT beat unconditional — keep unconditional pre-open. ")
-            + ("The **gap (at-open)** bucket beats it substantially — the strongest honest "
-               "conditioning available once the session has opened." if gap_wins else ""))
+        if c["gap_beats_unconditional"] and rel >= 0.05:
+            gap_txt = f"gap (at-open) cuts Brier {rel*100:.0f}% vs unconditional — a substantial post-open edge"
+        elif c["gap_beats_unconditional"]:
+            gap_txt = f"gap (at-open) edges unconditional by only {rel*100:.1f}% — treat as no material edge"
+        else:
+            gap_txt = "gap (at-open) does NOT beat unconditional — keep the unconditional rate"
+        pre_txt = ("pre-session vol×trend beats unconditional" if pre_wins
+                   else "pre-session conditioning does not beat unconditional (keep unconditional pre-open)")
+        lines.append(f"- {key}: best = **{best}** (Brier {b[best]:.4f}); {gap_txt}; {pre_txt}.")
     (OUT_DIR / "regime_calibration.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     print(f"snapshot {data_hash} events={len(events)}")

@@ -111,6 +111,17 @@
   .ev-row .ev-ci { color: var(--faint); font-size: 11.5px; text-align: right; }
   .ev-note { color: var(--faint); font-size: 11px; margin-top: 10px; line-height: 1.55; }
 
+  /* ---- per-level behaviour rows (gap-conditioned, honest secondary context) ---- */
+  .lvl-row { padding: 9px 0; }
+  .lvl-row + .lvl-row { border-top: 1px solid var(--ink-line); }
+  .lvl-name { font-size: 13px; font-weight: 650; color: var(--text); margin-bottom: 4px; }
+  .lvl-cell { display: grid; grid-template-columns: 82px 42px 1fr; gap: 8px; align-items: baseline; font-size: 12.5px; padding: 1px 0; }
+  .lvl-cell .lvl-lab { color: var(--muted); }
+  .lvl-cell .lvl-v { font-weight: 650; text-align: right; color: var(--text); }
+  .lvl-cell .lvl-v.edge { color: var(--below); }
+  .lvl-cell .lvl-meta { color: var(--faint); font-size: 11px; }
+  .lvl-cell .lvl-meta.edge { color: var(--below); }
+
   /* pivot method toggle sits on its own row */
   .sec-head.with-toggle { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
   .toggle { display: inline-flex; background: var(--ink-raised); border-radius: 999px; padding: 3px; gap: 2px; }
@@ -193,6 +204,14 @@
       <div class="disclaimer">Statistical reference bands — not price targets or guaranteed containment ranges.</div>
       <div class="setup" id="rv-setup" hidden></div>
       <div class="ladder" id="rv-ladder"></div>
+      <details class="evidence" id="evidence-levels" hidden>
+        <summary>Level behaviour</summary>
+        <div id="lvl-body"></div>
+      </details>
+      <details class="evidence" id="evidence-intraday" hidden>
+        <summary>Intraday behaviour</summary>
+        <div id="intra-body"></div>
+      </details>
       <details class="evidence" id="evidence-daily" hidden>
         <summary>Historical behaviour</summary>
         <div id="ev-body"></div>
@@ -231,6 +250,7 @@
 <script type="module">
 import { MultiHorizonVolatilityLevels } from '/app/levels/volatility_levels.js';
 import { isTradingSession, nextTradingSession, holidaysInRange } from '/app/levels/nyse_calendar.js';
+import { pickOutcome, GAP_EDGE_MIN } from '/app/levels/gate.js';
 
 const SYMBOL = 'SPY';
 const REFRESH_MS = 60_000;
@@ -433,6 +453,13 @@ function marketStateChip(state, quoteAgeMin, isClosed, live) {
   if (s === 'PRE' || s === 'PREPRE') return { text: 'Pre-market', cls: 'pre' };
   if (s === 'POST' || s === 'POSTPOST') return { text: 'After hours', cls: 'post' };
   if (s === 'CLOSED' || isClosed) return { text: 'Market closed', cls: '' };
+  // UNKNOWN state during an open (not-closed) session: show a meaningful chip rather
+  // than a bare dash — a stale quote reads as delayed, a fresh one as open.
+  if (!isClosed) {
+    return (Number.isFinite(quoteAgeMin) && quoteAgeMin > 30)
+      ? { text: 'Delayed quote', cls: 'stale' }
+      : { text: 'Market open', cls: 'open' };
+  }
   return { text: '—', cls: '' };
 }
 
@@ -481,6 +508,7 @@ function renderAll() {
   const price = renderHeader(data, asOf, priorClose);
   renderNearest(result, priorBar, price);
   renderSetup(data, asOf, priorClose);
+  renderLevelBehaviour();
   renderRvBands(result?.horizons?.daily, price);
   renderPivots(priorBar, price);
   if (result) renderHorizons(result);
@@ -502,6 +530,7 @@ async function loadEvidence() {
 }
 function renderEvidence() {
   if (!evidence || !Array.isArray(evidence.metrics)) return;
+  if (levelProbs) { $('evidence-daily').hidden = true; return; } // superseded by the per-level drawer
   const by = {};
   for (const m of evidence.metrics) by[m.metric] = m;
   const row = (label, m) => (m
@@ -555,6 +584,11 @@ function renderSetup(data, asOf, priorClose) {
   const u = findGapRate('touch_u1', bucket);
   const l = findGapRate('touch_l1', bucket);
   if (!u || !l || !u.sufficient) return;
+  // §7/§10: the descriptive gap rate is in-sample; only present it when it beats the
+  // unconditional base rate out-of-sample (same gate as the per-level drawer), so this
+  // summary never claims a regime edge the drawer abstains from.
+  const gated = (c) => c && c.gap_beats_unconditional && c.gap_rel_improvement >= GAP_EDGE_MIN;
+  if (!gated(regimeRates.calibration?.touch_u1) || !gated(regimeRates.calibration?.touch_l1)) return;
   const head = bucket === 'up' ? `Gapped up ${pct(gap)}`
     : bucket === 'down' ? `Gapped down ${pct(gap)}` : `Flat open ${pct(gap)}`;
   const kind = bucket === 'flat' ? 'flat-open' : `gap-${bucket}`;
@@ -575,6 +609,102 @@ function renderSetupFromLast() {
   const { data, priorBar, asOf } = lastData;
   const priorClose = priorBar ? priorBar.close : data.previousClose;
   renderSetup(data, asOf, priorClose);
+}
+
+// --- per-level behaviour: gap-conditioned touch & close-beyond, honest fallback (prereg §8) ---
+let levelProbs = null;
+async function loadLevelProbabilities() {
+  try {
+    const res = await fetch('/app/levels/level_probabilities.json', { headers: { accept: 'application/json' } });
+    if (res.ok) { levelProbs = await res.json(); if (lastData) renderLevelBehaviour(); }
+  } catch { /* drawer stays hidden when the artifact is unavailable */ }
+}
+function currentGap() {
+  if (!lastData) return null;
+  const { data, asOf, priorBar } = lastData;
+  const priorClose = priorBar ? priorBar.close : data.previousClose;
+  if (!Number.isFinite(priorClose) || priorClose <= 0) return null;
+  const todayBar = (data.candles || []).find(
+    (c) => new Date(c.time * 1000).toLocaleDateString('en-CA', { timeZone: TZ }) === asOf);
+  if (!todayBar || !Number.isFinite(todayBar.open)) return null; // gap only known once the open prints
+  const gap = (todayBar.open - priorClose) / priorClose;
+  return { gap, bucket: gapBucket(gap) };
+}
+function renderLevelBehaviour() {
+  if (!levelProbs || !levelProbs.levels) return;
+  const gi = currentGap();
+  const pctInt = (r) => `${Math.round(r * 100)}%`;
+  const ciTxt = (d) => `${Math.round(d.ci_low * 100)}–${Math.round(d.ci_high * 100)}%`;
+  const condLabel = (d) => d.mode === 'gap'
+    ? (gi.bucket === 'flat' ? 'flat open' : `gap ${gi.bucket}`)
+    : 'all sessions';
+  const cell = (lab, d) =>
+    `<div class="lvl-cell"><span class="lvl-lab">${lab}</span>`
+    + `<span class="lvl-v num">${pctInt(d.rate)}</span>`
+    + `<span class="lvl-meta num${d.mode === 'gap' ? ' edge' : ''}">${condLabel(d)} · n=${d.n} · ${ciTxt(d)}</span></div>`;
+  const parts = [];
+  for (const lid of ['u2', 'u1', 'l1', 'l2']) {
+    const L = levelProbs.levels[lid];
+    if (!L) continue;
+    parts.push(
+      `<div class="lvl-row"><div class="lvl-name">${L.label}</div>`
+      + cell('touch', pickOutcome(L.touch, gi))
+      + cell('close beyond', pickOutcome(L.close, gi))
+      + '</div>');
+  }
+  const note = gi
+    ? `Conditioned on today’s ${gi.bucket === 'flat' ? 'flat open' : 'gap ' + gi.bucket} where that beats the base rate out-of-sample; otherwise the all-sessions base rate.`
+    : 'Pre-open: all-sessions base rates (the gap edge applies only once the session has opened).';
+  $('lvl-body').innerHTML = parts.join('')
+    + `<div class="ev-note">${note} Point-in-time · ${levelProbs.n_sessions_unconditional} sessions · Wilson 95% CI. `
+    + 'Historical, not a forecast; abstains when a bucket is thin.</div>';
+  $('evidence-levels').hidden = false;
+  $('evidence-daily').hidden = true; // the per-level view supersedes the unconditional drawer
+}
+
+// --- intraday behaviour: post-touch acceptance/rejection + first-side + time-to-touch (prereg §3) ---
+let intraday = null;
+async function loadIntraday() {
+  try {
+    const res = await fetch('/app/levels/intraday_outcomes.json', { headers: { accept: 'application/json' } });
+    if (res.ok) { intraday = await res.json(); renderIntraday(); }
+  } catch { /* drawer stays hidden when the artifact is unavailable */ }
+}
+function renderIntraday() {
+  if (!intraday || !intraday.levels) return;
+  const N = '30';   // headline horizon; 15/30/60 all exist in the artifact
+  const asPct = (r) => `${Math.round(r * 100)}%`;
+  const rows = [];
+  for (const lid of ['u1', 'l1', 'u2', 'l2']) {
+    const L = intraday.levels[lid];
+    if (!L) continue;
+    const blk = L.post_touch_by_N[N];
+    const a = blk.acceptance, r = blk.rejection, u = blk.undetermined;
+    const ttt = L.time_to_touch_min;
+    if (a.sufficient) {
+      const t = (ttt.median != null) ? `${Math.round(ttt.median)} min` : '—';
+      rows.push(
+        `<div class="lvl-row"><div class="lvl-name">${L.label}</div>`
+        + `<div class="lvl-cell"><span class="lvl-lab">reached in</span>`
+        + `<span class="lvl-v num">${t}</span><span class="lvl-meta">median · n=${a.n}</span></div>`
+        + `<div class="lvl-cell"><span class="lvl-lab">then @30m</span>`
+        + `<span class="lvl-v num edge">${asPct(a.rate)}</span>`
+        + `<span class="lvl-meta edge">broke beyond · reject ${asPct(r.rate)} · undecided ${asPct(u.rate)}</span></div>`
+        + '</div>');
+    } else {
+      rows.push(
+        `<div class="lvl-row"><div class="lvl-name">${L.label}</div>`
+        + `<div class="lvl-cell"><span class="lvl-lab">post-touch</span>`
+        + `<span class="lvl-v">—</span><span class="lvl-meta">insufficient data (n=${a.n})</span></div>`
+        + '</div>');
+    }
+  }
+  const fs = intraday.first_side_touched;
+  const fsLine = `First side of ±1σ touched: +1σ ${asPct(fs.u1_first / fs.n)} · −1σ ${asPct(fs.l1_first / fs.n)} · neither ${asPct(fs.neither / fs.n)} (n=${fs.n})`;
+  $('intra-body').innerHTML = rows.join('')
+    + `<div class="ev-note">${fsLine}. Point-in-time band levels · ${intraday.n_sessions} sessions (${intraday.session_span}) · Wilson 95% CI. `
+    + '“Broke beyond” = accepted past the band; “reject” = turned back toward the prior close; “undecided” = neither within 30 min. Historical, not a forecast.</div>';
+  $('evidence-intraday').hidden = false;
 }
 
 async function load() {
@@ -630,6 +760,8 @@ setInterval(() => { if (!document.hidden) load(); }, REFRESH_MS);
 load();
 loadEvidence();
 loadRegime();
+loadLevelProbabilities();
+loadIntraday();
 </script>
 </body>
 </html>
