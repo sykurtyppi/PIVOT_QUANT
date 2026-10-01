@@ -3659,7 +3659,7 @@ const server = http.createServer(async (req, res) => {
     }
     const sym = levelsArtifactMatch[1].toUpperCase();
     const name = levelsArtifactMatch[2];
-    const ALLOWED_SYMBOLS = new Set(['SPY', 'QQQ']);
+    const ALLOWED_SYMBOLS = new Set(['SPY', 'QQQ', 'IWM']);
     const ALLOWED_FILES = new Set(['daily_touch_rates', 'regime_calibration', 'level_probabilities', 'intraday_outcomes']);
     if (!ALLOWED_SYMBOLS.has(sym) || !ALLOWED_FILES.has(name)) {
       sendJson(res, 404, { error: 'unknown levels artifact' });

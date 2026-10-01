@@ -92,6 +92,7 @@ class MultiInstrumentTest(unittest.TestCase):
     def test_symbol_toggle_present(self):
         self.assertIn('id="symbol-toggle"', PAGE)
         self.assertIn('data-symbol="QQQ"', PAGE)
+        self.assertIn('data-symbol="IWM"', PAGE)
         self.assertIn("selectSymbol", PAGE)
 
     def test_artifacts_fetched_symbol_scoped(self):
@@ -102,17 +103,20 @@ class MultiInstrumentTest(unittest.TestCase):
         self.assertIn("levelsArtifactMatch", SERVER)
         self.assertIn("ALLOWED_SYMBOLS", SERVER)
         self.assertIn("'QQQ'", SERVER)
+        self.assertIn("'IWM'", SERVER)
         # a valid symbol without intraday returns an explicit 200 'unavailable', not a 404
         self.assertIn("available: false", SERVER)
 
-    def test_qqq_artifact_present_and_independently_validated(self):
-        qqq = json.loads((ROOT / "research/levels_evidence/qqq/level_probabilities.json").read_text(encoding="utf-8"))
-        self.assertEqual(qqq["symbol"], "QQQ")
-        self.assertEqual(set(qqq["levels"]), {"u1", "u2", "l1", "l2"})
-        # QQQ must earn its OWN gap edge (prereg A1: validated per instrument, not assumed from SPY)
-        u1 = qqq["levels"]["u1"]["touch"]["calibration"]
-        self.assertTrue(u1["gap_beats_unconditional"])
-        self.assertGreater(u1["gap_rel_improvement"], 0.05)
+    def test_secondary_instrument_artifacts_independently_validated(self):
+        # Each added instrument must carry its own symbol + earn its OWN +1σ gap edge
+        # (prereg A1: validated per instrument, never assumed from SPY).
+        for sub, sym in (("qqq", "QQQ"), ("iwm", "IWM")):
+            art = json.loads((ROOT / f"research/levels_evidence/{sub}/level_probabilities.json").read_text(encoding="utf-8"))
+            self.assertEqual(art["symbol"], sym)
+            self.assertEqual(set(art["levels"]), {"u1", "u2", "l1", "l2"}, sym)
+            u1 = art["levels"]["u1"]["touch"]["calibration"]
+            self.assertTrue(u1["gap_beats_unconditional"], sym)
+            self.assertGreater(u1["gap_rel_improvement"], 0.05, sym)
 
 
 if __name__ == "__main__":

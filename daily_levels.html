@@ -131,6 +131,7 @@
   }
   .toggle button[aria-pressed="true"] { background: var(--ink-line); color: var(--text); }
   .toggle button:focus-visible { outline: 2px solid var(--below); outline-offset: 2px; }
+  .toggle.symbols { margin: 10px 0 2px; }
 
   /* ---- ladder ---- */
   .ladder { position: relative; }
@@ -176,12 +177,13 @@
 <body>
   <header>
     <div class="sym" id="sym">SPY</div>
-    <div class="toggle" role="group" aria-label="Instrument" id="symbol-toggle">
-      <button type="button" data-symbol="SPY" aria-pressed="true">SPY</button>
-      <button type="button" data-symbol="QQQ" aria-pressed="false">QQQ</button>
-    </div>
     <div class="state" id="state">—</div>
   </header>
+  <div class="toggle symbols" role="group" aria-label="Instrument" id="symbol-toggle">
+    <button type="button" data-symbol="SPY" aria-pressed="true">SPY</button>
+    <button type="button" data-symbol="QQQ" aria-pressed="false">QQQ</button>
+    <button type="button" data-symbol="IWM" aria-pressed="false">IWM</button>
+  </div>
   <div class="price-row">
     <div>
       <div class="price-label" id="price-label">Last</div>

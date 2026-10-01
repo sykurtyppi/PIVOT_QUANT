@@ -1,0 +1,349 @@
+{
+  "symbol": "IWM",
+  "generated_from": "research/levels_evidence/prereg_level_behavior.md \u00a78",
+  "data_snapshot_sha256_16": "daf75fa6970f9169",
+  "gap_cut": 0.003,
+  "min_bucket": 30,
+  "unconditional_min_n": 100,
+  "n_sessions_unconditional": 2492,
+  "n_events_conditioned": 2462,
+  "labelling": "Historical base rates, point-in-time \u2014 not a forecast. Gap-conditioned only where it beats unconditional out-of-sample; abstains when the bucket is thin.",
+  "levels": {
+    "u1": {
+      "label": "+1\u03c3 (upper)",
+      "gap_side": "up",
+      "touch": {
+        "outcome": "touch_u1",
+        "unconditional": {
+          "rate": 0.29574638844301765,
+          "ci_low": 0.2781534358155042,
+          "ci_high": 0.31396809241609536,
+          "n": 2492
+        },
+        "by_gap": {
+          "down": {
+            "rate": 0.07596899224806201,
+            "ci_low": 0.057939083181238527,
+            "ci_high": 0.09901984328100807,
+            "n": 645,
+            "sufficient": true
+          },
+          "flat": {
+            "rate": 0.18652849740932642,
+            "ci_low": 0.16321175184296077,
+            "ci_high": 0.21233107356789027,
+            "n": 965,
+            "sufficient": true
+          },
+          "up": {
+            "rate": 0.5833333333333334,
+            "ci_low": 0.5499275045363518,
+            "ci_high": 0.6159910759863408,
+            "n": 852,
+            "sufficient": true
+          }
+        },
+        "calibration": {
+          "best_predictor": "gap_at_open",
+          "gap_beats_unconditional": true,
+          "gap_rel_improvement": 0.20990616303748494,
+          "brier_gap_at_open": 0.16420455389160982,
+          "brier_unconditional": 0.2078291795350383,
+          "scored_sessions": 2210
+        }
+      },
+      "close": {
+        "outcome": "close_above_u1",
+        "unconditional": {
+          "rate": 0.16091492776886035,
+          "ci_low": 0.14701151757613654,
+          "ci_high": 0.17586213931129294,
+          "n": 2492
+        },
+        "by_gap": {
+          "down": {
+            "rate": 0.031007751937984496,
+            "ci_low": 0.020160962023550267,
+            "ci_high": 0.04740786888990346,
+            "n": 645,
+            "sufficient": true
+          },
+          "flat": {
+            "rate": 0.0922279792746114,
+            "ci_low": 0.07555348817431606,
+            "ci_high": 0.11213610455021247,
+            "n": 965,
+            "sufficient": true
+          },
+          "up": {
+            "rate": 0.3345070422535211,
+            "ci_low": 0.3036310389254343,
+            "ci_high": 0.3668686814449933,
+            "n": 852,
+            "sufficient": true
+          }
+        },
+        "calibration": {
+          "best_predictor": "gap_at_open",
+          "gap_beats_unconditional": true,
+          "gap_rel_improvement": 0.11804686738250918,
+          "brier_gap_at_open": 0.11959586994055854,
+          "brier_unconditional": 0.13560343006619616,
+          "scored_sessions": 2210
+        }
+      }
+    },
+    "u2": {
+      "label": "+2\u03c3 (upper)",
+      "gap_side": "up",
+      "touch": {
+        "outcome": "touch_u2",
+        "unconditional": {
+          "rate": 0.05176565008025682,
+          "ci_low": 0.04373623993418189,
+          "ci_high": 0.06117485443653844,
+          "n": 2492
+        },
+        "by_gap": {
+          "down": {
+            "rate": 0.012403100775193798,
+            "ci_low": 0.006297954394162782,
+            "ci_high": 0.024281871464618028,
+            "n": 645,
+            "sufficient": true
+          },
+          "flat": {
+            "rate": 0.02383419689119171,
+            "ci_low": 0.01593369231464925,
+            "ci_high": 0.035510698681337646,
+            "n": 965,
+            "sufficient": true
+          },
+          "up": {
+            "rate": 0.10915492957746478,
+            "ci_low": 0.08994399712971118,
+            "ci_high": 0.13187449140470264,
+            "n": 852,
+            "sufficient": true
+          }
+        },
+        "calibration": {
+          "best_predictor": "gap_at_open",
+          "gap_beats_unconditional": true,
+          "gap_rel_improvement": 0.026217853832924617,
+          "brier_gap_at_open": 0.046107427149315455,
+          "brier_unconditional": 0.04734881136484159,
+          "scored_sessions": 2210
+        }
+      },
+      "close": {
+        "outcome": "close_above_u2",
+        "unconditional": {
+          "rate": 0.028491171749598716,
+          "ci_low": 0.022649602717244702,
+          "ci_high": 0.03578418052858913,
+          "n": 2492
+        },
+        "by_gap": {
+          "down": {
+            "rate": 0.0031007751937984496,
+            "ci_low": 0.0008507566624194026,
+            "ci_high": 0.011234566669024951,
+            "n": 645,
+            "sufficient": true
+          },
+          "flat": {
+            "rate": 0.011398963730569948,
+            "ci_low": 0.006376751568809046,
+            "ci_high": 0.020295784567443017,
+            "n": 965,
+            "sufficient": true
+          },
+          "up": {
+            "rate": 0.06572769953051644,
+            "ci_low": 0.050960824886257534,
+            "ci_high": 0.08439305126309118,
+            "n": 852,
+            "sufficient": true
+          }
+        },
+        "calibration": {
+          "best_predictor": "gap_at_open",
+          "gap_beats_unconditional": true,
+          "gap_rel_improvement": 0.021939435625310758,
+          "brier_gap_at_open": 0.026278126386125037,
+          "brier_unconditional": 0.026867586060916,
+          "scored_sessions": 2210
+        }
+      }
+    },
+    "l1": {
+      "label": "\u22121\u03c3 (lower)",
+      "gap_side": "down",
+      "touch": {
+        "outcome": "touch_l1",
+        "unconditional": {
+          "rate": 0.2981540930979133,
+          "ci_low": 0.2805155285650455,
+          "ci_high": 0.3164139973691285,
+          "n": 2492
+        },
+        "by_gap": {
+          "down": {
+            "rate": 0.627906976744186,
+            "ci_low": 0.5899497667801319,
+            "ci_high": 0.6643496429707443,
+            "n": 645,
+            "sufficient": true
+          },
+          "flat": {
+            "rate": 0.2538860103626943,
+            "ci_low": 0.22743860761176826,
+            "ci_high": 0.28228509828931314,
+            "n": 965,
+            "sufficient": true
+          },
+          "up": {
+            "rate": 0.10446009389671361,
+            "ci_low": 0.0856674334860682,
+            "ci_high": 0.12680352938509534,
+            "n": 852,
+            "sufficient": true
+          }
+        },
+        "calibration": {
+          "best_predictor": "gap_at_open",
+          "gap_beats_unconditional": true,
+          "gap_rel_improvement": 0.19523070506849527,
+          "brier_gap_at_open": 0.1707679196583731,
+          "brier_unconditional": 0.2121948746477802,
+          "scored_sessions": 2210
+        }
+      },
+      "close": {
+        "outcome": "close_below_l1",
+        "unconditional": {
+          "rate": 0.1528892455858748,
+          "ci_low": 0.1392945823712865,
+          "ci_high": 0.1675524155075614,
+          "n": 2492
+        },
+        "by_gap": {
+          "down": {
+            "rate": 0.32868217054263565,
+            "ci_low": 0.2935386642189318,
+            "ci_high": 0.3658542475692884,
+            "n": 645,
+            "sufficient": true
+          },
+          "flat": {
+            "rate": 0.12538860103626942,
+            "ci_low": 0.1059685929625406,
+            "ci_high": 0.14777927938794747,
+            "n": 965,
+            "sufficient": true
+          },
+          "up": {
+            "rate": 0.051643192488262914,
+            "ci_low": 0.03869301736848631,
+            "ci_high": 0.06861828179111153,
+            "n": 852,
+            "sufficient": true
+          }
+        },
+        "calibration": {
+          "best_predictor": "gap_at_open",
+          "gap_beats_unconditional": true,
+          "gap_rel_improvement": 0.09267912516376874,
+          "brier_gap_at_open": 0.12035312533013909,
+          "brier_unconditional": 0.13264670599787806,
+          "scored_sessions": 2210
+        }
+      }
+    },
+    "l2": {
+      "label": "\u22122\u03c3 (lower)",
+      "gap_side": "down",
+      "touch": {
+        "outcome": "touch_l2",
+        "unconditional": {
+          "rate": 0.07825040128410915,
+          "ci_low": 0.06834322737614959,
+          "ci_high": 0.08945584172288987,
+          "n": 2492
+        },
+        "by_gap": {
+          "down": {
+            "rate": 0.20155038759689922,
+            "ci_low": 0.17239982562833006,
+            "ci_high": 0.2342348849529587,
+            "n": 645,
+            "sufficient": true
+          },
+          "flat": {
+            "rate": 0.05077720207253886,
+            "ci_low": 0.03861989116779795,
+            "ci_high": 0.06649685202428107,
+            "n": 965,
+            "sufficient": true
+          },
+          "up": {
+            "rate": 0.017605633802816902,
+            "ci_low": 0.01069782244768563,
+            "ci_high": 0.028843915653347627,
+            "n": 852,
+            "sufficient": true
+          }
+        },
+        "calibration": {
+          "best_predictor": "gap_at_open",
+          "gap_beats_unconditional": true,
+          "gap_rel_improvement": 0.06946662401757876,
+          "brier_gap_at_open": 0.06793051540456799,
+          "brier_unconditional": 0.07300169683097027,
+          "scored_sessions": 2210
+        }
+      },
+      "close": {
+        "outcome": "close_below_l2",
+        "unconditional": {
+          "rate": 0.03531300160513644,
+          "ci_low": 0.028751958833304017,
+          "ci_high": 0.04330448456982412,
+          "n": 2492
+        },
+        "by_gap": {
+          "down": {
+            "rate": 0.08992248062015504,
+            "ci_low": 0.07020522357955579,
+            "ci_high": 0.1144954566736955,
+            "n": 645,
+            "sufficient": true
+          },
+          "flat": {
+            "rate": 0.024870466321243522,
+            "ci_low": 0.016768967329552274,
+            "ci_high": 0.03673974490474585,
+            "n": 965,
+            "sufficient": true
+          },
+          "up": {
+            "rate": 0.007042253521126761,
+            "ci_low": 0.003231407890822371,
+            "ci_high": 0.015278397467897746,
+            "n": 852,
+            "sufficient": true
+          }
+        },
+        "calibration": {
+          "best_predictor": "gap_at_open",
+          "gap_beats_unconditional": true,
+          "gap_rel_improvement": 0.024520236799377506,
+          "brier_gap_at_open": 0.034075313433147,
+          "brier_unconditional": 0.034931850683753124,
+          "scored_sessions": 2210
+        }
+      }
+    }
+  }
+}
