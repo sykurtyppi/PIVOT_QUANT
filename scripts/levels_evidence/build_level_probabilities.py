@@ -24,7 +24,6 @@ import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-OUT = ROOT / "research" / "levels_evidence" / "level_probabilities.json"
 
 
 def _load(name: str, rel: str):
@@ -92,6 +91,7 @@ def build() -> dict:
             "close": _outcome_block(agg_metrics, desc, calib, close_o),
         }
     return {
+        "symbol": _b.SYMBOL,
         "generated_from": "research/levels_evidence/prereg_level_behavior.md §8",
         "data_snapshot_sha256_16": sha,
         "gap_cut": _rc.GAP_CUT,                # ±0.3% gap threshold (must match the page)
@@ -108,9 +108,11 @@ def build() -> dict:
 
 def main() -> int:
     report = build()
-    OUT.write_text(json.dumps(report, indent=2), encoding="utf-8")
-    print(f"snapshot {report['data_snapshot_sha256_16']} wrote {OUT.relative_to(ROOT)} "
-          f"({len(report['levels'])} levels)")
+    out = _b.OUT_DIR / "level_probabilities.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    print(f"{report['symbol']} snapshot {report['data_snapshot_sha256_16']} wrote "
+          f"{out.relative_to(ROOT)} ({len(report['levels'])} levels)")
     return 0
 
 

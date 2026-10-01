@@ -142,3 +142,25 @@ with an explicit **"insufficient data"** state whenever §5 gating fails.
 3. Intraday post-touch outcomes on the available 1-min window, heavily gated.
 4. Regime segmentation + the §7 baseline/Brier comparison.
 5. Surface in `/levels` as expandable secondary context with abstention.
+
+## 12. Amendments
+
+### 2026-10-01 — A1: multi-instrument daily layer (QQQ)
+
+Extends the **daily** layer (touch and close-beyond; the §3 *daily* outcomes only)
+from SPY to additional liquid index ETFs, beginning with **QQQ**, under the
+IDENTICAL discipline and frozen definitions of this prereg — point-in-time bands
+from the same `MultiHorizonVolatilityLevels` engine, Wilson CIs, §5 sample gating,
+the §6 regime buckets, the §7 walk-forward Brier verdict, and §8 surfacing. **No
+outcome, threshold, bucket, or estimator definition changes.**
+
+- **Daily only.** The INTRADAY layer (§3 intraday: acceptance / rejection /
+  first-side / time-to-touch) stays **SPY-only**. No true-OHLC 1-minute source
+  exists for QQQ: the T9 iVolatility 1-minute lake is last/bid/ask quote snapshots,
+  not OHLC bars, so it cannot drive the frozen `High_T ≥ U` touch rule. QQQ intraday
+  **abstains** until a true-OHLC 1-minute feed is available.
+- **Per instrument, independently.** Each instrument gets its own point-in-time
+  daily snapshot and its own §7 verdict — gap conditioning must earn its
+  out-of-sample edge *separately* for QQQ; it is not assumed from SPY.
+- Pivots remain reference-only (§1). Per-instrument artifacts live under
+  `research/levels_evidence/<symbol>/` (SPY stays at the root for compatibility).
