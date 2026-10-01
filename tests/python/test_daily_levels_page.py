@@ -9,6 +9,7 @@ break/reject ML surface.
 """
 from __future__ import annotations
 
+import json
 import unittest
 from pathlib import Path
 
@@ -37,7 +38,7 @@ class NoMisleadingProbabilityTest(unittest.TestCase):
 
 class HonestPerLevelContractTest(unittest.TestCase):
     def test_consumes_per_level_artifact(self):
-        self.assertIn("/app/levels/level_probabilities.json", PAGE)
+        self.assertIn("${symbol}/level_probabilities.json", PAGE)
 
     def test_sample_size_and_ci_shown(self):
         self.assertIn("n=", PAGE)
@@ -65,7 +66,7 @@ class HonestPerLevelContractTest(unittest.TestCase):
 
 class IntradaySurfaceTest(unittest.TestCase):
     def test_consumes_intraday_artifact(self):
-        self.assertIn("/app/levels/intraday_outcomes.json", PAGE)
+        self.assertIn("${symbol}/intraday_outcomes.json", PAGE)
 
     def test_intraday_honest_labels_and_gate(self):
         self.assertIn("insufficient data", PAGE)   # abstention is surfaced, not hidden
@@ -85,6 +86,33 @@ class ServerRouteTest(unittest.TestCase):
     def test_existing_evidence_routes_intact(self):
         self.assertIn("'/app/levels/regime_rates.json'", SERVER)
         self.assertIn("'/app/levels/touch_rates.json'", SERVER)
+
+
+class MultiInstrumentTest(unittest.TestCase):
+    def test_symbol_toggle_present(self):
+        self.assertIn('id="symbol-toggle"', PAGE)
+        self.assertIn('data-symbol="QQQ"', PAGE)
+        self.assertIn("selectSymbol", PAGE)
+
+    def test_artifacts_fetched_symbol_scoped(self):
+        for name in ("daily_touch_rates", "regime_calibration", "level_probabilities", "intraday_outcomes"):
+            self.assertIn(f"${{symbol}}/{name}.json", PAGE)
+
+    def test_server_symbol_route_allowlisted(self):
+        self.assertIn("levelsArtifactMatch", SERVER)
+        self.assertIn("ALLOWED_SYMBOLS", SERVER)
+        self.assertIn("'QQQ'", SERVER)
+        # a valid symbol without intraday returns an explicit 200 'unavailable', not a 404
+        self.assertIn("available: false", SERVER)
+
+    def test_qqq_artifact_present_and_independently_validated(self):
+        qqq = json.loads((ROOT / "research/levels_evidence/qqq/level_probabilities.json").read_text(encoding="utf-8"))
+        self.assertEqual(qqq["symbol"], "QQQ")
+        self.assertEqual(set(qqq["levels"]), {"u1", "u2", "l1", "l2"})
+        # QQQ must earn its OWN gap edge (prereg A1: validated per instrument, not assumed from SPY)
+        u1 = qqq["levels"]["u1"]["touch"]["calibration"]
+        self.assertTrue(u1["gap_beats_unconditional"])
+        self.assertGreater(u1["gap_rel_improvement"], 0.05)
 
 
 if __name__ == "__main__":

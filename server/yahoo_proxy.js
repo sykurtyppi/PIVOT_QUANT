@@ -3648,6 +3648,36 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Symbol-scoped evidence artifacts: /app/levels/<SYMBOL>/<file>.json (prereg §12/A1).
+  // SYMBOL and file are both allowlisted, so no caller-controlled path segment reaches
+  // the filesystem. SPY resolves to the root dir; other instruments to their subdir.
+  const levelsArtifactMatch = url.pathname.match(/^\/app\/levels\/([A-Za-z]{1,8})\/([a-z_]+)\.json$/);
+  if (levelsArtifactMatch) {
+    if (!methodAllowed(req, 'GET')) {
+      methodNotAllowed(res, 'GET');
+      return;
+    }
+    const sym = levelsArtifactMatch[1].toUpperCase();
+    const name = levelsArtifactMatch[2];
+    const ALLOWED_SYMBOLS = new Set(['SPY', 'QQQ']);
+    const ALLOWED_FILES = new Set(['daily_touch_rates', 'regime_calibration', 'level_probabilities', 'intraday_outcomes']);
+    if (!ALLOWED_SYMBOLS.has(sym) || !ALLOWED_FILES.has(name)) {
+      sendJson(res, 404, { error: 'unknown levels artifact' });
+      return;
+    }
+    const sub = sym === 'SPY' ? '' : sym.toLowerCase();
+    const filePath = path.join(ROOT_DIR, 'research', 'levels_evidence', sub, `${name}.json`);
+    // Intraday exists only for instruments with a true-OHLC 1-min source (SPY). For a
+    // valid symbol without it, return an explicit "unavailable" 200 (not a 404) so the
+    // page hides the drawer without logging a console error.
+    if (name === 'intraday_outcomes' && !fs.existsSync(filePath)) {
+      sendJson(res, 200, { symbol: sym, available: false });
+      return;
+    }
+    sendJsonFile(res, filePath);
+    return;
+  }
+
   if (url.pathname === '/levels' || url.pathname === '/daily_levels.html') {
     if (!methodAllowed(req, 'GET')) {
       methodNotAllowed(res, 'GET');

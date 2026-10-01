@@ -1,6 +1,7 @@
 {
   "generated_from": "research/levels_evidence/prereg_level_behavior.md",
   "estimator": "realized_vol band prior_close*exp(+/-k*sigma), sigma=std(ddof=1) of trailing 20 close-to-close log returns, point-in-time (data < T)",
+  "symbol": "SPY",
   "data_source": "SPY daily OHLC, yahoo via market proxy",
   "data_snapshot_sha256_16": "34b8ed65a2fd9c61",
   "session_span": "2016-10-31 .. 2026-09-30",

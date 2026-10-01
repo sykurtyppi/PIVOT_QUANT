@@ -1,4 +1,5 @@
 {
+  "symbol": "SPY",
   "generated_from": "research/levels_evidence/prereg_level_behavior.md \u00a78",
   "data_snapshot_sha256_16": "34b8ed65a2fd9c61",
   "gap_cut": 0.003,

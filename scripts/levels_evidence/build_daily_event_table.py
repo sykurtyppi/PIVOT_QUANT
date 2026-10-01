@@ -28,16 +28,19 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+# Instrument is parameterized (prereg §12 / A1). SPY keeps the root report paths for
+# backward compatibility; other instruments write to research/levels_evidence/<symbol>/.
+SYMBOL = os.environ.get("LEVELS_SYMBOL", "SPY").upper()
 DATA_DIR = ROOT / "data" / "levels_evidence"
-OUT_DIR = ROOT / "research" / "levels_evidence"
-SNAPSHOT = DATA_DIR / "spy_daily_snapshot.json"
-EVENT_TABLE = DATA_DIR / "daily_event_table.csv"
+OUT_DIR = (ROOT / "research" / "levels_evidence") / ("" if SYMBOL == "SPY" else SYMBOL.lower())
+SNAPSHOT = DATA_DIR / f"{SYMBOL.lower()}_daily_snapshot.json"
+EVENT_TABLE = DATA_DIR / f"{SYMBOL.lower()}_daily_event_table.csv"
 REPORT_JSON = OUT_DIR / "daily_touch_rates.json"
 REPORT_MD = OUT_DIR / "daily_touch_rates.md"
 
 WINDOW = 20                 # trailing returns for sigma (matches the live engine's primary window)
 PROXY = os.environ.get("MARKET_PROXY", "http://127.0.0.1:3000")
-RANGE = os.environ.get("SPY_RANGE", "10y")
+RANGE = os.environ.get("LEVELS_DAILY_RANGE", os.environ.get("SPY_RANGE", "10y"))
 
 
 def sample_std(values: list[float]) -> float:
@@ -64,14 +67,14 @@ def fetch_or_load_snapshot() -> tuple[list[dict], str]:
     if SNAPSHOT.exists():
         raw = SNAPSHOT.read_text(encoding="utf-8")
     else:
-        url = f"{PROXY}/api/market?symbol=SPY&range={RANGE}&interval=1d"
+        url = f"{PROXY}/api/market?symbol={SYMBOL}&range={RANGE}&interval=1d"
         with urllib.request.urlopen(url, timeout=30) as resp:  # noqa: S310 (localhost proxy)
             payload = json.load(resp)
         candles = payload.get("candles") or []
         if len(candles) < 200:
             raise SystemExit(f"proxy returned only {len(candles)} candles; refusing to build")
         snap = {
-            "symbol": "SPY", "range": RANGE, "interval": "1d",
+            "symbol": SYMBOL, "range": RANGE, "interval": "1d",
             "source": "yahoo via market proxy", "candle_count": len(candles),
             "candles": [
                 {"time": c["time"], "open": c["open"], "high": c["high"],
@@ -190,7 +193,8 @@ def main() -> int:
         "generated_from": "research/levels_evidence/prereg_level_behavior.md",
         "estimator": "realized_vol band prior_close*exp(+/-k*sigma), sigma=std(ddof=1) of trailing "
                      f"{WINDOW} close-to-close log returns, point-in-time (data < T)",
-        "data_source": "SPY daily OHLC, yahoo via market proxy",
+        "symbol": SYMBOL,
+        "data_source": f"{SYMBOL} daily OHLC, yahoo via market proxy",
         "data_snapshot_sha256_16": data_hash,
         "session_span": span,
         **agg,

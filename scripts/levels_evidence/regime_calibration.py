@@ -29,13 +29,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 BUILD = ROOT / "scripts" / "levels_evidence" / "build_daily_event_table.py"
-OUT_DIR = ROOT / "research" / "levels_evidence"
 
 _spec = importlib.util.spec_from_file_location("levels_evidence_build", BUILD)
 _b = importlib.util.module_from_spec(_spec)
 assert _spec and _spec.loader
 _spec.loader.exec_module(_b)
 
+OUT_DIR = _b.OUT_DIR          # symbol-aware (SPY -> root, other instruments -> subdir)
 WINDOW = _b.WINDOW
 BURN_IN = 252                 # start scoring after ~1y of trailing history
 MIN_BUCKET = 30               # sample gate for a bucketed estimate (prereg §5)
@@ -198,7 +198,7 @@ def main() -> int:
     desc = descriptive(events)
     calib = {name: calibration(events, name, k) for name, k, _ in OUTCOMES}
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    report = {"data_snapshot_sha256_16": data_hash, "n_events": len(events),
+    report = {"symbol": _b.SYMBOL, "data_snapshot_sha256_16": data_hash, "n_events": len(events),
               "span": f"{events[0]['date']} .. {events[-1]['date']}",
               "burn_in": BURN_IN, "min_bucket": MIN_BUCKET,
               "descriptive": desc, "calibration": calib}
