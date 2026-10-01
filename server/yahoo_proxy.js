@@ -37,6 +37,7 @@ const NYSE_CALENDAR_JS = path.join(ROOT_DIR, 'src', 'forecast', 'nyseCalendar.js
 const TOUCH_RATES_FILE = path.join(ROOT_DIR, 'research', 'levels_evidence', 'daily_touch_rates.json');
 const REGIME_RATES_FILE = path.join(ROOT_DIR, 'research', 'levels_evidence', 'regime_calibration.json');
 const LEVEL_PROBS_FILE = path.join(ROOT_DIR, 'research', 'levels_evidence', 'level_probabilities.json');
+const INTRADAY_OUTCOMES_FILE = path.join(ROOT_DIR, 'research', 'levels_evidence', 'intraday_outcomes.json');
 const LOCAL_CHART_PATH = path.join(
   ROOT_DIR,
   'node_modules',
@@ -3625,6 +3626,15 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     sendJsonFile(res, LEVEL_PROBS_FILE);
+    return;
+  }
+
+  if (url.pathname === '/app/levels/intraday_outcomes.json') {
+    if (!methodAllowed(req, 'GET')) {
+      methodNotAllowed(res, 'GET');
+      return;
+    }
+    sendJsonFile(res, INTRADAY_OUTCOMES_FILE);
     return;
   }
 

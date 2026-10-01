@@ -63,6 +63,20 @@ class HonestPerLevelContractTest(unittest.TestCase):
         self.assertNotIn("manifest_active", PAGE)
 
 
+class IntradaySurfaceTest(unittest.TestCase):
+    def test_consumes_intraday_artifact(self):
+        self.assertIn("/app/levels/intraday_outcomes.json", PAGE)
+
+    def test_intraday_honest_labels_and_gate(self):
+        self.assertIn("insufficient data", PAGE)   # abstention is surfaced, not hidden
+        self.assertIn("post_touch_by_N", PAGE)      # reads the frozen §3 structure
+        self.assertIn("sufficient", PAGE)           # honors the n>=100 gate
+
+    def test_server_serves_intraday_route(self):
+        self.assertIn("'/app/levels/intraday_outcomes.json'", SERVER)
+        self.assertIn("INTRADAY_OUTCOMES_FILE", SERVER)
+
+
 class ServerRouteTest(unittest.TestCase):
     def test_level_probabilities_route_served(self):
         self.assertIn("'/app/levels/level_probabilities.json'", SERVER)

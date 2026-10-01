@@ -118,6 +118,7 @@
   .lvl-cell { display: grid; grid-template-columns: 82px 42px 1fr; gap: 8px; align-items: baseline; font-size: 12.5px; padding: 1px 0; }
   .lvl-cell .lvl-lab { color: var(--muted); }
   .lvl-cell .lvl-v { font-weight: 650; text-align: right; color: var(--text); }
+  .lvl-cell .lvl-v.edge { color: var(--below); }
   .lvl-cell .lvl-meta { color: var(--faint); font-size: 11px; }
   .lvl-cell .lvl-meta.edge { color: var(--below); }
 
@@ -206,6 +207,10 @@
       <details class="evidence" id="evidence-levels" hidden>
         <summary>Level behaviour</summary>
         <div id="lvl-body"></div>
+      </details>
+      <details class="evidence" id="evidence-intraday" hidden>
+        <summary>Intraday behaviour</summary>
+        <div id="intra-body"></div>
       </details>
       <details class="evidence" id="evidence-daily" hidden>
         <summary>Historical behaviour</summary>
@@ -663,6 +668,51 @@ function renderLevelBehaviour() {
   $('evidence-daily').hidden = true; // the per-level view supersedes the unconditional drawer
 }
 
+// --- intraday behaviour: post-touch acceptance/rejection + first-side + time-to-touch (prereg §3) ---
+let intraday = null;
+async function loadIntraday() {
+  try {
+    const res = await fetch('/app/levels/intraday_outcomes.json', { headers: { accept: 'application/json' } });
+    if (res.ok) { intraday = await res.json(); renderIntraday(); }
+  } catch { /* drawer stays hidden when the artifact is unavailable */ }
+}
+function renderIntraday() {
+  if (!intraday || !intraday.levels) return;
+  const N = '30';   // headline horizon; 15/30/60 all exist in the artifact
+  const asPct = (r) => `${Math.round(r * 100)}%`;
+  const rows = [];
+  for (const lid of ['u1', 'l1', 'u2', 'l2']) {
+    const L = intraday.levels[lid];
+    if (!L) continue;
+    const blk = L.post_touch_by_N[N];
+    const a = blk.acceptance, r = blk.rejection, u = blk.undetermined;
+    const ttt = L.time_to_touch_min;
+    if (a.sufficient) {
+      const t = (ttt.median != null) ? `${Math.round(ttt.median)} min` : '—';
+      rows.push(
+        `<div class="lvl-row"><div class="lvl-name">${L.label}</div>`
+        + `<div class="lvl-cell"><span class="lvl-lab">reached in</span>`
+        + `<span class="lvl-v num">${t}</span><span class="lvl-meta">median · n=${a.n}</span></div>`
+        + `<div class="lvl-cell"><span class="lvl-lab">then @30m</span>`
+        + `<span class="lvl-v num edge">${asPct(a.rate)}</span>`
+        + `<span class="lvl-meta edge">broke beyond · reject ${asPct(r.rate)} · undecided ${asPct(u.rate)}</span></div>`
+        + '</div>');
+    } else {
+      rows.push(
+        `<div class="lvl-row"><div class="lvl-name">${L.label}</div>`
+        + `<div class="lvl-cell"><span class="lvl-lab">post-touch</span>`
+        + `<span class="lvl-v">—</span><span class="lvl-meta">insufficient data (n=${a.n})</span></div>`
+        + '</div>');
+    }
+  }
+  const fs = intraday.first_side_touched;
+  const fsLine = `First side of ±1σ touched: +1σ ${asPct(fs.u1_first / fs.n)} · −1σ ${asPct(fs.l1_first / fs.n)} · neither ${asPct(fs.neither / fs.n)} (n=${fs.n})`;
+  $('intra-body').innerHTML = rows.join('')
+    + `<div class="ev-note">${fsLine}. Point-in-time band levels · ${intraday.n_sessions} sessions (${intraday.session_span}) · Wilson 95% CI. `
+    + '“Broke beyond” = accepted past the band; “reject” = turned back toward the prior close; “undecided” = neither within 30 min. Historical, not a forecast.</div>';
+  $('evidence-intraday').hidden = false;
+}
+
 async function load() {
   try {
     const data = await fetchMarket();
@@ -717,6 +767,7 @@ load();
 loadEvidence();
 loadRegime();
 loadLevelProbabilities();
+loadIntraday();
 </script>
 </body>
 </html>
