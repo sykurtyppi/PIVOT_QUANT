@@ -3,10 +3,15 @@ from __future__ import annotations
 
 import argparse
 import os
+from pathlib import Path
 import sqlite3
+import sys
 from typing import Iterable
 
-from label_eligibility import normalize_bar_interval
+SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+from label_eligibility import normalize_bar_interval  # noqa: E402
 
 DEFAULT_DB = os.getenv("PIVOT_DB", "data/pivot_events.sqlite")
 DEFAULT_HORIZONS = [5, 15, 30, 60]
