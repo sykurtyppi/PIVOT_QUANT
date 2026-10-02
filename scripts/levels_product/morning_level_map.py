@@ -29,7 +29,9 @@ import pandas as pd
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "scripts"))
+sys.path.insert(0, str(REPO / "scripts" / "levels_product"))
 from backfill_events import calculate_pivots  # noqa: E402
+from hold_engine import label_coverage  # noqa: E402
 
 DB = REPO / "data" / "pivot_events.sqlite"
 ET = ZoneInfo("America/New_York")
@@ -76,6 +78,17 @@ def recent_base_rates(con, symbol, anchor_ts_ms, dq_min=0.9):
             for r in df.itertuples() if int(r.horizon_min) in HORIZONS}
 
 
+def hold_rate_snapshot(con, symbol, anchor_ts_ms, dq_min=0.9):
+    """Return morning rates only when every configured horizon is complete."""
+    coverage = label_coverage(con, symbol, dq_min, HORIZONS)
+    publishable = all(coverage[h]["complete"] for h in HORIZONS)
+    return {
+        "publishable": publishable,
+        "coverage": coverage,
+        "rates": recent_base_rates(con, symbol, anchor_ts_ms, dq_min) if publishable else {},
+    }
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--symbol", default="SPY")
@@ -90,7 +103,8 @@ def main():
     anchor_ts = int(pd.Timestamp(prior.d).tz_localize(ET).timestamp() * 1000) + 16 * 3_600_000
     spot = float(prior.close)
     levels = calculate_pivots(float(prior.high), float(prior.low), float(prior.close))
-    base = recent_base_rates(con, args.symbol, anchor_ts)
+    hold_snapshot = hold_rate_snapshot(con, args.symbol, anchor_ts)
+    base = hold_snapshot["rates"]
     con.close()
 
     rows = []
@@ -110,6 +124,8 @@ def main():
                                "close": round(float(prior.close), 2)},
         "reference_spot": round(spot, 2),
         "levels": rows,
+        "hold_rates_publishable": hold_snapshot["publishable"],
+        "label_coverage": hold_snapshot["coverage"],
         "unconditional_hold_rate_by_horizon": base,
         "disclaimer": ("Base rate is the same for every level — no validated per-level edge exists "
                        "at the open. Differentiated hold-probabilities are emitted intraday at the "
@@ -124,7 +140,10 @@ def main():
     for r in rows:
         marker = "  ← spot" if abs(r["distance_from_spot_bps"]) < 5 else ""
         print(f"  {r['level_type']:4s} {r['price']:8.2f}  ({r['distance_from_spot_bps']:+6.1f} bps, {r['side']}){marker}")
-    print("\n  Base hold rate (any level):", {h: f"{v['hold_rate']*100:.0f}%" for h, v in sorted(base.items())})
+    if hold_snapshot["publishable"]:
+        print("\n  Base hold rate (any level):", {h: f"{v['hold_rate']*100:.0f}%" for h, v in sorted(base.items())})
+    else:
+        print("\n  Base hold rate: UNAVAILABLE (label coverage incomplete)")
     print(f"\nWROTE {fp}")
 
 

@@ -56,21 +56,36 @@ def render(mp, tr) -> str:
     L += ["", "SUPPORT"]
     L += [level_line(r) for r in sup]
 
-    tparts, n_alerted = [], None
-    for h in (15, 30, 60):
-        rec = tr["horizons"].get(f"h{h}", {})
-        sb = rec.get("rolling_scoreboard_alerted_levels") or rec.get("rolling_scoreboard_alerted")
-        if sb and sb.get("actual_hold_rate") is not None:
-            tparts.append(f"{h}m {int(round(sb['actual_hold_rate'] * 100))}% held")
-            n_alerted = sb.get("n_alerted_touches", sb.get("n"))
-    if tparts:
-        L += ["", "TRACK RECORD — last 30 trading days, confluence levels",
-              "  " + "    ".join(tparts) + (f"   (n={n_alerted})" if n_alerted else "")]
-    base = mp.get("unconditional_hold_rate_by_horizon", {})
-    if base:
-        bstr = " / ".join(f"{int(round(v['hold_rate'] * 100))}%"
-                          for _, v in sorted(base.items(), key=lambda x: int(x[0])))
-        L.append(f"  Base rate, any level (15m/30m/60m): {bstr}")
+    rates_publishable = (
+        mp.get("hold_rates_publishable") is True
+        and tr.get("hold_rates_publishable") is True
+    )
+    if rates_publishable:
+        tparts, n_alerted = [], None
+        for h in (15, 30, 60):
+            rec = tr["horizons"].get(f"h{h}", {})
+            sb = rec.get("rolling_scoreboard_alerted_levels") or rec.get("rolling_scoreboard_alerted")
+            if sb and sb.get("actual_hold_rate") is not None:
+                tparts.append(f"{h}m {int(round(sb['actual_hold_rate'] * 100))}% held")
+                n_alerted = sb.get("n_alerted_touches", sb.get("n"))
+        if tparts:
+            L += ["", "TRACK RECORD — last 30 trading days, confluence levels",
+                  "  " + "    ".join(tparts) + (f"   (n={n_alerted})" if n_alerted else "")]
+        base = mp.get("unconditional_hold_rate_by_horizon", {})
+        if base:
+            bstr = " / ".join(f"{int(round(v['hold_rate'] * 100))}%"
+                              for _, v in sorted(base.items(), key=lambda x: int(x[0])))
+            L.append(f"  Base rate, any level (15m/30m/60m): {bstr}")
+    else:
+        coverage = mp.get("label_coverage") or tr.get("label_coverage") or {}
+        incomplete = []
+        for h in (15, 30, 60):
+            item = coverage.get(str(h), coverage.get(h, {}))
+            if not item.get("complete"):
+                missing = item.get("missing_count")
+                incomplete.append(f"{h}m missing {missing}" if missing else f"{h}m unavailable")
+        detail = ", ".join(incomplete) if incomplete else "coverage metadata unavailable"
+        L += ["", f"HOLD RATES UNAVAILABLE — incomplete labels: {detail}"]
 
     L += ["",
           "Most S/R levels are roughly coin-flips; confluence levels hold meaningfully more.",

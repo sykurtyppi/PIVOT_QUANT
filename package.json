@@ -35,7 +35,7 @@
     "ml:collector": "bash server/run_live_collector.sh",
     "ml:init-db": "./scripts/_pybin_exec.sh scripts/init_db.py",
     "ml:log-events": "./scripts/_pybin_exec.sh scripts/run_logger.py --events data/events.jsonl",
-    "ml:build-labels": "./scripts/_pybin_exec.sh scripts/build_labels.py --horizons 5 15 60 --incremental",
+    "ml:build-labels": "./scripts/_pybin_exec.sh scripts/build_labels.py --horizons 5 15 30 60 --incremental",
     "ml:export-csv": "./scripts/_pybin_exec.sh scripts/export_csv.py",
     "ml:export-parquet": "./scripts/_pybin_exec.sh scripts/export_parquet.py",
     "ml:duckdb-view": "./scripts/_pybin_exec.sh scripts/build_duckdb_view.py",

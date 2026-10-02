@@ -14,8 +14,15 @@ so a FIFO deque matures pending outcomes in O(n).
 from __future__ import annotations
 
 from collections import deque
+import sys
+from pathlib import Path
 
 import numpy as np
+
+SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+from label_eligibility import normalize_bar_interval  # noqa: E402
 
 WINDOW = 400        # trailing window (matured events) for the adaptive rate
 MIN_BUCKET = 30     # min matured in-bucket events before trusting a bucket rate
@@ -122,16 +129,109 @@ def et_dates_from_ms(ts_ms):
     return pd.to_datetime(ts_ms, unit="ms", utc=True).dt.tz_convert("America/New_York").dt.date
 
 
-def current_rates(read_con, symbol, dq_min=0.9, window=WINDOW):
-    """Live, as-of-now publishable hold rates per (horizon, bucket).
+def label_coverage(read_con, symbol, dq_min=0.9, horizons=HORIZONS):
+    """Return label completeness against every touch that can now be matured.
 
-    Uses ONLY matured (labeled) outcomes — the most recent `window` per bucket —
-    so it is leak-free by construction (an outcome exists in event_labels only
-    after it resolved). This is the P(hold) the intraday alert and the morning
-    post quote. Returns {horizon: {bucket: {"rate", "n", "ci95"}}}.
+    Eligibility mirrors ``scripts/build_labels.py``: the touch has a valid bar
+    interval, at least one forward bar inside the horizon, and market data at or
+    beyond the horizon endpoint. Any eligible touch without a label makes that
+    horizon incomplete. This compares labels to the data actually available in
+    the database rather than to wall-clock time, so weekends and feed downtime do
+    not create false staleness alarms.
+    """
+    raw_intervals = read_con.execute(
+        """SELECT DISTINCT bar_interval_sec
+           FROM touch_events
+           WHERE symbol=? AND data_quality>=?
+             AND confluence_count IS NOT NULL""",
+        (symbol, dq_min),
+    ).fetchall()
+    valid_intervals = [
+        (raw, normalized)
+        for (raw,) in raw_intervals
+        if (normalized := normalize_bar_interval(raw)) is not None
+    ]
+
+    coverage = {}
+    for h in horizons:
+        horizon_ms = int(h) * 60_000
+        if not valid_intervals:
+            coverage[int(h)] = {
+                "complete": False,
+                "status": "no_mature_events",
+                "eligible_count": 0,
+                "labeled_count": 0,
+                "missing_count": 0,
+                "latest_eligible_ts": None,
+                "latest_labeled_ts": None,
+            }
+            continue
+        interval_values = ", ".join("(?, ?)" for _ in valid_intervals)
+        interval_params = [value for pair in valid_intervals for value in pair]
+        row = read_con.execute(
+            f"""WITH valid_intervals(raw_interval, normalized_interval) AS (
+                   VALUES {interval_values}
+               ), eligible AS (
+                   SELECT te.event_id, te.ts_event
+                   FROM touch_events te
+                   JOIN valid_intervals vi
+                     ON te.bar_interval_sec=vi.raw_interval
+                   WHERE te.symbol=? AND te.data_quality>=?
+                     AND te.confluence_count IS NOT NULL
+                     AND EXISTS (
+                         SELECT 1 FROM bar_data b
+                         WHERE b.symbol=te.symbol
+                           AND b.bar_interval_sec=vi.normalized_interval
+                           AND b.ts>te.ts_event AND b.ts<=te.ts_event+?
+                     )
+                     AND (SELECT MAX(b.ts) FROM bar_data b
+                          WHERE b.symbol=te.symbol
+                            AND b.bar_interval_sec=vi.normalized_interval)
+                         >= te.ts_event+?
+               )
+               SELECT COUNT(*) AS eligible_count,
+                      COUNT(el.event_id) AS labeled_count,
+                      MAX(eligible.ts_event) AS latest_eligible_ts,
+                      MAX(CASE WHEN el.event_id IS NOT NULL
+                               THEN eligible.ts_event END) AS latest_labeled_ts
+               FROM eligible
+               LEFT JOIN event_labels el
+                 ON el.event_id=eligible.event_id AND el.horizon_min=?""",
+            (*interval_params, symbol, dq_min, horizon_ms, horizon_ms, int(h)),
+        ).fetchone()
+        eligible = int(row[0] or 0)
+        labeled = int(row[1] or 0)
+        missing = eligible - labeled
+        complete = bool(eligible > 0 and missing == 0)
+        coverage[int(h)] = {
+            "complete": complete,
+            "status": ("current" if complete else
+                       "no_mature_events" if eligible == 0 else "missing_labels"),
+            "eligible_count": eligible,
+            "labeled_count": labeled,
+            "missing_count": missing,
+            "latest_eligible_ts": int(row[2]) if row[2] is not None else None,
+            "latest_labeled_ts": int(row[3]) if row[3] is not None else None,
+        }
+    return coverage
+
+
+def current_rates(read_con, symbol, dq_min=0.9, window=WINDOW):
+    """Live hold rates, failing closed unless every horizon is complete.
+
+    Uses only matured outcomes and returns coverage metadata under ``_coverage``.
+    If any configured horizon has missing labels (or no mature events), no rate is
+    returned for any horizon: a partial snapshot must never look like a current,
+    comparable 15m/30m/60m probability set.
     """
     import pandas as pd
-    out = {}
+    coverage = label_coverage(read_con, symbol, dq_min)
+    publishable = all(coverage[h]["complete"] for h in HORIZONS)
+    out = {"_publishable": publishable, "_coverage": coverage}
+    if not publishable:
+        out.update({h: {} for h in HORIZONS})
+        return out
+
     for h in HORIZONS:
         df = pd.read_sql_query(
             """SELECT te.confluence_count, el.reject

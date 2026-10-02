@@ -164,6 +164,7 @@ is_truthy() {
 
 PYTHON=""
 RETRAIN_SYMBOLS="${RETRAIN_SYMBOLS:-SPY}"
+RETRAIN_SKIP_LABELS="${RETRAIN_SKIP_LABELS:-1}"
 PIVOT_DB_PATH="${PIVOT_DB:-${ROOT_DIR}/data/pivot_events.sqlite}"
 MODEL_DIR="${RF_MODEL_DIR:-data/models}"
 REPORT_PATH=""
@@ -462,7 +463,11 @@ ops_set \
 # Uses 5m bars from Yahoo (supports longer ranges than 1m's 7-day limit).
 run_step "backfill" "${PYTHON}" scripts/backfill_events.py --symbols "${RETRAIN_SYMBOLS}" --range 7d --interval 5m --source yahoo
 
-run_step "build_labels"    "${PYTHON}" scripts/build_labels.py --horizons 5 15 30 60 --incremental
+if is_truthy "${RETRAIN_SKIP_LABELS}"; then
+  echo "[$(timestamp)] INFO build_labels skipped (daily levels job is the default maturation owner)" | tee -a "${LOG_DIR}/retrain.log"
+else
+  run_step "retrain_build_labels" "${PYTHON}" scripts/build_labels.py --horizons 5 15 30 60 --incremental
+fi
 run_step "export_parquet"  "${PYTHON}" scripts/export_parquet.py
 run_step "duckdb_view"     "${PYTHON}" scripts/build_duckdb_view.py
 echo "[$(timestamp)] INFO train_artifacts config calib_days=${RETRAIN_RF_CALIB_DAYS} calib_mode=${RF_CALIB_MODE:-recent_days} time_decay=${RF_TIME_DECAY_ENABLED:-false} half_life=${RF_TIME_DECAY_HALF_LIFE_DAYS:-45} symbol=${RF_TRAIN_SYMBOL:-SPY} filter_unresolved=${RF_FILTER_UNRESOLVED_EVENTS:-false} drop_low_coverage_unresolved=${RF_DROP_LOW_COVERAGE_UNRESOLVED:-false}" | tee -a "${LOG_DIR}/retrain.log"

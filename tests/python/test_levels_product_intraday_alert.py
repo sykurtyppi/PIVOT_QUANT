@@ -131,6 +131,35 @@ class DeliveryCheckpointTest(unittest.TestCase):
         self.assertNotIn("delivered 2 alert(s)", output)
 
 
+class HoldRateFormattingTest(unittest.TestCase):
+    def test_incomplete_snapshot_never_formats_stale_percentages(self):
+        row = pd.Series({
+            "confluence_count": 1,
+            "touch_side": 1,
+            "level_type": "PP",
+            "level_price": 760.0,
+        })
+        rates = {
+            "_publishable": False,
+            "_coverage": {
+                15: {"complete": True, "missing_count": 0},
+                30: {"complete": False, "missing_count": 35},
+                60: {"complete": True, "missing_count": 0},
+            },
+            15: {"1": {"rate": 0.8046}},
+            30: {},
+            60: {"1": {"rate": 0.8659}},
+        }
+
+        alert = intraday_alert.fmt_alert(row, rates)
+
+        self.assertNotIn("80%", alert)
+        self.assertNotIn("87%", alert)
+        self.assertIn("unavailable", alert)
+        self.assertIn("30m", alert)
+        self.assertNotIn("full history", alert)
+
+
 class ProductionConfigurationTest(unittest.TestCase):
     def test_missing_webhook_fails_before_opening_databases(self):
         with mock.patch.dict(os.environ, {}, clear=False):

@@ -20,7 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -29,10 +29,12 @@ from sklearn.metrics import brier_score_loss
 
 import sys
 REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO / "scripts"))
 sys.path.insert(0, str(REPO / "scripts" / "levels_product"))
+from trading_calendar import is_trading_day, roll_back_to_trading_day  # noqa: E402
 from hold_engine import (  # noqa: E402
     BUCKETS, HORIZONS, MIN_PUBLISHABLE_N, bucket, et_dates_from_ms,
-    reliability_curve, trailing_base_rate, trailing_forecasts, wilson,
+    label_coverage, reliability_curve, trailing_base_rate, trailing_forecasts, wilson,
 )
 
 DB = REPO / "data" / "pivot_events.sqlite"
@@ -42,7 +44,40 @@ def _read_con():
     return sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
 
 
-def horizon_record(con, symbol, horizon, dq_min, recent_days):
+def trading_day_window(as_of_date: date, recent_days: int):
+    """Return the inclusive NYSE session window ending at ``as_of_date``."""
+    end = roll_back_to_trading_day(as_of_date)
+    days = []
+    cursor = end
+    while len(days) < recent_days:
+        if is_trading_day(cursor):
+            days.append(cursor)
+        cursor -= timedelta(days=1)
+    return days[-1], end
+
+
+def rolling_scoreboard(sc, as_of_date: date, recent_days: int):
+    """Score only the requested current session window, never last-available data."""
+    window_start, window_end = trading_day_window(as_of_date, recent_days)
+    recent = sc[
+        (sc.d >= window_start) & (sc.d <= window_end) & (sc.bkt != "0")
+    ]
+    rk, rn = int(recent.reject.sum()), len(recent)
+    latest = max(sc.d) if len(sc) else None
+    return {
+        "window_trading_days": recent_days,
+        "window_start_date": str(window_start),
+        "window_end_date": str(window_end),
+        "covered_trading_days": int(recent.d.nunique()) if rn else 0,
+        "latest_scored_date": str(latest) if latest is not None else None,
+        "n_alerted_touches": rn,
+        "actual_hold_rate": round(rk / rn, 4) if rn else None,
+        "ci95": wilson(rk, rn),
+        "avg_predicted": round(float(recent.pred.mean()), 4) if rn else None,
+    }
+
+
+def horizon_record(con, symbol, horizon, dq_min, recent_days, as_of_date):
     df = pd.read_sql_query(
         """SELECT te.event_id, te.ts_event, te.confluence_count, el.reject
            FROM touch_events te JOIN event_labels el ON te.event_id=el.event_id
@@ -75,13 +110,7 @@ def horizon_record(con, symbol, horizon, dq_min, recent_days):
         }
 
     sc["d"] = et_dates_from_ms(sc.ts_event)
-    days = sorted(sc.d.unique())[-recent_days:]
-    recent = sc[sc.d.isin(days) & (sc.bkt != "0")]
-    rk, rn = int(recent.reject.sum()), len(recent)
-    scoreboard = {"window_trading_days": recent_days, "n_alerted_touches": rn,
-                  "actual_hold_rate": round(rk / rn, 4) if rn else None,
-                  "ci95": wilson(rk, rn),
-                  "avg_predicted": round(float(recent.pred.mean()), 4) if rn else None}
+    scoreboard = rolling_scoreboard(sc, as_of_date, recent_days)
 
     return {
         "horizon_min": horizon, "n_scored": len(sc),
@@ -102,12 +131,30 @@ def main():
     args = ap.parse_args()
 
     con = _read_con()
-    records = {f"h{h}": horizon_record(con, args.symbol, h, args.dq_min, args.recent_days) for h in HORIZONS}
+    latest_bar = con.execute(
+        "SELECT MAX(ts) FROM bar_data WHERE symbol=?", (args.symbol,)
+    ).fetchone()[0]
+    if latest_bar is None:
+        raise SystemExit(f"no bar data for {args.symbol}")
+    report_date = pd.Timestamp(latest_bar, unit="ms", tz="UTC").tz_convert(
+        "America/New_York"
+    ).date()
+    coverage = label_coverage(con, args.symbol, args.dq_min, HORIZONS)
+    hold_rates_publishable = all(coverage[h]["complete"] for h in HORIZONS)
+    records = {
+        f"h{h}": horizon_record(
+            con, args.symbol, h, args.dq_min, args.recent_days, report_date
+        )
+        for h in HORIZONS
+    }
     con.close()
 
     out = {
         "product": "levels_track_record", "symbol": args.symbol,
         "as_of_utc": datetime.utcnow().isoformat() + "Z",
+        "report_session_date": str(report_date),
+        "hold_rates_publishable": hold_rates_publishable,
+        "label_coverage": coverage,
         "method": "leak-free (horizon-embargoed) trailing confluence-bucket hold model",
         "honest_framing": ("aggregate calibration is near-trivial (model ~ base-rate tracker); "
                            "the sellable signal is the conf-1 tilt; skill is vs a drift-adapted "
