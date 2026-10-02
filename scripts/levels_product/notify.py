@@ -97,13 +97,12 @@ def _slack_text(content: str) -> str:
 
 
 def post(content: str, *, username: str = "PivotQuant Levels", timeout: float = 8.0) -> bool:
-    """Best-effort deliver. Returns True if delivered, False on dry-run OR failure.
+    """Best-effort deliver. Returns True only for confirmed HTTP success.
 
     NEVER raises: a webhook error must not crash the daily pipeline or the
-    intraday poller (a crash mid-loop would skip the post-loop state advance and
-    cause a double-alert storm on the next poll). Delivery failures are logged
-    and swallowed — alerts are at-most-once, which for a free notification is the
-    right trade vs. duplicate spam.
+    intraday poller. Delivery failures are logged and returned to the caller so
+    stateful publishers can retain an event for retry rather than silently
+    checkpointing an undelivered alert.
     """
     url = (os.getenv(WEBHOOK_ENV) or "").strip()
     if not url:

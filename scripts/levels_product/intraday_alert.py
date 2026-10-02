@@ -16,6 +16,7 @@ Designed to be run on a short interval (e.g. every 1-2 min during RTH) by launch
 from __future__ import annotations
 
 import argparse
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -71,27 +72,84 @@ def fmt_alert(row, rates):
             f"{conf}\n   Hold rate (this tier, full history): {odds}")
 
 
-def main():
+def _checkpoint(scon, symbol, row):
+    scon.execute("INSERT OR REPLACE INTO alert_state VALUES (?,?,?)",
+                 (symbol, int(row.ts_event), row.event_id))
+    scon.commit()
+
+
+def deliver_alerts(new, rates, scon, symbol, max_alerts, *, dry_run=False):
+    """Deliver rows in order and checkpoint only confirmed deliveries.
+
+    A failed row terminates the batch so the failed event and every later event
+    remain pending for the next poll. Dry-run is a pure preview: it sends and
+    checkpoints nothing.
+    """
+    attempted = min(len(new), max(0, max_alerts))
+    if attempted == 0:
+        print("delivered 0 alert(s); state unchanged (nothing processed)")
+        return 0
+
+    if dry_run:
+        for row in new.iloc[:attempted].itertuples():
+            print(fmt_alert(row, rates))
+        print(f"previewed {attempted} alert(s); state unchanged")
+        if attempted < len(new):
+            print(f"hit max-alerts cap ({max_alerts}); {len(new)-attempted} deferred")
+        return 0
+
+    delivered = 0
+    for row in new.iloc[:attempted].itertuples():
+        try:
+            confirmed = notify.post(fmt_alert(row, rates))
+        except Exception as exc:  # defensive: notifier contract is non-raising
+            print(f"alert delivery raised {type(exc).__name__}; "
+                  f"event_id={row.event_id} pending retry")
+            return 1
+        if not confirmed:
+            print(f"alert delivery failed; event_id={row.event_id} pending retry "
+                  f"(delivered={delivered})")
+            return 1
+        _checkpoint(scon, symbol, row)
+        delivered += 1
+
+    print(f"delivered {delivered} alert(s); "
+          f"state advanced to ts={int(new.iloc[delivered - 1].ts_event)}")
+    if attempted < len(new):
+        print(f"hit max-alerts cap ({max_alerts}); {len(new)-attempted} deferred to next poll")
+    return 0
+
+
+def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--symbol", default="SPY")
     ap.add_argument("--dq-min", type=float, default=0.9)
     ap.add_argument("--min-confluence", type=int, default=1)
     ap.add_argument("--max-alerts", type=int, default=12, help="safety cap per poll")
-    args = ap.parse_args()
+    ap.add_argument("--dry-run", action="store_true",
+                    help="preview alerts without webhook delivery or cursor advancement")
+    args = ap.parse_args(argv)
+
+    if not args.dry_run and not (os.getenv(notify.WEBHOOK_ENV) or "").strip():
+        print(f"configuration error: {notify.WEBHOOK_ENV} is required for delivery; "
+              "use --dry-run to preview without sending")
+        return 2
 
     rcon, scon = _read_con(), _state_con()
     st = scon.execute("SELECT last_ts, last_event_id FROM alert_state WHERE symbol=?",
                       (args.symbol,)).fetchone()
     if st is None:
         mx = _max_touch(rcon, args.symbol, args.dq_min)
-        if mx:
+        if mx and args.dry_run:
+            print(f"dry-run: would initialize alert state at ts={mx[0]}; state unchanged")
+        elif mx:
             scon.execute("INSERT OR REPLACE INTO alert_state VALUES (?,?,?)", (args.symbol, mx[0], mx[1]))
             scon.commit()
             print(f"initialized alert state at ts={mx[0]} (no alerts on backfill)")
         else:
             print("no touches yet; nothing to initialize")
         rcon.close(); scon.close()
-        return
+        return 0
 
     last_ts, last_id = int(st[0]), st[1]
     new = pd.read_sql_query(
@@ -104,29 +162,14 @@ def main():
     if new.empty:
         print("no new confluence touches")
         rcon.close(); scon.close()
-        return
+        return 0
 
     rates = current_rates(rcon, args.symbol, args.dq_min)
-    fired = 0
-    for row in new.itertuples():
-        if fired >= args.max_alerts:
-            print(f"hit max-alerts cap ({args.max_alerts}); {len(new)-fired} deferred to next poll")
-            break
-        notify.post(fmt_alert(row, rates))
-        fired += 1
-    # advance state ONLY past touches we actually processed. If nothing fired
-    # (e.g. --max-alerts<=0), leave state untouched so no touch is silently
-    # skipped — fired-1 is the last fired row (fired>0 guarantees it's valid).
-    if fired == 0:
-        print("fired 0 alert(s); state unchanged (nothing processed)")
-    else:
-        processed = new.iloc[fired - 1]
-        scon.execute("INSERT OR REPLACE INTO alert_state VALUES (?,?,?)",
-                     (args.symbol, int(processed.ts_event), processed.event_id))
-        scon.commit()
-        print(f"fired {fired} alert(s); state advanced to ts={int(processed.ts_event)}")
+    rc = deliver_alerts(new, rates, scon, args.symbol, args.max_alerts,
+                        dry_run=args.dry_run)
     rcon.close(); scon.close()
+    return rc
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
