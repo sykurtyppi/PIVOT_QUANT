@@ -97,3 +97,6 @@ jobs:
 
       - name: Research-protocol unit tests
         run: python -m unittest discover -s tests/unit/test_research_protocol -p "test_*.py" -v
+
+      - name: Levels-product alert delivery tests
+        run: python -m unittest discover -s tests/python -p "test_levels_product*.py" -v
