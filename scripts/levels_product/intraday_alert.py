@@ -59,17 +59,25 @@ def fmt_alert(row, rates):
     # rejecting upward -> the level is acting as SUPPORT; -1 = price below,
     # rejecting downward -> RESISTANCE.
     side = "support" if row.touch_side == 1 else "resistance" if row.touch_side == -1 else "level"
-    parts = []
-    for h in (15, 30, 60):
-        r = rates.get(h, {}).get(b, {})
-        if r.get("rate") is not None:
-            parts.append(f"{h}m **{int(round(r['rate']*100))}%**")
-    odds = " · ".join(parts) if parts else "n/a (insufficient history)"
+    if not rates.get("_publishable", False):
+        stale = []
+        for h in (15, 30, 60):
+            status = rates.get("_coverage", {}).get(h, {})
+            if status.get("complete"):
+                continue
+            missing = int(status.get("missing_count") or 0)
+            stale.append(f"{h}m missing {missing}" if missing else f"{h}m unavailable")
+        odds = "unavailable (labels incomplete: " + ", ".join(stale) + ")"
+    else:
+        parts = []
+        for h in (15, 30, 60):
+            r = rates.get(h, {}).get(b, {})
+            if r.get("rate") is not None:
+                parts.append(f"{h}m **{int(round(r['rate']*100))}%**")
+        odds = " · ".join(parts) if parts else "n/a (insufficient in-tier sample)"
     conf = f"{int(row.confluence_count)}-level confluence" if row.confluence_count >= 1 else "no confluence"
-    # quote the tier's all-history base rate; the morning post's "last 30d" number
-    # is a separate recent-window view (labeled as such) — distinct on purpose.
     return (f"⚡ **SPY** touching `{row.level_type}` @ {row.level_price:.2f} ({side}) — "
-            f"{conf}\n   Hold rate (this tier, full history): {odds}")
+            f"{conf}\n   Hold rate (latest 400 labeled touches per tier): {odds}")
 
 
 def _checkpoint(scon, symbol, row):

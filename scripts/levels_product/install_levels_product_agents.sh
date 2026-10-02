@@ -22,10 +22,9 @@ DAILY_HOUR="${LEVELS_DAILY_HOUR:-8}"
 DAILY_MINUTE="${LEVELS_DAILY_MINUTE:-15}"
 INTRADAY_INTERVAL="${LEVELS_INTRADAY_INTERVAL_SEC:-120}"
 WEBHOOK="${LEVELS_PRODUCT_WEBHOOK_URL:-}"
-# default to skipping the in-product label maturation: the com.pivotquant.retrain
-# agent already maintains event_labels, so the product stays fully read-only on
-# the live DB. Set LEVELS_SKIP_LABELS=0 to have the daily job mature labels itself.
-SKIP_LABELS="${LEVELS_SKIP_LABELS:-1}"
+# The daily product job is the default and sole label-maturation owner. Operators
+# may set LEVELS_SKIP_LABELS=1 only after establishing one monitored external owner.
+SKIP_LABELS="${LEVELS_SKIP_LABELS:-0}"
 # "install-daily" installs only the daily agent (forward log + morning post),
 # holding the intraday alert poller until a webhook is configured.
 INSTALL_INTRADAY=1

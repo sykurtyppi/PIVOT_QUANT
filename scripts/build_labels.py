@@ -6,6 +6,8 @@ import os
 import sqlite3
 from typing import Iterable
 
+from label_eligibility import normalize_bar_interval
+
 DEFAULT_DB = os.getenv("PIVOT_DB", "data/pivot_events.sqlite")
 DEFAULT_HORIZONS = [5, 15, 30, 60]
 
@@ -146,26 +148,6 @@ def label_event(
         resolution = reject_idx
 
     return reject, brk, resolution
-
-
-def normalize_bar_interval(bar_interval_sec) -> int | None:
-    """Return a positive int bar interval, or None if missing/zero/invalid.
-
-    A None result means the touch event has no deterministic bar grid and
-    therefore MUST NOT be labeled: ``fetch_bars`` with ``interval_sec=None``
-    would walk a heterogeneous mix of 5/15/30/60m bars, producing a
-    supervision target that does not correspond to the interval the features
-    were built on (mixed-interval label leakage). Callers must skip such rows.
-    """
-    if bar_interval_sec is None or isinstance(bar_interval_sec, bool):
-        return None
-    try:
-        if isinstance(bar_interval_sec, float) and not bar_interval_sec.is_integer():
-            return None
-        interval = int(bar_interval_sec)
-    except (TypeError, ValueError):
-        return None
-    return interval if interval > 0 else None
 
 
 def has_sufficient_bars(

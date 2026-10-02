@@ -2,7 +2,8 @@
 # Phase-1 daily orchestration for the levels data product.
 #   maturation (labels) -> emit forecasts -> score -> track record -> morning map -> publish
 # Read-only on the live trading DB except the standard, additive label maturation
-# (skippable with LEVELS_SKIP_LABELS=1 if another cron already matures labels).
+# (skippable with LEVELS_SKIP_LABELS=1 only when one monitored external owner
+# explicitly maintains the same 5/15/30/60-minute label set).
 # Writes only: data/levels_product.sqlite, evidence/levels_product/, logs/levels_product/.
 set -euo pipefail
 
@@ -50,7 +51,7 @@ log "=== levels product daily start (symbol=${SYMBOL}, py=${PY}, channel=${LEVEL
 
 if [[ "${LEVELS_SKIP_LABELS:-0}" != "1" ]]; then
   log "step 1/6 build_labels --incremental (maturation)"
-  "${PY}" scripts/build_labels.py --incremental >>"${LOG_DIR}/daily.log" 2>&1 || log "WARN build_labels failed (continuing)"
+  "${PY}" scripts/build_labels.py --horizons 5 15 30 60 --incremental >>"${LOG_DIR}/daily.log" 2>&1
 else
   log "step 1/6 build_labels SKIPPED (LEVELS_SKIP_LABELS=1)"
 fi
