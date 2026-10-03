@@ -1365,6 +1365,7 @@ def main() -> None:
                         fit_fraction=float(args.calib_fit_fraction),
                         min_signals=int(threshold_min_signals),
                         trade_cost_bps=float(args.threshold_trade_cost_bps),
+                        label_horizon_min=int(horizon),
                     )
                     threshold_meta["oos_score_observations"] = wf["oos_score_observations"]
                     threshold_meta["oos_score_observations_source"] = (

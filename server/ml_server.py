@@ -1,5 +1,7 @@
 import asyncio
+import hashlib
 import heapq
+import io
 import json
 import logging
 import math
@@ -10,7 +12,8 @@ import sys
 import time
 import threading
 import atexit
-from contextlib import asynccontextmanager
+import fcntl
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -128,11 +131,27 @@ _missing_threshold_warnings: set[tuple[str, int, str]] = set()
 MODEL_DIR = Path(os.getenv("RF_MODEL_DIR", "data/models"))
 RF_MANIFEST_PATH = os.getenv("RF_MANIFEST_PATH", "").strip()
 RF_ACTIVE_MANIFEST = os.getenv("RF_ACTIVE_MANIFEST", "manifest_active.json").strip() or "manifest_active.json"
+RF_GOVERNANCE_STATE = os.getenv("RF_GOVERNANCE_STATE", "model_registry.json").strip() or "model_registry.json"
 RF_CANDIDATE_MANIFEST = (
     os.getenv("RF_CANDIDATE_MANIFEST", "manifest_runtime_latest.json").strip()
     or "manifest_runtime_latest.json"
 )
 LEGACY_CANDIDATE_MANIFEST = "manifest_latest.json"
+
+
+@contextmanager
+def _governance_file_lock(*, exclusive: bool):
+    registry_path = MODEL_DIR / RF_GOVERNANCE_STATE
+    lock_path = registry_path.with_name(f"{registry_path.name}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 HOST = os.getenv("ML_SERVER_BIND", "127.0.0.1")
 PORT = int(os.getenv("ML_SERVER_PORT", "5003"))
 STALE_MODEL_HOURS = int(os.getenv("STALE_MODEL_HOURS", "48"))
@@ -589,29 +608,95 @@ class ModelRegistry:
         self.manifest = None
         self.manifest_path: str | None = None
         self.manifest_signature: tuple[int, int] | None = None
+        self.approval_signature: tuple[int, int] | None = None
+        self.governance_identity: dict[str, object] | None = None
         self.models = {"reject": {}, "break": {}}
         self.thresholds = {"reject": {}, "break": {}}
         self._lock = threading.RLock()
 
     def resolve_manifest_path(self) -> Path:
         if RF_MANIFEST_PATH:
-            return Path(RF_MANIFEST_PATH)
-        active_path = MODEL_DIR / RF_ACTIVE_MANIFEST
-        if active_path.exists():
-            return active_path
-        candidate_path = MODEL_DIR / RF_CANDIDATE_MANIFEST
-        if candidate_path.exists():
-            return candidate_path
-        if candidate_path.name != LEGACY_CANDIDATE_MANIFEST:
-            legacy_path = MODEL_DIR / LEGACY_CANDIDATE_MANIFEST
-            if legacy_path.exists():
-                return legacy_path
-        return candidate_path
+            raise ValueError(
+                "RF_MANIFEST_PATH is not permitted for production serving; "
+                "only the governance-approved active manifest may be loaded"
+            )
+        return MODEL_DIR / RF_ACTIVE_MANIFEST
 
     @staticmethod
     def _file_signature(path: Path) -> tuple[int, int]:
         stat = path.stat()
         return (int(stat.st_mtime_ns), int(stat.st_size))
+
+    @staticmethod
+    def _file_sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _validate_governance_approval(
+        self, manifest_path: Path, manifest: dict
+    ) -> tuple[tuple[int, int], dict[str, object], dict[str, bytes]]:
+        registry_path = MODEL_DIR / RF_GOVERNANCE_STATE
+        if not registry_path.exists():
+            raise FileNotFoundError(f"Missing governance registry at {registry_path}")
+        with registry_path.open("r", encoding="utf-8") as handle:
+            governance = json.load(handle)
+        if not isinstance(governance, dict):
+            raise ValueError("Governance registry must be a JSON object")
+
+        manifest_version = str(manifest.get("version") or "").strip()
+        active_version = str(governance.get("active_version") or "").strip()
+        if not manifest_version or manifest_version != active_version:
+            raise ValueError(
+                "Active manifest version does not match governance active version: "
+                f"manifest={manifest_version or '<missing>'} "
+                f"registry={active_version or '<missing>'}"
+            )
+
+        expected_manifest_hash = str(
+            governance.get("active_manifest_sha256") or ""
+        ).strip().lower()
+        if not expected_manifest_hash:
+            raise ValueError("Governance registry is missing active_manifest_sha256")
+        actual_manifest_hash = self._file_sha256(manifest_path)
+        if actual_manifest_hash != expected_manifest_hash:
+            raise ValueError("Active manifest SHA-256 does not match governance approval")
+
+        artifact_hashes = governance.get("active_artifact_sha256")
+        if not isinstance(artifact_hashes, dict):
+            raise ValueError("Governance registry is missing active_artifact_sha256")
+        verified_artifact_bytes: dict[str, bytes] = {}
+        for target, horizons in manifest.get("models", {}).items():
+            if not isinstance(horizons, dict):
+                raise ValueError(f"Manifest model map for {target} must be an object")
+            for filename in horizons.values():
+                artifact_name = str(filename)
+                artifact_path = MODEL_DIR / artifact_name
+                if not artifact_path.exists():
+                    raise FileNotFoundError(
+                        f"Missing approved model artifact at {artifact_path}"
+                    )
+                expected_hash = str(
+                    artifact_hashes.get(artifact_name) or ""
+                ).strip().lower()
+                if not expected_hash:
+                    raise ValueError(
+                        f"Governance registry has no approved hash for {artifact_name}"
+                    )
+                artifact_bytes = artifact_path.read_bytes()
+                if hashlib.sha256(artifact_bytes).hexdigest() != expected_hash:
+                    raise ValueError(
+                        f"Model artifact SHA-256 mismatch for {artifact_name}"
+                    )
+                verified_artifact_bytes[artifact_name] = artifact_bytes
+        return self._file_signature(registry_path), {
+            "governance_verified": True,
+            "active_version": active_version,
+            "manifest_sha256": actual_manifest_hash,
+            "artifact_sha256": dict(artifact_hashes),
+        }, verified_artifact_bytes
 
     @staticmethod
     def _set_inference_n_jobs(node: object, n_jobs: int, seen: set[int] | None = None) -> None:
@@ -717,31 +802,52 @@ class ModelRegistry:
         manifest_path = self.resolve_manifest_path()
         if not manifest_path.exists():
             return False
+        registry_path = MODEL_DIR / RF_GOVERNANCE_STATE
+        if not registry_path.exists():
+            return False
         signature = self._file_signature(manifest_path)
+        approval_signature = self._file_signature(registry_path)
         manifest_path_str = str(manifest_path)
         with self._lock:
             return bool(
                 self.manifest is not None
                 and self.manifest_path == manifest_path_str
                 and self.manifest_signature == signature
+                and self.approval_signature == approval_signature
             )
 
     def load(self, *, force: bool = False) -> bool:
+        with _governance_file_lock(exclusive=False):
+            return self._load_locked(force=force)
+
+    def _load_locked(self, *, force: bool = False) -> bool:
         manifest_path = self.resolve_manifest_path()
         if not manifest_path.exists():
             raise FileNotFoundError(f"Missing manifest at {manifest_path}")
         signature = self._file_signature(manifest_path)
+        registry_path = MODEL_DIR / RF_GOVERNANCE_STATE
+        approval_signature = (
+            self._file_signature(registry_path) if registry_path.exists() else None
+        )
         manifest_path_str = str(manifest_path)
         if not force:
             with self._lock:
                 if (
                     self.manifest_path == manifest_path_str
                     and self.manifest_signature == signature
+                    and self.approval_signature == approval_signature
                     and self.manifest is not None
                 ):
                     return False
         with manifest_path.open("r", encoding="utf-8") as handle:
             manifest = json.load(handle)
+        if not isinstance(manifest, dict):
+            raise ValueError("Active manifest must be a JSON object")
+        (
+            approval_signature,
+            governance_identity,
+            verified_artifact_bytes,
+        ) = self._validate_governance_approval(manifest_path, manifest)
         models = {"reject": {}, "break": {}}
         thresholds = {"reject": {}, "break": {}}
 
@@ -758,10 +864,10 @@ class ModelRegistry:
 
         for target, horizons in manifest.get("models", {}).items():
             for horizon, filename in horizons.items():
-                path = MODEL_DIR / filename
-                if not path.exists():
-                    continue
-                payload = joblib.load(path)
+                artifact_bytes = verified_artifact_bytes.get(str(filename))
+                if artifact_bytes is None:
+                    raise ValueError(f"Approved model artifact was not verified: {filename}")
+                payload = joblib.load(io.BytesIO(artifact_bytes))
                 if isinstance(payload, dict):
                     ModelRegistry._set_inference_n_jobs(payload.get("pipeline"), ML_INFERENCE_N_JOBS)
                     ModelRegistry._set_inference_n_jobs(payload.get("calibrator"), ML_INFERENCE_N_JOBS)
@@ -791,6 +897,8 @@ class ModelRegistry:
             self.manifest = manifest
             self.manifest_path = manifest_path_str
             self.manifest_signature = signature
+            self.approval_signature = approval_signature
+            self.governance_identity = governance_identity
             self.models = models
             self.thresholds = thresholds
         return True
@@ -801,6 +909,12 @@ class ModelRegistry:
                 "manifest": self.manifest,
                 "manifest_path": self.manifest_path,
                 "manifest_signature": self.manifest_signature,
+                "approval_signature": self.approval_signature,
+                "governance_identity": (
+                    dict(self.governance_identity)
+                    if isinstance(self.governance_identity, dict)
+                    else None
+                ),
                 "models": {
                     "reject": dict(self.models.get("reject", {})),
                     "break": dict(self.models.get("break", {})),
@@ -2214,6 +2328,16 @@ async def health():
         "feature_version": FEATURE_VERSION,
         "manifest": manifest,
         "manifest_path": manifest_path,
+        "runtime_identity": (
+            registry_snapshot.get("governance_identity")
+            if isinstance(registry_snapshot.get("governance_identity"), dict)
+            else {
+                "governance_verified": False,
+                "active_version": None,
+                "manifest_sha256": None,
+                "artifact_sha256": {},
+            }
+        ),
         "models": models,
         "reload": _reload_state_snapshot(),
         "score": _score_state_snapshot(),
@@ -2339,10 +2463,7 @@ async def reload_models(force: bool = False):
         last_error=None,
     )
     try:
-        if not force and registry.is_manifest_unchanged():
-            changed = False
-        else:
-            changed = await asyncio.to_thread(registry.load, force=force)
+        changed = await asyncio.to_thread(registry.load, force=force)
         if changed:
             await asyncio.to_thread(analog_engine.refresh)
         # Always reload serving state on /reload — operators rely on
@@ -3896,6 +4017,12 @@ async def score(request: Request):
             result is not None for result in batch_preflight_results
         ):
             return JSONResponse({"results": batch_preflight_results})
+
+    if _startup_error:
+        raise HTTPException(
+            status_code=503,
+            detail=f"ML runtime governance/readiness failure: {_startup_error}",
+        )
 
     registry_snapshot = registry.snapshot()
     manifest = registry_snapshot.get("manifest")

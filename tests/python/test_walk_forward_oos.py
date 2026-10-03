@@ -151,6 +151,26 @@ class TestAntiLeak(unittest.TestCase):
         self.assertFalse({178, 179} & set(train.tolist()))
         self.assertEqual(int(ts[f.test_idx].min()), 180)
 
+    def test_label_horizon_purges_unmatured_training_rows(self):
+        minute_ms = 60_000
+        ts = np.arange(200, dtype=np.int64) * minute_ms
+        folds, skip = wf.build_expanding_folds(
+            ts,
+            n_folds=1,
+            test_window=20,
+            min_train=120,
+            calib_window=40,
+            label_horizon_min=15,
+        )
+
+        self.assertEqual(skip, "")
+        self.assertEqual(len(folds), 1)
+        fold = folds[0]
+        train = np.concatenate([fold.fit_idx, fold.calib_fit_idx, fold.tune_idx])
+        cutoff = int(ts[fold.test_idx].min()) - 15 * minute_ms
+        self.assertLessEqual(int(ts[train].max()), cutoff)
+        self.assertFalse(set(range(166, 180)) & set(train.tolist()))
+
 
 # ───────────────────────── per-fold threshold pre-test only ───────────────── #
 
@@ -223,6 +243,35 @@ class TestOrchestration(unittest.TestCase):
         self.assertIsNotNone(out["oos_score_observations"])
         self.assertEqual(out["signals_on_oos_slice"], len(out["oos_score_observations"]))
         self.assertEqual(len(out["oos_slice_bounds"]), 2)
+
+    def test_public_run_applies_and_records_label_horizon_purge(self):
+        X, y, ret, side, ts = _synth(40)
+        ts = ts.astype(np.int64) * 60_000
+        seen: list[dict] = []
+
+        out = wf.run_walk_forward_oos(
+            X=X,
+            y=y,
+            return_bps=ret,
+            touch_side=side,
+            ts=ts,
+            target="reject",
+            model_factory=_StubModel,
+            calibrate_fn=None,
+            select_threshold_fn=_make_select_fn(threshold=0.5, record=seen),
+            utility_fn=_util_fn,
+            n_folds=1,
+            test_window=6,
+            min_train=10,
+            calib_window=10,
+            fit_fraction=0.5,
+            min_signals=1,
+            label_horizon_min=2,
+        )
+
+        self.assertTrue(out["feasible"])
+        self.assertEqual(out["config"]["label_horizon_min"], 2)
+        self.assertEqual(seen[0]["n"], 4)
 
     def test_insufficient_rows_reports_not_feasible(self):
         X, y, ret, side, ts = _synth(8)  # too few for the requested geometry

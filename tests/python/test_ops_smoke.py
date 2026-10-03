@@ -4649,7 +4649,7 @@ class OpsSmokeTests(unittest.TestCase):
             "def _check_feature_drift(",
             1,
         )[0]
-        self.assertIn("registry.is_manifest_unchanged()", reload_block)
+        self.assertNotIn("registry.is_manifest_unchanged()", reload_block)
         self.assertIn("await asyncio.to_thread(registry.load, force=force)", reload_block)
         self.assertIn("await asyncio.to_thread(analog_engine.refresh)", reload_block)
         self.assertIn("changed = await asyncio.to_thread(registry.load, force=force)", reload_block)

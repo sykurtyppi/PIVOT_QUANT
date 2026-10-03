@@ -92,8 +92,10 @@ flowchart LR
   - `POST http://127.0.0.1:5003/reload`
 - Reload failure is logged as warning and does not crash the stack.
 - Serving contract:
-  - `ml_server.py` serves `RF_MANIFEST_PATH` if provided.
-  - Otherwise it serves `manifest_active.json` when present, then falls back to `RF_CANDIDATE_MANIFEST` (legacy fallback: `manifest_latest.json`).
+  - `ml_server.py` serves only the governance-approved active manifest (`RF_ACTIVE_MANIFEST`, default `manifest_active.json`).
+  - `RF_MANIFEST_PATH` and candidate-manifest fallback are intentionally rejected because they bypass governance approval.
+  - The serving registry path follows `RF_GOVERNANCE_STATE` (default `model_registry.json`) under `RF_MODEL_DIR`.
+  - Before restarting onto this contract, run governance evaluation for the current active version so the registry contains approved manifest and artifact SHA-256 values; otherwise readiness fails closed.
 
 ## Health State Definitions
 - `healthy`:
