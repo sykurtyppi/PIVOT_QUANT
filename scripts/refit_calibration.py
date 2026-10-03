@@ -85,8 +85,18 @@ def load_dataframe(db_path: str, view: str, horizon: int):
     duckdb = require("duckdb", "python3 -m pip install duckdb")
     con = duckdb.connect(db_path, read_only=True)
     try:
+        columns = {
+            str(row[1])
+            for row in con.execute(f"PRAGMA table_info('{view}')").fetchall()
+        }
+        if "coverage_status" not in columns:
+            raise ValueError(
+                f"{view} is missing required coverage_status; rebuild the training "
+                "view with coverage-qualified labels before refitting calibration"
+            )
         df = con.execute(
-            f"SELECT * FROM {view} WHERE horizon_min = ? ORDER BY ts_event",
+            f"SELECT * FROM {view} WHERE horizon_min = ? "
+            "AND coverage_status = 'qualified' ORDER BY ts_event",
             [horizon],
         ).df()
     finally:
@@ -110,6 +120,13 @@ def build_feature_dataframe(df):
     pd = require("pandas", "python3 -m pip install pandas")
     rows = [build_feature_row(row) for row in df.to_dict("records")]
     return pd.DataFrame(rows, index=df.index)
+
+
+def prepare_feature_dataframe(df):
+    """Return the explicit admissible model-feature matrix."""
+    return build_feature_dataframe(df).drop(
+        columns=list(drop_features()), errors="ignore"
+    )
 
 
 def _temp_path(path: Path) -> Path:
@@ -428,8 +445,10 @@ def main() -> None:
             results.append(PairResult(target, horizon, "skipped", "model payload missing pipeline"))
             continue
 
-        feature_df = build_feature_dataframe(sub)
-        feature_df = feature_df.drop(columns=[c for c in all_drops if c in feature_df.columns], errors="ignore")
+        feature_df = prepare_feature_dataframe(sub)
+        feature_df = feature_df.drop(
+            columns=[c for c in all_drops if c in feature_df.columns], errors="ignore"
+        )
 
         feature_columns = payload.get("feature_columns") or []
         if feature_columns:

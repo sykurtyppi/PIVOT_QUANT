@@ -56,6 +56,11 @@ def load_module(module_name: str, module_path: Path):
     return module
 
 
+def regular_session_test_ts_ms() -> int:
+    """Stable NYSE RTH timestamp for scoring tests that are not time-boundary tests."""
+    return int(datetime(2026, 3, 10, 15, 0, tzinfo=timezone.utc).timestamp() * 1000)
+
+
 class OpsSmokeTests(unittest.TestCase):
     maxDiff = None
 
@@ -4693,10 +4698,8 @@ class OpsSmokeTests(unittest.TestCase):
             "await asyncio.to_thread(_score_single_event_with_log, event, disable_analogs)",
             score_block,
         )
-        self.assertIn(
-            "await asyncio.to_thread(_score_events_batch, events, disable_analogs)",
-            score_block,
-        )
+        self.assertIn("_score_events_batch,", score_block)
+        self.assertIn("batch_preflight_results,", score_block)
 
     def test_ml_server_reload_runtime_busy_backpressure(self) -> None:
         ml_server = self._load_ml_server_module()
@@ -4767,7 +4770,13 @@ class OpsSmokeTests(unittest.TestCase):
                 ml_server.app,
                 "POST",
                 "/score",
-                payload={"event": {"symbol": "SPY", "horizon_min": 5}},
+                payload={
+                    "event": {
+                        "symbol": "SPY",
+                        "horizon_min": 5,
+                        "ts_event": 1700000000000,
+                    }
+                },
             )
             self.assertEqual(status, 429)
             self.assertEqual(payload.get("status"), "busy")
@@ -6503,7 +6512,10 @@ class OpsSmokeTests(unittest.TestCase):
             reject_probs={5: 0.55, 15: 0.56, 30: 0.99, 60: 0.57},
             break_probs={5: 0.10, 15: 0.10, 30: 0.10, 60: 0.10},
         )
-        result = ml_server._score_event({"event_id": "shadow_case_strong_30m"})
+        event_ts = int(datetime(2025, 1, 2, 15, tzinfo=timezone.utc).timestamp() * 1000)
+        result = ml_server._score_event(
+            {"event_id": "shadow_case_strong_30m", "ts_event": event_ts}
+        )
         self.assertEqual(result["signals"].get("signal_30m"), "reject")
         self.assertNotEqual(result["best_horizon"], 30)
         self.assertEqual(result["best_horizon"], 60)
@@ -6514,7 +6526,9 @@ class OpsSmokeTests(unittest.TestCase):
             reject_probs={5: 0.10, 15: 0.10, 30: 0.95, 60: 0.10},
             break_probs={5: 0.10, 15: 0.10, 30: 0.10, 60: 0.10},
         )
-        result = ml_server._score_event({"event_id": "shadow_case_only_30m"})
+        result = ml_server._score_event(
+            {"event_id": "shadow_case_only_30m", "ts_event": event_ts}
+        )
         self.assertEqual(result["signals"].get("signal_30m"), "reject")
         self.assertEqual(result["signals"].get("signal_5m"), "no_edge")
         self.assertEqual(result["signals"].get("signal_15m"), "no_edge")
@@ -6526,7 +6540,9 @@ class OpsSmokeTests(unittest.TestCase):
             reject_probs={5: 0.10, 15: 0.10, 30: 0.10, 60: 0.10},
             break_probs={5: 0.20, 15: 0.20, 30: 0.20, 60: 0.80},
         )
-        result = ml_server._score_event({"event_id": "break_only_case"})
+        result = ml_server._score_event(
+            {"event_id": "break_only_case", "ts_event": event_ts}
+        )
         self.assertEqual(result["signals"].get("signal_60m"), "break")
         self.assertEqual(result["best_horizon"], 60)
         self.assertFalse(result["abstain"])
@@ -6536,7 +6552,9 @@ class OpsSmokeTests(unittest.TestCase):
             reject_probs={5: 0.56, 15: 0.10, 30: 0.10, 60: 0.10},
             break_probs={5: 0.10, 15: 0.10, 30: 0.10, 60: 0.90},
         )
-        result = ml_server._score_event({"event_id": "break_stronger_than_reject"})
+        result = ml_server._score_event(
+            {"event_id": "break_stronger_than_reject", "ts_event": event_ts}
+        )
         self.assertEqual(result["signals"].get("signal_5m"), "reject")
         self.assertEqual(result["signals"].get("signal_60m"), "break")
         self.assertEqual(result["best_horizon"], 60)
@@ -6592,7 +6610,14 @@ class OpsSmokeTests(unittest.TestCase):
             },
         }
 
-        result = ml_server._score_event({"event_id": "no_edge_specific_other"})
+        result = ml_server._score_event(
+            {
+                "event_id": "no_edge_specific_other",
+                "ts_event": int(
+                    datetime(2025, 1, 2, 15, tzinfo=timezone.utc).timestamp() * 1000
+                ),
+            }
+        )
         self.assertEqual(result["signals"].get("signal_5m"), "no_edge")
         self.assertAlmostEqual(float(result["scores"]["exp_mfe_bps_5m"]), 11.0, places=6)
         self.assertAlmostEqual(float(result["scores"]["exp_mae_bps_5m"]), -7.0, places=6)
@@ -6602,7 +6627,14 @@ class OpsSmokeTests(unittest.TestCase):
             "mfe_bps_other": 13.0,
             "mae_bps_other": -8.0,
         }
-        result = ml_server._score_event({"event_id": "no_edge_legacy_other"})
+        result = ml_server._score_event(
+            {
+                "event_id": "no_edge_legacy_other",
+                "ts_event": int(
+                    datetime(2025, 1, 2, 15, tzinfo=timezone.utc).timestamp() * 1000
+                ),
+            }
+        )
         self.assertEqual(result["signals"].get("signal_5m"), "no_edge")
         self.assertAlmostEqual(float(result["scores"]["exp_mfe_bps_5m"]), 13.0, places=6)
         self.assertAlmostEqual(float(result["scores"]["exp_mae_bps_5m"]), -8.0, places=6)
@@ -6665,6 +6697,9 @@ class OpsSmokeTests(unittest.TestCase):
         set_registry(reject_prob=0.49, break_prob=0.51)
         compression_event = {
             "event_id": "regime_shadow_compression",
+            "ts_event": int(
+                datetime(2025, 1, 2, 15, tzinfo=timezone.utc).timestamp() * 1000
+            ),
             "regime_type": 3,
             "rv_regime": 1,
             "or_size_atr": 0.2,
@@ -6702,6 +6737,7 @@ class OpsSmokeTests(unittest.TestCase):
         # Compression + ultra ATR zone applies an additional cautious overlay.
         ultra_compression_event = {
             "event_id": "regime_active_compression_ultra",
+            "ts_event": compression_event["ts_event"],
             "regime_type": 3,
             "rv_regime": 1,
             "or_size_atr": 0.2,
@@ -6729,6 +6765,7 @@ class OpsSmokeTests(unittest.TestCase):
         set_registry(reject_prob=0.51, break_prob=0.49)
         expansion_event = {
             "event_id": "regime_active_expansion",
+            "ts_event": compression_event["ts_event"],
             "regime_type": 4,
             "rv_regime": 3,
             "or_size_atr": 0.9,
@@ -6743,6 +6780,7 @@ class OpsSmokeTests(unittest.TestCase):
         # Unknown regime in active mode falls back to baseline.
         neutral_event = {
             "event_id": "regime_active_neutral",
+            "ts_event": compression_event["ts_event"],
             "regime_type": None,
             "rv_regime": None,
             "or_size_atr": None,
@@ -6759,6 +6797,7 @@ class OpsSmokeTests(unittest.TestCase):
         set_registry(reject_prob=0.51, break_prob=0.52)
         near_expansion_event = {
             "event_id": "regime_expansion_near_guardrail",
+            "ts_event": compression_event["ts_event"],
             "regime_type": 4,
             "rv_regime": 3,
             "or_size_atr": 0.9,
@@ -6850,7 +6889,13 @@ class OpsSmokeTests(unittest.TestCase):
         ml_server.registry.thresholds = {"reject": {15: 0.5}, "break": {15: 0.5}}
         ml_server.registry.manifest = {"version": "vtest", "trained_end_ts": int(time.time() * 1000)}
 
-        blocked_event = {"event_id": "or_breakout_blocked_shadow", "or_breakout": -1}
+        blocked_event = {
+            "event_id": "or_breakout_blocked_shadow",
+            "ts_event": int(
+                datetime(2025, 1, 2, 15, tzinfo=timezone.utc).timestamp() * 1000
+            ),
+            "or_breakout": -1,
+        }
 
         ml_server.ML_REJECT_OR_BREAKOUT_FILTER_MODE = "shadow"
         shadow_result = ml_server._score_event(blocked_event)
@@ -6871,7 +6916,11 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertIn("OR_BREAKOUT_REJECT_FILTER_ACTIVE", active_result["quality_flags"])
         self.assertIn("or_breakout_filter", active_result["regime_policy"]["selected_policy"])
 
-        pass_event = {"event_id": "or_breakout_pass_active", "or_breakout": 1}
+        pass_event = {
+            "event_id": "or_breakout_pass_active",
+            "ts_event": blocked_event["ts_event"],
+            "or_breakout": 1,
+        }
         pass_result = ml_server._score_event(pass_event)
         self.assertEqual(pass_result["signals"].get("signal_15m"), "reject")
         pass_filter = pass_result["regime_policy"]["or_breakout_reject_filter"]
@@ -6930,7 +6979,14 @@ class OpsSmokeTests(unittest.TestCase):
         ml_server.registry.thresholds = {"reject": {15: 0.5, 60: 0.5}, "break": {15: 0.5, 60: 0.5}}
         ml_server.registry.manifest = {"version": "vtest", "trained_end_ts": int(time.time() * 1000)}
 
-        orb_neg1 = ml_server._score_event({"event_id": "or_breakout_rule_neg1", "or_breakout": -1})
+        event_ts = int(datetime(2025, 1, 2, 15, tzinfo=timezone.utc).timestamp() * 1000)
+        orb_neg1 = ml_server._score_event(
+            {
+                "event_id": "or_breakout_rule_neg1",
+                "ts_event": event_ts,
+                "or_breakout": -1,
+            }
+        )
         self.assertEqual(orb_neg1["signals"].get("signal_15m"), "no_edge")
         self.assertEqual(orb_neg1["signals"].get("signal_60m"), "reject")
         self.assertEqual(
@@ -6938,11 +6994,23 @@ class OpsSmokeTests(unittest.TestCase):
             {"15": [-1], "60": [0]},
         )
 
-        orb_zero = ml_server._score_event({"event_id": "or_breakout_rule_zero", "or_breakout": 0})
+        orb_zero = ml_server._score_event(
+            {
+                "event_id": "or_breakout_rule_zero",
+                "ts_event": event_ts,
+                "or_breakout": 0,
+            }
+        )
         self.assertEqual(orb_zero["signals"].get("signal_15m"), "reject")
         self.assertEqual(orb_zero["signals"].get("signal_60m"), "no_edge")
 
-        orb_one = ml_server._score_event({"event_id": "or_breakout_rule_one", "or_breakout": 1})
+        orb_one = ml_server._score_event(
+            {
+                "event_id": "or_breakout_rule_one",
+                "ts_event": event_ts,
+                "or_breakout": 1,
+            }
+        )
         self.assertEqual(orb_one["signals"].get("signal_15m"), "reject")
         self.assertEqual(orb_one["signals"].get("signal_60m"), "reject")
         self.assertEqual(int(orb_one["regime_policy"]["or_breakout_reject_filter"].get("candidate_count")), 0)
@@ -6994,14 +7062,19 @@ class OpsSmokeTests(unittest.TestCase):
         ml_server.registry.thresholds = {"reject": {5: 0.5}, "break": {5: 0.5}}
         ml_server.registry.manifest = {"version": "vtest", "trained_end_ts": int(time.time() * 1000)}
 
-        high_threshold_result = ml_server._score_event({"event_id": "drift_gate_high_threshold"})
+        event_ts = int(datetime(2025, 1, 2, 15, tzinfo=timezone.utc).timestamp() * 1000)
+        high_threshold_result = ml_server._score_event(
+            {"event_id": "drift_gate_high_threshold", "ts_event": event_ts}
+        )
         self.assertEqual(high_threshold_result["scores"]["drifted_features_reject_5m"], ["overnight_gap_atr"])
         self.assertEqual(high_threshold_result["scores"]["drifted_features_break_5m"], ["overnight_gap_atr"])
         self.assertNotIn("FEATURE_DRIFT_reject_5m", high_threshold_result["quality_flags"])
         self.assertNotIn("FEATURE_DRIFT_break_5m", high_threshold_result["quality_flags"])
 
         ml_server.ML_FEATURE_DRIFT_MIN_FEATURES = 1
-        low_threshold_result = ml_server._score_event({"event_id": "drift_gate_low_threshold"})
+        low_threshold_result = ml_server._score_event(
+            {"event_id": "drift_gate_low_threshold", "ts_event": event_ts}
+        )
         self.assertIn("FEATURE_DRIFT_reject_5m", low_threshold_result["quality_flags"])
         self.assertIn("FEATURE_DRIFT_break_5m", low_threshold_result["quality_flags"])
 
@@ -7017,7 +7090,7 @@ class OpsSmokeTests(unittest.TestCase):
             def predict_proba(self, _df):
                 return np.array([[1.0 - self.prob, self.prob]], dtype=float)
 
-        now_ms = int(time.time() * 1000)
+        now_ms = regular_session_test_ts_ms()
         ml_server.build_feature_row = lambda event: {
             "x": 1.0,
             "distance_atr_ratio": event.get("distance_atr_ratio"),
@@ -7114,7 +7187,7 @@ class OpsSmokeTests(unittest.TestCase):
             def predict_proba(self, _df):
                 return np.array([[1.0 - self.prob, self.prob]], dtype=float)
 
-        now_ms = int(time.time() * 1000)
+        now_ms = regular_session_test_ts_ms()
         ml_server.build_feature_row = lambda event: {
             "x": 1.0,
             "distance_atr_ratio": event.get("distance_atr_ratio"),
@@ -7281,7 +7354,7 @@ class OpsSmokeTests(unittest.TestCase):
             def predict_proba(self, _df):
                 return np.array([[1.0 - self.prob, self.prob]], dtype=float)
 
-        now_ms = int(time.time() * 1000)
+        now_ms = regular_session_test_ts_ms()
         ml_server.build_feature_row = lambda event: {
             "x": 1.0,
             "distance_atr_ratio": event.get("distance_atr_ratio"),
@@ -7384,7 +7457,7 @@ class OpsSmokeTests(unittest.TestCase):
             def predict_proba(self, _df):
                 return np.array([[1.0 - self.prob, self.prob]], dtype=float)
 
-        now_ms = int(time.time() * 1000)
+        now_ms = regular_session_test_ts_ms()
         ml_server.build_feature_row = lambda event: {
             "x": 1.0,
             "distance_atr_ratio": event.get("distance_atr_ratio"),
@@ -7494,7 +7567,7 @@ class OpsSmokeTests(unittest.TestCase):
             def predict_proba(self, _df):
                 return np.array([[1.0 - self.prob, self.prob]], dtype=float)
 
-        now_ms = int(time.time() * 1000)
+        now_ms = regular_session_test_ts_ms()
         ml_server.build_feature_row = lambda event: {
             "x": 1.0,
             "distance_atr_ratio": event.get("distance_atr_ratio"),
@@ -7608,7 +7681,7 @@ class OpsSmokeTests(unittest.TestCase):
             def predict_proba(self, _df):
                 return np.array([[1.0 - self.prob, self.prob]], dtype=float)
 
-        now_ms = int(time.time() * 1000)
+        now_ms = regular_session_test_ts_ms()
         ml_server.build_feature_row = lambda event: {
             "x": 1.0,
             "distance_atr_ratio": event.get("distance_atr_ratio"),
@@ -7720,7 +7793,7 @@ class OpsSmokeTests(unittest.TestCase):
             def predict_proba(self, _df):
                 return np.array([[1.0 - self.prob, self.prob]], dtype=float)
 
-        now_ms = int(time.time() * 1000)
+        now_ms = regular_session_test_ts_ms()
         ml_server.build_feature_row = lambda event: {
             "x": 1.0,
             "distance_atr_ratio": event.get("distance_atr_ratio"),
@@ -7826,7 +7899,7 @@ class OpsSmokeTests(unittest.TestCase):
             def predict_proba(self, _df):
                 return np.array([[1.0 - self.prob, self.prob]], dtype=float)
 
-        now_ms = int(time.time() * 1000)
+        now_ms = regular_session_test_ts_ms()
         ml_server.build_feature_row = lambda event: {
             "x": 1.0,
             "distance_atr_ratio": event.get("distance_atr_ratio"),
@@ -15519,7 +15592,15 @@ class OpsSmokeTests(unittest.TestCase):
             self._build_dormant_serving_state(),
         )
         try:
-            body = json.dumps({"event": {"symbol": "SPY", "horizon_min": 15}}).encode("utf-8")
+            body = json.dumps(
+                {
+                    "event": {
+                        "symbol": "SPY",
+                        "horizon_min": 15,
+                        "ts_event": 1700000000000,
+                    }
+                }
+            ).encode("utf-8")
             request = self._build_stub_request(body)
             response = asyncio.run(ml_server.score(request))
         finally:
@@ -15560,9 +15641,9 @@ class OpsSmokeTests(unittest.TestCase):
         try:
             events_payload = {
                 "events": [
-                    {"symbol": "SPY", "horizon_min": 15},
-                    {"symbol": "SPY", "horizon_min": 30},
-                    {"symbol": "SPY", "horizon_min": 60},
+                    {"symbol": "SPY", "horizon_min": 15, "ts_event": 1700000000000},
+                    {"symbol": "SPY", "horizon_min": 30, "ts_event": 1700000000000},
+                    {"symbol": "SPY", "horizon_min": 60, "ts_event": 1700000000000},
                 ]
             }
             body = json.dumps(events_payload).encode("utf-8")
@@ -15670,7 +15751,15 @@ class OpsSmokeTests(unittest.TestCase):
             self._build_active_serving_state(),
         )
         try:
-            body = json.dumps({"event": {"symbol": "SPY", "horizon_min": 15}}).encode("utf-8")
+            body = json.dumps(
+                {
+                    "event": {
+                        "symbol": "SPY",
+                        "horizon_min": 15,
+                        "ts_event": 1700000000000,
+                    }
+                }
+            ).encode("utf-8")
             request = self._build_stub_request(body)
             response = asyncio.run(ml_server.score(request))
         finally:
@@ -16029,7 +16118,9 @@ class OpsSmokeTests(unittest.TestCase):
             self._build_dormant_serving_state(),
         )
         try:
-            body = json.dumps({"event": {"symbol": "SPY"}}).encode("utf-8")
+            body = json.dumps(
+                {"event": {"symbol": "SPY", "ts_event": 1700000000000}}
+            ).encode("utf-8")
             request = self._build_stub_request(body)
             response = asyncio.run(ml_server.score(request))
             self.assertEqual(response.status_code, 200)
@@ -16049,7 +16140,15 @@ class OpsSmokeTests(unittest.TestCase):
             self.assertEqual(events[0]["decision"], "block")
 
             # A 3-event batch increments by 1 request and event_count=3.
-            batch_body = json.dumps({"events": [{}, {}, {}]}).encode("utf-8")
+            batch_body = json.dumps(
+                {
+                    "events": [
+                        {"ts_event": 1700000000000},
+                        {"ts_event": 1700000000000},
+                        {"ts_event": 1700000000000},
+                    ]
+                }
+            ).encode("utf-8")
             asyncio.run(ml_server.score(self._build_stub_request(batch_body)))
             snap = ml_server.serving_state_observability.counters_snapshot()
             self.assertEqual(snap["dormant_requests_count_in_process"], 2)
@@ -16098,7 +16197,9 @@ class OpsSmokeTests(unittest.TestCase):
             self._build_active_serving_state(),
         )
         try:
-            body = json.dumps({"event": {"symbol": "SPY"}}).encode("utf-8")
+            body = json.dumps(
+                {"event": {"symbol": "SPY", "ts_event": 1700000000000}}
+            ).encode("utf-8")
             asyncio.run(ml_server.score(self._build_stub_request(body)))
             after = ml_server.serving_state_observability.counters_snapshot()
             self.assertEqual(

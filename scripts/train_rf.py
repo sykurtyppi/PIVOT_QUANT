@@ -11,6 +11,15 @@ if str(ROOT) not in sys.path:
 
 DEFAULT_DUCKDB = os.getenv("DUCKDB_PATH", "data/pivot_training.duckdb")
 DEFAULT_VIEW = os.getenv("DUCKDB_VIEW", "training_events_v1")
+LABEL_QUALITY_FIELDS = {
+    "expected_bar_count",
+    "observed_bar_count",
+    "coverage_ratio",
+    "max_gap_sec",
+    "endpoint_gap_sec",
+    "endpoint_status",
+    "coverage_status",
+}
 DEFAULT_OUT = os.getenv("RF_METRICS_OUT", "data/exports/rf_walkforward_metrics.json")
 DEFAULT_FEATURE_OUT = os.getenv("RF_FEATURE_OUT", "data/exports/rf_feature_report.json")
 DEFAULT_FEATURE_CSV = os.getenv("RF_FEATURE_CSV", "data/exports/rf_feature_report.csv")
@@ -56,6 +65,29 @@ def build_feature_dataframe(df):
     pd = require("pandas", "python3 -m pip install pandas")
     rows = [build_feature_row(row) for row in df.to_dict("records")]
     return pd.DataFrame(rows, index=df.index)
+
+
+def prepare_training_data(df, target_name: str):
+    """Fail closed on label quality and return model-ready inputs."""
+    if target_name not in df.columns:
+        raise ValueError(f"Target '{target_name}' missing from training view.")
+    if "coverage_status" not in df.columns:
+        raise ValueError("coverage_status missing from training view; refusing unqualified labels")
+    df = df[df["coverage_status"].astype(str).eq("qualified")].copy()
+    df = df[df[target_name].notna()].copy()
+    label_cols = {
+        "event_id", "ts_event", "created_at", "event_ts_utc", "event_ts_et",
+        "event_date_et", "confluence_types", "horizon_min", "return_bps",
+        "mfe_bps", "mae_bps", "reject", "break", "resolution_min",
+        "or_high", "or_low",
+    } | LABEL_QUALITY_FIELDS
+    feature_df = build_feature_dataframe(df)
+    drop_cols = label_cols | drop_features()
+    feature_df = feature_df.drop(
+        columns=[c for c in drop_cols if c in feature_df.columns], errors="ignore"
+    )
+    feature_df = feature_df.loc[:, feature_df.notna().any()]
+    return df, feature_df, df[target_name].astype(int)
 
 
 def generate_splits(dates, train_days, calib_days, test_days, max_folds, stride_days=None):
@@ -377,43 +409,10 @@ def main() -> None:
     df = ensure_event_date(df)
     df = df.sort_values("ts_event")
 
-    if args.target not in df.columns:
-        raise ValueError(f"Target '{args.target}' missing from training view.")
-
-    df = df[df[args.target].notna()].copy()
+    df, feature_df, target = prepare_training_data(df, args.target)
     if df.empty:
-        print("No labeled rows for target.")
+        print("No coverage-qualified labeled rows for target.")
         return
-
-    # Columns that are metadata/labels, never features
-    label_cols = {
-        "event_id",
-        "ts_event",
-        "created_at",
-        "event_ts_utc",
-        "event_ts_et",
-        "event_date_et",
-        "confluence_types",
-        "horizon_min",
-        "return_bps",
-        "mfe_bps",
-        "mae_bps",
-        "reject",
-        "break",
-        "resolution_min",
-        # Raw OR prices (we keep the bps-normalized versions)
-        "or_high",
-        "or_low",
-    }
-    # Features explicitly marked for exclusion (raw prices, duplicates, dead)
-    feature_drops = drop_features()
-    drop_cols = label_cols | feature_drops
-
-    feature_df = build_feature_dataframe(df)
-    feature_df = feature_df.drop(columns=[c for c in drop_cols if c in feature_df.columns], errors="ignore")
-    # Drop columns that are entirely null across the dataset.
-    feature_df = feature_df.loc[:, feature_df.notna().any()]
-    target = df[args.target].astype(int)
 
     import numpy as np
 

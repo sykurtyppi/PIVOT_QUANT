@@ -32,6 +32,10 @@ DEFAULT_CANDIDATE_MANIFEST = (
     os.getenv("RF_CANDIDATE_MANIFEST", "manifest_runtime_latest.json").strip()
     or "manifest_runtime_latest.json"
 )
+LABEL_QUALITY_FIELDS = {
+    "expected_bar_count", "observed_bar_count", "coverage_ratio", "max_gap_sec",
+    "endpoint_gap_sec", "endpoint_status", "coverage_status",
+}
 
 
 def _env_float(name: str, default: float) -> float:
@@ -184,19 +188,11 @@ def apply_quality_filters(
     coverage_column: str,
     verbose: bool = False,
 ):
-    """Apply data-quality filters to a horizon's training frame.
+    """Keep the full population of coverage-qualified binary outcomes.
 
-    Pure (no I/O beyond optional prints); returns ``(filtered_df, info)``.
-
-    Policy (post adversarial-audit 2026-05-31):
-      * CRITICAL-3: drop foreign-symbol rows (belt-and-suspenders; load_dataframe
-        already scopes by symbol, but the training view is not symbol-scoped).
-      * CRITICAL-1 REVERTED: unresolved (resolution_min IS NULL) rows are KEPT as
-        observed reject=0/break=0 negatives by default. ``filter_unresolved=True``
-        is EXPERIMENTAL / NOT-FOR-PROMOTION (recreates the train/serve mismatch).
-      * Item-3 partial coverage: when keeping unresolved rows, drop only those
-        below ``unresolved_min_coverage`` IF ``coverage_column`` is present;
-        otherwise keep them and record the count (never silent).
+    The legacy filtering arguments remain accepted for CLI compatibility.
+    Missing coverage metadata fails closed. A qualified row with no threshold
+    crossing (resolution_min NULL) remains a valid 0/0 binary negative.
     """
     def _log(msg: str) -> None:
         if verbose:
@@ -215,60 +211,52 @@ def apply_quality_filters(
             )
 
     has_res = "resolution_min" in df.columns
-    n_unresolved = int(df["resolution_min"].isna().sum()) if has_res else 0
-    n_low_cov_dropped = 0
+    unresolved_mask = df["resolution_min"].isna() if has_res else df.index.to_series().notna()
+    n_unresolved = int(unresolved_mask.sum())
+
+    status_available = "coverage_status" in df.columns
     cov_col = str(coverage_column or "")
     cov_available = bool(cov_col) and cov_col in df.columns
-    experimental_filter_applied = False
+    if status_available:
+        qualified_mask = df["coverage_status"].astype(str).eq("qualified")
+        n_incomplete = int((~qualified_mask).sum())
+    else:
+        qualified_mask = df.index.to_series().map(lambda _value: False)
+        n_incomplete = int(len(df))
 
-    if filter_unresolved and has_res:
-        n_before = len(df)
-        df = df[df["resolution_min"].notna()].copy()
-        n_dropped = n_before - len(df)
-        experimental_filter_applied = True
-        if n_dropped > 0:
-            _log(
-                f"[data-quality][EXPERIMENTAL] horizon={horizon}m: dropped {n_dropped} "
-                f"unresolved events ({100*n_dropped/max(1,n_before):.1f}% of {n_before}). "
-                f"NOT-FOR-PROMOTION: creates train/serve prior mismatch."
-            )
-    elif has_res:
-        if drop_low_coverage_unresolved and cov_available:
-            unresolved_mask = df["resolution_min"].isna()
-            low_cov = unresolved_mask & (
-                df[cov_col].fillna(0.0) < float(unresolved_min_coverage)
-            )
-            n_low_cov_dropped = int(low_cov.sum())
-            if n_low_cov_dropped > 0:
-                df = df[~low_cov].copy()
-                _log(
-                    f"[data-quality] horizon={horizon}m: dropped {n_low_cov_dropped} "
-                    f"unresolved rows below {unresolved_min_coverage:.0%} bar coverage"
-                )
-        elif drop_low_coverage_unresolved and not cov_available:
-            _log(
-                f"[data-quality] horizon={horizon}m: --drop-low-coverage-unresolved set but "
-                f"coverage column '{cov_col}' absent from view; leaving {n_unresolved} "
-                f"unresolved rows in as negatives (see build_labels.py follow-up)."
-            )
-        else:
-            _log(
-                f"[data-quality] horizon={horizon}m: kept {n_unresolved} unresolved "
-                f"(chop) rows as negatives; coverage_column_present={cov_available}"
-            )
+    keep_mask = qualified_mask
+    n_before = len(df)
+    df = df[keep_mask].copy()
+    n_dropped = n_before - len(df)
+    if n_dropped:
+        _log(
+            f"[data-quality] horizon={horizon}m: excluded {n_incomplete} unqualified rows; "
+            "qualified no-crossing rows remain binary negatives"
+        )
 
     info = {
         "foreign_symbol_rows_dropped": int(n_foreign),
-        "experimental_filter_unresolved_applied": bool(experimental_filter_applied),
-        "unresolved_handling": {
-            "unresolved_rows_kept": int(max(0, n_unresolved - n_low_cov_dropped))
-            if not experimental_filter_applied
-            else 0,
-            "unresolved_rows_total": int(n_unresolved),
-            "low_coverage_dropped": int(n_low_cov_dropped),
+        "experimental_filter_unresolved_applied": False,
+        "coverage_handling": {
+            "policy": "qualified_only",
+            "coverage_status_column_present": bool(status_available),
+            "unqualified_rows_dropped": int(n_incomplete),
+            "incomplete_rows_dropped": int(n_incomplete),
+            "qualified_rows_kept": int(len(df)),
             "coverage_column_present": bool(cov_available),
             "coverage_floor": float(unresolved_min_coverage),
-            "experimental_filter_unresolved_applied": bool(experimental_filter_applied),
+        },
+        "unresolved_handling": {
+            "policy": "qualified_no_crossing_rows_are_binary_negatives",
+            "unresolved_rows_kept": int(df["resolution_min"].isna().sum()) if has_res else 0,
+            "unresolved_rows_total": int(n_unresolved),
+            "unresolved_rows_dropped": int(
+                n_unresolved - (df["resolution_min"].isna().sum() if has_res else 0)
+            ),
+            "low_coverage_dropped": 0,
+            "coverage_column_present": bool(cov_available),
+            "coverage_floor": float(unresolved_min_coverage),
+            "experimental_filter_unresolved_applied": False,
         },
     }
     return df, info
@@ -290,6 +278,22 @@ def build_feature_dataframe(df):
     pd = require("pandas", "python3 -m pip install pandas")
     rows = [build_feature_row(row) for row in df.to_dict("records")]
     return pd.DataFrame(rows, index=df.index)
+
+
+def prepare_feature_dataframe(df):
+    """Build features while mandatorily excluding labels and quality metadata."""
+    label_cols = {
+        "event_id", "ts_event", "created_at", "event_ts_utc", "event_ts_et",
+        "event_date_et", "confluence_types", "horizon_min", "return_bps",
+        "mfe_bps", "mae_bps", "reject", "break", "resolution_min",
+        "or_high", "or_low",
+    } | LABEL_QUALITY_FIELDS
+    feature_df = build_feature_dataframe(df)
+    all_drops = label_cols | drop_features()
+    feature_df = feature_df.drop(
+        columns=[c for c in all_drops if c in feature_df.columns], errors="ignore"
+    )
+    return feature_df.loc[:, feature_df.notna().any()]
 
 
 def _parse_version_number(label: str) -> int | None:
@@ -959,6 +963,7 @@ def main() -> None:
     manifest = {
         "version": version,
         "feature_version": FEATURE_VERSION,
+        "estimand": "full_population_binary_event_probability_among_coverage_qualified_paths",
         "models": {},
         "calibration": {},
         "thresholds_meta": {},
@@ -1009,30 +1014,8 @@ def main() -> None:
             verbose=True,
         )
         manifest.setdefault("unresolved_handling", {})[str(horizon)] = dq_info["unresolved_handling"]
-        label_cols = {
-            "event_id",
-            "ts_event",
-            "created_at",
-            "event_ts_utc",
-            "event_ts_et",
-            "event_date_et",
-            "confluence_types",
-            "horizon_min",
-            "return_bps",
-            "mfe_bps",
-            "mae_bps",
-            "reject",
-            "break",
-            "resolution_min",
-            "or_high",
-            "or_low",
-        }
-        feature_drops = drop_features()
-        all_drops = label_cols | feature_drops
-
-        feature_df = build_feature_dataframe(df)
-        feature_df = feature_df.drop(columns=[c for c in all_drops if c in feature_df.columns], errors="ignore")
-        feature_df = feature_df.loc[:, feature_df.notna().any()]
+        manifest.setdefault("coverage_handling", {})[str(horizon)] = dq_info["coverage_handling"]
+        feature_df = prepare_feature_dataframe(df)
 
         dates = sorted({d for d in df["event_date_et"].tolist() if d is not None})
         calib_dates = set(dates[-args.calib_days :]) if args.calib_days and dates else set()

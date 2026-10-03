@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Callable
 
 DEFAULT_DB = os.getenv("PIVOT_DB", "data/pivot_events.sqlite")
-LATEST_SCHEMA_VERSION = 8
+LATEST_SCHEMA_VERSION = 9
 
 
 TOUCH_EVENT_SQL = """
@@ -101,6 +101,13 @@ CREATE TABLE IF NOT EXISTS event_labels (
     reject INTEGER,
     break INTEGER,
     resolution_min REAL,
+    expected_bar_count INTEGER,
+    observed_bar_count INTEGER,
+    coverage_ratio REAL,
+    max_gap_sec REAL,
+    endpoint_gap_sec REAL,
+    endpoint_status TEXT,
+    coverage_status TEXT,
     PRIMARY KEY (event_id, horizon_min),
     FOREIGN KEY (event_id) REFERENCES touch_events(event_id)
 );
@@ -381,6 +388,24 @@ def migration_8_prediction_log_analog(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE prediction_log ADD COLUMN {col_name} {col_type}")
 
 
+def migration_9_event_label_coverage(conn: sqlite3.Connection) -> None:
+    label_cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(event_labels)").fetchall()
+    }
+    add_if_missing = {
+        "expected_bar_count": "INTEGER",
+        "observed_bar_count": "INTEGER",
+        "coverage_ratio": "REAL",
+        "max_gap_sec": "REAL",
+        "endpoint_gap_sec": "REAL",
+        "endpoint_status": "TEXT",
+        "coverage_status": "TEXT",
+    }
+    for col_name, col_type in add_if_missing.items():
+        if col_name not in label_cols:
+            conn.execute(f"ALTER TABLE event_labels ADD COLUMN {col_name} {col_type}")
+
+
 MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (1, "base_schema_tables", migration_1_base_tables),
     (2, "columns_and_indexes", migration_2_columns_and_indexes),
@@ -390,6 +415,7 @@ MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (6, "gamma_snapshots", migration_6_gamma_snapshots),
     (7, "prediction_log_regime_policy", migration_7_prediction_log_regime_policy),
     (8, "prediction_log_analog", migration_8_prediction_log_analog),
+    (9, "event_label_coverage", migration_9_event_label_coverage),
 ]
 
 
@@ -409,6 +435,12 @@ def migrate_connection(conn: sqlite3.Connection, target_version: int = LATEST_SC
         applied.append({"version": version, "name": name})
         if verbose:
             print(f"[migrate_db] applied v{version}: {name}")
+
+    # Reconcile idempotent schema contracts even when the migration ledger is
+    # current but a table was recreated from an older schema.
+    if target_version >= 9:
+        migration_9_event_label_coverage(conn)
+        conn.commit()
 
     final_version = get_schema_version(conn)
     summary = {

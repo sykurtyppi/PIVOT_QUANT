@@ -100,6 +100,7 @@ def emit(symbol, dq_min, golive_ts=None):
             """SELECT te.event_id, te.ts_event, te.confluence_count, el.reject
                FROM touch_events te
                LEFT JOIN event_labels el ON te.event_id=el.event_id AND el.horizon_min=?
+                AND el.coverage_status='qualified'
                WHERE te.symbol=? AND te.data_quality>=? AND te.confluence_count IS NOT NULL
                ORDER BY te.ts_event, te.event_id""",
             rcon, params=(h, symbol, dq_min))
@@ -132,7 +133,8 @@ def score(symbol, recent_days):
     rcon, pcon = _read_con(), _product_con()
     ensure_table(pcon)
     labels = pd.read_sql_query(
-        "SELECT event_id, horizon_min, reject FROM event_labels WHERE reject IS NOT NULL", rcon)
+        """SELECT event_id, horizon_min, reject FROM event_labels
+           WHERE coverage_status='qualified' AND reject IS NOT NULL""", rcon)
     out = {"product": "levels_forecast_log_score", "symbol": symbol,
            "as_of_utc": datetime.now(timezone.utc).isoformat(),
            "model_version": MODEL_VERSION, "horizons": {}}

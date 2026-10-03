@@ -62,6 +62,7 @@ class HoldRateFreshnessTest(unittest.TestCase):
                 event_id TEXT NOT NULL,
                 horizon_min INTEGER NOT NULL,
                 reject INTEGER,
+                coverage_status TEXT NOT NULL,
                 PRIMARY KEY (event_id, horizon_min)
             );
             """
@@ -82,8 +83,8 @@ class HoldRateFreshnessTest(unittest.TestCase):
             )
         for horizon in labeled_horizons:
             self.con.execute(
-                "INSERT INTO event_labels VALUES (?,?,?)",
-                (event_id, horizon, 1),
+                "INSERT INTO event_labels VALUES (?,?,?,?)",
+                (event_id, horizon, 1, "qualified"),
             )
         self.con.commit()
 
