@@ -11,7 +11,7 @@ import time
 import threading
 import atexit
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 try:
@@ -109,6 +109,11 @@ import joblib
 from ml.features import build_feature_row, collect_missing, FEATURE_VERSION
 from ml.label_shift import correct_prior_shift, rolling_class_rate
 from ml.thresholds import NO_SIGNAL_THRESHOLD, threshold_score_is_unsafe
+from scripts.trading_calendar import (
+    REGULAR_SESSION_OPEN_ET,
+    is_trading_day,
+    session_close_et,
+)
 from server.serving_state import (
     DEFAULT_DORMANT_LOG_MIN_INTERVAL_SEC,
     DEFAULT_DORMANT_LOG_SAMPLE_N,
@@ -926,6 +931,7 @@ class AnalogEngine:
                 FROM touch_events te
                 JOIN event_labels el ON el.event_id = te.event_id
                 WHERE te.ts_event IS NOT NULL
+                  AND el.coverage_status = 'qualified'
                   AND el.horizon_min IN (5, 15, 30, 60)
                 ORDER BY te.ts_event DESC
                 LIMIT ?
@@ -2890,8 +2896,114 @@ def _pick_best_horizon(
     return best_horizon, True
 
 
+def _event_session_metadata(ts_event: int | float | str | None) -> tuple[datetime | None, dict[str, object]]:
+    metadata: dict[str, object] = {
+        "status": "not_evaluated",
+        "reason": "invalid_or_missing_event_timestamp",
+        "session_date": None,
+        "session_open_et": None,
+        "session_close_et": None,
+        "horizons": {},
+    }
+    try:
+        if (
+            not isinstance(ts_event, (int, float))
+            or isinstance(ts_event, bool)
+            or not math.isfinite(ts_event)
+        ):
+            raise ValueError("missing event timestamp")
+        ts_event_ms = int(ts_event)
+        if not 1_000_000_000_000 <= ts_event_ms < 4_102_444_800_000:
+            raise ValueError("event timestamp must be epoch milliseconds between 2001 and 2100")
+        event_dt = datetime.fromtimestamp(ts_event_ms / 1000.0, tz=ANALOG_TZ)
+    except (OSError, OverflowError, TypeError, ValueError):
+        metadata["status"] = "abstained"
+        return None, metadata
+
+    event_date = event_dt.date()
+    session_open = datetime.combine(event_date, REGULAR_SESSION_OPEN_ET, tzinfo=ANALOG_TZ)
+    session_close = datetime.combine(event_date, session_close_et(event_date), tzinfo=ANALOG_TZ)
+    metadata.update(
+        {
+            "event_ts": ts_event_ms,
+            "event_time_et": event_dt.isoformat(),
+            "session_date": event_date.isoformat(),
+            "session_open_et": REGULAR_SESSION_OPEN_ET.isoformat(),
+            "session_close_et": session_close_et(event_date).isoformat(),
+        }
+    )
+
+    if not is_trading_day(event_date) or not (session_open <= event_dt < session_close):
+        reason = "event_outside_regular_session"
+        metadata.update({"status": "abstained", "reason": reason})
+        return None, metadata
+    return event_dt, metadata
+
+
+def _session_horizon_feasibility(
+    ts_event: int | float | str | None,
+    horizons: list[int],
+) -> tuple[set[int], dict[str, object]]:
+    """Return horizons whose complete label path can fit in the event session."""
+    event_dt, metadata = _event_session_metadata(ts_event)
+    if not horizons:
+        metadata.update({"status": "not_applicable", "reason": "no_model_horizons"})
+        return set(), metadata
+    if event_dt is None:
+        reason = str(metadata["reason"])
+        metadata["horizons"] = {
+            str(horizon): {"status": "abstained", "reason": reason}
+            for horizon in horizons
+        }
+        return set(), metadata
+
+    event_date = event_dt.date()
+    session_close = datetime.combine(event_date, session_close_et(event_date), tzinfo=ANALOG_TZ)
+    feasible: set[int] = set()
+    statuses: dict[str, dict[str, object]] = {}
+    for horizon in horizons:
+        endpoint = event_dt + timedelta(minutes=horizon)
+        if endpoint.date() == event_date and endpoint <= session_close:
+            feasible.add(horizon)
+            statuses[str(horizon)] = {
+                "status": "scoreable",
+                "reason": None,
+                "endpoint_et": endpoint.isoformat(),
+            }
+        else:
+            statuses[str(horizon)] = {
+                "status": "abstained",
+                "reason": "horizon_past_session_close",
+                "endpoint_et": endpoint.isoformat(),
+            }
+
+    if not feasible:
+        metadata.update({"status": "abstained", "reason": "no_session_feasible_horizons"})
+    elif len(feasible) < len(horizons):
+        metadata.update({"status": "partial", "reason": "some_horizons_past_session_close"})
+    else:
+        metadata.update({"status": "scoreable", "reason": None})
+    metadata["horizons"] = statuses
+    return feasible, metadata
+
+
 def _score_event(event: dict):
     load_shed_analogs = bool(getattr(_SCORE_LOAD_SHED_LOCAL, "disable_analogs", False))
+    _, initial_session_metadata = _session_horizon_feasibility(
+        event.get("ts_event"), [5, 15, 30, 60]
+    )
+    if initial_session_metadata.get("status") == "abstained":
+        reason = str(initial_session_metadata["reason"])
+        return {
+            "status": "abstained",
+            "abstain": True,
+            "abstain_reason": reason,
+            "best_horizon": None,
+            "scores": {},
+            "signals": {},
+            "missing_inputs": [],
+            "session_feasibility": initial_session_metadata,
+        }
     missing = collect_missing(event)
     features = build_feature_row(event)
     registry_snapshot = registry.snapshot()
@@ -2946,12 +3058,29 @@ def _score_event(event: dict):
     thresholds_used = {}
     model_map = {"reject": models_reject, "break": models_break}
     threshold_map_live = {"reject": thresholds_reject, "break": thresholds_break}
+    all_horizons = sorted(set(models_reject.keys()).union(models_break.keys()))
+    feasible_horizon_set, session_feasibility = _session_horizon_feasibility(
+        event.get("ts_event"), all_horizons
+    )
+    if session_feasibility.get("reason") == "invalid_or_missing_event_timestamp":
+        return {
+            "status": "abstained",
+            "abstain": True,
+            "abstain_reason": "invalid_or_missing_event_timestamp",
+            "best_horizon": None,
+            "scores": {},
+            "signals": {},
+            "missing_inputs": missing,
+            "session_feasibility": session_feasibility,
+        }
 
     def _snapshot_threshold(target: str, horizon: int) -> float:
         return float(_threshold_from_map(threshold_map_live, target, horizon, context="snapshot"))
 
     for target in ("reject", "break"):
         for horizon, payload in model_map.get(target, {}).items():
+            if horizon not in feasible_horizon_set:
+                continue
             feature_cols = payload.get("feature_columns", [])
             if not feature_cols:
                 continue
@@ -3009,13 +3138,10 @@ def _score_event(event: dict):
 
     # ── Signal classification per horizon ──
     # Uses optimal thresholds instead of hardcoded 0.5
-    all_horizons = sorted(
-        set(models_reject.keys())
-        .union(models_break.keys())
-    )
-    scored_horizons = [h for h in all_horizons if h not in ML_SHADOW_HORIZONS]
-    if not scored_horizons:
-        scored_horizons = list(all_horizons)
+    feasible_horizons = [h for h in all_horizons if h in feasible_horizon_set]
+    scored_horizons = [h for h in feasible_horizons if h not in ML_SHADOW_HORIZONS]
+    if not scored_horizons and feasible_horizons:
+        scored_horizons = list(feasible_horizons)
 
     threshold_baseline = {
         "reject": {h: _clamp_threshold(_snapshot_threshold("reject", h)) for h in all_horizons},
@@ -3058,7 +3184,7 @@ def _score_event(event: dict):
         analog_summary = analog_engine.score_event(
             event=event,
             features=features,
-            horizons=all_horizons,
+            horizons=feasible_horizons,
             trade_regime=regime_state["bucket"],
             scores=scores,
             best_horizon=None,
@@ -3614,13 +3740,20 @@ def _score_event(event: dict):
             selected_threshold_map, "break", horizon, context="response_payload"
         )
 
+    session_abstain_reason = (
+        session_feasibility.get("reason")
+        if session_feasibility.get("status") == "abstained"
+        else None
+    )
     return {
-        "status": "degraded" if missing else "ok",
+        "status": "abstained" if session_abstain_reason else ("degraded" if missing else "ok"),
         "scores": scores,
         "signals": signals,
         "thresholds": thresholds_used,
         "abstain": abstain,
+        "abstain_reason": session_abstain_reason,
         "best_horizon": best_horizon,
+        "session_feasibility": session_feasibility,
         "model_version": manifest.get("version") if manifest else None,
         "feature_version": FEATURE_VERSION,
         "trained_end_ts": manifest.get("trained_end_ts") if manifest else None,
@@ -3735,8 +3868,35 @@ async def _read_score_payload(request: Request) -> object:
     return _parse_score_json_body(raw_body)
 
 
+def _invalid_timestamp_abstention(event: dict) -> dict | None:
+    _, metadata = _session_horizon_feasibility(event.get("ts_event"), [5, 15, 30, 60])
+    if metadata.get("reason") != "invalid_or_missing_event_timestamp":
+        return None
+    return _score_event(event)
+
+
 @app.post("/score", dependencies=[Depends(require_write_auth)])
 async def score(request: Request):
+    payload = await _read_score_payload(request)
+    mode, normalized = _validate_score_payload(payload)
+    batch_preflight_results: list[dict | None] | None = None
+    if mode == "single":
+        if not isinstance(normalized, dict):
+            raise HTTPException(status_code=400, detail="Invalid single-event payload.")
+        invalid_result = _invalid_timestamp_abstention(normalized)
+        if invalid_result is not None:
+            return JSONResponse(invalid_result)
+    elif mode == "batch":
+        if not isinstance(normalized, list):
+            raise HTTPException(status_code=400, detail="Invalid batch payload.")
+        batch_preflight_results = [
+            _invalid_timestamp_abstention(event) for event in normalized
+        ]
+        if batch_preflight_results and all(
+            result is not None for result in batch_preflight_results
+        ):
+            return JSONResponse({"results": batch_preflight_results})
+
     registry_snapshot = registry.snapshot()
     manifest = registry_snapshot.get("manifest")
     if not isinstance(manifest, dict):
@@ -3751,7 +3911,30 @@ async def score(request: Request):
     }
     has_models = any(horizons for horizons in models.values())
     if manifest is None or not has_models:
-        raise HTTPException(status_code=503, detail="Models not loaded. Train artifacts first.")
+        detail = "Models not loaded. Train artifacts first."
+        if mode == "batch" and batch_preflight_results and any(
+            result is not None for result in batch_preflight_results
+        ):
+            unavailable = {
+                "status": "unavailable",
+                "abstain": True,
+                "abstain_reason": "models_not_loaded",
+                "best_horizon": None,
+                "scores": {},
+                "signals": {},
+                "detail": detail,
+            }
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "detail": detail,
+                    "results": [
+                        result if result is not None else dict(unavailable)
+                        for result in batch_preflight_results
+                    ],
+                },
+            )
+        raise HTTPException(status_code=503, detail=detail)
 
     # Serving-state gate (D1). When the manual flag in serving_state.json
     # is not ``active``, short-circuit with a structured dormant response
@@ -3762,27 +3945,19 @@ async def score(request: Request):
     if not serving_state.is_active():
         manifest_version = manifest.get("version") if isinstance(manifest, dict) else None
         blocked = serving_state.blocked_payload(manifest_version=manifest_version)
-        try:
-            payload = await _read_score_payload(request)
-            mode, normalized = _validate_score_payload(payload)
-        except HTTPException:
-            # Even when dormant, malformed requests still get the normal
-            # 4xx; otherwise clients can't distinguish "I sent garbage"
-            # from "serving is paused." Counters and audit events are
-            # only bumped on requests we ACTUALLY short-circuit.
-            raise
-
         # D2 observability. ``record_dormant_block`` bumps
         # process-local counters AND returns the rate/time-gate decision
         # for the sampled ``predict_blocked_dormant`` audit event.
-        # ``event_count`` is 1 for single mode, len(events) for batch —
-        # the audit line records how many request-events were short-
-        # circuited so the rate cannot be reconstructed wrong from
-        # request-line counts alone.
+        # ``event_count`` is 1 for single mode and counts only batch events
+        # actually short-circuited by the dormant gate. Timestamp-invalid
+        # events already have their own abstention and must not inflate the
+        # dormant-block audit rate.
         if mode == "single":
             event_count = 1
         elif mode == "batch":
-            event_count = len(normalized)
+            event_count = sum(
+                result is None for result in (batch_preflight_results or [])
+            )
         else:
             event_count = 0
         block_now_ms = int(time.time() * 1000)
@@ -3802,7 +3977,10 @@ async def score(request: Request):
             return JSONResponse(blocked)
         if mode == "batch":
             events = normalized
-            results = [dict(blocked) for _ in events]
+            results = [
+                preflight_result if preflight_result is not None else dict(blocked)
+                for preflight_result in (batch_preflight_results or [None] * len(events))
+            ]
             return JSONResponse({"results": results})
         raise HTTPException(status_code=400, detail="Unsupported score payload mode.")
 
@@ -3826,9 +4004,6 @@ async def score(request: Request):
         and current_in_flight >= ML_SCORE_ANALOG_DISABLE_IN_FLIGHT
     )
     try:
-        payload = await _read_score_payload(request)
-        mode, normalized = _validate_score_payload(payload)
-
         if mode == "single":
             event = normalized
             result = await asyncio.to_thread(_score_single_event_with_log, event, disable_analogs)
@@ -3837,7 +4012,14 @@ async def score(request: Request):
 
         if mode == "batch":
             events = normalized
-            results = await asyncio.to_thread(_score_events_batch, events, disable_analogs)
+            if not isinstance(events, list):
+                raise HTTPException(status_code=400, detail="Invalid batch payload.")
+            results = await asyncio.to_thread(
+                _score_events_batch,
+                events,
+                disable_analogs,
+                batch_preflight_results,
+            )
             request_ok = True
             return JSONResponse({"results": results})
 
@@ -3854,11 +4036,25 @@ async def score(request: Request):
         _finish_score_request(ok=request_ok, duration_ms=duration_ms, error=request_error)
 
 
-def _score_events_batch(events: list[dict], disable_analogs: bool = False) -> list[dict]:
+def _score_events_batch(
+    events: list[dict],
+    disable_analogs: bool = False,
+    precomputed_results: list[dict | None] | None = None,
+) -> list[dict]:
     results: list[dict] = []
     try:
         _SCORE_LOAD_SHED_LOCAL.disable_analogs = bool(disable_analogs)
-        for ev in events:
+        if precomputed_results is None:
+            precomputed_results = [
+                _invalid_timestamp_abstention(event) for event in events
+            ]
+        elif len(precomputed_results) != len(events):
+            raise ValueError("precomputed batch result count must match event count")
+        for index, ev in enumerate(events):
+            precomputed = precomputed_results[index]
+            if precomputed is not None:
+                results.append(precomputed)
+                continue
             res = _score_event(ev)
             _enqueue_prediction(ev, res)
             results.append(res)

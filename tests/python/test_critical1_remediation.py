@@ -1,14 +1,11 @@
 """Regression tests for the CRITICAL-1 remediation (adversarial audit 2026-05-31).
 
 Covers, per the remediation spec:
-  1. CRITICAL-1 reverted: unresolved (resolution_min IS NULL) rows are RETAINED
-     as reject=0/break=0 negatives by default; the experimental filter still
-     drops them when explicitly enabled.
+  1. Unresolved (resolution_min IS NULL) rows are excluded from supervision;
+     they must not silently become reject=0/break=0 negatives.
   2. CRITICAL-3: symbol scoping drops foreign-symbol rows (SPX leaking into a
      SPY model), at both the DuckDB load boundary and the in-frame guard.
-  3. Partial-coverage unresolved rows are handled deliberately (dropped only
-     when a coverage column is present + the flag is set; otherwise kept with a
-     recorded count — never silently treated as clean negatives).
+  3. Only coverage-qualified labels are eligible for supervision.
   4. Promotion guard: a candidate cannot be promoted without an OOS-validated
      evidence report (in-sample-only / threshold_tune_slice is rejected), and
      --force-promote does NOT bypass it.
@@ -38,7 +35,8 @@ def _frame(rows: list[dict]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _ev(symbol="SPY", resolution_min=3.0, reject=1, brk=0, coverage=1.0, ts=1):
+def _ev(symbol="SPY", resolution_min=3.0, reject=1, brk=0, coverage=1.0, ts=1,
+        coverage_status="qualified"):
     return {
         "symbol": symbol,
         "ts_event": ts,
@@ -46,6 +44,7 @@ def _ev(symbol="SPY", resolution_min=3.0, reject=1, brk=0, coverage=1.0, ts=1):
         "reject": reject,
         "break": brk,
         "bar_coverage": coverage,
+        "coverage_status": coverage_status,
     }
 
 
@@ -53,12 +52,12 @@ def _ev(symbol="SPY", resolution_min=3.0, reject=1, brk=0, coverage=1.0, ts=1):
 
 
 class TestUnresolvedRetention(unittest.TestCase):
-    def test_unresolved_kept_by_default(self):
-        """Default (filter_unresolved=False): unresolved chops are retained."""
+    def test_qualified_no_crossing_rows_are_binary_negatives(self):
+        """Fully observed no-crossing paths are valid 0/0 negatives."""
         df = _frame([
             _ev(resolution_min=3.0, reject=1, ts=1),
-            _ev(resolution_min=None, reject=0, brk=0, ts=2),  # chop / timeout
-            _ev(resolution_min=None, reject=0, brk=0, ts=3),  # chop / timeout
+            _ev(resolution_min=None, reject=0, brk=0, ts=2),
+            _ev(resolution_min=None, reject=0, brk=0, ts=3),
         ])
         out, info = tra.apply_quality_filters(
             df, horizon=15, symbol="SPY",
@@ -66,15 +65,18 @@ class TestUnresolvedRetention(unittest.TestCase):
             drop_low_coverage_unresolved=False,
             unresolved_min_coverage=0.8, coverage_column="bar_coverage",
         )
-        # all 3 rows retained; both unresolved chops survive as negatives
         self.assertEqual(len(out), 3)
         self.assertEqual(int(out["resolution_min"].isna().sum()), 2)
         self.assertEqual(info["unresolved_handling"]["unresolved_rows_total"], 2)
         self.assertEqual(info["unresolved_handling"]["unresolved_rows_kept"], 2)
+        self.assertEqual(info["unresolved_handling"]["unresolved_rows_dropped"], 0)
+        self.assertEqual(
+            info["unresolved_handling"]["policy"],
+            "qualified_no_crossing_rows_are_binary_negatives",
+        )
         self.assertFalse(info["experimental_filter_unresolved_applied"])
 
-    def test_experimental_filter_drops_unresolved(self):
-        """filter_unresolved=True is the experimental NOT-FOR-PROMOTION path."""
+    def test_legacy_filter_flag_does_not_change_estimand(self):
         df = _frame([
             _ev(resolution_min=3.0, reject=1, ts=1),
             _ev(resolution_min=None, reject=0, brk=0, ts=2),
@@ -85,12 +87,15 @@ class TestUnresolvedRetention(unittest.TestCase):
             drop_low_coverage_unresolved=False,
             unresolved_min_coverage=0.8, coverage_column="bar_coverage",
         )
-        self.assertEqual(len(out), 1)
-        self.assertEqual(int(out["resolution_min"].isna().sum()), 0)
-        self.assertTrue(info["experimental_filter_unresolved_applied"])
+        self.assertEqual(len(out), 2)
+        self.assertEqual(int(out["resolution_min"].isna().sum()), 1)
+        self.assertFalse(info["experimental_filter_unresolved_applied"])
+        self.assertEqual(
+            info["unresolved_handling"]["policy"],
+            "qualified_no_crossing_rows_are_binary_negatives",
+        )
 
-    def test_argparse_default_filter_unresolved_off(self):
-        """Env unset → --filter-unresolved defaults OFF (CRITICAL-1 reverted)."""
+    def test_argparse_legacy_filter_flag_does_not_change_estimand(self):
         import os
         prev = os.environ.pop("RF_FILTER_UNRESOLVED_EVENTS", None)
         try:
@@ -144,11 +149,29 @@ class TestSymbolScoping(unittest.TestCase):
 
 
 class TestPartialCoverage(unittest.TestCase):
-    def test_low_coverage_unresolved_dropped_when_column_present(self):
+    def test_quality_metadata_never_enters_artifact_feature_columns(self):
+        row = _ev(resolution_min=None, reject=0, brk=0, ts=1)
+        row.update({
+            "expected_bar_count": 15,
+            "observed_bar_count": 15,
+            "coverage_ratio": 1.0,
+            "max_gap_sec": 60.0,
+            "endpoint_gap_sec": 0.0,
+            "endpoint_status": "exact",
+            "distance_bps": 2.5,
+            "future_secret": 999,
+        })
+        features = tra.prepare_feature_dataframe(_frame([row]))
+        self.assertIn("distance_bps", features.columns)
+        self.assertNotIn("future_secret", features.columns)
+        self.assertTrue(tra.LABEL_QUALITY_FIELDS.isdisjoint(features.columns))
+
+    def test_incomplete_rows_dropped_regardless_of_resolution(self):
         df = _frame([
-            _ev(resolution_min=3.0, reject=1, coverage=0.10, ts=1),  # resolved, low cov → KEEP
-            _ev(resolution_min=None, reject=0, brk=0, coverage=0.95, ts=2),  # unresolved full cov → keep
-            _ev(resolution_min=None, reject=0, brk=0, coverage=0.20, ts=3),  # unresolved low cov → DROP
+            _ev(resolution_min=3.0, reject=1, coverage=1.0, ts=1),
+            _ev(resolution_min=3.0, reject=1, coverage=0.20, ts=2,
+                coverage_status="excessive_gap"),
+            _ev(resolution_min=None, reject=0, brk=0, coverage=1.0, ts=3),
         ])
         out, info = tra.apply_quality_filters(
             df, horizon=15, symbol="SPY",
@@ -156,13 +179,14 @@ class TestPartialCoverage(unittest.TestCase):
             drop_low_coverage_unresolved=True,
             unresolved_min_coverage=0.8, coverage_column="bar_coverage",
         )
-        # resolved low-coverage row is NOT dropped (only unresolved are gated)
         self.assertEqual(len(out), 2)
-        self.assertEqual(info["unresolved_handling"]["low_coverage_dropped"], 1)
+        self.assertEqual(set(out["ts_event"]), {1, 3})
+        self.assertEqual(info["coverage_handling"]["incomplete_rows_dropped"], 1)
+        self.assertEqual(info["unresolved_handling"]["unresolved_rows_kept"], 1)
+        self.assertEqual(info["unresolved_handling"]["unresolved_rows_dropped"], 0)
         self.assertTrue(info["unresolved_handling"]["coverage_column_present"])
-        self.assertEqual(set(out["ts_event"]), {1, 2})
 
-    def test_no_coverage_column_keeps_unresolved_non_silently(self):
+    def test_no_coverage_status_fails_closed(self):
         df = _frame([
             {"symbol": "SPY", "ts_event": 1, "resolution_min": None, "reject": 0, "break": 0},
             {"symbol": "SPY", "ts_event": 2, "resolution_min": 3.0, "reject": 1, "break": 0},
@@ -173,10 +197,9 @@ class TestPartialCoverage(unittest.TestCase):
             drop_low_coverage_unresolved=True,   # requested...
             unresolved_min_coverage=0.8, coverage_column="bar_coverage",  # ...but column absent
         )
-        self.assertEqual(len(out), 2)  # nothing dropped
-        self.assertFalse(info["unresolved_handling"]["coverage_column_present"])
-        self.assertEqual(info["unresolved_handling"]["unresolved_rows_total"], 1)
-        self.assertEqual(info["unresolved_handling"]["low_coverage_dropped"], 0)
+        self.assertEqual(len(out), 0)
+        self.assertFalse(info["coverage_handling"]["coverage_status_column_present"])
+        self.assertEqual(info["coverage_handling"]["unqualified_rows_dropped"], 2)
 
 
 # ───────────────────────── Promotion guard ─────────────────────────── #

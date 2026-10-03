@@ -82,6 +82,7 @@ def horizon_record(con, symbol, horizon, dq_min, recent_days, as_of_date):
         """SELECT te.event_id, te.ts_event, te.confluence_count, el.reject
            FROM touch_events te JOIN event_labels el ON te.event_id=el.event_id
            WHERE te.symbol=? AND el.horizon_min=? AND te.data_quality>=?
+                 AND el.coverage_status='qualified'
                  AND el.reject IS NOT NULL AND te.confluence_count IS NOT NULL
            ORDER BY te.ts_event, te.event_id""",
         con, params=(symbol, horizon, dq_min))

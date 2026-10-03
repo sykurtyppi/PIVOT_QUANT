@@ -330,6 +330,13 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             reject INTEGER,
             break INTEGER,
             resolution_min REAL,
+            expected_bar_count INTEGER,
+            observed_bar_count INTEGER,
+            coverage_ratio REAL,
+            max_gap_sec REAL,
+            endpoint_gap_sec REAL,
+            endpoint_status TEXT,
+            coverage_status TEXT,
             PRIMARY KEY (event_id, horizon_min),
             FOREIGN KEY (event_id) REFERENCES touch_events(event_id)
         );

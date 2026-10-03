@@ -2,19 +2,38 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
+from datetime import datetime
+import math
 import os
 from pathlib import Path
 import sqlite3
 import sys
 from typing import Iterable
+from zoneinfo import ZoneInfo
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 from label_eligibility import normalize_bar_interval  # noqa: E402
+from trading_calendar import (  # noqa: E402
+    REGULAR_SESSION_OPEN_ET,
+    is_trading_day,
+    session_close_et,
+)
 
 DEFAULT_DB = os.getenv("PIVOT_DB", "data/pivot_events.sqlite")
 DEFAULT_HORIZONS = [5, 15, 30, 60]
+
+LABEL_QUALITY_COLUMNS = {
+    "expected_bar_count": "INTEGER",
+    "observed_bar_count": "INTEGER",
+    "coverage_ratio": "REAL",
+    "max_gap_sec": "REAL",
+    "endpoint_gap_sec": "REAL",
+    "endpoint_status": "TEXT",
+    "coverage_status": "TEXT",
+}
 
 
 def connect(db_path: str) -> sqlite3.Connection:
@@ -91,6 +110,117 @@ def forward_bars_after_touch(bars: Iterable[dict], ts_event: int) -> list[dict]:
     strictly after that timestamp.
     """
     return [bar for bar in bars if int(bar["ts"]) > int(ts_event)]
+
+
+def normalize_ohlc_path(bars: Iterable[dict]) -> str | None:
+    """Coerce and validate every OHLC value, returning a failure status if invalid."""
+    for bar in bars:
+        try:
+            open_price = float(bar["open"])
+            high_price = float(bar["high"])
+            low_price = float(bar["low"])
+            close_price = float(bar["close"])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return "invalid_ohlc_values"
+
+        values = (open_price, high_price, low_price, close_price)
+        if not all(math.isfinite(value) for value in values):
+            return "invalid_ohlc_values"
+        if (
+            high_price < max(open_price, close_price, low_price)
+            or low_price > min(open_price, close_price, high_price)
+            or high_price < low_price
+        ):
+            return "invalid_ohlc_structure"
+
+        bar["open"], bar["high"], bar["low"], bar["close"] = values
+    return None
+
+
+def assess_bar_path_coverage(
+    bars: Iterable[dict], ts_event: int, end_ts: int, interval_sec: int
+) -> dict:
+    """Return strict path-coverage metadata for a forward label window."""
+    bars = list(bars)
+    interval_ms = int(interval_sec) * 1000
+    window_ms = int(end_ts) - int(ts_event)
+    expected = window_ms // interval_ms if interval_ms > 0 and window_ms > 0 else 0
+    raw_timestamps = [
+        int(bar["ts"])
+        for bar in bars
+        if int(ts_event) < int(bar["ts"]) <= int(end_ts)
+    ]
+    timestamps = sorted(raw_timestamps)
+    observed = len(timestamps)
+    coverage_ratio = observed / expected if expected > 0 else 0.0
+
+    if timestamps:
+        endpoint_gap_ms = max(0, int(end_ts) - timestamps[-1])
+        boundary_gaps = [timestamps[0] - int(ts_event)]
+        boundary_gaps.extend(b - a for a, b in zip(timestamps, timestamps[1:]))
+        boundary_gaps.append(endpoint_gap_ms)
+        max_gap_ms = max(boundary_gaps)
+    else:
+        endpoint_gap_ms = window_ms if window_ms > 0 else 0
+        max_gap_ms = endpoint_gap_ms
+
+    endpoint_status = "exact" if timestamps and timestamps[-1] == int(end_ts) else "missing"
+    eastern = ZoneInfo("America/New_York")
+    event_dt = datetime.fromtimestamp(int(ts_event) / 1000.0, tz=eastern)
+    end_dt = datetime.fromtimestamp(int(end_ts) / 1000.0, tz=eastern)
+    event_date = event_dt.date()
+    session_open = datetime.combine(event_date, REGULAR_SESSION_OPEN_ET, tzinfo=eastern)
+    session_close = datetime.combine(event_date, session_close_et(event_date), tzinfo=eastern)
+    bars_outside_session = any(
+        not (session_open < datetime.fromtimestamp(ts / 1000.0, tz=eastern) <= session_close)
+        for ts in timestamps
+    )
+    ohlc_status = normalize_ohlc_path(bars)
+
+    if expected <= 0:
+        coverage_status = "invalid_window"
+    elif not is_trading_day(event_date) or not (session_open <= event_dt < session_close):
+        coverage_status = "event_outside_regular_session"
+    elif end_dt.date() != event_date or end_dt > session_close:
+        coverage_status = "horizon_past_session_close"
+    elif bars_outside_session:
+        coverage_status = "bar_outside_regular_session"
+    elif len(set(raw_timestamps)) != len(raw_timestamps):
+        coverage_status = "duplicate_timestamps"
+    elif not timestamps:
+        coverage_status = "no_bars"
+    elif timestamps[0] - int(ts_event) > interval_ms:
+        coverage_status = "late_first_bar"
+    elif endpoint_status != "exact":
+        coverage_status = "missing_endpoint"
+    elif max_gap_ms > interval_ms:
+        coverage_status = "excessive_gap"
+    elif observed != expected:
+        coverage_status = "unexpected_bar_count"
+    elif ohlc_status is not None:
+        coverage_status = ohlc_status
+    else:
+        coverage_status = "qualified"
+
+    return {
+        "qualified": coverage_status == "qualified",
+        "expected_bar_count": int(expected),
+        "observed_bar_count": int(observed),
+        "coverage_ratio": float(coverage_ratio),
+        "max_gap_sec": float(max_gap_ms / 1000.0),
+        "endpoint_gap_sec": float(endpoint_gap_ms / 1000.0),
+        "endpoint_status": endpoint_status,
+        "coverage_status": coverage_status,
+    }
+
+
+def ensure_label_quality_columns(conn: sqlite3.Connection) -> None:
+    """Add quality columns for databases not yet run through migration 9."""
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(event_labels)")}
+    for name, sql_type in LABEL_QUALITY_COLUMNS.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE event_labels ADD COLUMN {name} {sql_type}")
+    conn.commit()
 
 
 def label_event(
@@ -193,6 +323,7 @@ def main() -> None:
     args = parser.parse_args()
 
     conn = connect(args.db)
+    ensure_label_quality_columns(conn)
 
     if args.force:
         conn.execute("DELETE FROM event_labels")
@@ -210,7 +341,18 @@ def main() -> None:
 
     labeled = 0
     skipped_missing_interval = 0
+    skipped_incomplete_path = 0
+    skipped_by_status: Counter[str] = Counter()
     for event_id, symbol, ts_event, touch_price, level_price, touch_side, bar_interval_sec in events:
+        # Requalification is authoritative for the requested horizon set. Clear
+        # stale rows before any event-level early return, while preserving labels
+        # for horizons that were not requested by this run.
+        for horizon in args.horizons:
+            conn.execute(
+                "DELETE FROM event_labels WHERE event_id = ? AND horizon_min = ?",
+                (event_id, horizon),
+            )
+
         # P0-A guard: refuse to label an event with no known bar grid. A
         # NULL/0/invalid bar_interval_sec would otherwise fall through to
         # interval-agnostic bar queries (mixed-interval label leakage), so the
@@ -222,15 +364,16 @@ def main() -> None:
         for horizon in args.horizons:
             horizon_ms = horizon * 60 * 1000
             end_ts = ts_event + horizon_ms
-            if args.incremental and label_exists(conn, event_id, horizon):
-                continue
-
             if not has_sufficient_bars(conn, symbol, end_ts, interval):
+                skipped_by_status["insufficient_latest_bar"] += 1
                 continue
 
             bars = fetch_bars(conn, symbol, ts_event, end_ts, interval)
             bars = forward_bars_after_touch(bars, ts_event)
-            if not bars:
+            quality = assess_bar_path_coverage(bars, ts_event, end_ts, interval)
+            if not quality["qualified"]:
+                skipped_incomplete_path += 1
+                skipped_by_status[str(quality["coverage_status"])] += 1
                 continue
 
             mfe_bps, mae_bps = compute_mfe_mae(bars, touch_price, touch_side)
@@ -253,10 +396,18 @@ def main() -> None:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO event_labels
-                (event_id, horizon_min, return_bps, mfe_bps, mae_bps, reject, break, resolution_min)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (event_id, horizon_min, return_bps, mfe_bps, mae_bps, reject, break,
+                 resolution_min, expected_bar_count, observed_bar_count, coverage_ratio,
+                 max_gap_sec, endpoint_gap_sec, endpoint_status, coverage_status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (event_id, horizon, return_bps, mfe_bps, mae_bps, reject, brk, resolution_min),
+                (
+                    event_id, horizon, return_bps, mfe_bps, mae_bps, reject, brk,
+                    resolution_min, quality["expected_bar_count"],
+                    quality["observed_bar_count"], quality["coverage_ratio"],
+                    quality["max_gap_sec"], quality["endpoint_gap_sec"],
+                    quality["endpoint_status"], quality["coverage_status"],
+                ),
             )
             labeled += 1
 
@@ -268,6 +419,15 @@ def main() -> None:
             f"Skipped {skipped_missing_interval} events with missing/zero "
             "bar_interval_sec (no deterministic bar grid; not labeled)"
         )
+    if skipped_incomplete_path:
+        print(
+            f"Skipped {skipped_incomplete_path} event/horizon paths without complete, "
+            "qualified bar coverage"
+        )
+    if skipped_by_status:
+        print("Coverage skips: " + ", ".join(
+            f"{status}={count}" for status, count in sorted(skipped_by_status.items())
+        ))
 
 
 if __name__ == "__main__":

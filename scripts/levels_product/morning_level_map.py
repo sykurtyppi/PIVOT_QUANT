@@ -71,6 +71,7 @@ def recent_base_rates(con, symbol, anchor_ts_ms, dq_min=0.9):
         """SELECT el.horizon_min, AVG(el.reject) rate, COUNT(*) n
            FROM touch_events te JOIN event_labels el ON te.event_id=el.event_id
            WHERE te.symbol=? AND te.data_quality>=? AND te.ts_event>=? AND te.ts_event<=?
+                 AND el.coverage_status='qualified'
                  AND el.reject IS NOT NULL
            GROUP BY el.horizon_min""",
         con, params=(symbol, dq_min, cutoff, anchor_ts_ms))

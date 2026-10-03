@@ -12,6 +12,27 @@ except ImportError:  # pragma: no cover
 FEATURE_VERSION = "v3"
 NY_TZ = ZoneInfo("America/New_York") if ZoneInfo else timezone.utc
 
+# Raw event fields that may participate in model feature construction. Labels,
+# post-outcome quality fields, identifiers, and unknown future columns are
+# intentionally absent so new database fields fail closed.
+ADMISSIBLE_EVENT_FEATURE_INPUTS = (
+    "symbol", "ts_event", "session", "level_type", "level_price",
+    "touch_price", "touch_side", "distance_bps", "is_first_touch_today",
+    "touch_count_today", "confluence_count", "confluence_types", "ema9",
+    "ema21", "ema_state", "vwap", "vwap_dist_bps", "atr", "rv_30",
+    "rv_regime", "iv_rv_state", "gamma_mode", "gamma_flip",
+    "gamma_flip_dist_bps", "gamma_confidence", "oi_concentration_top5",
+    "zero_dte_share", "data_quality", "bar_interval_sec", "source", "vpoc",
+    "vpoc_dist_bps", "volume_at_level", "volume_at_level_relative",
+    "mtf_confluence", "mtf_confluence_types", "weekly_pivot",
+    "monthly_pivot", "level_age_days", "has_history", "hist_edge_score",
+    "hist_reject_rate", "hist_break_rate", "hist_sample_size", "regime_type",
+    "overnight_gap_atr", "or_high", "or_low", "or_size_atr", "or_breakout",
+    "or_high_dist_bps", "or_low_dist_bps", "session_std",
+    "sigma_band_position", "distance_to_upper_sigma_bps",
+    "distance_to_lower_sigma_bps",
+)
+
 # ── Features the RF should NEVER see (dead, leaked, or raw-price) ──
 # These are explicitly dropped before training regardless of null status.
 DROP_FEATURES = {
@@ -73,7 +94,11 @@ def _level_family(level_type: str | None) -> str:
 
 
 def build_feature_row(event: dict[str, Any]) -> dict[str, Any]:
-    row = dict(event)
+    row = {
+        key: event[key]
+        for key in ADMISSIBLE_EVENT_FEATURE_INPUTS
+        if key in event
+    }
     ts_event = event.get("ts_event")
 
     # ── Time-of-day features (improved) ──

@@ -142,7 +142,14 @@ def main() -> None:
                 try_cast(mae_bps AS DOUBLE) AS mae_bps,
                 try_cast(reject AS INTEGER) AS reject,
                 try_cast("break" AS INTEGER) AS break,
-                try_cast(resolution_min AS DOUBLE) AS resolution_min
+                try_cast(resolution_min AS DOUBLE) AS resolution_min,
+                try_cast(expected_bar_count AS INTEGER) AS expected_bar_count,
+                try_cast(observed_bar_count AS INTEGER) AS observed_bar_count,
+                try_cast(coverage_ratio AS DOUBLE) AS coverage_ratio,
+                try_cast(max_gap_sec AS DOUBLE) AS max_gap_sec,
+                try_cast(endpoint_gap_sec AS DOUBLE) AS endpoint_gap_sec,
+                endpoint_status,
+                coverage_status
             FROM {('read_parquet' if use_parquet else 'read_csv_auto')}('{labels_parquet if use_parquet else labels_csv}')
         ),
         joined AS (
@@ -154,7 +161,14 @@ def main() -> None:
                 l.mae_bps,
                 l.reject,
                 l.break,
-                l.resolution_min
+                l.resolution_min,
+                l.expected_bar_count,
+                l.observed_bar_count,
+                l.coverage_ratio,
+                l.max_gap_sec,
+                l.endpoint_gap_sec,
+                l.endpoint_status,
+                l.coverage_status
             FROM touch t
             JOIN labels l
             ON t.event_id = l.event_id
@@ -233,6 +247,13 @@ def main() -> None:
                 timed.reject,
                 timed.break,
                 timed.resolution_min,
+                timed.expected_bar_count,
+                timed.observed_bar_count,
+                timed.coverage_ratio,
+                timed.max_gap_sec,
+                timed.endpoint_gap_sec,
+                timed.endpoint_status,
+                timed.coverage_status,
                 -- timestamp columns
                 timed.event_ts_utc,
                 timed.event_ts_et,

@@ -31,6 +31,12 @@ BUCKETS = ["0", "1", "2+"]
 MIN_PUBLISHABLE_N = 200  # a bucket's calibration/CI is only "publishable" above this
 
 
+def _require_coverage_status(con) -> None:
+    columns = {row[1] for row in con.execute("PRAGMA table_info(event_labels)")}
+    if "coverage_status" not in columns:
+        raise RuntimeError("event_labels.coverage_status is required")
+
+
 def bucket(conf):
     return np.where(conf >= 2, "2+", np.where(conf >= 1, "1", "0"))
 
@@ -139,6 +145,7 @@ def label_coverage(read_con, symbol, dq_min=0.9, horizons=HORIZONS):
     the database rather than to wall-clock time, so weekends and feed downtime do
     not create false staleness alarms.
     """
+    _require_coverage_status(read_con)
     raw_intervals = read_con.execute(
         """SELECT DISTINCT bar_interval_sec
            FROM touch_events
@@ -196,7 +203,8 @@ def label_coverage(read_con, symbol, dq_min=0.9, horizons=HORIZONS):
                                THEN eligible.ts_event END) AS latest_labeled_ts
                FROM eligible
                LEFT JOIN event_labels el
-                 ON el.event_id=eligible.event_id AND el.horizon_min=?""",
+                 ON el.event_id=eligible.event_id AND el.horizon_min=?
+                AND el.coverage_status='qualified'""",
             (*interval_params, symbol, dq_min, horizon_ms, horizon_ms, int(h)),
         ).fetchone()
         eligible = int(row[0] or 0)
@@ -225,6 +233,7 @@ def current_rates(read_con, symbol, dq_min=0.9, window=WINDOW):
     comparable 15m/30m/60m probability set.
     """
     import pandas as pd
+    _require_coverage_status(read_con)
     coverage = label_coverage(read_con, symbol, dq_min)
     publishable = all(coverage[h]["complete"] for h in HORIZONS)
     out = {"_publishable": publishable, "_coverage": coverage}
@@ -237,6 +246,7 @@ def current_rates(read_con, symbol, dq_min=0.9, window=WINDOW):
             """SELECT te.confluence_count, el.reject
                FROM touch_events te JOIN event_labels el ON te.event_id=el.event_id
                WHERE te.symbol=? AND el.horizon_min=? AND te.data_quality>=?
+                     AND el.coverage_status='qualified'
                      AND el.reject IS NOT NULL AND te.confluence_count IS NOT NULL
                ORDER BY te.ts_event, te.event_id""",
             read_con, params=(symbol, h, dq_min))
