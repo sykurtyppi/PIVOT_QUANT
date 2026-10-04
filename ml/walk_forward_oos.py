@@ -67,6 +67,7 @@ def build_expanding_folds(
     min_train: int,
     calib_window: int,
     fit_fraction: float = 0.6,
+    label_horizon_min: int = 0,
 ) -> tuple[list[FoldPlan], str]:
     """Build K expanding-window folds from a chronologically sorted ts array.
 
@@ -89,6 +90,8 @@ def build_expanding_folds(
         return [], "n_folds_lt_1"
     if test_window < 1:
         return [], "test_window_lt_1"
+    if label_horizon_min < 0:
+        return [], "label_horizon_min_lt_0"
     # enforce chronological sort (defensive; caller sorts by ts_event)
     if n >= 2 and bool(np.any(np.diff(ts) < 0)):
         return [], "ts_not_sorted_ascending"
@@ -131,9 +134,17 @@ def build_expanding_folds(
         # tune slice (adjacent to the boundary) absorbs the loss; run_one_fold
         # already degrades gracefully if it shrinks below min_signals.
         test_start_ts = ts[test_start]
-        fit_idx = fit_idx[ts[fit_idx] < test_start_ts]
-        calib_fit_idx = calib_fit_idx[ts[calib_fit_idx] < test_start_ts]
-        tune_idx = tune_idx[ts[tune_idx] < test_start_ts]
+        maturity_cutoff_ts = int(test_start_ts) - int(label_horizon_min) * 60_000
+        fit_idx = fit_idx[
+            (ts[fit_idx] < test_start_ts) & (ts[fit_idx] <= maturity_cutoff_ts)
+        ]
+        calib_fit_idx = calib_fit_idx[
+            (ts[calib_fit_idx] < test_start_ts)
+            & (ts[calib_fit_idx] <= maturity_cutoff_ts)
+        ]
+        tune_idx = tune_idx[
+            (ts[tune_idx] < test_start_ts) & (ts[tune_idx] <= maturity_cutoff_ts)
+        ]
         train_kept = np.concatenate([fit_idx, calib_fit_idx, tune_idx])
         train_end_ts = int(ts[int(train_kept.max())]) if train_kept.size else int(ts[0])
         folds.append(
@@ -315,6 +326,7 @@ def run_walk_forward_oos(
     fit_fraction: float = 0.6,
     min_signals: int = 30,
     trade_cost_bps: float = 0.0,
+    label_horizon_min: int = 0,
 ) -> dict:
     """Run the walk-forward harness for one (target, horizon).
 
@@ -343,6 +355,7 @@ def run_walk_forward_oos(
         "calib_window": int(calib_window),
         "fit_fraction": float(fit_fraction),
         "min_signals": int(min_signals),
+        "label_horizon_min": int(label_horizon_min),
     }
 
     folds, skip_reason = build_expanding_folds(
@@ -352,6 +365,7 @@ def run_walk_forward_oos(
         min_train=min_train,
         calib_window=calib_window,
         fit_fraction=fit_fraction,
+        label_horizon_min=label_horizon_min,
     )
     if not folds:
         return {

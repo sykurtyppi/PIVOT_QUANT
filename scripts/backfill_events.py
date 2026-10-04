@@ -1447,8 +1447,18 @@ def compute_historical_accuracy(
     before_ts: int,
     horizon: int = 15,
 ) -> tuple[float | None, float | None, int]:
-    """Look back at past labeled events for this level_type to compute
-    historical reject/break rates. Returns (reject_rate, break_rate, sample_size)."""
+    """Return point-in-time historical rates from qualified, matured labels only.
+
+    A prior event is observable at ``before_ts`` only after its full label horizon
+    has elapsed. Legacy schemas without coverage provenance fail closed instead of
+    silently treating unknown-quality labels as qualified.
+    """
+    label_columns = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(event_labels)").fetchall()
+    }
+    if "coverage_status" not in label_columns:
+        return None, None, 0
+
     cur = conn.execute(
         """
         SELECT el.reject, el.break
@@ -1456,10 +1466,12 @@ def compute_historical_accuracy(
         JOIN event_labels el ON te.event_id = el.event_id
         WHERE te.symbol = ? AND te.level_type = ? AND te.ts_event < ?
           AND el.horizon_min = ?
+          AND el.coverage_status = 'qualified'
+          AND te.ts_event + (el.horizon_min * 60000) <= ?
         ORDER BY te.ts_event DESC
         LIMIT 100
         """,
-        (symbol, level_type, before_ts, horizon),
+        (symbol, level_type, before_ts, horizon, before_ts),
     )
     rows = cur.fetchall()
     if not rows:

@@ -13,12 +13,15 @@ Also supports rollback to previous/explicit model versions.
 from __future__ import annotations
 
 import argparse
+import fcntl
+import hashlib
 import json
 import os
 import shutil
 import sqlite3
 import sys
 import time
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -186,6 +189,131 @@ def atomic_copy(src: Path, dst: Path) -> None:
     finally:
         if tmp.exists():
             tmp.unlink()
+
+
+@contextmanager
+def governance_publication_lock(state_path: Path):
+    lock_path = state_path.with_name(f"{state_path.name}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def build_approval_hashes(
+    models_dir: Path, manifest_path: Path, manifest: dict[str, Any]
+) -> dict[str, Any]:
+    artifact_hashes: dict[str, str] = {}
+    models = manifest.get("models", {})
+    if not isinstance(models, dict):
+        raise ValueError("Manifest models must be an object")
+    for target, horizons in models.items():
+        if not isinstance(horizons, dict):
+            raise ValueError(f"Manifest model map for {target} must be an object")
+        for filename in horizons.values():
+            artifact_name = str(filename)
+            artifact_path = models_dir / artifact_name
+            if not artifact_path.exists():
+                raise FileNotFoundError(f"Missing model artifact: {artifact_path}")
+            artifact_hashes[artifact_name] = file_sha256(artifact_path)
+    return {
+        "active_manifest_sha256": file_sha256(manifest_path),
+        "active_artifact_sha256": artifact_hashes,
+    }
+
+
+def activate_manifest(
+    models_dir: Path,
+    source_path: Path,
+    active_path: Path,
+    previous_path: Path,
+    manifest: dict[str, Any],
+) -> dict[str, Any]:
+    """Validate before activation and atomically preserve the old active manifest."""
+    expected_hashes = build_approval_hashes(models_dir, source_path, manifest)
+    backup_path = active_path.with_name(
+        f".{active_path.name}.backup.{os.getpid()}.{time.time_ns()}"
+    )
+    had_active = active_path.is_file()
+    if had_active:
+        atomic_copy(active_path, backup_path)
+
+    try:
+        atomic_copy(source_path, active_path)
+        active_hashes = build_approval_hashes(models_dir, active_path, manifest)
+        if active_hashes != expected_hashes:
+            raise RuntimeError("Manifest or artifact bytes changed during activation")
+        if had_active:
+            atomic_copy(backup_path, previous_path)
+        return active_hashes
+    except Exception:
+        if had_active and backup_path.is_file():
+            atomic_copy(backup_path, active_path)
+        elif not had_active:
+            active_path.unlink(missing_ok=True)
+        raise
+    finally:
+        backup_path.unlink(missing_ok=True)
+
+
+def publish_manifest_and_state(
+    *,
+    models_dir: Path,
+    source_path: Path,
+    active_path: Path,
+    previous_path: Path,
+    manifest: dict[str, Any],
+    expected_hashes: dict[str, Any],
+    state_path: Path,
+    state: dict[str, Any],
+    ops_db: str | None,
+    result: dict[str, Any],
+) -> None:
+    """Publish a manifest and its approval while the caller holds the write lock."""
+    active_backup = active_path.with_name(
+        f".{active_path.name}.publish-backup.{os.getpid()}.{time.time_ns()}"
+    )
+    previous_backup = previous_path.with_name(
+        f".{previous_path.name}.publish-backup.{os.getpid()}.{time.time_ns()}"
+    )
+    had_active = active_path.is_file()
+    had_previous = previous_path.is_file()
+    if had_active:
+        atomic_copy(active_path, active_backup)
+    if had_previous:
+        atomic_copy(previous_path, previous_backup)
+
+    try:
+        active_hashes = activate_manifest(
+            models_dir, source_path, active_path, previous_path, manifest
+        )
+        if active_hashes != expected_hashes:
+            raise RuntimeError("Preflight approval hashes changed before publication")
+        _persist_state_and_ops(state_path, state, ops_db, result)
+    except Exception:
+        if had_active and active_backup.is_file():
+            atomic_copy(active_backup, active_path)
+        elif not had_active:
+            active_path.unlink(missing_ok=True)
+        if had_previous and previous_backup.is_file():
+            atomic_copy(previous_backup, previous_path)
+        elif not had_previous:
+            previous_path.unlink(missing_ok=True)
+        raise
+    finally:
+        active_backup.unlink(missing_ok=True)
+        previous_backup.unlink(missing_ok=True)
 
 
 def parse_csv_list(value: str) -> list[str]:
@@ -822,16 +950,22 @@ def _persist_state_and_ops(
 
     atomic_write_json(state_path, state)
     if ops_db:
-        _ops_set(
-            ops_db,
-            {
-                "model_active_version": str(result.get("active_version") or ""),
-                "model_candidate_version": str(result.get("candidate_version") or ""),
-                "model_governance_last_action": str(result.get("action") or ""),
-                "model_governance_last_reason": reason,
-                "model_governance_last_checked_ms": str(now_ms()),
-            },
-        )
+        try:
+            _ops_set(
+                ops_db,
+                {
+                    "model_active_version": str(result.get("active_version") or ""),
+                    "model_candidate_version": str(result.get("candidate_version") or ""),
+                    "model_governance_last_action": str(result.get("action") or ""),
+                    "model_governance_last_reason": reason,
+                    "model_governance_last_checked_ms": str(now_ms()),
+                },
+            )
+        except Exception as exc:
+            print(
+                f"WARNING: governance state committed but ops telemetry update failed: {exc}",
+                file=sys.stderr,
+            )
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -948,6 +1082,12 @@ def check_oos_validation(
 
 
 def cmd_evaluate(args: argparse.Namespace) -> int:
+    state_path = Path(args.models_dir) / args.state_file
+    with governance_publication_lock(state_path):
+        return _cmd_evaluate_locked(args)
+
+
+def _cmd_evaluate_locked(args: argparse.Namespace) -> int:
     models_dir = Path(args.models_dir)
     metadata_dir = _resolve_metadata_dir(models_dir, args.metadata_dir)
     candidate_path = resolve_candidate_manifest_path(models_dir, args.candidate_manifest)
@@ -1101,7 +1241,7 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
                 f"reason={oos_reason}",
                 file=sys.stderr,
             )
-        atomic_copy(candidate_path, active_path)
+        approval_hashes = build_approval_hashes(models_dir, candidate_path, candidate)
         state.update(
             {
                 "active_version": candidate_version,
@@ -1111,6 +1251,7 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
                 "last_reason": "initialized active manifest from candidate",
                 "last_checked_at_ms": now_ms(),
                 "last_promoted_at_ms": now_ms(),
+                **approval_hashes,
             }
         )
         push_history(
@@ -1131,7 +1272,18 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
                 "reason": state["last_reason"],
             }
         )
-        _persist_state_and_ops(state_path, state, args.ops_db, result)
+        publish_manifest_and_state(
+            models_dir=models_dir,
+            source_path=candidate_path,
+            active_path=active_path,
+            previous_path=prev_path,
+            manifest=candidate,
+            expected_hashes=approval_hashes,
+            state_path=state_path,
+            state=state,
+            ops_db=args.ops_db,
+            result=result,
+        )
         print(json.dumps(result))
         return 0
 
@@ -1140,6 +1292,7 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
     result["active_version"] = active_version
 
     if candidate_version == active_version:
+        approval_hashes = build_approval_hashes(models_dir, active_path, active)
         state.update(
             {
                 "candidate_version": candidate_version,
@@ -1147,6 +1300,7 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
                 "last_action": "no_change",
                 "last_reason": "candidate version equals active version",
                 "last_checked_at_ms": now_ms(),
+                **approval_hashes,
             }
         )
         push_history(
@@ -1258,9 +1412,7 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
 
-    if active_path.exists():
-        atomic_copy(active_path, prev_path)
-    atomic_copy(candidate_path, active_path)
+    approval_hashes = build_approval_hashes(models_dir, candidate_path, candidate)
 
     state.update(
         {
@@ -1271,6 +1423,7 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
             "last_reason": "candidate promoted to active",
             "last_checked_at_ms": now_ms(),
             "last_promoted_at_ms": now_ms(),
+            **approval_hashes,
         }
     )
     push_history(
@@ -1300,12 +1453,29 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
             "oos_validation_bypassed": bool(oos_validation_bypassed),
         }
     )
-    _persist_state_and_ops(state_path, state, args.ops_db, result)
+    publish_manifest_and_state(
+        models_dir=models_dir,
+        source_path=candidate_path,
+        active_path=active_path,
+        previous_path=prev_path,
+        manifest=candidate,
+        expected_hashes=approval_hashes,
+        state_path=state_path,
+        state=state,
+        ops_db=args.ops_db,
+        result=result,
+    )
     print(json.dumps(result))
     return 0
 
 
 def cmd_rollback(args: argparse.Namespace) -> int:
+    state_path = Path(args.models_dir) / args.state_file
+    with governance_publication_lock(state_path):
+        return _cmd_rollback_locked(args)
+
+
+def _cmd_rollback_locked(args: argparse.Namespace) -> int:
     models_dir = Path(args.models_dir)
     metadata_dir = _resolve_metadata_dir(models_dir, args.metadata_dir)
     active_path = models_dir / args.active_manifest
@@ -1345,8 +1515,7 @@ def cmd_rollback(args: argparse.Namespace) -> int:
         print(json.dumps(out))
         return 0
 
-    atomic_copy(active_path, prev_path)
-    atomic_copy(target_path, active_path)
+    approval_hashes = build_approval_hashes(models_dir, target_path, target_manifest)
 
     state.update(
         {
@@ -1356,6 +1525,7 @@ def cmd_rollback(args: argparse.Namespace) -> int:
             "last_reason": f"rolled back from {active_version} to {target_version}",
             "last_checked_at_ms": now_ms(),
             "last_promoted_at_ms": now_ms(),
+            **approval_hashes,
         }
     )
     push_history(
@@ -1375,7 +1545,18 @@ def cmd_rollback(args: argparse.Namespace) -> int:
         "candidate_version": state.get("candidate_version"),
         "reason": state["last_reason"],
     }
-    _persist_state_and_ops(state_path, state, args.ops_db, result)
+    publish_manifest_and_state(
+        models_dir=models_dir,
+        source_path=target_path,
+        active_path=active_path,
+        previous_path=prev_path,
+        manifest=target_manifest,
+        expected_hashes=approval_hashes,
+        state_path=state_path,
+        state=state,
+        ops_db=args.ops_db,
+        result=result,
+    )
     print(json.dumps(result))
     return 0
 
