@@ -118,7 +118,7 @@
       }
     },
     "testMatch": [
-      "**/tests/**/*.test.js"
+      "<rootDir>/tests/**/*.test.js"
     ],
     "transform": {
       "^.+\\.js$": "babel-jest"

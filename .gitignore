@@ -14,8 +14,12 @@ env/
 
 # Local app config and secrets
 .env
+.env.bak*
 config.json
 *.log
+# Generated local research/runtime configuration and lock state
+data/**/*.env
+data/**/*.lock
 
 # Generated outputs / artifacts
 exports/

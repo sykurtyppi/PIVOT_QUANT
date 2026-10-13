@@ -65,6 +65,28 @@ class RuntimeManifestGovernanceTests(unittest.TestCase):
         self.assertEqual(resolved, self.models_dir / "manifest_active.json")
         self.assertNotEqual(resolved, candidate)
 
+    def test_resolver_rejects_active_manifest_aliasing_candidate(self) -> None:
+        self.module.RF_ACTIVE_MANIFEST = "manifest_candidate.json"
+        with self.assertRaisesRegex(ValueError, "candidate manifest"):
+            self.module.ModelRegistry().resolve_manifest_path()
+
+    def test_resolver_rejects_normalized_candidate_alias(self) -> None:
+        self.module.RF_ACTIVE_MANIFEST = "nested/../manifest_candidate.json"
+        with self.assertRaisesRegex(ValueError, "candidate manifest"):
+            self.module.ModelRegistry().resolve_manifest_path()
+
+    def test_resolver_rejects_hard_link_to_candidate(self) -> None:
+        candidate = self._write_json("manifest_candidate.json", {"version": "v999"})
+        active = self.models_dir / "manifest_active.json"
+        active.hardlink_to(candidate)
+        with self.assertRaisesRegex(ValueError, "candidate manifest"):
+            self.module.ModelRegistry().resolve_manifest_path()
+
+    def test_resolver_rejects_legacy_candidate_as_active(self) -> None:
+        self.module.RF_ACTIVE_MANIFEST = "manifest_latest.json"
+        with self.assertRaisesRegex(ValueError, "candidate manifest"):
+            self.module.ModelRegistry().resolve_manifest_path()
+
     def test_resolver_rejects_arbitrary_manifest_override(self) -> None:
         override = self._write_json("manual.json", {"version": "v999"})
         self.module.RF_MANIFEST_PATH = str(override)
@@ -107,6 +129,38 @@ class RuntimeManifestGovernanceTests(unittest.TestCase):
             health["runtime_identity"]["manifest_sha256"],
             hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
         )
+
+    def test_load_hashes_the_exact_manifest_bytes_it_parses(self) -> None:
+        unapproved_manifest = {
+            "version": "v001",
+            "models": {},
+            "thresholds": {"reject": {"5": 0.01}},
+        }
+        approved_manifest = {
+            "version": "v001",
+            "models": {},
+            "thresholds": {"reject": {"5": 0.99}},
+        }
+        manifest_path = self._write_json("manifest_active.json", unapproved_manifest)
+        approved_bytes = json.dumps(approved_manifest).encode("utf-8")
+        self._write_json(
+            "model_registry.json",
+            {
+                "active_version": "v001",
+                "active_manifest_sha256": hashlib.sha256(approved_bytes).hexdigest(),
+                "active_artifact_sha256": {},
+            },
+        )
+        registry = self.module.ModelRegistry()
+        original_validate = registry._validate_governance_approval
+
+        def replace_before_validation(*args):
+            manifest_path.write_bytes(approved_bytes)
+            return original_validate(*args)
+
+        registry._validate_governance_approval = replace_before_validation
+        with self.assertRaisesRegex(ValueError, "manifest SHA-256"):
+            registry.load()
 
     def test_load_waits_for_atomic_governance_publication(self) -> None:
         active_path = self._write_json(

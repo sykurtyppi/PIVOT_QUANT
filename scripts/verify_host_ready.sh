@@ -136,6 +136,7 @@ echo "HTTP checks:"
 check_http_root "http://127.0.0.1:3000/"
 check_http_json_field "http://127.0.0.1:5003/health" "status"
 check_http_json_field "http://127.0.0.1:5004/health" "status"
+"${ROOT_DIR}/scripts/_pybin_exec.sh" "${ROOT_DIR}/scripts/runtime_readiness.py"
 if [[ -n "${LAN_IP:-}" ]]; then
   check_http_root "http://${LAN_IP}:3000/"
 fi

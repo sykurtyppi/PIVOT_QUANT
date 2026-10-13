@@ -620,7 +620,27 @@ class ModelRegistry:
                 "RF_MANIFEST_PATH is not permitted for production serving; "
                 "only the governance-approved active manifest may be loaded"
             )
-        return MODEL_DIR / RF_ACTIVE_MANIFEST
+        active_path = MODEL_DIR / RF_ACTIVE_MANIFEST
+        active_identity = active_path.resolve(strict=False)
+        candidate_paths = [
+            MODEL_DIR / RF_CANDIDATE_MANIFEST,
+            MODEL_DIR / "manifest_latest.json",
+        ]
+        aliases_candidate = any(
+            active_identity == candidate_path.resolve(strict=False)
+            or (
+                active_path.exists()
+                and candidate_path.exists()
+                and active_path.samefile(candidate_path)
+            )
+            for candidate_path in candidate_paths
+        )
+        if aliases_candidate:
+            raise ValueError(
+                "Active manifest must not alias a candidate manifest; "
+                "configure separate active and candidate manifest paths"
+            )
+        return active_path
 
     @staticmethod
     def _file_signature(path: Path) -> tuple[int, int]:
@@ -636,7 +656,7 @@ class ModelRegistry:
         return digest.hexdigest()
 
     def _validate_governance_approval(
-        self, manifest_path: Path, manifest: dict
+        self, manifest_path: Path, manifest: dict, manifest_bytes: bytes
     ) -> tuple[tuple[int, int], dict[str, object], dict[str, bytes]]:
         registry_path = MODEL_DIR / RF_GOVERNANCE_STATE
         if not registry_path.exists():
@@ -660,7 +680,7 @@ class ModelRegistry:
         ).strip().lower()
         if not expected_manifest_hash:
             raise ValueError("Governance registry is missing active_manifest_sha256")
-        actual_manifest_hash = self._file_sha256(manifest_path)
+        actual_manifest_hash = hashlib.sha256(manifest_bytes).hexdigest()
         if actual_manifest_hash != expected_manifest_hash:
             raise ValueError("Active manifest SHA-256 does not match governance approval")
 
@@ -839,15 +859,20 @@ class ModelRegistry:
                     and self.manifest is not None
                 ):
                     return False
-        with manifest_path.open("r", encoding="utf-8") as handle:
-            manifest = json.load(handle)
+        manifest_bytes = manifest_path.read_bytes()
+        try:
+            manifest = json.loads(manifest_bytes)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("Active manifest must contain valid UTF-8 JSON") from exc
         if not isinstance(manifest, dict):
             raise ValueError("Active manifest must be a JSON object")
         (
             approval_signature,
             governance_identity,
             verified_artifact_bytes,
-        ) = self._validate_governance_approval(manifest_path, manifest)
+        ) = self._validate_governance_approval(
+            manifest_path, manifest, manifest_bytes
+        )
         models = {"reject": {}, "break": {}}
         thresholds = {"reject": {}, "break": {}}
 
