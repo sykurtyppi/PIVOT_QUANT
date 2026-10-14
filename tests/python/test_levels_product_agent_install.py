@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -61,6 +62,11 @@ class LevelsProductAgentInstallerTest(unittest.TestCase):
                 "FAKE_LAUNCHCTL_LOG": str(launchctl_log),
             }
         )
+        if not isolated_project_without_python:
+            # Installation needs a Python path in the generated intraday plist.
+            # Supply the test runner explicitly rather than inheriting an
+            # operator's PYTHON_BIN or depending on a repository-local venv.
+            env["PYTHON_BIN"] = sys.executable
         if webhook is not None:
             env["LEVELS_PRODUCT_WEBHOOK_URL"] = webhook
         result = subprocess.run(
