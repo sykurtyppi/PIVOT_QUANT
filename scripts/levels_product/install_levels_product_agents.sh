@@ -22,6 +22,10 @@ DAILY_HOUR="${LEVELS_DAILY_HOUR:-8}"
 DAILY_MINUTE="${LEVELS_DAILY_MINUTE:-15}"
 INTRADAY_INTERVAL="${LEVELS_INTRADAY_INTERVAL_SEC:-120}"
 WEBHOOK="${LEVELS_PRODUCT_WEBHOOK_URL:-}"
+# Treat whitespace-only configuration as absent. The intraday runtime strips the
+# value too, so the installer must make the same delivery decision.
+WEBHOOK="${WEBHOOK#"${WEBHOOK%%[![:space:]]*}"}"
+WEBHOOK="${WEBHOOK%"${WEBHOOK##*[![:space:]]}"}"
 # The daily product job is the default and sole label-maturation owner. Operators
 # may set LEVELS_SKIP_LABELS=1 only after establishing one monitored external owner.
 SKIP_LABELS="${LEVELS_SKIP_LABELS:-0}"
@@ -30,6 +34,38 @@ SKIP_LABELS="${LEVELS_SKIP_LABELS:-0}"
 INSTALL_INTRADAY=1
 [[ "${ACTION}" == "install-daily" ]] && INSTALL_INTRADAY=0
 mkdir -p "${LOG_DIR}" "${LA_DIR}"
+
+daily_label="com.pivotquant.levels_daily"
+intraday_label="com.pivotquant.levels_intraday"
+legacy_alert_label="com.pivotquant.levels-alerts"
+
+unload() {
+  local label="$1"
+  launchctl bootout "gui/${UID_NUM}/${label}" 2>/dev/null || true
+  rm -f "${LA_DIR}/${label}.plist"
+}
+
+remove_legacy_alert_agent() {
+  local legacy_plist="${LA_DIR}/${legacy_alert_label}.plist"
+  local legacy_plist_existed=0
+  [[ -e "${legacy_plist}" ]] && legacy_plist_existed=1
+  # The retired watcher points at scripts/levels_alerts/run_watcher.sh, which no
+  # longer exists. Always boot it out so launchd cannot keep retrying a stale,
+  # already-loaded definition even when its plist was removed separately.
+  launchctl bootout "gui/${UID_NUM}/${legacy_alert_label}" 2>/dev/null || true
+  rm -f "${legacy_plist}"
+  if [[ "${legacy_plist_existed}" == "1" ]]; then
+    echo "removed legacy levels-alert agent (${legacy_alert_label})"
+  fi
+}
+
+remove_legacy_alert_agent
+
+if [[ "${ACTION}" == "uninstall" ]]; then
+  unload "${daily_label}"; unload "${intraday_label}"
+  echo "uninstalled levels-product agents"
+  exit 0
+fi
 
 # resolve a >=3.10 interpreter for the intraday agent (mirrors the daily script)
 PY="${PYTHON_BIN:-}"
@@ -46,15 +82,6 @@ xml_escape() {  # escape & < > " so an operator-set webhook can't inject plist X
   printf '%s' "${s}"
 }
 
-daily_label="com.pivotquant.levels_daily"
-intraday_label="com.pivotquant.levels_intraday"
-
-unload() {
-  local label="$1"
-  launchctl bootout "gui/${UID_NUM}/${label}" 2>/dev/null || true
-  rm -f "${LA_DIR}/${label}.plist"
-}
-
 # Clear any loaded instance of a label WITHOUT removing its plist — used right before
 # bootstrap so we never delete the freshly-written plist we are about to load (deleting
 # it made `launchctl bootstrap` fail with "5: Input/output error").
@@ -63,18 +90,27 @@ bootout_only() {
   launchctl bootout "gui/${UID_NUM}/${label}" 2>/dev/null || true
 }
 
-if [[ "${ACTION}" == "uninstall" ]]; then
-  unload "${daily_label}"; unload "${intraday_label}"
-  echo "uninstalled levels-product agents"
-  exit 0
-fi
-
 webhook_env_block() {
   [[ -z "${WEBHOOK}" ]] && return 0
   local esc; esc="$(xml_escape "${WEBHOOK}")"
   cat <<EOF
     <key>LEVELS_PRODUCT_WEBHOOK_URL</key><string>${esc}</string>
 EOF
+}
+
+daily_delivery_env_block() {
+  local channel="dryrun"
+  [[ -n "${WEBHOOK}" ]] && channel="webhook"
+  webhook_env_block
+  printf '    <key>LEVELS_CHANNEL</key><string>%s</string>\n' "${channel}"
+}
+
+intraday_mode_arg() {
+  # intraday_alert.py intentionally fails closed when delivery is requested
+  # without a webhook. Make an unconfigured installed agent explicitly dry-run
+  # instead of allowing it to fail every interval.
+  [[ -n "${WEBHOOK}" ]] && return 0
+  printf '%s\n' '    <string>--dry-run</string>'
 }
 
 weekday_block() {  # hour/minute weekdays 1-5
@@ -99,7 +135,7 @@ cat > "${LA_DIR}/${daily_label}.plist" <<EOF
   </array>
   <key>EnvironmentVariables</key>
   <dict>
-$(webhook_env_block)    <key>LEVELS_SKIP_LABELS</key><string>${SKIP_LABELS}</string>
+$(daily_delivery_env_block)    <key>LEVELS_SKIP_LABELS</key><string>${SKIP_LABELS}</string>
   </dict>
   <key>StartCalendarInterval</key>
   <array>
@@ -122,7 +158,7 @@ cat > "${LA_DIR}/${intraday_label}.plist" <<EOF
     <string>${PY}</string>
     <string>${LP_DIR}/intraday_alert.py</string>
     <string>--symbol</string><string>SPY</string>
-  </array>
+$(intraday_mode_arg)  </array>
   <key>EnvironmentVariables</key>
   <dict>
 $(webhook_env_block)  </dict>
@@ -148,4 +184,7 @@ else
   unload "${intraday_label}"  # ensure no stale intraday agent remains in daily-only mode
   echo "  ${intraday_label}  NOT installed (install-daily mode; add it later with 'install')"
 fi
-[[ -z "${WEBHOOK}" ]] && echo "  NOTE: LEVELS_PRODUCT_WEBHOOK_URL unset → agents dry-run (logged, not delivered) to ${LOG_DIR}"
+if [[ -z "${WEBHOOK}" ]]; then
+  echo "  NOTE: LEVELS_PRODUCT_WEBHOOK_URL unset → agents dry-run (logged, not delivered) to ${LOG_DIR}"
+fi
+exit 0
