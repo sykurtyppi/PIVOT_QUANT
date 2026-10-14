@@ -9,7 +9,7 @@
 
 ## 🎯 Overview
 
-PIVOT_QUANT is a comprehensive, institutional-grade pivot point analysis system that provides:
+PIVOT_QUANT is a comprehensive pivot point analysis system that provides:
 
 - **Mathematical Precision**: IEEE-754 compliant calculations with configurable precision
 - **Multiple Methodologies**: Standard, Fibonacci, Camarilla, Woodie, and DeMark pivot calculations
@@ -17,6 +17,45 @@ PIVOT_QUANT is a comprehensive, institutional-grade pivot point analysis system 
 - **Performance Monitoring**: Real-time performance tracking and optimization
 - **Statistical Validation**: Hypothesis testing and significance analysis
 - **Institutional Architecture**: Scalable, maintainable, and production-ready design
+
+### Current product direction
+
+The production product is the deterministic **levels workflow**: a morning market map,
+point-in-time level calculations, evidence-qualified context, intraday confluence alerts,
+and a prospective track record. The canonical implementation lives in
+`scripts/levels_product/`.
+
+The predictive reject/break ML system is retained as governed research infrastructure.
+Existing candidates have **not demonstrated a useful economic edge**, so ML output must
+not be presented as validated alpha or promoted merely because collection and serving are
+operational. Any future candidate must earn promotion through prospective, common-event,
+after-cost evidence.
+
+Canonical operator commands:
+
+```bash
+# Run the complete daily levels workflow once.
+npm run levels:daily
+
+# Poll the canonical intraday alert path once. Delivery requires the webhook.
+npm run levels:intraday
+
+# Preview alerts without delivery or cursor advancement.
+npm run levels:intraday:dry-run
+
+# Install the daily and intraday macOS LaunchAgents. This also removes the retired
+# com.pivotquant.levels-alerts agent so there is only one alert owner.
+npm run levels:agents:install
+
+# Install only the daily job while alert delivery is not configured.
+npm run levels:agents:install-daily
+```
+
+`LEVELS_PRODUCT_WEBHOOK_URL` enables delivery. When it is unset, the installer
+configures the intraday agent with `--dry-run`, so it cannot repeatedly fail or advance
+the delivery cursor; daily publishing also remains a logged dry run. Reinstall after
+adding the webhook to activate delivery. Do not revive
+`scripts/levels_alerts/run_watcher.sh`: that path is retired.
 
 ## 🚀 Quick Start
 
