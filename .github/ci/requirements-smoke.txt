@@ -1,1 +1,2 @@
 -r ../../requirements-runtime.txt
+PyYAML==6.0.2

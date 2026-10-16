@@ -8,6 +8,7 @@ import importlib.util
 import asyncio
 import os
 import re
+import shlex
 import shutil
 import sqlite3
 import socket
@@ -25,11 +26,70 @@ from urllib.error import HTTPError, URLError
 import urllib.request
 
 import numpy as np
+import yaml
 from fastapi import HTTPException
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PYTHON = str(Path(sys.executable).resolve())
+CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+FULL_PYTHON_DISCOVERY_COMMAND = [
+    "python",
+    "-m",
+    "unittest",
+    "discover",
+    "-s",
+    "tests/python",
+    "-p",
+    "test_*.py",
+    "-v",
+]
+
+
+def workflow_has_active_full_python_discovery(workflow: dict) -> bool:
+    """Return whether an unconditional CI step runs the complete Python suite."""
+    workflow_defaults = workflow.get("defaults", {})
+    if not isinstance(workflow_defaults, dict):
+        return False
+    if workflow_defaults.get("run"):
+        return False
+
+    jobs = workflow.get("jobs", {})
+    if not isinstance(jobs, dict):
+        return False
+
+    for job in jobs.values():
+        if (
+            not isinstance(job, dict)
+            or "if" in job
+            or "needs" in job
+            or "continue-on-error" in job
+        ):
+            continue
+        job_defaults = job.get("defaults", {})
+        if not isinstance(job_defaults, dict) or job_defaults.get("run"):
+            continue
+        steps = job.get("steps", [])
+        if not isinstance(steps, list):
+            continue
+        for step in steps:
+            if not isinstance(step, dict) or "if" in step:
+                continue
+            if any(
+                key in step
+                for key in ("continue-on-error", "working-directory", "shell")
+            ):
+                continue
+            command = step.get("run")
+            if not isinstance(command, str):
+                continue
+            try:
+                command_parts = shlex.split(command)
+            except ValueError:
+                continue
+            if command_parts == FULL_PYTHON_DISCOVERY_COMMAND:
+                return True
+    return False
 
 
 def run_cmd(cmd: list[str], cwd: Path, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -16260,6 +16320,72 @@ class OpsSmokeTests(unittest.TestCase):
             self.assertEqual(counters["last_blocked_at_ms"], 123456)
         finally:
             ml_server.serving_state_observability = original_obs
+
+
+class CiPythonDiscoveryPolicyTests(unittest.TestCase):
+    def test_ci_runs_all_python_test_files_by_default(self) -> None:
+        workflow = yaml.safe_load(CI_WORKFLOW.read_text(encoding="utf-8"))
+
+        self.assertIsInstance(workflow, dict)
+        self.assertTrue(
+            workflow_has_active_full_python_discovery(workflow),
+            "CI must actively run every tests/python/test_*.py file by default",
+        )
+
+    def test_policy_rejects_inactive_or_partial_commands(self) -> None:
+        old_partial_command = (
+            "python -m unittest discover -s tests/python "
+            "-p 'test_ops_smoke.py' -v"
+        )
+        full_command = (
+            'python -m unittest discover -s tests/python -p "test_*.py" -v'
+        )
+        mutations = (
+            f"jobs:\n  tests:\n    steps:\n      - run: {old_partial_command!r}\n"
+            f"        # {full_command}\n",
+            f"jobs:\n  tests:\n    steps:\n      - if: false\n        run: {full_command!r}\n",
+            f"jobs:\n  tests:\n    if: false\n    steps:\n      - run: {full_command!r}\n",
+            f"jobs:\n  tests:\n    continue-on-error: true\n    steps:\n      - run: {full_command!r}\n",
+            f"jobs:\n  tests:\n    continue-on-error: false\n    steps:\n      - run: {full_command!r}\n",
+            f"jobs:\n  tests:\n    continue-on-error: ${{{{ false }}}}\n    steps:\n      - run: {full_command!r}\n",
+            f"jobs:\n  tests:\n    steps:\n      - continue-on-error: true\n        run: {full_command!r}\n",
+            f"jobs:\n  tests:\n    steps:\n      - continue-on-error: ${{{{ true }}}}\n        run: {full_command!r}\n",
+            f"jobs:\n  tests:\n    defaults:\n      run:\n        working-directory: scripts\n    steps:\n      - run: {full_command!r}\n",
+            f"defaults:\n  run:\n    working-directory: scripts\njobs:\n  tests:\n    steps:\n      - run: {full_command!r}\n",
+            f"jobs:\n  tests:\n    steps:\n      - shell: python\n        run: {full_command!r}\n",
+            "jobs:\n"
+            "  disabled:\n"
+            "    if: false\n"
+            "    steps:\n"
+            "      - run: 'true'\n"
+            "  tests:\n"
+            "    needs: disabled\n"
+            "    steps:\n"
+            f"      - run: {full_command!r}\n",
+        )
+
+        for workflow_text in mutations:
+            with self.subTest(workflow_text=workflow_text):
+                workflow = yaml.safe_load(workflow_text)
+                self.assertFalse(workflow_has_active_full_python_discovery(workflow))
+
+    def test_policy_accepts_unconditional_full_discovery(self) -> None:
+        workflow = {
+            "jobs": {
+                "tests": {
+                    "steps": [
+                        {
+                            "run": (
+                                "python -m unittest discover -s tests/python "
+                                "-p 'test_*.py' -v"
+                            )
+                        }
+                    ]
+                }
+            }
+        }
+
+        self.assertTrue(workflow_has_active_full_python_discovery(workflow))
 
 
 if __name__ == "__main__":
