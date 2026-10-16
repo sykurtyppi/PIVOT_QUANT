@@ -39,7 +39,8 @@ jobs:
         run: npm test -- --runInBand
 
   python-smoke:
-    name: Python Full Suite
+    # Keep this check name stable because main branch protection requires it.
+    name: Python Ops Smoke
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
