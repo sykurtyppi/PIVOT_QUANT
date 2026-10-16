@@ -17,7 +17,6 @@ rates) suitable for a Discord/newsletter template. Read-only on the DB.
 from __future__ import annotations
 
 import argparse
-import json
 import sqlite3
 import sys
 from datetime import datetime
@@ -32,6 +31,7 @@ sys.path.insert(0, str(REPO / "scripts"))
 sys.path.insert(0, str(REPO / "scripts" / "levels_product"))
 from backfill_events import calculate_pivots  # noqa: E402
 from hold_engine import label_coverage  # noqa: E402
+from level_snapshot import build_snapshot, write_snapshot  # noqa: E402
 
 DB = REPO / "data" / "pivot_events.sqlite"
 ET = ZoneInfo("America/New_York")
@@ -108,44 +108,37 @@ def main():
     base = hold_snapshot["rates"]
     con.close()
 
-    rows = []
-    for label, price in levels.items():
-        rows.append({
-            "level_type": label, "price": round(float(price), 2),
-            "distance_from_spot_bps": round((price - spot) / spot * 1e4, 1),
-            "side": "resistance" if price >= spot else "support",
-        })
-    rows.sort(key=lambda r: -r["price"])
-
-    payload = {
-        "product": "morning_level_map", "symbol": args.symbol,
-        "as_of_utc": datetime.utcnow().isoformat() + "Z",
-        "prior_session_date": str(prior.d),
-        "prior_session_ohlc": {"high": round(float(prior.high), 2), "low": round(float(prior.low), 2),
-                               "close": round(float(prior.close), 2)},
-        "reference_spot": round(spot, 2),
-        "levels": rows,
-        "hold_rates_publishable": hold_snapshot["publishable"],
-        "label_coverage": hold_snapshot["coverage"],
-        "unconditional_hold_rate_by_horizon": base,
-        "disclaimer": ("Base rate is the same for every level — no validated per-level edge exists "
-                       "at the open. Differentiated hold-probabilities are emitted intraday at the "
-                       "touch (confluence alerts)."),
-    }
-    out_dir = Path(args.out_dir); out_dir.mkdir(parents=True, exist_ok=True)
-    fp = out_dir / f"morning_level_map_{args.symbol}_{prior.d}.json"
-    fp.write_text(json.dumps(payload, indent=2))
+    payload = build_snapshot(
+        symbol=args.symbol,
+        source_session_date=prior.d,
+        source_ohlc={"high": prior.high, "low": prior.low, "close": prior.close},
+        generated_at_utc=datetime.now(ZoneInfo("UTC")).isoformat().replace("+00:00", "Z"),
+        raw_levels=levels,
+        evidence={
+            "hold_rates_publishable": hold_snapshot["publishable"],
+            "label_coverage": hold_snapshot["coverage"],
+            "unconditional_hold_rate_by_horizon": base,
+            "disclaimer": (
+                "Base rate is the same for every level — no validated per-level edge exists "
+                "at the open. Differentiated hold-probabilities are emitted intraday at the "
+                "touch (confluence alerts)."
+            ),
+        },
+    )
+    out_dir = Path(args.out_dir)
+    fp, latest = write_snapshot(payload, out_dir)
 
     # human-readable preview (the Discord/newsletter body)
-    print(f"\n📍 SPY LEVEL MAP — {prior.d} session basis (spot ~{spot:.2f})\n")
-    for r in rows:
-        marker = "  ← spot" if abs(r["distance_from_spot_bps"]) < 5 else ""
-        print(f"  {r['level_type']:4s} {r['price']:8.2f}  ({r['distance_from_spot_bps']:+6.1f} bps, {r['side']}){marker}")
+    print(f"\n📍 {args.symbol} LEVEL MAP — {payload['session_date']} session (spot ~{spot:.2f})\n")
+    for r in payload["levels"]:
+        marker = "  ← spot" if abs(r["distance_from_reference_bps"]) < 5 else ""
+        print(f"  {r['label']:4s} {r['price']:8.2f}  "
+              f"({r['distance_from_reference_bps']:+6.1f} bps, {r['side']}){marker}")
     if hold_snapshot["publishable"]:
         print("\n  Base hold rate (any level):", {h: f"{v['hold_rate']*100:.0f}%" for h, v in sorted(base.items())})
     else:
         print("\n  Base hold rate: UNAVAILABLE (label coverage incomplete)")
-    print(f"\nWROTE {fp}")
+    print(f"\nWROTE {fp} (latest: {latest.name}, snapshot_id={payload['snapshot_id']})")
 
 
 if __name__ == "__main__":

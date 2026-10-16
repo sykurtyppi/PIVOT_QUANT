@@ -19,7 +19,10 @@ import argparse
 import os
 import sqlite3
 import sys
+from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -27,9 +30,12 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "scripts" / "levels_product"))
 import notify  # noqa: E402
 from hold_engine import bucket, current_rates  # noqa: E402
+from level_snapshot import load_snapshot, validate_snapshot  # noqa: E402
 
 READ_DB = REPO / "data" / "pivot_events.sqlite"
 PRODUCT_DB = REPO / "data" / "levels_product.sqlite"
+ART = REPO / "evidence" / "levels_product"
+ET = ZoneInfo("America/New_York")
 
 
 def _read_con():
@@ -76,8 +82,51 @@ def fmt_alert(row, rates):
                 parts.append(f"{h}m **{int(round(r['rate']*100))}%**")
         odds = " · ".join(parts) if parts else "n/a (insufficient in-tier sample)"
     conf = f"{int(row.confluence_count)}-level confluence" if row.confluence_count >= 1 else "no confluence"
+    reference = ""
+    if getattr(row, "snapshot_id", None) and getattr(row, "level_id", None):
+        reference = f"\n   Ref: {row.snapshot_id} / {row.level_id}"
     return (f"⚡ **SPY** touching `{row.level_type}` @ {row.level_price:.2f} ({side}) — "
-            f"{conf}\n   Hold rate (latest 400 labeled touches per tier): {odds}")
+            f"{conf}\n   Hold rate (latest 400 labeled touches per tier): {odds}{reference}")
+
+
+def bind_snapshot_identity(row, snapshot):
+    """Attach canonical snapshot/level IDs or fail closed on calculation drift."""
+    validate_snapshot(snapshot)
+    matches = [level for level in snapshot["levels"] if level["label"] == row.level_type]
+    if len(matches) != 1 or abs(float(matches[0]["price"]) - float(row.level_price)) > 0.011:
+        raise ValueError(
+            f"touch {row.event_id} level {row.level_type}@{row.level_price:.4f} "
+            f"does not match snapshot {snapshot['snapshot_id']}"
+        )
+    values = row._asdict() if hasattr(row, "_asdict") else vars(row)
+    return SimpleNamespace(
+        **values,
+        snapshot_id=snapshot["snapshot_id"],
+        level_id=matches[0]["level_id"],
+    )
+
+
+def _snapshot_for_event(symbol, ts_event, art_dir=ART):
+    session_date = datetime.fromtimestamp(int(ts_event) / 1000, tz=ET).date().isoformat()
+    path = art_dir / f"levels_snapshot_{symbol}_{session_date}.json"
+    if not path.exists():
+        raise ValueError(f"missing canonical levels snapshot for {symbol} session {session_date}")
+    snapshot = load_snapshot(path)
+    if snapshot["symbol"] != symbol or snapshot["session_date"] != session_date:
+        raise ValueError(f"snapshot identity mismatch for {symbol} session {session_date}")
+    return snapshot
+
+
+def bind_snapshot_rows(new, symbol, art_dir=ART):
+    """Bind every pending touch before any delivery or checkpoint mutation."""
+    cache = {}
+    bound = []
+    for row in new.itertuples(index=False):
+        session_date = datetime.fromtimestamp(int(row.ts_event) / 1000, tz=ET).date().isoformat()
+        if session_date not in cache:
+            cache[session_date] = _snapshot_for_event(symbol, row.ts_event, art_dir)
+        bound.append(vars(bind_snapshot_identity(row, cache[session_date])))
+    return pd.DataFrame(bound)
 
 
 def _checkpoint(scon, symbol, row):
@@ -86,14 +135,16 @@ def _checkpoint(scon, symbol, row):
     scon.commit()
 
 
-def deliver_alerts(new, rates, scon, symbol, max_alerts, *, dry_run=False):
+def deliver_alerts(new, rates, scon, symbol, max_alerts, *, dry_run=False, pending_count=None):
     """Deliver rows in order and checkpoint only confirmed deliveries.
 
     A failed row terminates the batch so the failed event and every later event
     remain pending for the next poll. Dry-run is a pure preview: it sends and
     checkpoints nothing.
     """
+    total_pending = len(new) if pending_count is None else pending_count
     attempted = min(len(new), max(0, max_alerts))
+    deferred = max(0, total_pending - attempted)
     if attempted == 0:
         print("delivered 0 alert(s); state unchanged (nothing processed)")
         return 0
@@ -102,8 +153,8 @@ def deliver_alerts(new, rates, scon, symbol, max_alerts, *, dry_run=False):
         for row in new.iloc[:attempted].itertuples():
             print(fmt_alert(row, rates))
         print(f"previewed {attempted} alert(s); state unchanged")
-        if attempted < len(new):
-            print(f"hit max-alerts cap ({max_alerts}); {len(new)-attempted} deferred")
+        if deferred:
+            print(f"hit max-alerts cap ({max_alerts}); {deferred} deferred")
         return 0
 
     delivered = 0
@@ -123,8 +174,8 @@ def deliver_alerts(new, rates, scon, symbol, max_alerts, *, dry_run=False):
 
     print(f"delivered {delivered} alert(s); "
           f"state advanced to ts={int(new.iloc[delivered - 1].ts_event)}")
-    if attempted < len(new):
-        print(f"hit max-alerts cap ({max_alerts}); {len(new)-attempted} deferred to next poll")
+    if deferred:
+        print(f"hit max-alerts cap ({max_alerts}); {deferred} deferred to next poll")
     return 0
 
 
@@ -172,9 +223,18 @@ def main(argv=None):
         rcon.close(); scon.close()
         return 0
 
+    pending_count = len(new)
+    bounded = new.iloc[:max(0, args.max_alerts)].copy()
+    try:
+        bounded = bind_snapshot_rows(bounded, args.symbol)
+    except ValueError as exc:
+        print(f"levels snapshot contract error: {exc}; state unchanged")
+        rcon.close(); scon.close()
+        return 3
+
     rates = current_rates(rcon, args.symbol, args.dq_min)
-    rc = deliver_alerts(new, rates, scon, args.symbol, args.max_alerts,
-                        dry_run=args.dry_run)
+    rc = deliver_alerts(bounded, rates, scon, args.symbol, args.max_alerts,
+                        dry_run=args.dry_run, pending_count=pending_count)
     rcon.close(); scon.close()
     return rc
 

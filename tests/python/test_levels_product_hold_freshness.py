@@ -211,14 +211,16 @@ class MorningPublicationTest(unittest.TestCase):
     def test_render_withholds_all_rates_when_artifact_coverage_is_incomplete(self):
         mp = {
             "symbol": "SPY",
-            "reference_spot": 700.0,
-            "prior_session_date": "2026-10-01",
+            "reference_price": 700.0,
+            "session_date": "2026-10-02",
             "levels": [],
-            "hold_rates_publishable": False,
-            "label_coverage": {"30": {"complete": False, "missing_count": 7}},
-            "unconditional_hold_rate_by_horizon": {
-                "15": {"hold_rate": 0.80, "n": 100},
-                "60": {"hold_rate": 0.87, "n": 100},
+            "evidence": {
+                "hold_rates_publishable": False,
+                "label_coverage": {"30": {"complete": False, "missing_count": 7}},
+                "unconditional_hold_rate_by_horizon": {
+                    "15": {"hold_rate": 0.80, "n": 100},
+                    "60": {"hold_rate": 0.87, "n": 100},
+                },
             },
         }
         tr = {
@@ -238,14 +240,16 @@ class MorningPublicationTest(unittest.TestCase):
         self.assertNotIn("87%", body)
         self.assertNotIn("% held", body)
 
-    def test_render_withholds_rates_when_legacy_artifacts_omit_coverage_metadata(self):
+    def test_render_withholds_rates_when_contract_evidence_omits_coverage_metadata(self):
         mp = {
             "symbol": "SPY",
-            "reference_spot": 700.0,
-            "prior_session_date": "2026-10-01",
+            "reference_price": 700.0,
+            "session_date": "2026-10-02",
             "levels": [],
-            "unconditional_hold_rate_by_horizon": {
-                "15": {"hold_rate": 0.80, "n": 100},
+            "evidence": {
+                "unconditional_hold_rate_by_horizon": {
+                    "15": {"hold_rate": 0.80, "n": 100},
+                },
             },
         }
         tr = {
