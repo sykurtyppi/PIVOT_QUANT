@@ -18,7 +18,8 @@ import json
 import os
 from pathlib import Path
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "scripts"))
@@ -30,6 +31,7 @@ from level_snapshot import (  # noqa: E402
     _create_immutable_json,
     load_snapshot,
 )
+from trading_calendar import REGULAR_SESSION_OPEN_ET, is_trading_day  # noqa: E402
 
 ART = REPO / "evidence" / "levels_product"
 
@@ -111,15 +113,43 @@ def _canonical_bytes(value) -> bytes:
     ).encode("utf-8")
 
 
-def build_briefing_artifact(mp, tr) -> dict:
+def _parse_utc(value: str, field: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        raise ValueError(f"{field} must include a timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+def build_briefing_artifact(mp, tr, *, captured_at_utc: str | None = None) -> dict:
     """Freeze the exact pre-market message and the evidence it was built from."""
+    captured_text = captured_at_utc or mp["generated_at_utc"]
+    captured = _parse_utc(captured_text, "captured_at_utc")
+    snapshot_generated = _parse_utc(mp["generated_at_utc"], "generated_at_utc")
+    track_as_of = _parse_utc(tr.get("as_of_utc"), "track_record_as_of_utc")
+    session_day = date.fromisoformat(mp["session_date"])
+    if not is_trading_day(session_day):
+        raise ValueError("session_date must be a trading day")
+    session_open = datetime.combine(
+        session_day, REGULAR_SESSION_OPEN_ET, ZoneInfo("America/New_York")
+    ).astimezone(timezone.utc)
+    if snapshot_generated > captured:
+        raise ValueError("snapshot was generated after briefing capture")
+    if track_as_of > captured:
+        raise ValueError("track record evidence is later than briefing capture")
+    if captured > session_open:
+        raise ValueError("briefing capture must occur no later than session open")
+
     track_record_sha256 = hashlib.sha256(_canonical_bytes(tr)).hexdigest()
     core = {
         "contract": "pivotquant.morning_briefing",
         "contract_version": 1,
         "symbol": mp["symbol"],
         "session_date": mp["session_date"],
-        "prepared_at_utc": mp["generated_at_utc"],
+        "prepared_at_utc": captured.isoformat().replace("+00:00", "Z"),
+        "snapshot_generated_at_utc": mp["generated_at_utc"],
         "snapshot_id": mp["snapshot_id"],
         "track_record_as_of_utc": tr.get("as_of_utc"),
         "track_record_sha256": track_record_sha256,
@@ -169,6 +199,28 @@ def write_briefing_artifact(artifact: dict, out_dir: Path) -> tuple[Path, Path]:
         finally:
             fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
     return immutable, latest
+
+
+def load_or_build_briefing(
+    mp: dict, tr: dict, out_dir: Path, *, captured_at_utc: str
+) -> tuple[dict, Path]:
+    """Reuse the frozen session briefing on retries; never rebuild its evidence."""
+    immutable = out_dir / f"morning_briefing_{mp['symbol']}_{mp['session_date']}.json"
+    if immutable.exists():
+        artifact = _load_briefing(immutable)
+        expected = {
+            "contract": "pivotquant.morning_briefing",
+            "symbol": mp["symbol"],
+            "session_date": mp["session_date"],
+            "snapshot_id": mp["snapshot_id"],
+        }
+        if any(artifact.get(key) != value for key, value in expected.items()):
+            raise ValueError(f"existing briefing does not match current snapshot: {immutable}")
+        return artifact, immutable
+
+    artifact = build_briefing_artifact(mp, tr, captured_at_utc=captured_at_utc)
+    immutable, _ = write_briefing_artifact(artifact, out_dir)
+    return artifact, immutable
 
 
 def _resolve_channel(requested: str) -> str:
@@ -252,8 +304,10 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="build but do not actually send")
     args = ap.parse_args()
     mp, tr = _latest(args.symbol)
-    briefing = build_briefing_artifact(mp, tr)
-    immutable, _ = write_briefing_artifact(briefing, ART)
+    captured_at_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    briefing, immutable = load_or_build_briefing(
+        mp, tr, ART, captured_at_utc=captured_at_utc
+    )
     channel = _resolve_channel(args.channel)
     ok, status = deliver_briefing(
         briefing, channel=channel, out_dir=ART, dry_run=args.dry_run

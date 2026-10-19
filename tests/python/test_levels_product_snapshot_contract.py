@@ -366,9 +366,47 @@ class BriefingArtifactTest(unittest.TestCase):
         self.assertEqual(artifact["contract_version"], 1)
         self.assertEqual(artifact["snapshot_id"], self.snapshot["snapshot_id"])
         self.assertEqual(artifact["prepared_at_utc"], self.snapshot["generated_at_utc"])
+        self.assertEqual(
+            artifact["snapshot_generated_at_utc"], self.snapshot["generated_at_utc"]
+        )
         self.assertEqual(artifact["track_record"], self.track_record)
         self.assertRegex(artifact["briefing_id"], r"^brf_[0-9a-f]{24}$")
         self.assertIn("SPY LEVELS — 2026-10-02 session", artifact["body"])
+
+    def test_rejects_post_open_or_future_evidence_capture(self):
+        with self.assertRaisesRegex(ValueError, "later than briefing capture"):
+            publish.build_briefing_artifact(
+                self.snapshot,
+                {**self.track_record, "as_of_utc": "2026-10-02T12:01:00Z"},
+                captured_at_utc="2026-10-02T12:00:00Z",
+            )
+        with self.assertRaisesRegex(ValueError, "no later than session open"):
+            publish.build_briefing_artifact(
+                self.snapshot,
+                self.track_record,
+                captured_at_utc="2026-10-02T14:00:00Z",
+            )
+
+    def test_retry_reuses_frozen_briefing_even_if_track_record_file_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            first, immutable = publish.load_or_build_briefing(
+                self.snapshot,
+                self.track_record,
+                out_dir,
+                captured_at_utc="2026-10-02T11:01:00Z",
+            )
+            changed = {**self.track_record, "as_of_utc": "2026-10-02T11:05:00Z"}
+            retry, retry_path = publish.load_or_build_briefing(
+                self.snapshot,
+                changed,
+                out_dir,
+                captured_at_utc="2026-10-02T11:06:00Z",
+            )
+
+            self.assertEqual(retry, first)
+            self.assertEqual(retry_path, immutable)
+            self.assertEqual(retry["track_record"], self.track_record)
 
     def test_write_freezes_first_briefing_and_rejects_changed_rerun(self):
         first = publish.build_briefing_artifact(self.snapshot, self.track_record)
