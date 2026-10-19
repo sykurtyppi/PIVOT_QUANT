@@ -13915,6 +13915,7 @@ class OpsSmokeTests(unittest.TestCase):
         train_purge: dict | None = None,
         score_observations: list | None = None,
         score_observations_source: str | None = None,
+        oos_slice_bounds: list[dict] | None = None,
     ) -> dict:
         if train_purge is None:
             train_purge = {
@@ -13938,6 +13939,7 @@ class OpsSmokeTests(unittest.TestCase):
             "train_purge": train_purge,
             "score_observations": score_observations,
             "score_observations_source": score_observations_source,
+            "oos_slice_bounds": oos_slice_bounds,
         }
 
     @classmethod
@@ -14434,8 +14436,18 @@ class OpsSmokeTests(unittest.TestCase):
         module = self._readiness_module()
         obs = self._strong_pass_obs()
         rows = [
-            self._ph_row(t, h, score=10.0, score_observations=obs,
-                         score_observations_source="held_out_slice")
+            self._ph_row(
+                t, h, score=10.0, score_observations=obs,
+                score_observations_source="held_out_slice",
+                oos_slice_bounds=[{
+                    "producer": "pivotquant.held_out_oos.v1",
+                    "fold": 0,
+                    "train_end_ts": 1_767_225_599_000,
+                    "test_start_ts": 1_767_225_600_000,
+                    "test_end_ts": 1_774_915_199_000,
+                    "feasible": True,
+                }],
+            )
             for t, h in [
                 ("reject", 5), ("reject", 15), ("reject", 30), ("reject", 60),
                 ("break", 5), ("break", 15), ("break", 30), ("break", 60),
@@ -14452,6 +14464,24 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(result["promotion_disposition"], "ready_full_family")
         self.assertTrue(result["promotion_ready"])
         self.assertNotIn("oos_validation_missing", result["reasons"])
+
+    def test_b3_allowlisted_source_without_split_bounds_cannot_promote(self) -> None:
+        module = self._readiness_module()
+        obs = self._strong_pass_obs()
+        rows = [
+            self._ph_row(
+                t, h, score=10.0, score_observations=obs,
+                score_observations_source="held_out_slice",
+            )
+            for t, h in [
+                ("reject", 5), ("reject", 15), ("reject", 30), ("reject", 60),
+                ("break", 5), ("break", 15), ("break", 30), ("break", 60),
+            ]
+        ]
+        result = module.classify_candidate_readiness(self._build_report_stub(rows))
+        self.assertFalse(result["oos_validation_present"])
+        self.assertFalse(result["promotion_ready"])
+        self.assertIn("oos_validation_missing", result["reasons"])
 
     def test_b3_unrecognized_source_treated_as_in_sample(self) -> None:
         """A typo'd or non-conventional source name MUST NOT promote.
@@ -14526,13 +14556,45 @@ class OpsSmokeTests(unittest.TestCase):
             # 4 horizons OOS, 4 horizons in-sample. Each axis covers only
             # half of the viable set; promotion gating must reject this.
             self._ph_row("reject", 5, score=10.0, score_observations=obs,
-                         score_observations_source="held_out_slice"),
+                         score_observations_source="held_out_slice",
+                         oos_slice_bounds=[{
+                             "producer": "pivotquant.held_out_oos.v1",
+                             "fold": 0,
+                             "train_end_ts": 1_767_225_599_000,
+                             "test_start_ts": 1_767_225_600_000,
+                             "test_end_ts": 1_774_915_199_000,
+                             "feasible": True,
+                         }]),
             self._ph_row("reject", 15, score=20.0, score_observations=obs,
-                         score_observations_source="held_out_slice"),
+                         score_observations_source="held_out_slice",
+                         oos_slice_bounds=[{
+                             "producer": "pivotquant.held_out_oos.v1",
+                             "fold": 0,
+                             "train_end_ts": 1_767_225_599_000,
+                             "test_start_ts": 1_767_225_600_000,
+                             "test_end_ts": 1_774_915_199_000,
+                             "feasible": True,
+                         }]),
             self._ph_row("reject", 30, score=30.0, score_observations=obs,
-                         score_observations_source="held_out_slice"),
+                         score_observations_source="held_out_slice",
+                         oos_slice_bounds=[{
+                             "producer": "pivotquant.held_out_oos.v1",
+                             "fold": 0,
+                             "train_end_ts": 1_767_225_599_000,
+                             "test_start_ts": 1_767_225_600_000,
+                             "test_end_ts": 1_774_915_199_000,
+                             "feasible": True,
+                         }]),
             self._ph_row("reject", 60, score=40.0, score_observations=obs,
-                         score_observations_source="held_out_slice"),
+                         score_observations_source="held_out_slice",
+                         oos_slice_bounds=[{
+                             "producer": "pivotquant.held_out_oos.v1",
+                             "fold": 0,
+                             "train_end_ts": 1_767_225_599_000,
+                             "test_start_ts": 1_767_225_600_000,
+                             "test_end_ts": 1_774_915_199_000,
+                             "feasible": True,
+                         }]),
             self._ph_row("break", 5, score=5.0, score_observations=obs,
                          score_observations_source="threshold_tune_slice"),
             self._ph_row("break", 15, score=6.0, score_observations=obs,
@@ -14584,13 +14646,45 @@ class OpsSmokeTests(unittest.TestCase):
         rows = [
             # 4 OOS with observations.
             self._ph_row("reject", 5, score=10.0, score_observations=obs,
-                         score_observations_source="held_out_slice"),
+                         score_observations_source="held_out_slice",
+                         oos_slice_bounds=[{
+                             "producer": "pivotquant.held_out_oos.v1",
+                             "fold": 0,
+                             "train_end_ts": 1_767_225_599_000,
+                             "test_start_ts": 1_767_225_600_000,
+                             "test_end_ts": 1_774_915_199_000,
+                             "feasible": True,
+                         }]),
             self._ph_row("reject", 15, score=20.0, score_observations=obs,
-                         score_observations_source="held_out_slice"),
+                         score_observations_source="held_out_slice",
+                         oos_slice_bounds=[{
+                             "producer": "pivotquant.held_out_oos.v1",
+                             "fold": 0,
+                             "train_end_ts": 1_767_225_599_000,
+                             "test_start_ts": 1_767_225_600_000,
+                             "test_end_ts": 1_774_915_199_000,
+                             "feasible": True,
+                         }]),
             self._ph_row("reject", 30, score=30.0, score_observations=obs,
-                         score_observations_source="held_out_slice"),
+                         score_observations_source="held_out_slice",
+                         oos_slice_bounds=[{
+                             "producer": "pivotquant.held_out_oos.v1",
+                             "fold": 0,
+                             "train_end_ts": 1_767_225_599_000,
+                             "test_start_ts": 1_767_225_600_000,
+                             "test_end_ts": 1_774_915_199_000,
+                             "feasible": True,
+                         }]),
             self._ph_row("reject", 60, score=40.0, score_observations=obs,
-                         score_observations_source="held_out_slice"),
+                         score_observations_source="held_out_slice",
+                         oos_slice_bounds=[{
+                             "producer": "pivotquant.held_out_oos.v1",
+                             "fold": 0,
+                             "train_end_ts": 1_767_225_599_000,
+                             "test_start_ts": 1_767_225_600_000,
+                             "test_end_ts": 1_774_915_199_000,
+                             "feasible": True,
+                         }]),
             # 4 viable but no observations -> insufficient_data.
             self._ph_row("break", 5, score=5.0),
             self._ph_row("break", 15, score=6.0),
@@ -14621,8 +14715,18 @@ class OpsSmokeTests(unittest.TestCase):
         module = self._readiness_module()
         obs = self._strong_pass_obs()
         rows = [
-            self._ph_row(t, h, score=10.0, score_observations=obs,
-                         score_observations_source="held_out_slice")
+            self._ph_row(
+                t, h, score=10.0, score_observations=obs,
+                score_observations_source="held_out_slice",
+                oos_slice_bounds=[{
+                    "producer": "pivotquant.held_out_oos.v1",
+                    "fold": 0,
+                    "train_end_ts": 1_767_225_599_000,
+                    "test_start_ts": 1_767_225_600_000,
+                    "test_end_ts": 1_774_915_199_000,
+                    "feasible": True,
+                }],
+            )
             for t, h in [
                 ("reject", 5), ("reject", 15), ("reject", 30), ("reject", 60),
                 ("break", 5), ("break", 15), ("break", 30), ("break", 60),

@@ -32,7 +32,7 @@ sys.path.insert(0, str(REPO / "scripts" / "levels_product"))
 from backfill_events import calculate_pivots  # noqa: E402
 from hold_engine import label_coverage  # noqa: E402
 from level_snapshot import build_snapshot, write_snapshot  # noqa: E402
-from trading_calendar import REGULAR_SESSION_OPEN_ET, session_close_et  # noqa: E402
+from trading_calendar import REGULAR_SESSION_OPEN_ET, is_trading_day, session_close_et  # noqa: E402
 
 DB = REPO / "data" / "pivot_events.sqlite"
 ET = ZoneInfo("America/New_York")
@@ -74,6 +74,9 @@ def daily_rth_ohlc(con, symbol):
     open_minute = REGULAR_SESSION_OPEN_ET.hour * 60 + REGULAR_SESSION_OPEN_ET.minute
     complete = []
     for row in o.itertuples():
+        if not is_trading_day(row.d):
+            complete.append(False)
+            continue
         close = session_close_et(row.d)
         close_minute = close.hour * 60 + close.minute
         expected_bars = close_minute - open_minute

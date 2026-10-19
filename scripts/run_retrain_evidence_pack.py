@@ -740,6 +740,7 @@ def _validate_horizon_statistically(
         # the in-sample-vs-OOS routing in the aggregator.
         "score_observations_source": row.get(source_key),
         "signals_on_tune_slice": row.get(signals_key),
+        "oos_slice_bounds": row.get("oos_slice_bounds"),
     }
 
     if observations is None:
@@ -890,7 +891,7 @@ def run_oos_validation(
 _OOS_OBSERVATION_SOURCES_EXACT = frozenset({"held_out_slice", "walk_forward_fold"})
 
 
-def _is_oos_source(source: object) -> bool:
+def _is_oos_source(source: object, bounds: object = None) -> bool:
     """Return True iff ``source`` names a recognized OOS observation slice.
 
     Conservatively False for None, empty strings, and any source the
@@ -904,7 +905,28 @@ def _is_oos_source(source: object) -> bool:
     s = source.strip()
     if not s:
         return False
-    return s in _OOS_OBSERVATION_SOURCES_EXACT
+    if s not in _OOS_OBSERVATION_SOURCES_EXACT:
+        return False
+    if not isinstance(bounds, list) or not bounds:
+        return False
+    expected_producer = {
+        "walk_forward_fold": "pivotquant.walk_forward_oos.v1",
+        "held_out_slice": "pivotquant.held_out_oos.v1",
+    }[s]
+    for fold in bounds:
+        if (not isinstance(fold, dict)
+                or fold.get("producer") != expected_producer
+                or fold.get("feasible") is not True):
+            return False
+        try:
+            train_end = int(fold["train_end_ts"])
+            test_start = int(fold["test_start_ts"])
+            test_end = int(fold["test_end_ts"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        if not (train_end < test_start <= test_end):
+            return False
+    return True
 
 
 def _aggregate_statistical_validation(
@@ -983,7 +1005,7 @@ def _aggregate_statistical_validation(
     for key, res in per_horizon_results.items():
         status = res.get("status")
         source = res.get("score_observations_source")
-        is_oos = _is_oos_source(source)
+        is_oos = _is_oos_source(source, res.get("oos_slice_bounds"))
         if status in ("passed", "failed"):
             passed_bool = status == "passed"
             overall_ran.append(passed_bool)

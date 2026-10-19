@@ -100,6 +100,14 @@ describe('enhanced_fdr_correction.js — EnhancedFDRCorrection', () => {
       const out = E.enhancedBenjaminiHochbergCorrection([0], 2);
       expect(out.significant).toEqual([false]);
     });
+
+    test('sparse p-value arrays fail closed without throwing', () => {
+      const sparse = [];
+      sparse[1] = 0.01;
+      const out = E.enhancedBenjaminiHochbergCorrection(sparse, 0.05);
+      expect(out.qValues).toHaveLength(2);
+      expect(out.significant).toEqual([false, true]);
+    });
   });
 
   describe('permutationTest (randomised — bounded, not pinned)', () => {
@@ -133,7 +141,7 @@ describe('enhanced_fdr_correction.js — EnhancedFDRCorrection', () => {
       const out = E.analyzePivotSignificanceEnhanced(
         { WIN: { successes: 95, trials: 100 } },
         'RANGE', 'weekly',
-        { customBaselines: { WIN: 0.5 } },
+        { customBaselines: { WIN: 0.5 }, overlapHorizon: 1 },
       );
       const r = out.levels.WIN;
       expect(r.hasSufficientData).toBe(true);
@@ -158,7 +166,7 @@ describe('enhanced_fdr_correction.js — EnhancedFDRCorrection', () => {
       const out = E.analyzePivotSignificanceEnhanced(
         { SMALL: { successes: 4, trials: 5 } },
         'RANGE', 'weekly',
-        { customBaselines: { SMALL: 0.5 } },
+        { customBaselines: { SMALL: 0.5 }, overlapHorizon: 1 },
       );
       const r = out.levels.SMALL;
       expect(r.hasSufficientData).toBe(false);
@@ -175,7 +183,7 @@ describe('enhanced_fdr_correction.js — EnhancedFDRCorrection', () => {
       const out = E.analyzePivotSignificanceEnhanced(
         { BAD: { successes: NaN, trials: 100 } },
         'RANGE', 'weekly',
-        { customBaselines: { BAD: 0.5 } },
+        { customBaselines: { BAD: 0.5 }, overlapHorizon: 1 },
       );
       expect(out.levels.BAD.hasSufficientData).toBe(false);
       expect(out.levels.BAD.significant).toBe(false);
@@ -186,14 +194,14 @@ describe('enhanced_fdr_correction.js — EnhancedFDRCorrection', () => {
       const invalidAlpha = E.analyzePivotSignificanceEnhanced(
         { WIN: { successes: 100, trials: 100 } },
         'RANGE', 'weekly',
-        { alpha: 2, customBaselines: { WIN: 0.5 } },
+        { alpha: 2, customBaselines: { WIN: 0.5 }, overlapHorizon: 1 },
       );
       expect(invalidAlpha.levels.WIN.significant).toBe(false);
 
       const invalidBaseline = E.analyzePivotSignificanceEnhanced(
         { WIN: { successes: 100, trials: 100 }, BAD: null },
         'RANGE', 'weekly',
-        { customBaselines: { WIN: NaN, BAD: 0.5 } },
+        { customBaselines: { WIN: NaN, BAD: 0.5 }, overlapHorizon: 1 },
       );
       expect(invalidBaseline.levels.WIN.hasSufficientData).toBe(false);
       expect(invalidBaseline.levels.WIN.significant).toBe(false);
@@ -202,10 +210,37 @@ describe('enhanced_fdr_correction.js — EnhancedFDRCorrection', () => {
       const zeroBaseline = E.analyzePivotSignificanceEnhanced(
         { ZERO: { successes: 1, trials: 100 } },
         'RANGE', 'weekly',
-        { customBaselines: { ZERO: 0 } },
+        { customBaselines: { ZERO: 0 }, overlapHorizon: 1 },
       );
       expect(zeroBaseline.levels.ZERO.baseline).toBe(0);
       expect(E.analyzePivotSignificanceEnhanced(null).summary.totalLevels).toBe(0);
+    });
+
+    test('malformed levels remain in the predeclared BH family as p=1', () => {
+      const out = E.analyzePivotSignificanceEnhanced(
+        { A: { successes: 16, trials: 20 }, BAD: null },
+        'RANGE', 'weekly',
+        { customBaselines: { A: 0.56, BAD: 0.5 }, overlapHorizon: 1 },
+      );
+      expect(out.levels.A.pValue).toBeLessThan(0.05);
+      expect(out.levels.A.qValue).toBeGreaterThan(0.05);
+      expect(out.levels.A.significant).toBe(false);
+    });
+
+    test('overlap horizon supplies the conservative n_obs / h lower bound', () => {
+      const out = E.analyzePivotSignificanceEnhanced(
+        { WIN: { successes: 95, trials: 100 } },
+        'RANGE', 'weekly',
+        { customBaselines: { WIN: 0.5 }, overlapHorizon: 5 },
+      );
+      expect(out.levels.WIN.nEffective).toBe(20);
+      const missing = E.analyzePivotSignificanceEnhanced(
+        { WIN: { successes: 95, trials: 100 } },
+        'RANGE', 'weekly',
+        { customBaselines: { WIN: 0.5 } },
+      );
+      expect(missing.levels.WIN.nEffective).toBe(0);
+      expect(missing.levels.WIN.hasSufficientData).toBe(false);
     });
   });
 
@@ -215,7 +250,7 @@ describe('enhanced_fdr_correction.js — EnhancedFDRCorrection', () => {
       out = E.analyzePivotSignificanceEnhanced(
         { WIN: { successes: 95, trials: 100 }, SMALL: { successes: 4, trials: 5 } },
         'RANGE', 'weekly',
-        { customBaselines: { WIN: 0.5, SMALL: 0.5 } },
+        { customBaselines: { WIN: 0.5, SMALL: 0.5 }, overlapHorizon: 1 },
       );
     });
 

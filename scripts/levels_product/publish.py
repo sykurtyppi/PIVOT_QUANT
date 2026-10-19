@@ -162,9 +162,25 @@ def build_briefing_artifact(mp, tr, *, captured_at_utc: str | None = None) -> di
 
 def _load_briefing(path: Path) -> dict:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        artifact = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"could not read morning briefing {path}: {exc}") from exc
+    _validate_briefing_integrity(artifact)
+    return artifact
+
+
+def _validate_briefing_integrity(artifact: dict) -> None:
+    if not isinstance(artifact, dict):
+        raise ValueError("briefing artifact must be an object")
+    briefing_id = artifact.get("briefing_id")
+    core = {key: value for key, value in artifact.items() if key != "briefing_id"}
+    expected_id = f"brf_{hashlib.sha256(_canonical_bytes(core)).hexdigest()[:24]}"
+    if briefing_id != expected_id:
+        raise ValueError("briefing identity digest mismatch")
+    track_record = artifact.get("track_record")
+    expected_track_hash = hashlib.sha256(_canonical_bytes(track_record)).hexdigest()
+    if artifact.get("track_record_sha256") != expected_track_hash:
+        raise ValueError("briefing track-record digest mismatch")
 
 
 def write_briefing_artifact(artifact: dict, out_dir: Path) -> tuple[Path, Path]:
@@ -246,7 +262,12 @@ def deliver_briefing(
     out_dir: Path,
     dry_run: bool = False,
 ) -> tuple[bool, str]:
-    """Deliver once per briefing/channel and persist confirmed success separately."""
+    """Deduplicate confirmed delivery.
+
+    Remote acceptance followed by a local crash remains an at-least-once
+    ambiguity unless the configured provider honors an idempotency key.
+    """
+    _validate_briefing_integrity(artifact)
     if dry_run or channel == "dryrun":
         print(artifact["body"])
         return False, "dry-run"
@@ -260,7 +281,10 @@ def deliver_briefing(
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
         try:
             if receipt_path.exists():
-                receipt = _load_briefing(receipt_path)
+                try:
+                    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError) as exc:
+                    raise ValueError(f"could not read delivery receipt {receipt_path}: {exc}") from exc
                 if (
                     receipt.get("briefing_id") != artifact["briefing_id"]
                     or receipt.get("channel") != channel

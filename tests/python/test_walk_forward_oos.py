@@ -307,7 +307,13 @@ class TestOrchestration(unittest.TestCase):
 
 class TestEvidencePackOOSAxis(unittest.TestCase):
     def test_walk_forward_fold_recognized_as_oos(self):
-        self.assertTrue(ep._is_oos_source("walk_forward_fold"))
+        bounds = [{
+            "producer": "pivotquant.walk_forward_oos.v1",
+            "train_end_ts": 1000, "test_start_ts": 2000,
+            "test_end_ts": 3000, "feasible": True,
+        }]
+        self.assertTrue(ep._is_oos_source("walk_forward_fold", bounds))
+        self.assertFalse(ep._is_oos_source("walk_forward_fold"))
         self.assertFalse(ep._is_oos_source("threshold_tune_slice"))
         self.assertFalse(ep._is_oos_source("oos_fabricated"))
         self.assertFalse(ep._is_oos_source("oos_"))
@@ -323,6 +329,11 @@ class TestEvidencePackOOSAxis(unittest.TestCase):
             "oos_score_observations": oos,
             "oos_score_observations_source": "walk_forward_fold" if oos else None,
             "signals_on_oos_slice": len(oos) if oos else 0,
+            "oos_slice_bounds": [{
+                "producer": "pivotquant.walk_forward_oos.v1",
+                "train_end_ts": 1000, "test_start_ts": 2000,
+                "test_end_ts": 3000, "feasible": True,
+            }] if oos else None,
         }
 
     def test_oos_coverage_complete_only_when_all_viable_have_oos(self):

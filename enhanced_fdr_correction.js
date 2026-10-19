@@ -144,13 +144,14 @@ window.EnhancedFDRCorrection = (() => {
      * Enhanced Benjamini-Hochberg FDR correction with monotonicity guarantee
      */
     function enhancedBenjaminiHochbergCorrection(pValues, alpha = 0.05) {
+        if (!Array.isArray(pValues)) return { qValues: [], significant: [] };
         const n = pValues.length;
         if (n === 0) return { qValues: [], significant: [] };
         const alphaValid = Number.isFinite(alpha) && alpha >= 0 && alpha <= 1;
 
         // Fail closed on malformed statistical inputs. Mapping invalid values to
         // zero would manufacture maximum significance from corrupt data.
-        const validPValues = pValues.map(p => {
+        const validPValues = Array.from(pValues, p => {
             if (!Number.isFinite(p) || p < 0 || p > 1) return 1;
             return p;
         });
@@ -182,16 +183,11 @@ window.EnhancedFDRCorrection = (() => {
         return { qValues, significant };
     }
 
-    /**
-     * Return the observed sample size.
-     *
-     * A fixed timeframe multiplier is not a defensible dependence correction:
-     * without event timestamps or clusters it only changes a gate while leaving
-     * the test statistic untouched. Callers needing clustered inference must
-     * provide a block/session panel rather than a guessed n_eff.
-     */
-    function calculateEffectiveN(trials, regime, timeframe) {
-        return Number.isFinite(trials) && trials >= 0 ? Math.floor(trials) : 0;
+    /** Conservative overlap lower bound n_eff = floor(n_obs / horizon). */
+    function calculateEffectiveN(trials, overlapHorizon) {
+        if (!Number.isFinite(trials) || trials < 0
+            || !Number.isInteger(overlapHorizon) || overlapHorizon <= 0) return 0;
+        return Math.floor(trials / overlapHorizon);
     }
 
     /**
@@ -230,7 +226,8 @@ window.EnhancedFDRCorrection = (() => {
             customBaselines = null,
             permutationTests = false,
             minN = 12,
-            minNEff = 10
+            minNEff = 10,
+            overlapHorizon = null
         } = options;
 
         pivotStats = pivotStats && typeof pivotStats === 'object' ? pivotStats : {};
@@ -263,7 +260,7 @@ window.EnhancedFDRCorrection = (() => {
                 && stats.successes <= stats.trials;
             const trials = countsValid ? stats.trials : 0;
             const successes = countsValid ? stats.successes : 0;
-            const nEff = calculateEffectiveN(trials, regime, timeframe);
+            const nEff = calculateEffectiveN(trials, overlapHorizon);
 
             // Check sample size requirements
             const hasSufficientData = countsValid && trials >= minN && nEff >= minNEff;
@@ -275,7 +272,6 @@ window.EnhancedFDRCorrection = (() => {
 
             if (hasSufficientData) {
                 pValue = oneSidedBinomialTest(successes, trials, p0, oneSided);
-                pValues.push(pValue);
                 validLevels.push(level);
 
                 // Permutation test if requested
@@ -311,19 +307,19 @@ window.EnhancedFDRCorrection = (() => {
                 testType: oneSided ? 'one-sided' : 'two-sided',
                 hypothesis: oneSided ? `H1: p > ${(p0*100).toFixed(1)}%` : `H1: p ≠ ${(p0*100).toFixed(1)}%`
             };
+            pValues.push(pValue);
         });
 
-        // Apply FDR correction only to levels with sufficient data
+        // Preserve the predeclared family: invalid or underpowered levels enter
+        // as p=1 instead of shrinking the multiplicity correction.
         if (pValues.length > 0) {
             const fdrResults = enhancedBenjaminiHochbergCorrection(pValues, alpha);
 
             // Update results with FDR-corrected values
-            let validIndex = 0;
-            levels.forEach(level => {
+            levels.forEach((level, index) => {
                 if (results[level].hasSufficientData) {
-                    results[level].qValue = fdrResults.qValues[validIndex];
-                    results[level].significant = fdrResults.significant[validIndex];
-                    validIndex++;
+                    results[level].qValue = fdrResults.qValues[index];
+                    results[level].significant = fdrResults.significant[index];
                 }
             });
         }
@@ -344,7 +340,7 @@ window.EnhancedFDRCorrection = (() => {
                 regime: regime,
                 timeframe: timeframe,
                 baselines: baselines,
-                testParameters: { alpha, oneSided, minN, minNEff }
+                testParameters: { alpha, oneSided, minN, minNEff, overlapHorizon }
             }
         };
     }

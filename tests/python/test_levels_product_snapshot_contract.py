@@ -408,6 +408,25 @@ class BriefingArtifactTest(unittest.TestCase):
             self.assertEqual(retry_path, immutable)
             self.assertEqual(retry["track_record"], self.track_record)
 
+    def test_tampered_frozen_briefing_is_rejected_before_reuse(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            artifact, immutable = publish.load_or_build_briefing(
+                self.snapshot,
+                self.track_record,
+                out_dir,
+                captured_at_utc="2026-10-02T11:01:00Z",
+            )
+            immutable.write_text(json.dumps({**artifact, "body": "TAMPERED"}))
+
+            with self.assertRaisesRegex(ValueError, "briefing identity digest mismatch"):
+                publish.load_or_build_briefing(
+                    self.snapshot,
+                    self.track_record,
+                    out_dir,
+                    captured_at_utc="2026-10-02T11:02:00Z",
+                )
+
     def test_write_freezes_first_briefing_and_rejects_changed_rerun(self):
         first = publish.build_briefing_artifact(self.snapshot, self.track_record)
         changed_track_record = dict(self.track_record)

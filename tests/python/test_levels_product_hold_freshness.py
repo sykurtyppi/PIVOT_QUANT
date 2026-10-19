@@ -229,6 +229,14 @@ class CompletedSessionSelectionTest(unittest.TestCase):
         self.assertTrue(daily.empty)
 
 
+    def test_weekend_and_exchange_holiday_sessions_are_rejected(self):
+        for start in ("2026-10-03 09:30", "2026-07-03 09:30"):
+            with self.subTest(start=start):
+                con = self._bars(start, 390)
+                self.addCleanup(con.close)
+                self.assertTrue(morning_map.daily_rth_ohlc(con, "SPY").empty)
+
+
 class TrackRecordWindowTest(unittest.TestCase):
     def test_recent_scoreboard_is_anchored_to_reporting_session(self):
         april = pd.DataFrame(
