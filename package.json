@@ -113,6 +113,10 @@
     "testEnvironment": "node",
     "collectCoverageFrom": [
       "src/**/*.js",
+      "fdr_correction.js",
+      "enhanced_fdr_correction.js",
+      "advanced_analytics.js",
+      "advanced_pivot_engine.js",
       "!src/**/*.test.js"
     ],
     "coverageThreshold": {
