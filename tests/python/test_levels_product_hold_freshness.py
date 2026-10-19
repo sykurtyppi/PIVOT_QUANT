@@ -204,6 +204,26 @@ class CompletedSessionSelectionTest(unittest.TestCase):
         self.assertEqual(list(daily["d"]), [date(2026, 10, 1)])
         self.assertEqual(int(daily.iloc[0]["bars"]), 390)
 
+    def test_many_distinct_timestamps_in_two_minute_slots_are_rejected(self):
+        con = sqlite3.connect(":memory:")
+        self.addCleanup(con.close)
+        con.execute(
+            "CREATE TABLE bar_data "
+            "(symbol TEXT, ts INTEGER, open REAL, high REAL, low REAL, close REAL)"
+        )
+        open_ts = pd.Timestamp("2026-10-01 09:30", tz="America/New_York")
+        close_ts = pd.Timestamp("2026-10-01 15:59", tz="America/New_York")
+        timestamps = [open_ts + pd.Timedelta(milliseconds=i) for i in range(389)]
+        timestamps.append(close_ts)
+        con.executemany(
+            "INSERT INTO bar_data VALUES (?, ?, ?, ?, ?, ?)",
+            [("SPY", int(ts.timestamp() * 1000), 100, 101, 99, 100.5) for ts in timestamps],
+        )
+
+        daily = morning_map.daily_rth_ohlc(con, "SPY")
+
+        self.assertTrue(daily.empty)
+
     def test_duplicate_timestamps_across_intervals_do_not_fake_completeness(self):
         con = sqlite3.connect(":memory:")
         self.addCleanup(con.close)

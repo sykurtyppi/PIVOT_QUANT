@@ -62,7 +62,7 @@ def daily_rth_ohlc(con, symbol):
     g = b.groupby("d")
     o = pd.DataFrame({"open": g.open.first(), "high": g.high.max(),
                       "low": g.low.min(), "close": g.close.last(),
-                      "bars": g.size(),
+                      "bars": g.minute_of_day.nunique(),
                       "last_minute": g.minute_of_day.max()}).reset_index()
     # Use the most recent COMPLETE session, regardless of run hour. Reaching an
     # arbitrary bar-count floor is insufficient: a feed truncated before the
