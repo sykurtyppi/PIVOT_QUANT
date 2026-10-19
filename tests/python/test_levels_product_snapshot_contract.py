@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import sys
 import tempfile
 import threading
@@ -325,6 +326,66 @@ class SnapshotContractTest(unittest.TestCase):
                 out_dir / "levels_snapshot_SPY_latest.json"
             )
             self.assertEqual(latest["session_date"], newer["session_date"])
+
+
+class BriefingArtifactTest(unittest.TestCase):
+    def setUp(self):
+        self.snapshot = snapshot_contract.build_snapshot(
+            symbol="SPY",
+            source_session_date=date(2026, 10, 1),
+            source_ohlc={"high": 680.0, "low": 670.0, "close": 676.0},
+            generated_at_utc="2026-10-02T11:00:00Z",
+            raw_levels=calculate_pivots(high=680.0, low=670.0, close=676.0),
+            evidence={"hold_rates_publishable": False, "label_coverage": {}},
+        )
+        self.track_record = {
+            "as_of_utc": "2026-10-02T10:59:00Z",
+            "hold_rates_publishable": False,
+            "label_coverage": {},
+            "horizons": {},
+        }
+
+    def test_publish_cli_imports_from_repo_root(self):
+        result = subprocess.run(
+            [sys.executable, str(LEVELS_DIR / "publish.py"), "--help"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("usage: publish.py", result.stdout)
+        self.assertIn("--channel", result.stdout)
+
+    def test_builds_content_addressed_briefing_bound_to_snapshot(self):
+        artifact = publish.build_briefing_artifact(self.snapshot, self.track_record)
+
+        self.assertEqual(artifact["contract"], "pivotquant.morning_briefing")
+        self.assertEqual(artifact["contract_version"], 1)
+        self.assertEqual(artifact["snapshot_id"], self.snapshot["snapshot_id"])
+        self.assertEqual(artifact["prepared_at_utc"], self.snapshot["generated_at_utc"])
+        self.assertRegex(artifact["briefing_id"], r"^brf_[0-9a-f]{24}$")
+        self.assertIn("SPY LEVELS — 2026-10-02 session", artifact["body"])
+
+    def test_write_freezes_first_briefing_and_rejects_changed_rerun(self):
+        first = publish.build_briefing_artifact(self.snapshot, self.track_record)
+        changed_track_record = dict(self.track_record)
+        changed_track_record["hold_rates_publishable"] = True
+        changed_track_record["horizons"] = {
+            "h15": {"rolling_scoreboard_alerted": {"actual_hold_rate": 0.75, "n": 20}}
+        }
+        changed = publish.build_briefing_artifact(self.snapshot, changed_track_record)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            immutable, latest = publish.write_briefing_artifact(first, Path(tmp))
+            before = immutable.read_bytes()
+
+            self.assertEqual(immutable.name, "morning_briefing_SPY_2026-10-02.json")
+            self.assertEqual(json.loads(latest.read_text()), first)
+            with self.assertRaisesRegex(ValueError, "immutable briefing"):
+                publish.write_briefing_artifact(changed, Path(tmp))
+            self.assertEqual(immutable.read_bytes(), before)
 
 
 class SnapshotConsumerParityTest(unittest.TestCase):

@@ -12,14 +12,24 @@ aren't" framing. Read-only; no DB access.
 from __future__ import annotations
 
 import argparse
+import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
-
-import notify
-from level_snapshot import load_snapshot
+import sys
 
 REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO / "scripts"))
+sys.path.insert(0, str(REPO / "scripts" / "levels_product"))
+
+import notify  # noqa: E402
+from level_snapshot import (  # noqa: E402
+    _atomic_latest_link,
+    _create_immutable_json,
+    load_snapshot,
+)
+
 ART = REPO / "evidence" / "levels_product"
 
 
@@ -94,6 +104,71 @@ def render(mp, tr) -> str:
     return "\n".join(L)
 
 
+def _canonical_bytes(value) -> bytes:
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+
+
+def build_briefing_artifact(mp, tr) -> dict:
+    """Freeze the exact pre-market message and the evidence it was built from."""
+    track_record_sha256 = hashlib.sha256(_canonical_bytes(tr)).hexdigest()
+    core = {
+        "contract": "pivotquant.morning_briefing",
+        "contract_version": 1,
+        "symbol": mp["symbol"],
+        "session_date": mp["session_date"],
+        "prepared_at_utc": mp["generated_at_utc"],
+        "snapshot_id": mp["snapshot_id"],
+        "track_record_as_of_utc": tr.get("as_of_utc"),
+        "track_record_sha256": track_record_sha256,
+        "body": render(mp, tr),
+    }
+    digest = hashlib.sha256(_canonical_bytes(core)).hexdigest()[:24]
+    return {**core, "briefing_id": f"brf_{digest}"}
+
+
+def _load_briefing(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"could not read morning briefing {path}: {exc}") from exc
+
+
+def write_briefing_artifact(artifact: dict, out_dir: Path) -> tuple[Path, Path]:
+    """Create one immutable pre-market briefing plus a monotonic latest pointer."""
+    immutable = out_dir / (
+        f"morning_briefing_{artifact['symbol']}_{artifact['session_date']}.json"
+    )
+    latest = out_dir / f"morning_briefing_{artifact['symbol']}_latest.json"
+    if not _create_immutable_json(immutable, artifact):
+        existing = _load_briefing(immutable)
+        if existing != artifact:
+            raise ValueError(
+                f"immutable briefing already exists with different contents: {immutable}"
+            )
+
+    lock_path = out_dir / f".{latest.name}.lock"
+    with lock_path.open("a+b") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        try:
+            if latest.exists() or latest.is_symlink():
+                current = _load_briefing(latest)
+                if current["session_date"] > artifact["session_date"]:
+                    return immutable, latest
+                if (
+                    current["session_date"] == artifact["session_date"]
+                    and current != artifact
+                ):
+                    raise ValueError(
+                        "latest briefing conflicts with immutable session artifact"
+                    )
+            _atomic_latest_link(latest, immutable)
+        finally:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+    return immutable, latest
+
+
 def _resolve_channel(requested: str) -> str:
     """auto → email if SMTP configured, else webhook if set, else dry-run."""
     if requested != "auto":
@@ -114,7 +189,9 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="build but do not actually send")
     args = ap.parse_args()
     mp, tr = _latest(args.symbol)
-    body = render(mp, tr)
+    briefing = build_briefing_artifact(mp, tr)
+    immutable, _ = write_briefing_artifact(briefing, ART)
+    body = briefing["body"]
     subject = f"{mp['symbol']} Levels — {mp['session_date']} session"
     channel = _resolve_channel(args.channel)
     if channel == "email":
