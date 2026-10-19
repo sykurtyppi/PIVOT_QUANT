@@ -310,15 +310,17 @@ window.AdvancedUIComponents = (() => {
         let detailsHTML = '';
 
         if (alert.type === 'significance') {
-            detailsHTML = `
-                <div class="alert-details">
-                    <div class="alert-bias">Bias: <strong>${alert.bias}</strong></div>
-                    <div class="alert-ci">CI: [${alert.confidence_interval.lower.toFixed(1)}%, ${alert.confidence_interval.upper.toFixed(1)}%]</div>
+            const stopsHTML = alert.stops ? `
                     <div class="alert-stops">
                         Stop: ${alert.stops.stop_distance.toFixed(2)} |
                         Target: ${alert.stops.target_distance.toFixed(2)}
                         (${alert.stops.risk_reward_ratio}:1 R:R)
-                    </div>
+                    </div>` : '<div class="alert-stops unavailable">Stops unavailable (ATR required)</div>';
+            detailsHTML = `
+                <div class="alert-details">
+                    <div class="alert-bias">Bias: <strong>${alert.bias}</strong></div>
+                    <div class="alert-ci">CI: [${alert.confidence_interval.lower.toFixed(1)}%, ${alert.confidence_interval.upper.toFixed(1)}%]</div>
+                    ${stopsHTML}
                 </div>
             `;
         } else if (alert.type === 'stability') {

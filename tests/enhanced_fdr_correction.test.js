@@ -72,6 +72,14 @@ describe('enhanced_fdr_correction.js — EnhancedFDRCorrection', () => {
       const atNull = E.oneSidedBinomialTest(50, 100, 0.5, true);
       expect(atNull).toBeCloseTo(0.5398, 3);
     });
+
+    test('malformed direct-call contracts fail closed', () => {
+      for (const baseline of [null, -1, 2, 'bad', NaN]) {
+        expect(E.oneSidedBinomialTest(1, 100, baseline, true)).toBe(1.0);
+      }
+      expect(E.oneSidedBinomialTest(1.5, 100, 0.5, true)).toBe(1.0);
+      expect(E.oneSidedBinomialTest(1, 100.5, 0.5, true)).toBe(1.0);
+    });
   });
 
   describe('enhancedBenjaminiHochbergCorrection', () => {

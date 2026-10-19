@@ -335,6 +335,17 @@ class TestOOSValidationGuard(unittest.TestCase):
             self.assertFalse(ok)
             self.assertEqual(reason, "evidence_report_candidate_artifact_mismatch")
 
+    def test_approval_hashes_must_still_match_evidence_checked_bytes(self):
+        evidence_detail = {
+            "actual_candidate_artifact_sha256": {"candidate.pkl": "evaluated"},
+        }
+        approval_hashes = {
+            "active_artifact_sha256": {"candidate.pkl": "replacement"},
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "changed after OOS evidence validation"):
+            gov.require_approval_matches_oos_evidence(approval_hashes, evidence_detail)
+
 
 class TestBootstrapRequiresOOS(unittest.TestCase):
     """Bootstrap (no manifest_active.json yet) must clear the SAME OOS gate as a

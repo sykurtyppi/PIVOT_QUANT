@@ -26,6 +26,9 @@ window.EnhancedFDRCorrection = (() => {
      * @param {boolean} oneSided - If true, one-sided test (default), if false, two-sided
      */
     function oneSidedBinomialTest(successes, trials, p0 = 0.5, oneSided = true) {
+        if (!Number.isInteger(successes) || !Number.isInteger(trials)
+            || trials < 0 || !Number.isFinite(p0) || p0 < 0 || p0 > 1
+            || typeof oneSided !== 'boolean') return 1.0;
         if (trials === 0) return 1.0;
         if (successes < 0 || successes > trials) return 1.0;
 

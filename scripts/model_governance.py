@@ -233,6 +233,16 @@ def build_approval_hashes(
     }
 
 
+def require_approval_matches_oos_evidence(
+    approval_hashes: dict[str, Any], evidence_detail: dict[str, Any]
+) -> None:
+    """Close the evidence-check/preflight TOCTOU window for model bytes."""
+    evidence_hashes = evidence_detail.get("actual_candidate_artifact_sha256")
+    approval_artifact_hashes = approval_hashes.get("active_artifact_sha256")
+    if evidence_hashes != approval_artifact_hashes:
+        raise RuntimeError("Candidate artifacts changed after OOS evidence validation")
+
+
 def activate_manifest(
     models_dir: Path,
     source_path: Path,
@@ -1273,6 +1283,8 @@ def _cmd_evaluate_locked(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
         approval_hashes = build_approval_hashes(models_dir, candidate_path, candidate)
+        if require_oos and oos_ok:
+            require_approval_matches_oos_evidence(approval_hashes, oos_detail)
         state.update(
             {
                 "active_version": candidate_version,
@@ -1444,6 +1456,8 @@ def _cmd_evaluate_locked(args: argparse.Namespace) -> int:
         )
 
     approval_hashes = build_approval_hashes(models_dir, candidate_path, candidate)
+    if require_oos and oos_ok:
+        require_approval_matches_oos_evidence(approval_hashes, oos_detail)
 
     state.update(
         {
