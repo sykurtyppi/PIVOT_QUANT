@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import importlib.util
 import asyncio
@@ -26,13 +27,16 @@ from urllib.error import HTTPError, URLError
 import urllib.request
 
 import numpy as np
-import yaml
 from fastapi import HTTPException
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PYTHON = str(Path(sys.executable).resolve())
 CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+# The canonical full-discovery command. The guard below matches it by INTENT
+# (interpreter + `unittest discover -s tests/python -p test_*.py`), not byte
+# identity, so semantically-equivalent edits (python3, a trailing slash, a
+# reordered flag, an extra -v/-b, a merged install+test run block) stay accepted.
 FULL_PYTHON_DISCOVERY_COMMAND = [
     "python",
     "-m",
@@ -45,50 +49,215 @@ FULL_PYTHON_DISCOVERY_COMMAND = [
     "-v",
 ]
 
+# `if:` values that still let a step/job run every time (so they do not gate it off).
+_ALWAYS_TRUE_IF = frozenset({"always()", "true", "${{ true }}", "${{ always() }}"})
+
+
+def _if_blocks_execution(value) -> bool:
+    """True when an `if:` condition would stop the step/job from running.
+
+    Only clearly-always-true forms are treated as non-blocking; any other literal
+    or expression is conservatively treated as a real gate.
+    """
+    if isinstance(value, bool):
+        return value is False
+    if isinstance(value, str):
+        return value.strip().lower() not in _ALWAYS_TRUE_IF
+    return True
+
+
+def _continue_on_error_swallows_failure(value) -> bool:
+    """True when `continue-on-error` makes a failure non-gating.
+
+    ``continue-on-error: false`` (the default) keeps the suite a real gate and is
+    allowed; any truthy or unresolved-expression value swallows failures and so
+    disqualifies the job/step.
+    """
+    if isinstance(value, bool):
+        return value is True
+    if isinstance(value, str):
+        return value.strip().lower() != "false"
+    return True
+
+
+def _as_list(value) -> list:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return [value]
+
+
+def _job_skipped(job_name, jobs, _visiting=frozenset()) -> bool:
+    """True when a job will not run — gated off by `if:` or by a skipped `needs:` dep.
+
+    ``needs:`` on an active job is NOT a gate (it only orders execution), but
+    ``needs:`` on a job that is itself skipped propagates the skip.
+    """
+    job = jobs.get(job_name)
+    if not isinstance(job, dict) or job_name in _visiting:
+        return True
+    if "if" in job and _if_blocks_execution(job["if"]):
+        return True
+    for dep in _as_list(job.get("needs")):
+        if _job_skipped(dep, jobs, _visiting | {job_name}):
+            return True
+    return False
+
+
+def _job_gates_full_run(job_name, job, jobs) -> bool:
+    """True when this job actually runs AND its failure would fail the workflow."""
+    if _job_skipped(job_name, jobs):
+        return False
+    if "continue-on-error" in job and _continue_on_error_swallows_failure(
+        job["continue-on-error"]
+    ):
+        return False
+    if job.get("environment"):
+        # A deployment `environment:` can pause the job on protection rules
+        # (required reviewers / wait timer), so it is not an automatic gate.
+        return False
+    job_defaults = job.get("defaults", {})
+    if not isinstance(job_defaults, dict) or job_defaults.get("run"):
+        return False
+    return True
+
+
+def _option_value(tokens, *flags):
+    """Return the value of the first of ``flags`` in ``tokens`` (`-x v` or `-x=v`)."""
+    for idx, tok in enumerate(tokens):
+        if tok in flags and idx + 1 < len(tokens):
+            return tokens[idx + 1]
+        for flag in flags:
+            if tok.startswith(flag + "="):
+                return tok[len(flag) + 1:]
+    return None
+
+
+def _command_runs_full_python_discovery(command) -> bool:
+    """True when ``command`` runs `unittest discover` over all of tests/python.
+
+    Matches by intent so legitimate variants pass: any python interpreter
+    (python / python3 / python3.x / a path like .venv/bin/python), a trailing
+    slash on the start dir, reordered or extra flags, and a multi-line run block
+    that also does an install step.
+    """
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return False
+    for i in range(1, len(tokens) - 1):
+        if tokens[i] != "-m" or tokens[i + 1] != "unittest":
+            continue
+        interpreter = tokens[i - 1].rsplit("/", 1)[-1]
+        if not (
+            interpreter in {"python", "python3", "python.exe"}
+            or interpreter.startswith("python3.")
+        ):
+            continue
+        rest = tokens[i + 2:]
+        if not rest or rest[0] != "discover":
+            continue
+        start_dir = _option_value(rest, "-s", "--start-directory")
+        pattern = _option_value(rest, "-p", "--pattern")
+        if start_dir is None or pattern is None:
+            continue
+        if start_dir.rstrip("/") != "tests/python":
+            continue
+        if pattern != "test_*.py":
+            continue
+        return True
+    return False
+
 
 def workflow_has_active_full_python_discovery(workflow: dict) -> bool:
-    """Return whether an unconditional CI step runs the complete Python suite."""
-    workflow_defaults = workflow.get("defaults", {})
-    if not isinstance(workflow_defaults, dict):
+    """Return whether a gating CI step runs the complete tests/python suite."""
+    if not isinstance(workflow, dict):
         return False
-    if workflow_defaults.get("run"):
+    workflow_defaults = workflow.get("defaults", {})
+    if not isinstance(workflow_defaults, dict) or workflow_defaults.get("run"):
         return False
 
     jobs = workflow.get("jobs", {})
     if not isinstance(jobs, dict):
         return False
 
-    for job in jobs.values():
-        if (
-            not isinstance(job, dict)
-            or "if" in job
-            or "needs" in job
-            or "continue-on-error" in job
-        ):
-            continue
-        job_defaults = job.get("defaults", {})
-        if not isinstance(job_defaults, dict) or job_defaults.get("run"):
+    for job_name, job in jobs.items():
+        if not isinstance(job, dict) or not _job_gates_full_run(job_name, job, jobs):
             continue
         steps = job.get("steps", [])
         if not isinstance(steps, list):
             continue
         for step in steps:
-            if not isinstance(step, dict) or "if" in step:
+            if not isinstance(step, dict):
                 continue
-            if any(
-                key in step
-                for key in ("continue-on-error", "working-directory", "shell")
+            if "if" in step and _if_blocks_execution(step["if"]):
+                continue
+            if "continue-on-error" in step and _continue_on_error_swallows_failure(
+                step["continue-on-error"]
             ):
                 continue
+            if "working-directory" in step or "shell" in step:
+                # A different cwd breaks `discover -s tests/python`; a custom
+                # shell can alter how the command runs — treat both as unsafe.
+                continue
             command = step.get("run")
-            if not isinstance(command, str):
-                continue
-            try:
-                command_parts = shlex.split(command)
-            except ValueError:
-                continue
-            if command_parts == FULL_PYTHON_DISCOVERY_COMMAND:
+            if isinstance(command, str) and _command_runs_full_python_discovery(command):
                 return True
+    return False
+
+
+def _branch_patterns_match_default(patterns, default_branch) -> bool:
+    return any(
+        isinstance(pattern, str) and fnmatch.fnmatch(default_branch, pattern)
+        for pattern in patterns
+    )
+
+
+def workflow_runs_full_discovery_on_default_branch(
+    workflow: dict, default_branch: str = "main"
+) -> bool:
+    """Return whether the workflow is triggered for every change to the default branch.
+
+    A `push`/`pull_request` trigger covering ``default_branch`` with no
+    ``paths:``/``paths-ignore:`` scoping qualifies. Path scoping disqualifies it:
+    GitHub reports a path-skipped required check as a *success*, so the suite
+    would silently not run on changes outside the scoped paths.
+    """
+    if not isinstance(workflow, dict):
+        return False
+    # PyYAML parses a bare `on:` key as the boolean True (YAML 1.1), so the real
+    # GitHub workflow's triggers live under the key True, not "on".
+    on_cfg = workflow.get("on")
+    if on_cfg is None and True in workflow:
+        on_cfg = workflow[True]
+    if on_cfg is None:
+        return False
+    if isinstance(on_cfg, str):
+        on_cfg = {on_cfg: None}
+    elif isinstance(on_cfg, (list, tuple)):
+        on_cfg = {str(event): None for event in on_cfg}
+    if not isinstance(on_cfg, dict):
+        return False
+
+    for event in ("pull_request", "push"):
+        if event not in on_cfg:
+            continue
+        cfg = on_cfg[event]
+        if cfg is None or not isinstance(cfg, dict):
+            return True
+        if "paths" in cfg or "paths-ignore" in cfg:
+            continue
+        branches_ignore = cfg.get("branches-ignore")
+        if branches_ignore and _branch_patterns_match_default(
+            _as_list(branches_ignore), default_branch
+        ):
+            continue
+        branches = cfg.get("branches")
+        if branches is None:
+            return True
+        if _branch_patterns_match_default(_as_list(branches), default_branch):
+            return True
     return False
 
 
@@ -16323,13 +16492,24 @@ class OpsSmokeTests(unittest.TestCase):
 
 
 class CiPythonDiscoveryPolicyTests(unittest.TestCase):
+    @staticmethod
+    def _load(text: str):
+        import yaml  # local so a missing PyYAML degrades only these tests
+
+        return yaml.safe_load(text)
+
     def test_ci_runs_all_python_test_files_by_default(self) -> None:
-        workflow = yaml.safe_load(CI_WORKFLOW.read_text(encoding="utf-8"))
+        workflow = self._load(CI_WORKFLOW.read_text(encoding="utf-8"))
 
         self.assertIsInstance(workflow, dict)
         self.assertTrue(
             workflow_has_active_full_python_discovery(workflow),
             "CI must actively run every tests/python/test_*.py file by default",
+        )
+        self.assertTrue(
+            workflow_runs_full_discovery_on_default_branch(workflow),
+            "the full-suite job must be triggered on pushes/PRs to the default "
+            "branch, unscoped by paths",
         )
 
     def test_policy_rejects_inactive_or_partial_commands(self) -> None:
@@ -16346,13 +16526,13 @@ class CiPythonDiscoveryPolicyTests(unittest.TestCase):
             f"jobs:\n  tests:\n    steps:\n      - if: false\n        run: {full_command!r}\n",
             f"jobs:\n  tests:\n    if: false\n    steps:\n      - run: {full_command!r}\n",
             f"jobs:\n  tests:\n    continue-on-error: true\n    steps:\n      - run: {full_command!r}\n",
-            f"jobs:\n  tests:\n    continue-on-error: false\n    steps:\n      - run: {full_command!r}\n",
             f"jobs:\n  tests:\n    continue-on-error: ${{{{ false }}}}\n    steps:\n      - run: {full_command!r}\n",
             f"jobs:\n  tests:\n    steps:\n      - continue-on-error: true\n        run: {full_command!r}\n",
             f"jobs:\n  tests:\n    steps:\n      - continue-on-error: ${{{{ true }}}}\n        run: {full_command!r}\n",
             f"jobs:\n  tests:\n    defaults:\n      run:\n        working-directory: scripts\n    steps:\n      - run: {full_command!r}\n",
             f"defaults:\n  run:\n    working-directory: scripts\njobs:\n  tests:\n    steps:\n      - run: {full_command!r}\n",
             f"jobs:\n  tests:\n    steps:\n      - shell: python\n        run: {full_command!r}\n",
+            f"jobs:\n  tests:\n    environment: ci-gated\n    steps:\n      - run: {full_command!r}\n",
             "jobs:\n"
             "  disabled:\n"
             "    if: false\n"
@@ -16366,7 +16546,7 @@ class CiPythonDiscoveryPolicyTests(unittest.TestCase):
 
         for workflow_text in mutations:
             with self.subTest(workflow_text=workflow_text):
-                workflow = yaml.safe_load(workflow_text)
+                workflow = self._load(workflow_text)
                 self.assertFalse(workflow_has_active_full_python_discovery(workflow))
 
     def test_policy_accepts_unconditional_full_discovery(self) -> None:
@@ -16386,6 +16566,63 @@ class CiPythonDiscoveryPolicyTests(unittest.TestCase):
         }
 
         self.assertTrue(workflow_has_active_full_python_discovery(workflow))
+
+    def test_policy_accepts_semantically_equivalent_commands(self) -> None:
+        full_command = (
+            'python -m unittest discover -s tests/python -p "test_*.py" -v'
+        )
+        # Legitimate variants that still run the whole suite and must NOT redden CI.
+        equivalents = (
+            f"jobs:\n  tests:\n    steps:\n      - run: {full_command!r}\n",
+            'jobs:\n  tests:\n    steps:\n      - run: "python3 -m unittest discover -s tests/python/ -p test_*.py"\n',
+            'jobs:\n  tests:\n    steps:\n      - run: "python -m unittest discover -v -b -p test_*.py -s tests/python"\n',
+            'jobs:\n  tests:\n    steps:\n      - run: ".venv/bin/python -m unittest discover -s tests/python -p test_*.py"\n',
+            'jobs:\n  tests:\n    steps:\n      - run: "python -m unittest discover --start-directory tests/python --pattern test_*.py"\n',
+            "jobs:\n  tests:\n    steps:\n      - run: |\n"
+            "          python -m pip install -r reqs.txt\n"
+            "          python -m unittest discover -s tests/python -p test_*.py -v\n",
+            f"jobs:\n  tests:\n    continue-on-error: false\n    steps:\n      - run: {full_command!r}\n",
+            f"jobs:\n  tests:\n    steps:\n      - if: always()\n        run: {full_command!r}\n",
+            "jobs:\n  build:\n    steps:\n      - run: 'true'\n"
+            "  tests:\n    needs: build\n    steps:\n"
+            f"      - run: {full_command!r}\n",
+        )
+
+        for workflow_text in equivalents:
+            with self.subTest(workflow_text=workflow_text):
+                workflow = self._load(workflow_text)
+                self.assertTrue(workflow_has_active_full_python_discovery(workflow))
+
+    def test_policy_requires_triggers_on_default_branch(self) -> None:
+        triggered = (
+            "on:\n  pull_request:\n    branches: [main]\njobs: {}\n",
+            "on:\n  push:\n    branches: [main]\njobs: {}\n",
+            "on: push\njobs: {}\n",
+            "on: [push, pull_request]\njobs: {}\n",
+            "on:\n  pull_request:\n    branches: ['**']\njobs: {}\n",
+        )
+        not_triggered = (
+            "on:\n  workflow_dispatch: {}\njobs: {}\n",
+            "on:\n  pull_request:\n    paths-ignore: ['**']\njobs: {}\n",
+            "on:\n  push:\n    paths: ['src/**']\njobs: {}\n",
+            "on:\n  pull_request:\n    branches: [dev]\njobs: {}\n",
+            "on:\n  push:\n    branches-ignore: [main]\njobs: {}\n",
+            "jobs: {}\n",
+        )
+        for workflow_text in triggered:
+            with self.subTest(triggered=workflow_text):
+                self.assertTrue(
+                    workflow_runs_full_discovery_on_default_branch(
+                        self._load(workflow_text)
+                    )
+                )
+        for workflow_text in not_triggered:
+            with self.subTest(not_triggered=workflow_text):
+                self.assertFalse(
+                    workflow_runs_full_discovery_on_default_branch(
+                        self._load(workflow_text)
+                    )
+                )
 
 
 if __name__ == "__main__":

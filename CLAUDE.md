@@ -64,6 +64,8 @@ bash scripts/run_retrain_cycle.sh                 # backfill → labels → expo
 
 GitHub Actions runs three jobs on push to `main` and on PRs: `JS Lint and Test`, `Python Fast Tests`, `Python Ops Smoke`. All three must be green before merging. See `.github/workflows/ci.yml`.
 
+The `Python Ops Smoke` job now runs the **full** `tests/python` discovery (`discover -s tests/python -p "test_*.py"`), not just `test_ops_smoke.py` — its display name is retained for branch-protection check-name stability. A guard inside `test_ops_smoke.py` (`CiPythonDiscoveryPolicyTests`) fails the suite if that step is ever reverted to a partial selector, disabled, or scoped off the default branch.
+
 ## Architecture — Python Half
 
 ### Data Flow
