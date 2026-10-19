@@ -11,6 +11,7 @@ discovery without the heavy ML dependencies.
 """
 from __future__ import annotations
 
+import math
 import sqlite3
 import sys
 import tempfile
@@ -31,6 +32,15 @@ class CorrectPriorShiftTests(unittest.TestCase):
     def test_noop_when_priors_equal(self) -> None:
         # pi_train == pi_current: no mismatch to correct, raw prob returned as-is.
         self.assertEqual(correct_prior_shift(0.7, 0.3, 0.3), 0.7)
+
+    def test_non_finite_inputs_are_rejected(self) -> None:
+        for values in (
+            (math.nan, 0.3, 0.3),
+            (0.4, math.inf, 0.3),
+            (0.4, 0.3, -math.inf),
+        ):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                correct_prior_shift(*values)
 
     def test_noop_within_relative_tolerance(self) -> None:
         # priors differ by ~1e-4 relative (inside rel_tol=1e-4) -> treated equal.
@@ -182,6 +192,42 @@ class RollingClassRateTests(unittest.TestCase):
         db = self._make_db(rows)
         rate = rolling_class_rate(db, target="reject", horizon=15, window_days=30, min_rows=5)
         self.assertAlmostEqual(rate, 1.0, places=9)  # the 100 NULL rows do not count
+
+    def test_each_event_counts_once_across_model_versions(self) -> None:
+        now = self._now_ms()
+        path = tempfile.NamedTemporaryFile(suffix=".sqlite", delete=False).name
+        self.addCleanup(lambda: Path(path).unlink(missing_ok=True))
+        con = sqlite3.connect(path)
+        try:
+            con.execute(
+                "CREATE TABLE prediction_log "
+                "(event_id TEXT, ts_prediction INTEGER, model_version TEXT)"
+            )
+            con.execute(
+                "CREATE TABLE event_labels "
+                "(event_id TEXT, horizon_min INTEGER, reject INTEGER, break INTEGER)"
+            )
+            con.executemany(
+                "INSERT INTO prediction_log VALUES (?, ?, ?)",
+                [
+                    ("positive", now, "v1"),
+                    ("positive", now, "v2"),
+                    ("positive", now, "v3"),
+                    ("negative", now, "v1"),
+                ],
+            )
+            con.executemany(
+                "INSERT INTO event_labels VALUES (?, ?, ?, ?)",
+                [("positive", 15, 1, 0), ("negative", 15, 0, 1)],
+            )
+            con.commit()
+        finally:
+            con.close()
+
+        rate = rolling_class_rate(
+            path, target="reject", horizon=15, window_days=30, min_rows=2
+        )
+        self.assertAlmostEqual(rate, 0.5, places=9)
 
     def test_missing_tables_returns_none(self) -> None:
         # An empty db (no tables) -> query raises -> caught -> None (fail-closed).

@@ -146,10 +146,10 @@ window.EnhancedFDRCorrection = (() => {
         const n = pValues.length;
         if (n === 0) return { qValues: [], significant: [] };
 
-        // Handle edge cases
+        // Fail closed on malformed statistical inputs. Mapping invalid values to
+        // zero would manufacture maximum significance from corrupt data.
         const validPValues = pValues.map(p => {
-            if (!Number.isFinite(p) || p < 0) return 0;
-            if (p > 1) return 1;
+            if (!Number.isFinite(p) || p < 0 || p > 1) return 1;
             return p;
         });
 
@@ -181,18 +181,15 @@ window.EnhancedFDRCorrection = (() => {
     }
 
     /**
-     * Calculate effective sample size accounting for regime clustering
+     * Return the observed sample size.
+     *
+     * A fixed timeframe multiplier is not a defensible dependence correction:
+     * without event timestamps or clusters it only changes a gate while leaving
+     * the test statistic untouched. Callers needing clustered inference must
+     * provide a block/session panel rather than a guessed n_eff.
      */
     function calculateEffectiveN(trials, regime, timeframe) {
-        // Adjust for temporal clustering based on timeframe
-        const clusteringFactors = {
-            daily: 0.9,    // Less clustering in daily data
-            weekly: 0.8,   // Moderate clustering
-            monthly: 0.7   // More clustering in monthly data
-        };
-
-        const factor = clusteringFactors[timeframe] || 0.8;
-        return Math.round(trials * factor);
+        return Number.isFinite(trials) && trials >= 0 ? Math.floor(trials) : 0;
     }
 
     /**
@@ -246,10 +243,17 @@ window.EnhancedFDRCorrection = (() => {
         levels.forEach(level => {
             const stats = pivotStats[level];
             const p0 = baselines[level] || 0.5; // Fallback to 0.5 if baseline not found
-            const nEff = calculateEffectiveN(stats.trials, regime, timeframe);
+            const countsValid = Number.isInteger(stats.trials)
+                && Number.isInteger(stats.successes)
+                && stats.trials >= 0
+                && stats.successes >= 0
+                && stats.successes <= stats.trials;
+            const trials = countsValid ? stats.trials : 0;
+            const successes = countsValid ? stats.successes : 0;
+            const nEff = calculateEffectiveN(trials, regime, timeframe);
 
             // Check sample size requirements
-            const hasSufficientData = stats.trials >= minN && nEff >= minNEff;
+            const hasSufficientData = countsValid && trials >= minN && nEff >= minNEff;
 
             let pValue = 1.0;
             let qValue = null;
@@ -257,26 +261,26 @@ window.EnhancedFDRCorrection = (() => {
             let permPValue = null;
 
             if (hasSufficientData) {
-                pValue = oneSidedBinomialTest(stats.successes, stats.trials, p0, oneSided);
+                pValue = oneSidedBinomialTest(successes, trials, p0, oneSided);
                 pValues.push(pValue);
                 validLevels.push(level);
 
                 // Permutation test if requested
                 if (permutationTests && debugMode) {
-                    permPValue = permutationTest(stats, p0);
+                    permPValue = permutationTest({ successes, trials }, p0);
                 }
             }
 
             // Calculate confidence interval
-            const ci = wilsonConfidenceInterval(stats.successes, stats.trials, 0.95);
+            const ci = wilsonConfidenceInterval(successes, trials, 0.95);
 
             // Calculate lift (observed rate - baseline)
-            const observedRate = stats.trials > 0 ? stats.successes / stats.trials : 0;
+            const observedRate = trials > 0 ? successes / trials : 0;
             const lift = observedRate - p0;
 
             results[level] = {
-                successes: stats.successes,
-                trials: stats.trials,
+                successes,
+                trials,
                 nEffective: nEff,
                 successRate: observedRate * 100,
                 baseline: p0 * 100,

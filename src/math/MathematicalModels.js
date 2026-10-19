@@ -399,33 +399,27 @@ export class MathematicalModels {
     /**
      * Perform statistical significance testing for pivot levels
      */
-    async performSignificanceAnalysis(ohlcData, levels, config = {}) {
-        const {
-            alpha = 0.05,
-            testType = 'binomial',
-            minSampleSize = 20
-        } = config;
-
+    async performSignificanceAnalysis(_ohlcData, levels, _config = {}) {
         const results = {};
 
         for (const [method, methodLevels] of Object.entries(levels)) {
             results[method] = {};
 
-            for (const [levelName, levelValue] of Object.entries(methodLevels)) {
+            for (const [levelName, _levelValue] of Object.entries(methodLevels)) {
                 if (levelName === 'metadata') continue;
-
-                const testResults = await this._performLevelSignificanceTest(
-                    ohlcData, levelValue, alpha, testType, minSampleSize
-                );
-
+                // Current levels are computed from the latest bar. Back-applying
+                // those static values to earlier closes is look-ahead and cannot
+                // establish efficacy. Fail closed until a point-in-time session
+                // panel supplies the level that was known for each observation.
                 results[method][levelName] = {
-                    pValue: testResults.pValue,
-                    isSignificant: testResults.pValue < alpha,
-                    testStatistic: testResults.testStatistic,
-                    confidenceInterval: testResults.confidenceInterval,
-                    effectSize: testResults.effectSize,
-                    sampleSize: testResults.sampleSize,
-                    methodology: testType
+                    pValue: 1,
+                    isSignificant: false,
+                    testStatistic: null,
+                    confidenceInterval: null,
+                    effectSize: null,
+                    sampleSize: 0,
+                    methodology: 'disabled_without_point_in_time_levels',
+                    reason: 'latest_level_cannot_be_backtested_against_prior_closes'
                 };
             }
         }

@@ -1007,6 +1007,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 def check_oos_validation(
     candidate_version: str,
     evidence_report_path: str | None,
+    candidate_manifest_path: str | Path | None,
 ) -> tuple[bool, str, dict[str, Any]]:
     """Verify an OOS-validated evidence report exists for ``candidate_version``.
 
@@ -1038,6 +1039,16 @@ def check_oos_validation(
     if not isinstance(report, dict):
         return (False, "evidence_report_not_a_json_object", detail)
 
+    manifest_path = Path(candidate_manifest_path) if candidate_manifest_path else None
+    if manifest_path is None or not manifest_path.is_file():
+        return (False, "candidate_manifest_not_available_for_evidence_binding", detail)
+    try:
+        actual_manifest = load_json(manifest_path)
+    except Exception as exc:  # noqa: BLE001
+        return (False, f"candidate_manifest_unreadable:{exc}", detail)
+    if report.get("candidate_manifest") != actual_manifest:
+        return (False, "evidence_report_candidate_manifest_mismatch", detail)
+
     # Tie the report to THIS candidate version.
     cand_manifest = report.get("candidate_manifest")
     report_version = None
@@ -1058,6 +1069,14 @@ def check_oos_validation(
     readiness = report.get("candidate_readiness")
     if not isinstance(readiness, dict):
         return (False, "evidence_report_missing_candidate_readiness", detail)
+    try:
+        from run_retrain_evidence_pack import classify_candidate_readiness
+
+        recomputed_readiness = classify_candidate_readiness(report)
+    except Exception as exc:  # noqa: BLE001
+        return (False, f"evidence_report_readiness_recompute_failed:{exc}", detail)
+    if readiness != recomputed_readiness:
+        return (False, "evidence_report_readiness_mismatch", detail)
     oos_passed = readiness.get("oos_validation_passed")
     promotion_ready = readiness.get("promotion_ready")
     disposition = readiness.get("promotion_disposition")
@@ -1197,7 +1216,7 @@ def _cmd_evaluate_locked(args: argparse.Namespace) -> int:
         require_oos = bool(getattr(args, "require_oos_validation", True))
         allow_unvalidated = bool(getattr(args, "allow_unvalidated_promotion", False))
         oos_ok, oos_reason, oos_detail = check_oos_validation(
-            candidate_version, getattr(args, "evidence_report", "")
+            candidate_version, getattr(args, "evidence_report", ""), candidate_path
         )
         if require_oos and not oos_ok and not allow_unvalidated:
             reason = "bootstrap blocked: OOS validation required"
@@ -1364,7 +1383,7 @@ def _cmd_evaluate_locked(args: argparse.Namespace) -> int:
     require_oos = bool(getattr(args, "require_oos_validation", True))
     allow_unvalidated = bool(getattr(args, "allow_unvalidated_promotion", False))
     oos_ok, oos_reason, oos_detail = check_oos_validation(
-        candidate_version, getattr(args, "evidence_report", "")
+        candidate_version, getattr(args, "evidence_report", ""), candidate_path
     )
     if require_oos and not oos_ok and not allow_unvalidated:
         reason = "candidate blocked: OOS validation required"

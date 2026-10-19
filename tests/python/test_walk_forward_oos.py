@@ -309,6 +309,8 @@ class TestEvidencePackOOSAxis(unittest.TestCase):
     def test_walk_forward_fold_recognized_as_oos(self):
         self.assertTrue(ep._is_oos_source("walk_forward_fold"))
         self.assertFalse(ep._is_oos_source("threshold_tune_slice"))
+        self.assertFalse(ep._is_oos_source("oos_fabricated"))
+        self.assertFalse(ep._is_oos_source("oos_"))
 
     def _ph_row(self, target, horizon, *, in_sample, oos):
         return {

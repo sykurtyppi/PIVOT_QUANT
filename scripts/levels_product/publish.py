@@ -18,6 +18,7 @@ import json
 import os
 from pathlib import Path
 import sys
+from datetime import datetime, timezone
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "scripts"))
@@ -122,6 +123,7 @@ def build_briefing_artifact(mp, tr) -> dict:
         "snapshot_id": mp["snapshot_id"],
         "track_record_as_of_utc": tr.get("as_of_utc"),
         "track_record_sha256": track_record_sha256,
+        "track_record": tr,
         "body": render(mp, tr),
     }
     digest = hashlib.sha256(_canonical_bytes(core)).hexdigest()[:24]
@@ -181,6 +183,67 @@ def _resolve_channel(requested: str) -> str:
     return "dryrun"
 
 
+def _delivery_receipt_path(artifact: dict, channel: str, out_dir: Path) -> Path:
+    return out_dir / f"morning_delivery_{artifact['briefing_id']}_{channel}.json"
+
+
+def deliver_briefing(
+    artifact: dict,
+    *,
+    channel: str,
+    out_dir: Path,
+    dry_run: bool = False,
+) -> tuple[bool, str]:
+    """Deliver once per briefing/channel and persist confirmed success separately."""
+    if dry_run or channel == "dryrun":
+        print(artifact["body"])
+        return False, "dry-run"
+    if channel not in {"email", "webhook"}:
+        raise ValueError(f"unsupported delivery channel: {channel}")
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    receipt_path = _delivery_receipt_path(artifact, channel, out_dir)
+    lock_path = out_dir / f".{receipt_path.name}.lock"
+    with lock_path.open("a+b") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        try:
+            if receipt_path.exists():
+                receipt = _load_briefing(receipt_path)
+                if (
+                    receipt.get("briefing_id") != artifact["briefing_id"]
+                    or receipt.get("channel") != channel
+                ):
+                    raise ValueError(f"delivery receipt identity conflict: {receipt_path}")
+                return True, "already-delivered"
+
+            if channel == "email":
+                subject = (
+                    f"{artifact['symbol']} Levels — "
+                    f"{artifact['session_date']} session"
+                )
+                sent = notify.email_post(subject, artifact["body"], dry_run=False)
+            else:
+                sent = notify.post(artifact["body"])
+            if not sent:
+                return False, "delivery-failed"
+
+            receipt = {
+                "contract": "pivotquant.morning_delivery_receipt",
+                "contract_version": 1,
+                "briefing_id": artifact["briefing_id"],
+                "snapshot_id": artifact["snapshot_id"],
+                "channel": channel,
+                "delivered_at_utc": datetime.now(timezone.utc).isoformat().replace(
+                    "+00:00", "Z"
+                ),
+            }
+            if not _create_immutable_json(receipt_path, receipt):
+                raise ValueError(f"delivery receipt appeared during locked send: {receipt_path}")
+            return True, "sent"
+        finally:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--symbol", default="SPY")
@@ -191,20 +254,15 @@ def main():
     mp, tr = _latest(args.symbol)
     briefing = build_briefing_artifact(mp, tr)
     immutable, _ = write_briefing_artifact(briefing, ART)
-    body = briefing["body"]
-    subject = f"{mp['symbol']} Levels — {mp['session_date']} session"
     channel = _resolve_channel(args.channel)
-    if channel == "email":
-        ok = notify.email_post(subject, body, dry_run=args.dry_run)
-    elif channel == "webhook":
-        ok = False if args.dry_run else notify.post(body)
-        if args.dry_run:
-            print(body)
-    else:  # dryrun
-        print(body)
-        ok = False
-    print(f"\n[channel={channel} {'sent' if ok else 'dry-run/not-sent'}]")
+    ok, status = deliver_briefing(
+        briefing, channel=channel, out_dir=ART, dry_run=args.dry_run
+    )
+    print(f"\n[channel={channel} status={status}]")
+    if status == "delivery-failed":
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

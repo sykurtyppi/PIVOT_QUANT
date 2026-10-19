@@ -32,6 +32,7 @@ sys.path.insert(0, str(REPO / "scripts" / "levels_product"))
 from backfill_events import calculate_pivots  # noqa: E402
 from hold_engine import label_coverage  # noqa: E402
 from level_snapshot import build_snapshot, write_snapshot  # noqa: E402
+from trading_calendar import REGULAR_SESSION_OPEN_ET, session_close_et  # noqa: E402
 
 DB = REPO / "data" / "pivot_events.sqlite"
 ET = ZoneInfo("America/New_York")
@@ -39,7 +40,7 @@ HORIZONS = [15, 30, 60]
 BASE_RATE_LOOKBACK_DAYS = 60  # recent window for the unconditional base rate
 
 
-MIN_SESSION_BARS = 360  # a complete RTH 1-min session is ~390 bars; require most of it
+MAX_MISSING_SESSION_BARS = 30
 
 
 def daily_rth_ohlc(con, symbol):
@@ -49,17 +50,31 @@ def daily_rth_ohlc(con, symbol):
     t = pd.to_datetime(b.ts, unit="ms", utc=True).dt.tz_convert(ET)
     b["d"] = t.dt.date
     mins = t.dt.hour * 60 + t.dt.minute
+    b["minute_of_day"] = mins
     b = b[(mins >= 570) & (mins <= 960) & (b.high >= b.low) & (b.high > 0)]
     g = b.groupby("d")
     o = pd.DataFrame({"open": g.open.first(), "high": g.high.max(),
                       "low": g.low.min(), "close": g.close.last(),
-                      "bars": g.size()}).reset_index()
-    # Use the most recent COMPLETE session (by bar count), regardless of run hour:
+                      "bars": g.size(),
+                      "last_minute": g.minute_of_day.max()}).reset_index()
+    # Use the most recent COMPLETE session, regardless of run hour. Reaching an
+    # arbitrary bar-count floor is insufficient: a feed truncated before the
+    # close must never be stamped as the official completed-session close.
     # floor-trader pivots must come from a finished session, never today's partial
     # bars. A morning run → prior session; an after-close run → today's session
-    # (i.e. the upcoming day's levels). Today's partial session has < MIN bars and
-    # is excluded automatically, so no explicit "exclude today" is needed.
-    o = o[o.bars >= MIN_SESSION_BARS]
+    # (i.e. the upcoming day's levels). Account for exchange early closes while
+    # tolerating at most 30 missing one-minute bars within the session.
+    open_minute = REGULAR_SESSION_OPEN_ET.hour * 60 + REGULAR_SESSION_OPEN_ET.minute
+    complete = []
+    for row in o.itertuples():
+        close = session_close_et(row.d)
+        close_minute = close.hour * 60 + close.minute
+        expected_bars = close_minute - open_minute
+        complete.append(
+            row.last_minute >= close_minute - 1
+            and row.bars >= expected_bars - MAX_MISSING_SESSION_BARS
+        )
+    o = o[pd.Series(complete, index=o.index, dtype=bool)]
     return o.sort_values("d").reset_index(drop=True)
 
 

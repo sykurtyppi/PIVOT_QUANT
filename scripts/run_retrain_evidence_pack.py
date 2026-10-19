@@ -883,7 +883,7 @@ def run_oos_validation(
 # Recognized OOS observation source labels. Anything else (including
 # "threshold_tune_slice", None, "", "unknown") is treated as IN-SAMPLE for
 # promotion purposes. Future OOS-validation PRs MUST pick a source name from
-# this convention (the explicit set OR the ``oos_`` prefix) when they write
+# this explicit allow-list when they write
 # per-signal observations into the manifest; otherwise the readiness
 # classifier will refuse to count their result toward
 # ``oos_validation_passed`` / ``promotion_ready``.
@@ -904,9 +904,7 @@ def _is_oos_source(source: object) -> bool:
     s = source.strip()
     if not s:
         return False
-    if s in _OOS_OBSERVATION_SOURCES_EXACT:
-        return True
-    return s.startswith("oos_")
+    return s in _OOS_OBSERVATION_SOURCES_EXACT
 
 
 def _aggregate_statistical_validation(

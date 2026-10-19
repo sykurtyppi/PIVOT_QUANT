@@ -14481,9 +14481,8 @@ class OpsSmokeTests(unittest.TestCase):
             result["promotion_disposition"], "full_family_in_sample_validated"
         )
 
-    def test_b3_oos_prefix_source_promotes(self) -> None:
-        """Sources matching the ``oos_`` prefix convention also count as OOS,
-        not only the explicit names in _OOS_OBSERVATION_SOURCES_EXACT."""
+    def test_b3_arbitrary_oos_prefix_source_does_not_promote(self) -> None:
+        """OOS status is an explicit provenance class, not a string prefix."""
         module = self._readiness_module()
         obs = self._strong_pass_obs()
         rows = [
@@ -14495,10 +14494,12 @@ class OpsSmokeTests(unittest.TestCase):
             ]
         ]
         result = module.classify_candidate_readiness(self._build_report_stub(rows))
-        self.assertEqual(result["validation_scope"], "oos")
-        self.assertTrue(result["oos_validation_passed"])
-        self.assertTrue(result["promotion_ready"])
-        self.assertEqual(result["promotion_disposition"], "ready_full_family")
+        self.assertEqual(result["validation_scope"], "in_sample")
+        self.assertFalse(result["oos_validation_present"])
+        self.assertFalse(result["promotion_ready"])
+        self.assertEqual(
+            result["promotion_disposition"], "full_family_in_sample_validated"
+        )
 
     def test_b3_mixed_scope_does_not_promote_due_to_oos_coverage_gap(self) -> None:
         """Mixed scope: 4 viable horizons OOS-pass, 4 in-sample-pass.

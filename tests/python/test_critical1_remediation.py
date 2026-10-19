@@ -20,6 +20,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import pandas as pd
 
@@ -220,8 +221,20 @@ class TestOOSValidationGuard(unittest.TestCase):
         p.write_text(json.dumps(report))
         return p
 
+    def _write_manifest(self, d: Path, version="v500"):
+        p = d / "manifest_candidate.json"
+        p.write_text(json.dumps({"version": version}))
+        return p
+
+    def _check(self, version, report, manifest):
+        with mock.patch(
+            "run_retrain_evidence_pack.classify_candidate_readiness",
+            return_value=json.loads(report.read_text())["candidate_readiness"],
+        ):
+            return gov.check_oos_validation(version, str(report), manifest)
+
     def test_no_report_blocks(self):
-        ok, reason, _ = gov.check_oos_validation("v500", "")
+        ok, reason, _ = gov.check_oos_validation("v500", "", None)
         self.assertFalse(ok)
         self.assertIn("no_evidence_report", reason)
 
@@ -231,7 +244,8 @@ class TestOOSValidationGuard(unittest.TestCase):
                 Path(d), "v500", oos_passed=False, promo_ready=False,
                 disposition="threshold_tune_slice",
             )
-            ok, reason, detail = gov.check_oos_validation("v500", str(p))
+            manifest = self._write_manifest(Path(d))
+            ok, reason, detail = self._check("v500", p, manifest)
             self.assertFalse(ok)
             self.assertIn("oos_validation_not_passed", reason)
             self.assertEqual(detail["promotion_disposition"], "threshold_tune_slice")
@@ -241,7 +255,8 @@ class TestOOSValidationGuard(unittest.TestCase):
             p = self._write_report(
                 Path(d), "v499", oos_passed=True, promo_ready=True,
             )
-            ok, reason, _ = gov.check_oos_validation("v500", str(p))
+            manifest = self._write_manifest(Path(d), "v499")
+            ok, reason, _ = self._check("v500", p, manifest)
             self.assertFalse(ok)
             self.assertIn("version_mismatch", reason)
 
@@ -250,7 +265,8 @@ class TestOOSValidationGuard(unittest.TestCase):
             p = self._write_report(
                 Path(d), "v500", oos_passed=True, promo_ready=True,
             )
-            ok, reason, _ = gov.check_oos_validation("v500", str(p))
+            manifest = self._write_manifest(Path(d))
+            ok, reason, _ = self._check("v500", p, manifest)
             self.assertTrue(ok)
             self.assertEqual(reason, "oos_validation_passed")
 
@@ -259,9 +275,37 @@ class TestOOSValidationGuard(unittest.TestCase):
             p = self._write_report(
                 Path(d), "v500", oos_passed=True, promo_ready=False,
             )
-            ok, reason, _ = gov.check_oos_validation("v500", str(p))
+            manifest = self._write_manifest(Path(d))
+            ok, reason, _ = self._check("v500", p, manifest)
             self.assertFalse(ok)
             self.assertIn("not_promotion_ready", reason)
+
+    def test_forged_readiness_flags_block(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            p = self._write_report(
+                root, "v500", oos_passed=True, promo_ready=True,
+            )
+            manifest = self._write_manifest(root)
+
+            ok, reason, _ = gov.check_oos_validation("v500", str(p), manifest)
+
+            self.assertFalse(ok)
+            self.assertIn("readiness_mismatch", reason)
+
+    def test_report_must_match_exact_candidate_manifest(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            p = self._write_report(
+                root, "v500", oos_passed=True, promo_ready=True,
+            )
+            manifest = root / "manifest_candidate.json"
+            manifest.write_text(json.dumps({"version": "v500", "models": {"reject": {}}}))
+
+            ok, reason, _ = gov.check_oos_validation("v500", str(p), manifest)
+
+            self.assertFalse(ok)
+            self.assertIn("candidate_manifest_mismatch", reason)
 
 
 class TestBootstrapRequiresOOS(unittest.TestCase):
@@ -341,7 +385,7 @@ class TestBootstrapRequiresOOS(unittest.TestCase):
             d = Path(dd)
             self._setup(d)
             report = {
-                "candidate_manifest": {"version": "v500"},
+                "candidate_manifest": self._candidate(),
                 "candidate_readiness": {
                     "oos_validation_passed": True,
                     "promotion_ready": True,
@@ -350,7 +394,11 @@ class TestBootstrapRequiresOOS(unittest.TestCase):
             }
             rp = d / "evidence.json"
             rp.write_text(json.dumps(report))
-            rc, out = self._run(self._args(d, evidence_report=str(rp)))
+            with mock.patch(
+                "run_retrain_evidence_pack.classify_candidate_readiness",
+                return_value=report["candidate_readiness"],
+            ):
+                rc, out = self._run(self._args(d, evidence_report=str(rp)))
             self.assertEqual(rc, 0)
             self.assertEqual(out["action"], "bootstrap")
             self.assertTrue(out["promoted"])

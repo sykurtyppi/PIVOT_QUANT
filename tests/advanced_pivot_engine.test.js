@@ -56,10 +56,10 @@ describe('advanced_pivot_engine.js — advancedPivotEngine', () => {
       expect(p.PIVOT).toBeCloseTo(100, 9);
       expect(p.R1).toBeCloseTo(110, 9);
       expect(p.R2).toBeCloseTo(120, 9);
-      expect(p.R3).toBeCloseTo(220, 9);
+      expect(p.R3).toBeCloseTo(130, 9);
       expect(p.S1).toBeCloseTo(90, 9);
       expect(p.S2).toBeCloseTo(80, 9);
-      expect(p.S3).toBeCloseTo(180, 9);
+      expect(p.S3).toBeCloseTo(70, 9);
       // < 20 candles -> no gamma-flip level is added
       expect(p).not.toHaveProperty('GAMMA_FLIP');
     });

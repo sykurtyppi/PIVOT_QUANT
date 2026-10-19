@@ -163,6 +163,48 @@ class HoldRateFreshnessTest(unittest.TestCase):
         self.assertEqual(snapshot["coverage"][30]["missing_count"], 35)
 
 
+class CompletedSessionSelectionTest(unittest.TestCase):
+    @staticmethod
+    def _bars(start: str, periods: int):
+        index = pd.date_range(start, periods=periods, freq="min", tz="America/New_York")
+        bars = pd.DataFrame(
+            {"Open": 100.0, "High": 101.0, "Low": 99.0, "Close": 100.5},
+            index=index,
+        )
+        con = sqlite3.connect(":memory:")
+        con.execute(
+            "CREATE TABLE bar_data "
+            "(symbol TEXT, ts INTEGER, open REAL, high REAL, low REAL, close REAL)"
+        )
+        con.executemany(
+            "INSERT INTO bar_data VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    "SPY", int(ts.timestamp() * 1000), row.Open, row.High, row.Low, row.Close
+                )
+                for ts, row in bars.iterrows()
+            ],
+        )
+        return con
+
+    def test_incomplete_session_with_360_bars_is_not_canonicalized(self):
+        con = self._bars("2026-10-01 09:30", 360)  # final observation is 15:29 ET
+        self.addCleanup(con.close)
+
+        daily = morning_map.daily_rth_ohlc(con, "SPY")
+
+        self.assertTrue(daily.empty)
+
+    def test_session_reaching_final_one_minute_bar_is_accepted(self):
+        con = self._bars("2026-10-01 09:30", 390)  # final observation is 15:59 ET
+        self.addCleanup(con.close)
+
+        daily = morning_map.daily_rth_ohlc(con, "SPY")
+
+        self.assertEqual(list(daily["d"]), [date(2026, 10, 1)])
+        self.assertEqual(int(daily.iloc[0]["bars"]), 390)
+
+
 class TrackRecordWindowTest(unittest.TestCase):
     def test_recent_scoreboard_is_anchored_to_reporting_session(self):
         april = pd.DataFrame(

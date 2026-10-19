@@ -88,13 +88,13 @@ describe('enhanced_fdr_correction.js — EnhancedFDRCorrection', () => {
       expect(significant).toEqual([true, false, false]);
     });
 
-    test('clamps invalid p-values (NaN/negative -> 0, >1 -> 1)', () => {
+    test('fails closed on invalid p-values', () => {
       const { qValues, significant } = E.enhancedBenjaminiHochbergCorrection([NaN, -0.5, 2.0, 0.01], 0.05);
-      expect(qValues[0]).toBeCloseTo(0, 9);
-      expect(qValues[1]).toBeCloseTo(0, 9);
+      expect(qValues[0]).toBeCloseTo(1, 9);
+      expect(qValues[1]).toBeCloseTo(1, 9);
       expect(qValues[2]).toBeCloseTo(1.0, 9);
-      expect(qValues[3]).toBeCloseTo(0.013333, 5);
-      expect(significant).toEqual([true, true, false, true]);
+      expect(qValues[3]).toBeCloseTo(0.04, 9);
+      expect(significant).toEqual([false, false, false, true]);
     });
   });
 
@@ -136,7 +136,7 @@ describe('enhanced_fdr_correction.js — EnhancedFDRCorrection', () => {
       expect(r.successRate).toBeCloseTo(95, 9);
       expect(r.baseline).toBeCloseTo(50, 9);
       expect(r.lift).toBeCloseTo(45, 9);
-      expect(r.nEffective).toBe(80); // round(100 * 0.8 weekly clustering factor)
+      expect(r.nEffective).toBe(100);
       expect(r.significant).toBe(true);
       expect(r.qValue).toBeLessThanOrEqual(0.05);
       expect(r.testType).toBe('one-sided');
@@ -161,10 +161,21 @@ describe('enhanced_fdr_correction.js — EnhancedFDRCorrection', () => {
       expect(r.pValue).toBe(1.0);
       expect(r.qValue).toBeNull();
       expect(r.significant).toBe(false);
-      expect(r.nEffective).toBe(4);
+      expect(r.nEffective).toBe(5);
       expect(r.successRate).toBeCloseTo(80, 9);
       expect(out.summary.validLevels).toBe(0);
       expect(out.summary.insufficientDataLevels).toBe(1);
+    });
+
+    test('malformed counts cannot become significant', () => {
+      const out = E.analyzePivotSignificanceEnhanced(
+        { BAD: { successes: NaN, trials: 100 } },
+        'RANGE', 'weekly',
+        { customBaselines: { BAD: 0.5 } },
+      );
+      expect(out.levels.BAD.hasSufficientData).toBe(false);
+      expect(out.levels.BAD.significant).toBe(false);
+      expect(out.levels.BAD.pValue).toBe(1.0);
     });
   });
 

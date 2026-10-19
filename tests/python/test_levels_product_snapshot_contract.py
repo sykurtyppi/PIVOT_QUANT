@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from datetime import date
 from pathlib import Path
@@ -365,6 +366,7 @@ class BriefingArtifactTest(unittest.TestCase):
         self.assertEqual(artifact["contract_version"], 1)
         self.assertEqual(artifact["snapshot_id"], self.snapshot["snapshot_id"])
         self.assertEqual(artifact["prepared_at_utc"], self.snapshot["generated_at_utc"])
+        self.assertEqual(artifact["track_record"], self.track_record)
         self.assertRegex(artifact["briefing_id"], r"^brf_[0-9a-f]{24}$")
         self.assertIn("SPY LEVELS — 2026-10-02 session", artifact["body"])
 
@@ -386,6 +388,70 @@ class BriefingArtifactTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "immutable briefing"):
                 publish.write_briefing_artifact(changed, Path(tmp))
             self.assertEqual(immutable.read_bytes(), before)
+
+    def test_failed_delivery_has_no_receipt_and_returns_failure(self):
+        artifact = publish.build_briefing_artifact(self.snapshot, self.track_record)
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            publish.notify, "post", return_value=False
+        ) as post:
+            ok, status = publish.deliver_briefing(
+                artifact, channel="webhook", out_dir=Path(tmp)
+            )
+
+            self.assertFalse(ok)
+            self.assertEqual(status, "delivery-failed")
+            self.assertEqual(post.call_count, 1)
+            self.assertEqual(list(Path(tmp).glob("morning_delivery_*.json")), [])
+
+    def test_dry_run_has_no_receipt_and_does_not_send(self):
+        artifact = publish.build_briefing_artifact(self.snapshot, self.track_record)
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            publish.notify, "post"
+        ) as post:
+            ok, status = publish.deliver_briefing(
+                artifact, channel="webhook", out_dir=Path(tmp), dry_run=True
+            )
+
+            self.assertFalse(ok)
+            self.assertEqual(status, "dry-run")
+            post.assert_not_called()
+            self.assertEqual(list(Path(tmp).glob("morning_delivery_*.json")), [])
+
+    def test_concurrent_delivery_sends_once_and_reuses_receipt(self):
+        artifact = publish.build_briefing_artifact(self.snapshot, self.track_record)
+        outcomes = []
+
+        def slow_success(_body):
+            time.sleep(0.05)
+            return True
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            publish.notify, "post", side_effect=slow_success
+        ) as post:
+            out_dir = Path(tmp)
+
+            def deliver():
+                outcomes.append(
+                    publish.deliver_briefing(
+                        artifact, channel="webhook", out_dir=out_dir
+                    )
+                )
+
+            threads = [threading.Thread(target=deliver) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=5)
+
+            self.assertEqual(post.call_count, 1)
+            self.assertEqual(sorted(status for _, status in outcomes), [
+                "already-delivered", "sent"
+            ])
+            receipts = list(out_dir.glob("morning_delivery_*.json"))
+            self.assertEqual(len(receipts), 1)
+            receipt = json.loads(receipts[0].read_text())
+            self.assertEqual(receipt["briefing_id"], artifact["briefing_id"])
+            self.assertEqual(receipt["channel"], "webhook")
 
 
 class SnapshotConsumerParityTest(unittest.TestCase):

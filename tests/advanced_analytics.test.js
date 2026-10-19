@@ -113,10 +113,11 @@ describe('advanced_analytics.js — AdvancedAnalytics', () => {
   });
 
   describe('calculateATRStops', () => {
-    test('derives stop/target from the CI upper with a 1.5:1 reward:risk', () => {
-      const stops = A.calculateATRStops({ confidenceInterval: { upper: 50 } }, 'reversal', 2);
-      expect(stops.stop_distance).toBeCloseTo(2, 9); // 2 * (50*0.02)
-      expect(stops.target_distance).toBeCloseTo(3, 9); // 2 * 1.5 * 1
+    test('uses explicit price ATR and refuses to fabricate it from confidence data', () => {
+      expect(A.calculateATRStops({}, 'reversal', 2)).toBeNull();
+      const stops = A.calculateATRStops({ atr: 1.25 }, 'reversal', 2);
+      expect(stops.stop_distance).toBeCloseTo(2.5, 9);
+      expect(stops.target_distance).toBeCloseTo(3.75, 9);
       expect(stops.risk_reward_ratio).toBe(1.5);
       expect(stops.bias).toBe('reversal');
       expect(stops.atr_multiplier).toBe(2);
@@ -176,6 +177,15 @@ describe('advanced_analytics.js — AdvancedAnalytics', () => {
       const result = { qValue: 0.5, lift: 1, nEffective: 40, confidenceInterval: { upper: 50, lower: 30 } };
       expect(A.evaluateAlerts('R1', result, null, rules)).toEqual([]);
     });
+
+    test('stability direction cannot fire contradictory alerts', () => {
+      const rules = A.createAlertRules();
+      const result = { qValue: 1, lift: 0, nEffective: 40, confidenceInterval: { upper: 50, lower: 30 } };
+      const up = A.evaluateAlerts('R1', result, { variance: 200, trend: 3 }, rules);
+      expect(up.filter((a) => a.type === 'stability').map((a) => a.level)).toEqual(['improving']);
+      const down = A.evaluateAlerts('R1', result, { variance: 200, trend: -3 }, rules);
+      expect(down.filter((a) => a.type === 'stability').map((a) => a.level)).toEqual(['deteriorating']);
+    });
   });
 
   describe('generateTopPicks', () => {
@@ -197,6 +207,15 @@ describe('advanced_analytics.js — AdvancedAnalytics', () => {
 
     test('honours maxPicks', () => {
       expect(A.generateTopPicks(fdrResults, 'RANGE', 1)).toHaveLength(1);
+    });
+
+    test('preserves an exact q-value of zero', () => {
+      const exact = JSON.parse(JSON.stringify(fdrResults));
+      exact.levels.R1.qValue = 0;
+      const tiny = JSON.parse(JSON.stringify(fdrResults));
+      tiny.levels.R1.qValue = Number.MIN_VALUE;
+      expect(A.generateTopPicks(exact, 'RANGE', 1)[0].score)
+        .toBeCloseTo(A.generateTopPicks(tiny, 'RANGE', 1)[0].score, 12);
     });
   });
 
