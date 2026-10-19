@@ -14,6 +14,7 @@ Covers, per the remediation spec:
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import sys
@@ -208,9 +209,10 @@ class TestPartialCoverage(unittest.TestCase):
 
 class TestOOSValidationGuard(unittest.TestCase):
     def _write_report(self, d: Path, version, *, oos_passed, promo_ready,
-                      disposition="held_out_oos"):
+                      disposition="held_out_oos", artifact_hashes=None):
         report = {
             "candidate_manifest": {"version": version},
+            "candidate_artifact_sha256": artifact_hashes or {},
             "candidate_readiness": {
                 "oos_validation_passed": oos_passed,
                 "promotion_ready": promo_ready,
@@ -307,6 +309,32 @@ class TestOOSValidationGuard(unittest.TestCase):
             self.assertFalse(ok)
             self.assertIn("candidate_manifest_mismatch", reason)
 
+    def test_artifact_replacement_after_evidence_blocks(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            artifact = root / "candidate.pkl"
+            artifact.write_bytes(b"evaluated-model")
+            manifest_data = {
+                "version": "v500",
+                "models": {"reject": {"15": artifact.name}},
+            }
+            manifest = root / "manifest_candidate.json"
+            manifest.write_text(json.dumps(manifest_data))
+            digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+            report = self._write_report(
+                root, "v500", oos_passed=True, promo_ready=True,
+                artifact_hashes={artifact.name: digest},
+            )
+            report_data = json.loads(report.read_text())
+            report_data["candidate_manifest"] = manifest_data
+            report.write_text(json.dumps(report_data))
+
+            artifact.write_bytes(b"replacement-model")
+            ok, reason, _ = self._check("v500", report, manifest)
+
+            self.assertFalse(ok)
+            self.assertEqual(reason, "evidence_report_candidate_artifact_mismatch")
+
 
 class TestBootstrapRequiresOOS(unittest.TestCase):
     """Bootstrap (no manifest_active.json yet) must clear the SAME OOS gate as a
@@ -386,6 +414,9 @@ class TestBootstrapRequiresOOS(unittest.TestCase):
             self._setup(d)
             report = {
                 "candidate_manifest": self._candidate(),
+                "candidate_artifact_sha256": {
+                    "reject_5.pkl": hashlib.sha256(b"stub").hexdigest()
+                },
                 "candidate_readiness": {
                     "oos_validation_passed": True,
                     "promotion_ready": True,

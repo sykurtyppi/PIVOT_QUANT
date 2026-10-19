@@ -70,8 +70,7 @@ describe('enhanced_fdr_correction.js — EnhancedFDRCorrection', () => {
     test('large-sample one-sided: strong over-performance is tiny', () => {
       expect(E.oneSidedBinomialTest(90, 100, 0.5, true)).toBeLessThan(1e-4);
       const atNull = E.oneSidedBinomialTest(50, 100, 0.5, true);
-      expect(atNull).toBeGreaterThan(0.35);
-      expect(atNull).toBeLessThan(0.65);
+      expect(atNull).toBeCloseTo(0.5398, 3);
     });
   });
 
@@ -95,6 +94,11 @@ describe('enhanced_fdr_correction.js — EnhancedFDRCorrection', () => {
       expect(qValues[2]).toBeCloseTo(1.0, 9);
       expect(qValues[3]).toBeCloseTo(0.04, 9);
       expect(significant).toEqual([false, false, false, true]);
+    });
+
+    test('invalid alpha cannot manufacture significance', () => {
+      const out = E.enhancedBenjaminiHochbergCorrection([0], 2);
+      expect(out.significant).toEqual([false]);
     });
   });
 
@@ -176,6 +180,32 @@ describe('enhanced_fdr_correction.js — EnhancedFDRCorrection', () => {
       expect(out.levels.BAD.hasSufficientData).toBe(false);
       expect(out.levels.BAD.significant).toBe(false);
       expect(out.levels.BAD.pValue).toBe(1.0);
+    });
+
+    test('malformed alpha, baselines, and level objects fail closed', () => {
+      const invalidAlpha = E.analyzePivotSignificanceEnhanced(
+        { WIN: { successes: 100, trials: 100 } },
+        'RANGE', 'weekly',
+        { alpha: 2, customBaselines: { WIN: 0.5 } },
+      );
+      expect(invalidAlpha.levels.WIN.significant).toBe(false);
+
+      const invalidBaseline = E.analyzePivotSignificanceEnhanced(
+        { WIN: { successes: 100, trials: 100 }, BAD: null },
+        'RANGE', 'weekly',
+        { customBaselines: { WIN: NaN, BAD: 0.5 } },
+      );
+      expect(invalidBaseline.levels.WIN.hasSufficientData).toBe(false);
+      expect(invalidBaseline.levels.WIN.significant).toBe(false);
+      expect(invalidBaseline.levels.BAD.hasSufficientData).toBe(false);
+
+      const zeroBaseline = E.analyzePivotSignificanceEnhanced(
+        { ZERO: { successes: 1, trials: 100 } },
+        'RANGE', 'weekly',
+        { customBaselines: { ZERO: 0 } },
+      );
+      expect(zeroBaseline.levels.ZERO.baseline).toBe(0);
+      expect(E.analyzePivotSignificanceEnhanced(null).summary.totalLevels).toBe(0);
     });
   });
 

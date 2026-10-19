@@ -48,8 +48,9 @@ window.EnhancedFDRCorrection = (() => {
         const variance = trials * p0 * (1 - p0);
         const stdDev = Math.sqrt(variance);
 
-        // Apply continuity correction
-        const correction = successes > mean ? -0.5 : 0.5;
+        // For the upper tail P(X >= k), the continuous boundary is k - 0.5.
+        // A two-sided approximation instead corrects toward the null mean.
+        const correction = oneSided ? -0.5 : (successes > mean ? -0.5 : 0.5);
         const zScore = (successes + correction - mean) / stdDev;
 
         if (oneSided) {
@@ -145,6 +146,7 @@ window.EnhancedFDRCorrection = (() => {
     function enhancedBenjaminiHochbergCorrection(pValues, alpha = 0.05) {
         const n = pValues.length;
         if (n === 0) return { qValues: [], significant: [] };
+        const alphaValid = Number.isFinite(alpha) && alpha >= 0 && alpha <= 1;
 
         // Fail closed on malformed statistical inputs. Mapping invalid values to
         // zero would manufacture maximum significance from corrupt data.
@@ -174,7 +176,7 @@ window.EnhancedFDRCorrection = (() => {
 
             // Clamp to [0, 1]
             qValues[indexed[i].index] = Math.max(0, Math.min(qValue, 1.0));
-            significant[indexed[i].index] = qValues[indexed[i].index] <= alpha;
+            significant[indexed[i].index] = alphaValid && qValues[indexed[i].index] <= alpha;
         }
 
         return { qValues, significant };
@@ -231,6 +233,8 @@ window.EnhancedFDRCorrection = (() => {
             minNEff = 10
         } = options;
 
+        pivotStats = pivotStats && typeof pivotStats === 'object' ? pivotStats : {};
+
         // Get regime-specific baselines
         const baselines = customBaselines || DEFAULT_REGIME_BASELINES[regime] || DEFAULT_REGIME_BASELINES['RANGE'];
 
@@ -241,9 +245,18 @@ window.EnhancedFDRCorrection = (() => {
 
         // Calculate p-values for each level
         levels.forEach(level => {
-            const stats = pivotStats[level];
-            const p0 = baselines[level] || 0.5; // Fallback to 0.5 if baseline not found
-            const countsValid = Number.isInteger(stats.trials)
+            const stats = pivotStats[level] && typeof pivotStats[level] === 'object'
+                ? pivotStats[level]
+                : {};
+            const baselineCandidate = Object.prototype.hasOwnProperty.call(baselines, level)
+                ? baselines[level]
+                : 0.5;
+            const baselineValid = Number.isFinite(baselineCandidate)
+                && baselineCandidate >= 0
+                && baselineCandidate <= 1;
+            const p0 = baselineValid ? baselineCandidate : 0.5;
+            const countsValid = baselineValid
+                && Number.isInteger(stats.trials)
                 && Number.isInteger(stats.successes)
                 && stats.trials >= 0
                 && stats.successes >= 0

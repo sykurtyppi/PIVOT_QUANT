@@ -1453,6 +1453,22 @@ def build_report(
         }
         summary = summary_block(per_horizon)
 
+    artifact_hashes: dict[str, str | None] = {}
+    if isinstance(candidate_manifest, dict):
+        models = candidate_manifest.get("models", {})
+        if isinstance(models, dict):
+            for horizons in models.values():
+                if not isinstance(horizons, dict):
+                    continue
+                for filename in horizons.values():
+                    artifact_name = str(filename)
+                    artifact_path = candidate_manifest_path.parent / artifact_name
+                    artifact_hashes[artifact_name] = (
+                        hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+                        if artifact_path.is_file()
+                        else None
+                    )
+
     report = {
         "schema_version": SCHEMA_VERSION,
         "run_id": run_id,
@@ -1461,6 +1477,7 @@ def build_report(
         "training": training_block,
         "candidate_manifest_path": str(candidate_manifest_path),
         "candidate_manifest": candidate_manifest,
+        "candidate_artifact_sha256": artifact_hashes,
         "per_horizon": per_horizon,
         "runtime_safety_dry_run": safety,
         "summary": summary,

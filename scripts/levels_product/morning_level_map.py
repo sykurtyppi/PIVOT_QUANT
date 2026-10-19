@@ -44,9 +44,16 @@ MAX_MISSING_SESSION_BARS = 30
 
 
 def daily_rth_ohlc(con, symbol):
+    columns = {
+        str(row[1]) for row in con.execute("PRAGMA table_info(bar_data)").fetchall()
+    }
+    interval_filter = " AND bar_interval_sec=60" if "bar_interval_sec" in columns else ""
     b = pd.read_sql_query(
-        "SELECT ts,open,high,low,close FROM bar_data WHERE symbol=? ORDER BY ts",
+        "SELECT ts,open,high,low,close FROM bar_data WHERE symbol=?"
+        + interval_filter
+        + " ORDER BY ts",
         con, params=(symbol,))
+    b = b.drop_duplicates(subset=["ts"], keep="last")
     t = pd.to_datetime(b.ts, unit="ms", utc=True).dt.tz_convert(ET)
     b["d"] = t.dt.date
     mins = t.dt.hour * 60 + t.dt.minute

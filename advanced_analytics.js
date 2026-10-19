@@ -50,7 +50,10 @@ window.AdvancedAnalytics = (() => {
      * Calculate walk-forward stability metrics
      */
     function calculateWalkForwardStability(timeSeries, windowSize = 60, stepSize = 20) {
-        if (!timeSeries || timeSeries.length < windowSize + stepSize) {
+        if (!Array.isArray(timeSeries)
+            || !Number.isInteger(windowSize) || windowSize <= 0
+            || !Number.isInteger(stepSize) || stepSize <= 0
+            || timeSeries.length < windowSize + stepSize) {
             return { variance: null, trend: null, stability: 'UNKNOWN' };
         }
 
@@ -404,7 +407,8 @@ window.AdvancedAnalytics = (() => {
      */
     function calculateATRStops(result, bias, atrMultiplier = 2.0) {
         const atr = Number(result && result.atr);
-        if (!Number.isFinite(atr) || atr <= 0) return null;
+        if (!Number.isFinite(atr) || atr <= 0
+            || !Number.isFinite(atrMultiplier) || atrMultiplier <= 0) return null;
 
         const stopDistance = atrMultiplier * atr;
         const targetDistance = atrMultiplier * 1.5 * atr; // 1.5:1 reward:risk

@@ -79,6 +79,13 @@ describe('advanced_analytics.js — AdvancedAnalytics', () => {
   });
 
   describe('calculateWalkForwardStability', () => {
+    test('invalid window and step sizes fail closed without looping', () => {
+      const ts = Array(100).fill({ success: true });
+      expect(A.calculateWalkForwardStability(ts, 10, 0).stability).toBe('UNKNOWN');
+      expect(A.calculateWalkForwardStability(ts, 10, -1).stability).toBe('UNKNOWN');
+      expect(A.calculateWalkForwardStability(ts, 0, 5).stability).toBe('UNKNOWN');
+    });
+
     test('too-short series is UNKNOWN', () => {
       const ts = Array(10).fill({ success: true });
       expect(A.calculateWalkForwardStability(ts, 10, 5)).toEqual({ variance: null, trend: null, stability: 'UNKNOWN' });
@@ -121,6 +128,12 @@ describe('advanced_analytics.js — AdvancedAnalytics', () => {
       expect(stops.risk_reward_ratio).toBe(1.5);
       expect(stops.bias).toBe('reversal');
       expect(stops.atr_multiplier).toBe(2);
+    });
+
+    test('rejects non-positive or non-finite ATR multipliers', () => {
+      expect(A.calculateATRStops({ atr: 1 }, 'bullish', 0)).toBeNull();
+      expect(A.calculateATRStops({ atr: 1 }, 'bullish', -2)).toBeNull();
+      expect(A.calculateATRStops({ atr: 1 }, 'bullish', NaN)).toBeNull();
     });
   });
 

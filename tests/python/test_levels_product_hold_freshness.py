@@ -204,6 +204,30 @@ class CompletedSessionSelectionTest(unittest.TestCase):
         self.assertEqual(list(daily["d"]), [date(2026, 10, 1)])
         self.assertEqual(int(daily.iloc[0]["bars"]), 390)
 
+    def test_duplicate_timestamps_across_intervals_do_not_fake_completeness(self):
+        con = sqlite3.connect(":memory:")
+        self.addCleanup(con.close)
+        con.execute(
+            "CREATE TABLE bar_data (symbol TEXT, ts INTEGER, open REAL, high REAL, "
+            "low REAL, close REAL, bar_interval_sec INTEGER)"
+        )
+        timestamps = pd.date_range(
+            "2026-10-01 09:30", "2026-10-01 15:59", periods=181,
+            tz="America/New_York",
+        )
+        rows = []
+        for ts in timestamps:
+            for interval in (60, 300):
+                rows.append((
+                    "SPY", int(ts.timestamp() * 1000), 100.0, 101.0, 99.0,
+                    100.5, interval,
+                ))
+        con.executemany("INSERT INTO bar_data VALUES (?, ?, ?, ?, ?, ?, ?)", rows)
+
+        daily = morning_map.daily_rth_ohlc(con, "SPY")
+
+        self.assertTrue(daily.empty)
+
 
 class TrackRecordWindowTest(unittest.TestCase):
     def test_recent_scoreboard_is_anchored_to_reporting_session(self):

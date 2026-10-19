@@ -1049,6 +1049,18 @@ def check_oos_validation(
     if report.get("candidate_manifest") != actual_manifest:
         return (False, "evidence_report_candidate_manifest_mismatch", detail)
 
+    try:
+        actual_artifact_hashes = build_approval_hashes(
+            manifest_path.parent, manifest_path, actual_manifest
+        )["active_artifact_sha256"]
+    except Exception as exc:  # noqa: BLE001
+        return (False, f"candidate_artifact_hashing_failed:{exc}", detail)
+    evidence_artifact_hashes = report.get("candidate_artifact_sha256")
+    detail["evidence_candidate_artifact_sha256"] = evidence_artifact_hashes
+    detail["actual_candidate_artifact_sha256"] = actual_artifact_hashes
+    if evidence_artifact_hashes != actual_artifact_hashes:
+        return (False, "evidence_report_candidate_artifact_mismatch", detail)
+
     # Tie the report to THIS candidate version.
     cand_manifest = report.get("candidate_manifest")
     report_version = None
