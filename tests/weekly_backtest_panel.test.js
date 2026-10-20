@@ -76,6 +76,26 @@ describe('weekly_backtest_panel.js — weeklyBacktestPanel (jsdom)', () => {
       const oneWeek = [3, 4, 5, 6, 7, 8, 9].map((d) => bar(2024, 6, d, 100, 110, 90, 100));
       expect(() => W.computePriorWeekPivots(oneWeek)).toThrow('at least 2 weeks');
     });
+
+    test('aggregates an ISO week across the New Year boundary as one week', () => {
+      // ISO week 2020-W01 spans Mon Dec 30 2019 .. Sun Jan 5 2020. A later week
+      // (2020-W02) makes that boundary week the prior (second-to-last) one.
+      const boundary = [
+        bar(2019, 12, 30, 45, 50, 40, 45),
+        bar(2019, 12, 31, 45, 200, 40, 150), // high 200
+        bar(2020, 1, 1, 55, 60, 10, 55), // low 10
+        bar(2020, 1, 2, 65, 70, 50, 65),
+        bar(2020, 1, 3, 70, 80, 60, 109), // last bar of 2020-W01 -> close 109
+        bar(2020, 1, 6, 250, 300, 5, 250), // 2020-W02 (latest, excluded)
+        bar(2020, 1, 7, 250, 310, 6, 260),
+      ];
+      const r = W.computePriorWeekPivots(boundary);
+      // Dec 30 .. Jan 3 is ONE ISO week -> high 200 / low 10 / close 109.
+      // The old calendar-year key split Dec 30-31 off and returned high 80.
+      expect(r.high).toBe(200);
+      expect(r.low).toBe(10);
+      expect(r.close).toBe(109);
+    });
   });
 
   describe('exports fail closed before a backtest has run', () => {
