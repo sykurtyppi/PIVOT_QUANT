@@ -73,10 +73,13 @@ def daily_rth_ohlc(con, symbol):
         & (b.high >= b.low)
         & (b.high > 0)
     ]
+    b["minute_rows"] = b.groupby(["d", "minute_of_day"])["ts"].transform("size")
     g = b.groupby("d")
     o = pd.DataFrame({"open": g.open.first(), "high": g.high.max(),
                       "low": g.low.min(), "close": g.close.last(),
                       "bars": g.minute_of_day.nunique(),
+                      "first_minute": g.minute_of_day.min(),
+                      "max_rows_per_minute": g.minute_rows.max(),
                       "last_minute": g.minute_of_day.max()}).reset_index()
     # Use the most recent COMPLETE session, regardless of run hour. Reaching an
     # arbitrary bar-count floor is insufficient: a feed truncated before the
@@ -95,8 +98,10 @@ def daily_rth_ohlc(con, symbol):
         close_minute = close.hour * 60 + close.minute
         expected_bars = close_minute - open_minute
         complete.append(
-            row.last_minute >= close_minute - 1
+            row.first_minute == open_minute
+            and row.last_minute >= close_minute - 1
             and row.bars >= expected_bars - MAX_MISSING_SESSION_BARS
+            and row.max_rows_per_minute == 1
         )
     o = o[pd.Series(complete, index=o.index, dtype=bool)]
     return o.sort_values("d").reset_index(drop=True)

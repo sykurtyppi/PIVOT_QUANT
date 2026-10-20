@@ -266,6 +266,52 @@ describe('enhanced_fdr_correction.js — EnhancedFDRCorrection', () => {
       expect(missing.levels.WIN.nEffective).toBe(0);
       expect(missing.levels.WIN.hasSufficientData).toBe(false);
     });
+
+    test('overlap correction uses effective observations for inference', () => {
+      const out = E.analyzePivotSignificanceEnhanced(
+        { WIN: { successes: 60, trials: 100 } },
+        'RANGE', 'weekly',
+        { customBaselines: { WIN: 0.5 }, overlapHorizon: 5 },
+      );
+      const r = out.levels.WIN;
+      expect(r.nEffective).toBe(20);
+      expect(r.successesEffective).toBe(12);
+      expect(r.pValue).toBeCloseTo(E.oneSidedBinomialTest(12, 20, 0.5, true), 12);
+      expect(r.confidenceInterval.lower).toBeCloseTo(
+        E.wilsonConfidenceInterval(12, 20, 0.95).lower * 100,
+        12,
+      );
+      expect(r.significant).toBe(false);
+    });
+
+    test('empty custom baselines fail closed without deriving family from results', () => {
+      const sparse = E.analyzePivotSignificanceEnhanced(
+        { A: { successes: 60, trials: 100 } },
+        'RANGE', 'weekly',
+        { customBaselines: {}, overlapHorizon: 1 },
+      );
+      const expanded = E.analyzePivotSignificanceEnhanced(
+        { A: { successes: 60, trials: 100 }, B: null },
+        'RANGE', 'weekly',
+        { customBaselines: {}, overlapHorizon: 1 },
+      );
+      expect(sparse.summary.totalLevels).toBe(0);
+      expect(expanded.summary.totalLevels).toBe(0);
+      expect(sparse.familyInfo.familyMembers).toEqual([]);
+      expect(expanded.familyInfo.familyMembers).toEqual([]);
+    });
+
+    test('unsafe explicit family members fail closed', () => {
+      const out = E.analyzePivotSignificanceEnhanced(
+        JSON.parse('{"__proto__":{"successes":100,"trials":100}}'),
+        'RANGE', 'weekly',
+        { familyMembers: ['__proto__'], overlapHorizon: 1 },
+      );
+      expect(out.summary.totalLevels).toBe(0);
+      expect(out.summary.validLevels).toBe(0);
+      expect(Object.prototype.hasOwnProperty.call(out.levels, '__proto__')).toBe(false);
+      expect(JSON.stringify(out.levels)).toBe('{}');
+    });
   });
 
   describe('generateTooltip / formatSignificanceDisplay', () => {

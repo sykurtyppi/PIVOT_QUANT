@@ -237,21 +237,38 @@ window.EnhancedFDRCorrection = (() => {
         const pivotStatsValid = pivotStats && typeof pivotStats === 'object';
         pivotStats = pivotStatsValid ? pivotStats : {};
 
-        // Get regime-specific baselines
-        const baselines = customBaselines || DEFAULT_REGIME_BASELINES[regime] || DEFAULT_REGIME_BASELINES['RANGE'];
+        const isSafeFamilyMember = level => typeof level === 'string'
+            && level.length > 0
+            && level !== '__proto__'
+            && level !== 'prototype'
+            && level !== 'constructor';
+        const customBaselinesProvided = customBaselines !== null && customBaselines !== undefined;
+        const customBaselinesValid = customBaselines
+            && typeof customBaselines === 'object'
+            && !Array.isArray(customBaselines)
+            && Object.keys(customBaselines).length > 0
+            && Object.keys(customBaselines).every(isSafeFamilyMember);
+
+        // An explicitly supplied but empty/malformed custom map has no valid
+        // predeclared family and therefore fails closed.
+        const baselines = customBaselinesValid
+            ? customBaselines
+            : (customBaselinesProvided
+                ? Object.create(null)
+                : (DEFAULT_REGIME_BASELINES[regime] || DEFAULT_REGIME_BASELINES['RANGE']));
 
         // The multiplicity family must not depend on which result keys happen
         // to be present. Callers may declare it explicitly; otherwise the
         // selected baseline map is the predeclared family. Invalid top-level
         // input retains the historical empty-result behavior.
-        const declaredFamily = Array.isArray(familyMembers)
+        const familyMembersProvided = familyMembers !== null && familyMembers !== undefined;
+        const explicitFamilyValid = Array.isArray(familyMembers)
             && familyMembers.length > 0
-            && familyMembers.every(level => typeof level === 'string' && level.length > 0)
-            ? [...new Set(familyMembers)]
+            && familyMembers.every(isSafeFamilyMember);
+        const declaredFamily = familyMembersProvided
+            ? (explicitFamilyValid ? [...new Set(familyMembers)] : [])
             : Object.keys(baselines);
-        const levels = pivotStatsValid
-            ? (declaredFamily.length > 0 ? declaredFamily : Object.keys(pivotStats))
-            : [];
+        const levels = pivotStatsValid ? declaredFamily : [];
         const pValues = [];
         const results = {};
         const validLevels = [];
@@ -277,6 +294,8 @@ window.EnhancedFDRCorrection = (() => {
             const trials = countsValid ? stats.trials : 0;
             const successes = countsValid ? stats.successes : 0;
             const nEff = calculateEffectiveN(trials, overlapHorizon);
+            const observedRate = trials > 0 ? successes / trials : 0;
+            const successesEff = nEff > 0 ? Math.floor(observedRate * nEff) : 0;
 
             // Check sample size requirements
             const hasSufficientData = countsValid && trials >= minN && nEff >= minNEff;
@@ -287,26 +306,27 @@ window.EnhancedFDRCorrection = (() => {
             let permPValue = null;
 
             if (hasSufficientData) {
-                pValue = oneSidedBinomialTest(successes, trials, p0, oneSided);
+                pValue = oneSidedBinomialTest(successesEff, nEff, p0, oneSided);
                 validLevels.push(level);
 
                 // Permutation test if requested
                 if (permutationTests && debugMode) {
-                    permPValue = permutationTest({ successes, trials }, p0);
+                    permPValue = permutationTest({ successes: successesEff, trials: nEff }, p0);
                 }
             }
 
-            // Calculate confidence interval
-            const ci = wilsonConfidenceInterval(successes, trials, 0.95);
+            // Inference uses the conservative effective sample implied by the
+            // overlap horizon; raw counts remain available for descriptive rate.
+            const ci = wilsonConfidenceInterval(successesEff, nEff, 0.95);
 
             // Calculate lift (observed rate - baseline)
-            const observedRate = trials > 0 ? successes / trials : 0;
             const lift = observedRate - p0;
 
             results[level] = {
                 successes,
                 trials,
                 nEffective: nEff,
+                successesEffective: successesEff,
                 successRate: observedRate * 100,
                 baseline: p0 * 100,
                 lift: lift * 100,

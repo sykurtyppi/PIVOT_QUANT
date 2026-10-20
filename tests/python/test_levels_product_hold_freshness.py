@@ -204,6 +204,13 @@ class CompletedSessionSelectionTest(unittest.TestCase):
         self.assertEqual(list(daily["d"]), [date(2026, 10, 1)])
         self.assertEqual(int(daily.iloc[0]["bars"]), 390)
 
+    def test_session_missing_opening_bar_is_rejected(self):
+        for start, periods in (("2026-10-01 10:00", 360), ("2026-11-27 10:00", 180)):
+            with self.subTest(start=start):
+                con = self._bars(start, periods)
+                self.addCleanup(con.close)
+                self.assertTrue(morning_map.daily_rth_ohlc(con, "SPY").empty)
+
     def test_close_boundary_bar_is_excluded_from_completed_session_ohlc(self):
         con = self._bars("2026-10-01 09:30", 390)
         self.addCleanup(con.close)
@@ -259,6 +266,17 @@ class CompletedSessionSelectionTest(unittest.TestCase):
         daily = morning_map.daily_rth_ohlc(con, "SPY")
 
         self.assertTrue(daily.empty)
+
+    def test_second_timestamp_in_a_complete_minute_bucket_rejects_session(self):
+        con = self._bars("2026-10-01 09:30", 390)
+        self.addCleanup(con.close)
+        jitter_ts = pd.Timestamp("2026-10-01 15:59:30", tz="America/New_York")
+        con.execute(
+            "INSERT INTO bar_data VALUES (?, ?, ?, ?, ?, ?)",
+            ("SPY", int(jitter_ts.timestamp() * 1000), 500.0, 999.0, 1.0, 777.0),
+        )
+
+        self.assertTrue(morning_map.daily_rth_ohlc(con, "SPY").empty)
 
     def test_duplicate_timestamps_across_intervals_do_not_fake_completeness(self):
         con = sqlite3.connect(":memory:")
