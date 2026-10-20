@@ -44,7 +44,7 @@ window.PivotFDRIntegration = (() => {
     /**
      * Create enhanced display results with FDR correction
      */
-    function displayResultsWithFDR(data, historicalData = SAMPLE_HISTORICAL_DATA) {
+    function displayResultsWithFDR(data, historicalData = null) {
         const container = document.getElementById('tables-container');
         container.innerHTML = '';
 
@@ -64,12 +64,17 @@ window.PivotFDRIntegration = (() => {
         const standardLevels = ['R3', 'R2', 'R1', 'Pivot', 'S1', 'S2', 'S3'];
         const pivotStatsForFDR = {};
 
-        standardLevels.forEach(level => {
-            if (historicalData[level.toUpperCase()] || historicalData[level]) {
-                const key = level.toUpperCase() === 'PIVOT' ? 'PIVOT' : level.toUpperCase();
-                pivotStatsForFDR[level] = historicalData[key] || { successes: 0, trials: 0 };
-            }
-        });
+        // Only use caller-supplied, validated historical statistics. With none,
+        // render without significance marks rather than fabricate it from the
+        // demonstration data (discipline contract: never fabricate significance).
+        if (historicalData) {
+            standardLevels.forEach(level => {
+                if (historicalData[level.toUpperCase()] || historicalData[level]) {
+                    const key = level.toUpperCase() === 'PIVOT' ? 'PIVOT' : level.toUpperCase();
+                    pivotStatsForFDR[level] = historicalData[key] || { successes: 0, trials: 0 };
+                }
+            });
+        }
 
         // Perform FDR analysis
         const fdrEngine = resolveFDRCorrectionEngine();
@@ -388,7 +393,9 @@ window.PivotFDRIntegration = (() => {
             current: 4500.00
         };
 
-        displayResultsWithFDR(sampleData);
+        // Demonstration path only: significance here is from SAMPLE_HISTORICAL_DATA,
+        // passed explicitly so it never leaks into the production display default.
+        displayResultsWithFDR(sampleData, SAMPLE_HISTORICAL_DATA);
     }
 
     // Public API

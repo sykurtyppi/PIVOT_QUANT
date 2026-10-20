@@ -681,7 +681,7 @@ window.weeklyBacktestPanel = (() => {
         const weeks = {};
         dailyData.forEach(day => {
             const date = new Date(day.timestamp * 1000);
-            const weekKey = `${date.getUTCFullYear()}-W${getWeekNumber(date)}`;
+            const weekKey = isoWeekKey(date);
 
             if (!weeks[weekKey]) {
                 weeks[weekKey] = {
@@ -704,12 +704,20 @@ window.weeklyBacktestPanel = (() => {
         return Object.values(weeks);
     }
 
-    function getWeekNumber(date) {
-        const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+    // ISO-8601 week key using the week-YEAR and week-number of the week's
+    // Thursday, so a week straddling New Year stays a single key (e.g. 2020-W01
+    // spans Dec 30 2019 through Jan 5 2020). Pairing the calendar year with the
+    // ISO week number — as the previous getWeekNumber did — split such weeks and
+    // corrupted the prior-week high/low/close around the year boundary. UTC
+    // throughout so grouping is timezone-independent.
+    function isoWeekKey(date) {
+        const d = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
         const dayNum = d.getUTCDay() || 7;
-        d.setUTCDate(d.getUTCDate() + 4 - dayNum);
-        const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
-        return Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
+        d.setUTCDate(d.getUTCDate() + 4 - dayNum); // Thursday of this ISO week
+        const isoYear = d.getUTCFullYear();
+        const yearStart = new Date(Date.UTC(isoYear, 0, 1));
+        const isoWeek = Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
+        return `${isoYear}-W${isoWeek}`;
     }
 
     // Note: fetchHistoricalData is handled through the main backtestEngine.runBacktest() call
