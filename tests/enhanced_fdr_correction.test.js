@@ -5,8 +5,8 @@
  *
  * Same browser-global IIFE shape as fdr_correction.js, so we stub `window` on
  * globalThis and load for side effect. Deterministic statistics are pinned to
- * known values; the only randomised routine (permutationTest) is bounded, not
- * pinned, to stay non-flaky.
+ * known values; the aggregate-count permutation helper intentionally fails
+ * closed because protocol-compliant block permutation requires raw labels.
  */
 
 describe('enhanced_fdr_correction.js — EnhancedFDRCorrection', () => {
@@ -118,15 +118,11 @@ describe('enhanced_fdr_correction.js — EnhancedFDRCorrection', () => {
     });
   });
 
-  describe('permutationTest (randomised — bounded, not pinned)', () => {
-    test('zero trials returns 1.0', () => {
-      expect(E.permutationTest({ successes: 0, trials: 0 }, 0.5)).toBe(1.0);
-    });
-
-    test('always returns a fraction in [0, 1]', () => {
-      const p = E.permutationTest({ successes: 95, trials: 100 }, 0.5, 100);
-      expect(p).toBeGreaterThanOrEqual(0);
-      expect(p).toBeLessThanOrEqual(1);
+  describe('permutationTest', () => {
+    test('fails closed because aggregate counts cannot perform protocol block permutation', () => {
+      expect(E.permutationTest({ successes: 0, trials: 0 }, 0.5)).toBeNull();
+      expect(E.permutationTest({ successes: 95, trials: 100 }, 0.5, 10000)).toBeNull();
+      expect(E.permutationTest({ successes: 95, trials: 100 }, 0.5, 0)).toBeNull();
     });
   });
 
@@ -276,11 +272,27 @@ describe('enhanced_fdr_correction.js — EnhancedFDRCorrection', () => {
       const r = out.levels.WIN;
       expect(r.nEffective).toBe(20);
       expect(r.successesEffective).toBe(12);
-      expect(r.pValue).toBeCloseTo(E.oneSidedBinomialTest(12, 20, 0.5, true), 12);
+      expect(r.pValue).toBeGreaterThan(0.1);
+      expect(r.pValue).toBeLessThan(0.25);
       expect(r.confidenceInterval.lower).toBeCloseTo(
         E.wilsonConfidenceInterval(12, 20, 0.95).lower * 100,
         12,
       );
+      expect(r.significant).toBe(false);
+    });
+
+    test('two-sided overlap inference retains the observed proportion', () => {
+      const out = E.analyzePivotSignificanceEnhanced(
+        { WIN: { successes: 29, trials: 100 } },
+        'RANGE', 'weekly',
+        { customBaselines: { WIN: 0.5 }, overlapHorizon: 5, oneSided: false },
+      );
+      const r = out.levels.WIN;
+      expect(r.nEffective).toBe(20);
+      expect(r.successesEffective).toBeCloseTo(5.8, 12);
+      expect(r.confidenceInterval.center).toBeGreaterThan(29);
+      expect(r.confidenceInterval.center).toBeLessThan(50);
+      expect(r.pValue).toBeGreaterThan(0.05);
       expect(r.significant).toBe(false);
     });
 

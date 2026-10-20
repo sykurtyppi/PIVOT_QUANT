@@ -6,17 +6,17 @@
 window.EnhancedFDRCorrection = (() => {
 
     // Default regime-specific baselines (can be customized)
-    const DEFAULT_REGIME_BASELINES = {
-        'UP-TREND': {
+    const DEFAULT_REGIME_BASELINES = Object.freeze({
+        'UP-TREND': Object.freeze({
             R3: 0.45, R2: 0.50, R1: 0.55, PIVOT: 0.50, S1: 0.65, S2: 0.70, S3: 0.75
-        },
-        'DOWN-TREND': {
+        }),
+        'DOWN-TREND': Object.freeze({
             R3: 0.75, R2: 0.70, R1: 0.65, PIVOT: 0.50, S1: 0.55, S2: 0.50, S3: 0.45
-        },
-        'RANGE': {
+        }),
+        'RANGE': Object.freeze({
             R3: 0.60, R2: 0.55, R1: 0.52, PIVOT: 0.50, S1: 0.52, S2: 0.55, S3: 0.60
-        }
-    };
+        })
+    });
 
     /**
      * One-sided binomial test: H1: p > p0
@@ -63,6 +63,22 @@ window.EnhancedFDRCorrection = (() => {
             // Two-sided test
             return 2 * (1 - normalCDF(Math.abs(zScore)));
         }
+    }
+
+    /**
+     * Score test using a conservative effective sample size while retaining
+     * the observed proportion (no synthetic integer success count).
+     */
+    function effectiveProportionTest(observedRate, nEffective, p0, oneSided) {
+        if (!Number.isFinite(observedRate) || observedRate < 0 || observedRate > 1
+            || !Number.isInteger(nEffective) || nEffective <= 0
+            || !Number.isFinite(p0) || p0 <= 0 || p0 >= 1
+            || typeof oneSided !== 'boolean') return 1.0;
+        const standardError = Math.sqrt(p0 * (1 - p0) / nEffective);
+        const zScore = (observedRate - p0) / standardError;
+        return oneSided
+            ? 1 - normalCDF(zScore)
+            : Math.min(1, 2 * (1 - normalCDF(Math.abs(zScore))));
     }
 
     /**
@@ -194,28 +210,11 @@ window.EnhancedFDRCorrection = (() => {
     }
 
     /**
-     * Permutation test for additional validation
+     * Aggregate counts cannot implement the protocol's block permutation.
+     * Fail closed until time-ordered labels and a registered seed are supplied.
      */
-    function permutationTest(stats, p0, K = 200) {
-        const { successes, trials } = stats;
-        if (trials === 0) return 1.0;
-
-        const observedP = oneSidedBinomialTest(successes, trials, p0, true);
-        let permutedBetter = 0;
-
-        // Generate K permutations
-        for (let k = 0; k < K; k++) {
-            // Simulate random success count under null hypothesis
-            let permutedSuccesses = 0;
-            for (let i = 0; i < trials; i++) {
-                if (Math.random() < p0) permutedSuccesses++;
-            }
-
-            const permutedP = oneSidedBinomialTest(permutedSuccesses, trials, p0, true);
-            if (permutedP <= observedP) permutedBetter++;
-        }
-
-        return permutedBetter / K;
+    function permutationTest(_stats, _p0, _K = 10000) {
+        return null;
     }
 
     /**
@@ -267,7 +266,7 @@ window.EnhancedFDRCorrection = (() => {
             && familyMembers.every(isSafeFamilyMember);
         const declaredFamily = familyMembersProvided
             ? (explicitFamilyValid ? [...new Set(familyMembers)] : [])
-            : Object.keys(baselines);
+            : Object.keys(baselines).filter(isSafeFamilyMember);
         const levels = pivotStatsValid ? declaredFamily : [];
         const pValues = [];
         const results = {};
@@ -295,7 +294,7 @@ window.EnhancedFDRCorrection = (() => {
             const successes = countsValid ? stats.successes : 0;
             const nEff = calculateEffectiveN(trials, overlapHorizon);
             const observedRate = trials > 0 ? successes / trials : 0;
-            const successesEff = nEff > 0 ? Math.floor(observedRate * nEff) : 0;
+            const successesEff = nEff > 0 ? observedRate * nEff : 0;
 
             // Check sample size requirements
             const hasSufficientData = countsValid && trials >= minN && nEff >= minNEff;
@@ -306,7 +305,9 @@ window.EnhancedFDRCorrection = (() => {
             let permPValue = null;
 
             if (hasSufficientData) {
-                pValue = oneSidedBinomialTest(successesEff, nEff, p0, oneSided);
+                pValue = nEff === trials
+                    ? oneSidedBinomialTest(successes, trials, p0, oneSided)
+                    : effectiveProportionTest(observedRate, nEff, p0, oneSided);
                 validLevels.push(level);
 
                 // Permutation test if requested

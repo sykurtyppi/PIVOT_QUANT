@@ -278,6 +278,45 @@ class CompletedSessionSelectionTest(unittest.TestCase):
 
         self.assertTrue(morning_map.daily_rth_ohlc(con, "SPY").empty)
 
+    def test_conflicting_rows_at_exact_timestamp_reject_session_regardless_of_order(self):
+        final_ts = pd.Timestamp("2026-10-01 15:59", tz="America/New_York")
+        conflict = ("SPY", int(final_ts.timestamp() * 1000), 100.0, 110.0, 90.0, 109.0)
+        for insert_first in (False, True):
+            with self.subTest(insert_first=insert_first):
+                con = self._bars("2026-10-01 09:30", 390)
+                self.addCleanup(con.close)
+                if insert_first:
+                    existing = con.execute(
+                        "SELECT * FROM bar_data WHERE ts=?", (conflict[1],)
+                    ).fetchone()
+                    con.execute("DELETE FROM bar_data WHERE ts=?", (conflict[1],))
+                    con.execute("INSERT INTO bar_data VALUES (?, ?, ?, ?, ?, ?)", conflict)
+                    con.execute("INSERT INTO bar_data VALUES (?, ?, ?, ?, ?, ?)", existing)
+                else:
+                    con.execute("INSERT INTO bar_data VALUES (?, ?, ?, ?, ?, ?)", conflict)
+
+                self.assertTrue(morning_map.daily_rth_ohlc(con, "SPY").empty)
+
+    def test_malformed_physical_bar_rejects_entire_session(self):
+        malformed = (
+            (100.0, 101.0, 99.0, 109.0),
+            (100.0, 99.0, 101.0, 100.0),
+            (0.0, 101.0, 99.0, 100.0),
+            (100.0, 101.0, 0.0, 100.0),
+            (100.0, float("nan"), 99.0, 100.0),
+        )
+        final_ts = int(pd.Timestamp("2026-10-01 15:59", tz="America/New_York").timestamp() * 1000)
+        for values in malformed:
+            with self.subTest(values=values):
+                con = self._bars("2026-10-01 09:30", 390)
+                self.addCleanup(con.close)
+                con.execute("DELETE FROM bar_data WHERE ts=?", (final_ts,))
+                con.execute(
+                    "INSERT INTO bar_data VALUES (?, ?, ?, ?, ?, ?)",
+                    ("SPY", final_ts, *values),
+                )
+                self.assertTrue(morning_map.daily_rth_ohlc(con, "SPY").empty)
+
     def test_duplicate_timestamps_across_intervals_do_not_fake_completeness(self):
         con = sqlite3.connect(":memory:")
         self.addCleanup(con.close)

@@ -53,7 +53,6 @@ def daily_rth_ohlc(con, symbol):
         + interval_filter
         + " ORDER BY ts",
         con, params=(symbol,))
-    b = b.drop_duplicates(subset=["ts"], keep="last")
     t = pd.to_datetime(b.ts, unit="ms", utc=True).dt.tz_convert(ET)
     b["d"] = t.dt.date
     mins = t.dt.hour * 60 + t.dt.minute
@@ -67,18 +66,23 @@ def daily_rth_ohlc(con, symbol):
             else 0
         )
     )
-    b = b[
-        (mins >= 570)
-        & (mins < close_minutes)
-        & (b.high >= b.low)
-        & (b.high > 0)
-    ]
+    b = b[(mins >= 570) & (mins < close_minutes)]
+    prices = b[["open", "high", "low", "close"]]
+    b["row_valid"] = (
+        np.isfinite(prices).all(axis=1)
+        & (prices > 0).all(axis=1)
+        & (b.low <= b.open)
+        & (b.open <= b.high)
+        & (b.low <= b.close)
+        & (b.close <= b.high)
+    )
     b["minute_rows"] = b.groupby(["d", "minute_of_day"])["ts"].transform("size")
     g = b.groupby("d")
     o = pd.DataFrame({"open": g.open.first(), "high": g.high.max(),
                       "low": g.low.min(), "close": g.close.last(),
                       "bars": g.minute_of_day.nunique(),
                       "first_minute": g.minute_of_day.min(),
+                      "all_rows_valid": g.row_valid.all(),
                       "max_rows_per_minute": g.minute_rows.max(),
                       "last_minute": g.minute_of_day.max()}).reset_index()
     # Use the most recent COMPLETE session, regardless of run hour. Reaching an
@@ -101,6 +105,7 @@ def daily_rth_ohlc(con, symbol):
             row.first_minute == open_minute
             and row.last_minute >= close_minute - 1
             and row.bars >= expected_bars - MAX_MISSING_SESSION_BARS
+            and row.all_rows_valid
             and row.max_rows_per_minute == 1
         )
     o = o[pd.Series(complete, index=o.index, dtype=bool)]
