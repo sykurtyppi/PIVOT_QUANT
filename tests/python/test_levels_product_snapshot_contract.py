@@ -340,7 +340,9 @@ class BriefingArtifactTest(unittest.TestCase):
             evidence={"hold_rates_publishable": False, "label_coverage": {}},
         )
         self.track_record = {
+            "symbol": "SPY",
             "as_of_utc": "2026-10-02T10:59:00Z",
+            "report_session_date": "2026-10-01",
             "hold_rates_publishable": False,
             "label_coverage": {},
             "horizons": {},
@@ -385,6 +387,22 @@ class BriefingArtifactTest(unittest.TestCase):
                 self.snapshot,
                 self.track_record,
                 captured_at_utc="2026-10-02T14:00:00Z",
+            )
+
+    def test_rejects_cross_symbol_or_stale_track_record(self):
+        with self.assertRaisesRegex(ValueError, "symbol"):
+            publish.build_briefing_artifact(
+                self.snapshot, {**self.track_record, "symbol": "QQQ"}
+            )
+        with self.assertRaisesRegex(ValueError, "session"):
+            publish.build_briefing_artifact(
+                self.snapshot,
+                {**self.track_record, "report_session_date": "2025-01-02"},
+            )
+        with self.assertRaisesRegex(ValueError, "older than snapshot source"):
+            publish.build_briefing_artifact(
+                self.snapshot,
+                {**self.track_record, "as_of_utc": "2026-10-01T12:00:00Z"},
             )
 
     def test_retry_reuses_frozen_briefing_even_if_track_record_file_changes(self):

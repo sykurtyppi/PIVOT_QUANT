@@ -317,6 +317,15 @@ class CompletedSessionSelectionTest(unittest.TestCase):
                 )
                 self.assertTrue(morning_map.daily_rth_ohlc(con, "SPY").empty)
 
+    def test_textual_ohlc_rejects_session_without_crashing(self):
+        con = self._bars("2026-10-01 09:30", 390)
+        self.addCleanup(con.close)
+        final_ts = int(
+            pd.Timestamp("2026-10-01 15:59", tz="America/New_York").timestamp() * 1000
+        )
+        con.execute("UPDATE bar_data SET high=? WHERE ts=?", ("not-a-number", final_ts))
+        self.assertTrue(morning_map.daily_rth_ohlc(con, "SPY").empty)
+
     def test_duplicate_timestamps_across_intervals_do_not_fake_completeness(self):
         con = sqlite3.connect(":memory:")
         self.addCleanup(con.close)

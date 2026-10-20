@@ -49,6 +49,13 @@ describe('enhanced_fdr_correction.js — EnhancedFDRCorrection', () => {
       expect(ci.lower).toBeLessThanOrEqual(ci.center);
       expect(ci.center).toBeLessThanOrEqual(ci.upper);
     });
+
+    test('malformed Wilson inputs return an uninformative interval', () => {
+      const fallback = { lower: 0, upper: 1, center: 0 };
+      expect(E.wilsonConfidenceInterval(2, 1, 0.95)).toEqual(fallback);
+      expect(E.wilsonConfidenceInterval(1, -1, 0.95)).toEqual(fallback);
+      expect(E.wilsonConfidenceInterval(1, 2, 2)).toEqual(fallback);
+    });
   });
 
   describe('oneSidedBinomialTest', () => {
@@ -323,6 +330,49 @@ describe('enhanced_fdr_correction.js — EnhancedFDRCorrection', () => {
       expect(out.summary.validLevels).toBe(0);
       expect(Object.prototype.hasOwnProperty.call(out.levels, '__proto__')).toBe(false);
       expect(JSON.stringify(out.levels)).toBe('{}');
+    });
+
+    test('requested unavailable permutation validation blocks significance visibly', () => {
+      const out = E.analyzePivotSignificanceEnhanced(
+        { WIN: { successes: 100, trials: 100 } }, 'RANGE', 'weekly',
+        { customBaselines: { WIN: 0.5 }, overlapHorizon: 1, permutationTests: true },
+      );
+      expect(out.levels.WIN.permutationPValue).toBeNull();
+      expect(out.levels.WIN.permutationAvailable).toBe(false);
+      expect(out.levels.WIN.significant).toBe(false);
+      expect(out.summary.significantLevels).toBe(0);
+      expect(E.generateTooltip('WIN', out.levels.WIN)).toContain('Permutation validation: unavailable');
+    });
+
+    test('explicit family member without registered baseline remains p=1', () => {
+      const out = E.analyzePivotSignificanceEnhanced(
+        { A: { successes: 100, trials: 100 }, B: { successes: 100, trials: 100 } },
+        'RANGE', 'weekly',
+        { customBaselines: { A: 0.5 }, familyMembers: ['A', 'B'], overlapHorizon: 1 },
+      );
+      expect(out.levels.B.baselineValid).toBe(false);
+      expect(out.levels.B.pValue).toBe(1);
+      expect(out.levels.B.significant).toBe(false);
+    });
+
+    test('malformed thresholds fail closed', () => {
+      const out = E.analyzePivotSignificanceEnhanced(
+        { WIN: { successes: 1, trials: 1 } }, 'RANGE', 'weekly',
+        { customBaselines: { WIN: 0.01 }, overlapHorizon: 1, minN: -1, minNEff: -1 },
+      );
+      expect(out.levels.WIN.hasSufficientData).toBe(false);
+      expect(out.levels.WIN.pValue).toBe(1);
+      expect(out.levels.WIN.significant).toBe(false);
+    });
+
+    test('inherited pivot statistics are ignored', () => {
+      const inherited = Object.create({ WIN: { successes: 100, trials: 100 } });
+      const out = E.analyzePivotSignificanceEnhanced(
+        inherited, 'RANGE', 'weekly',
+        { customBaselines: { WIN: 0.5 }, overlapHorizon: 1 },
+      );
+      expect(out.levels.WIN.pValue).toBe(1);
+      expect(out.levels.WIN.significant).toBe(false);
     });
   });
 

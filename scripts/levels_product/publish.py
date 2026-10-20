@@ -113,7 +113,7 @@ def _canonical_bytes(value) -> bytes:
     ).encode("utf-8")
 
 
-def _parse_utc(value: str, field: str) -> datetime:
+def _parse_utc(value: object, field: str) -> datetime:
     try:
         parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except (TypeError, ValueError) as exc:
@@ -125,10 +125,16 @@ def _parse_utc(value: str, field: str) -> datetime:
 
 def build_briefing_artifact(mp, tr, *, captured_at_utc: str | None = None) -> dict:
     """Freeze the exact pre-market message and the evidence it was built from."""
+    if tr.get("symbol") != mp.get("symbol"):
+        raise ValueError("track record symbol must match snapshot symbol")
+    source_session = (mp.get("source") or {}).get("session_date")
+    if tr.get("report_session_date") != source_session:
+        raise ValueError("track record session must match snapshot source session")
     captured_text = captured_at_utc or mp["generated_at_utc"]
     captured = _parse_utc(captured_text, "captured_at_utc")
     snapshot_generated = _parse_utc(mp["generated_at_utc"], "generated_at_utc")
     track_as_of = _parse_utc(tr.get("as_of_utc"), "track_record_as_of_utc")
+    source_as_of = _parse_utc((mp.get("source") or {}).get("as_of_utc"), "source_as_of_utc")
     session_day = date.fromisoformat(mp["session_date"])
     if not is_trading_day(session_day):
         raise ValueError("session_date must be a trading day")
@@ -139,6 +145,8 @@ def build_briefing_artifact(mp, tr, *, captured_at_utc: str | None = None) -> di
         raise ValueError("snapshot was generated after briefing capture")
     if track_as_of > captured:
         raise ValueError("track record evidence is later than briefing capture")
+    if track_as_of < source_as_of:
+        raise ValueError("track record evidence is older than snapshot source")
     if captured > session_open:
         raise ValueError("briefing capture must occur no later than session open")
 

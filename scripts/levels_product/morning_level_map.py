@@ -67,7 +67,9 @@ def daily_rth_ohlc(con, symbol):
         )
     )
     b = b[(mins >= 570) & (mins < close_minutes)]
-    prices = b[["open", "high", "low", "close"]]
+    price_columns = ["open", "high", "low", "close"]
+    b[price_columns] = b[price_columns].apply(pd.to_numeric, errors="coerce")
+    prices = b[price_columns]
     b["row_valid"] = (
         np.isfinite(prices).all(axis=1)
         & (prices > 0).all(axis=1)

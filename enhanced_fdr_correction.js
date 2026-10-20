@@ -111,7 +111,11 @@ window.EnhancedFDRCorrection = (() => {
      * Wilson score confidence interval
      */
     function wilsonConfidenceInterval(successes, trials, confidence = 0.95) {
-        if (trials === 0) return { lower: 0, upper: 1, center: 0 };
+        if (!Number.isFinite(successes) || !Number.isFinite(trials)
+            || trials <= 0 || successes < 0 || successes > trials
+            || !Number.isFinite(confidence) || confidence <= 0 || confidence >= 1) {
+            return { lower: 0, upper: 1, center: 0 };
+        }
 
         const z = normalInverse((1 + confidence) / 2);
         const p = successes / trials;
@@ -221,6 +225,7 @@ window.EnhancedFDRCorrection = (() => {
      * Enhanced regime-aware pivot significance analysis
      */
     function analyzePivotSignificanceEnhanced(pivotStats, regime = 'RANGE', timeframe = 'weekly', options = {}) {
+        options = options && typeof options === 'object' && !Array.isArray(options) ? options : {};
         const {
             alpha = 0.05,
             oneSided = true,
@@ -235,6 +240,8 @@ window.EnhancedFDRCorrection = (() => {
 
         const pivotStatsValid = pivotStats && typeof pivotStats === 'object';
         pivotStats = pivotStatsValid ? pivotStats : {};
+        const thresholdsValid = Number.isInteger(minN) && minN >= 1
+            && Number.isInteger(minNEff) && minNEff >= 1;
 
         const isSafeFamilyMember = level => typeof level === 'string'
             && level.length > 0
@@ -274,13 +281,13 @@ window.EnhancedFDRCorrection = (() => {
 
         // Calculate p-values for each level
         levels.forEach(level => {
-            const stats = pivotStats[level] && typeof pivotStats[level] === 'object'
+            const stats = Object.prototype.hasOwnProperty.call(pivotStats, level)
+                && pivotStats[level] && typeof pivotStats[level] === 'object'
                 ? pivotStats[level]
                 : {};
-            const baselineCandidate = Object.prototype.hasOwnProperty.call(baselines, level)
-                ? baselines[level]
-                : 0.5;
-            const baselineValid = Number.isFinite(baselineCandidate)
+            const baselineDeclared = Object.prototype.hasOwnProperty.call(baselines, level);
+            const baselineCandidate = baselineDeclared ? baselines[level] : null;
+            const baselineValid = baselineDeclared && Number.isFinite(baselineCandidate)
                 && baselineCandidate >= 0
                 && baselineCandidate <= 1;
             const p0 = baselineValid ? baselineCandidate : 0.5;
@@ -297,7 +304,8 @@ window.EnhancedFDRCorrection = (() => {
             const successesEff = nEff > 0 ? observedRate * nEff : 0;
 
             // Check sample size requirements
-            const hasSufficientData = countsValid && trials >= minN && nEff >= minNEff;
+            const hasSufficientData = thresholdsValid && countsValid
+                && trials >= minN && nEff >= minNEff;
 
             let pValue = 1.0;
             let qValue = null;
@@ -311,7 +319,7 @@ window.EnhancedFDRCorrection = (() => {
                 validLevels.push(level);
 
                 // Permutation test if requested
-                if (permutationTests && debugMode) {
+                if (permutationTests) {
                     permPValue = permutationTest({ successes: successesEff, trials: nEff }, p0);
                 }
             }
@@ -330,6 +338,7 @@ window.EnhancedFDRCorrection = (() => {
                 successesEffective: successesEff,
                 successRate: observedRate * 100,
                 baseline: p0 * 100,
+                baselineValid,
                 lift: lift * 100,
                 pValue: pValue,
                 qValue: qValue,
@@ -341,6 +350,8 @@ window.EnhancedFDRCorrection = (() => {
                     center: ci.center * 100
                 },
                 permutationPValue: permPValue,
+                permutationRequested: permutationTests,
+                permutationAvailable: Number.isFinite(permPValue),
                 testType: oneSided ? 'one-sided' : 'two-sided',
                 hypothesis: oneSided ? `H1: p > ${(p0*100).toFixed(1)}%` : `H1: p ≠ ${(p0*100).toFixed(1)}%`
             };
@@ -356,7 +367,9 @@ window.EnhancedFDRCorrection = (() => {
             levels.forEach((level, index) => {
                 if (results[level].hasSufficientData) {
                     results[level].qValue = fdrResults.qValues[index];
-                    results[level].significant = fdrResults.significant[index];
+                    results[level].significant = fdrResults.significant[index]
+                        && (!results[level].permutationRequested
+                            || results[level].permutationAvailable);
                 }
             });
         }
@@ -413,6 +426,10 @@ window.EnhancedFDRCorrection = (() => {
         // Sample size information
         parts.push(`Sample Size: n=${result.trials}, n_eff=${result.nEffective}`);
         parts.push(`95% CI: [${result.confidenceInterval.lower.toFixed(1)}%, ${result.confidenceInterval.upper.toFixed(1)}%]`);
+
+        if (result.permutationRequested && !result.permutationAvailable) {
+            parts.push('Permutation validation: unavailable — significance withheld');
+        }
 
         // Debug information
         if (debugMode && result.permutationPValue !== null) {
