@@ -65,7 +65,7 @@ describe('pivot_fdr_integration.js — PivotFDRIntegration (jsdom)', () => {
     });
 
     test('renders a 7-row pivot table with significance cells and an FDR summary', () => {
-      PFI.displayResultsWithFDR(data);
+      PFI.displayResultsWithFDR(data, PFI.SAMPLE_HISTORICAL_DATA);
       const container = document.getElementById('tables-container');
       const rows = container.querySelectorAll('table.pivot-table tbody tr');
       expect(rows).toHaveLength(7);
@@ -75,6 +75,38 @@ describe('pivot_fdr_integration.js — PivotFDRIntegration (jsdom)', () => {
       const summary = container.querySelector('.fdr-summary');
       expect(summary).not.toBeNull();
       expect(summary.textContent).toContain('levels significant');
+    });
+
+    test('uses the caller-supplied statistics, not the demo defaults', () => {
+      const custom = {
+        R3: { successes: 1, trials: 10 }, R2: { successes: 2, trials: 10 },
+        R1: { successes: 3, trials: 10 }, PIVOT: { successes: 4, trials: 10 },
+        S1: { successes: 5, trials: 10 }, S2: { successes: 6, trials: 10 },
+        S3: { successes: 7, trials: 10 },
+      };
+      const spy = jest.spyOn(window.FDRCorrection, 'analyzePivotSignificance');
+      try {
+        PFI.displayResultsWithFDR(data, custom);
+        expect(spy).toHaveBeenCalled();
+        const passedStats = spy.mock.calls[0][0];
+        expect(passedStats.R3).toEqual({ successes: 1, trials: 10 }); // the caller's data
+        expect(passedStats.R3.successes).not.toBe(PFI.SAMPLE_HISTORICAL_DATA.R3.successes); // not the demo 45
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    test('fails closed (no fabricated significance) when no statistics are supplied', () => {
+      // The installed window.displayResults is this one-arg call; it must NOT
+      // feed the demonstration data into the engine.
+      const spy = jest.spyOn(window.FDRCorrection, 'analyzePivotSignificance');
+      try {
+        PFI.displayResultsWithFDR(data);
+        expect(spy).toHaveBeenCalledWith({}, 0.05); // empty stats, never SAMPLE_HISTORICAL_DATA
+        expect(document.querySelectorAll('.significance-cell.no-data')).toHaveLength(7);
+      } finally {
+        spy.mockRestore();
+      }
     });
 
     test('distance cell marks a level at the current price', () => {
