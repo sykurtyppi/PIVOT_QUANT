@@ -238,21 +238,41 @@ window.EnhancedFDRCorrection = (() => {
      */
     function analyzePivotSignificanceEnhanced(pivotStats, regime = 'RANGE', timeframe = 'weekly', options = {}) {
         options = options && typeof options === 'object' && !Array.isArray(options) ? options : {};
-        const ownOption = (name, fallback) => Object.prototype.hasOwnProperty.call(options, name)
-            ? options[name]
-            : fallback;
-        const alpha = ownOption('alpha', 0.05);
-        const oneSided = ownOption('oneSided', true);
-        const customBaselines = ownOption('customBaselines', null);
-        const permutationTests = ownOption('permutationTests', false);
-        const minN = ownOption('minN', 12);
-        const minNEff = ownOption('minNEff', 10);
-        const overlapHorizon = ownOption('overlapHorizon', null);
-        const familyMembers = ownOption('familyMembers', null);
+        const ownOption = (name, fallback) => {
+            const descriptor = Object.getOwnPropertyDescriptor(options, name);
+            if (descriptor === undefined) {
+                return { provided: false, valid: true, value: fallback };
+            }
+            if (!Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
+                return { provided: true, valid: false, value: fallback };
+            }
+            return { provided: true, valid: true, value: descriptor.value };
+        };
+        const alphaOption = ownOption('alpha', 0.05);
+        const oneSidedOption = ownOption('oneSided', true);
+        const customBaselinesOption = ownOption('customBaselines', null);
+        const permutationTestsOption = ownOption('permutationTests', false);
+        const minNOption = ownOption('minN', 12);
+        const minNEffOption = ownOption('minNEff', 10);
+        const overlapHorizonOption = ownOption('overlapHorizon', null);
+        const familyMembersOption = ownOption('familyMembers', null);
+        const optionRecords = [
+            alphaOption, oneSidedOption, customBaselinesOption, permutationTestsOption,
+            minNOption, minNEffOption, overlapHorizonOption, familyMembersOption
+        ];
+        const optionsValid = optionRecords.every(option => option.valid);
+        const alpha = alphaOption.value;
+        const oneSided = oneSidedOption.value;
+        const customBaselines = customBaselinesOption.value;
+        const permutationTests = permutationTestsOption.value;
+        const minN = minNOption.value;
+        const minNEff = minNEffOption.value;
+        const overlapHorizon = overlapHorizonOption.value;
+        const familyMembers = familyMembersOption.value;
 
         const pivotStatsValid = pivotStats && typeof pivotStats === 'object';
         pivotStats = pivotStatsValid ? pivotStats : {};
-        const thresholdsValid = Number.isInteger(minN) && minN >= 1
+        const thresholdsValid = optionsValid && Number.isInteger(minN) && minN >= 1
             && Number.isInteger(minNEff) && minNEff >= 1;
 
         const isSafeFamilyMember = level => typeof level === 'string'
@@ -260,7 +280,7 @@ window.EnhancedFDRCorrection = (() => {
             && level !== '__proto__'
             && level !== 'prototype'
             && level !== 'constructor';
-        const customBaselinesProvided = customBaselines !== null && customBaselines !== undefined;
+        const customBaselinesProvided = customBaselinesOption.provided;
         const customBaselinesValid = customBaselines
             && typeof customBaselines === 'object'
             && !Array.isArray(customBaselines)
@@ -281,16 +301,18 @@ window.EnhancedFDRCorrection = (() => {
         // to be present. Callers may declare it explicitly; otherwise the
         // selected baseline map is the predeclared family. Invalid top-level
         // input retains the historical empty-result behavior.
-        const familyMembersProvided = familyMembers !== null && familyMembers !== undefined;
+        const familyMembersProvided = familyMembersOption.provided;
         let explicitFamilyValid = Array.isArray(familyMembers) && familyMembers.length > 0;
         const explicitFamily = [];
         if (explicitFamilyValid) {
             for (let index = 0; index < familyMembers.length; index++) {
-                if (!Object.prototype.hasOwnProperty.call(familyMembers, index)) {
+                const memberDescriptor = Object.getOwnPropertyDescriptor(familyMembers, index);
+                if (memberDescriptor === undefined
+                    || !Object.prototype.hasOwnProperty.call(memberDescriptor, 'value')) {
                     explicitFamilyValid = false;
                     break;
                 }
-                const member = familyMembers[index];
+                const member = memberDescriptor.value;
                 if (!isSafeFamilyMember(member)) {
                     explicitFamilyValid = false;
                     break;

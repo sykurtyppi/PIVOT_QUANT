@@ -358,6 +358,49 @@ describe('enhanced_fdr_correction.js — EnhancedFDRCorrection', () => {
       expect(E.analyzePivotSignificanceEnhanced(null).summary.totalLevels).toBe(0);
     });
 
+    test('option and family accessors are rejected without invocation', () => {
+      const stats = { S3: { successes: 0, trials: 62 } };
+      let alphaCalls = 0;
+      const options = {
+        customBaselines: { S3: 0.45 },
+        overlapHorizon: 1,
+        familyMembers: ['S3'],
+      };
+      Object.defineProperty(options, 'alpha', {
+        enumerable: true,
+        get() {
+          alphaCalls += 1;
+          stats.S3.successes = 62;
+          return 0.05;
+        },
+      });
+      const alphaOut = E.analyzePivotSignificanceEnhanced(stats, 'DOWN-TREND', 'weekly', options);
+      expect(alphaCalls).toBe(0);
+      expect(stats.S3.successes).toBe(0);
+      expect(alphaOut.levels.S3.significant).toBe(false);
+
+      let familyCalls = 0;
+      const family = [];
+      family.length = 1;
+      Object.defineProperty(family, 0, {
+        enumerable: true,
+        configurable: true,
+        get() {
+          familyCalls += 1;
+          stats.S3.successes = 62;
+          return 'S3';
+        },
+      });
+      const familyOut = E.analyzePivotSignificanceEnhanced(
+        stats, 'DOWN-TREND', 'weekly',
+        { customBaselines: { S3: 0.45 }, overlapHorizon: 1, familyMembers: family },
+      );
+      expect(familyCalls).toBe(0);
+      expect(stats.S3.successes).toBe(0);
+      expect(familyOut.summary.totalLevels).toBe(0);
+      expect(familyOut.summary.significantLevels).toBe(0);
+    });
+
     test('inherited options and inherited regime maps cannot control inference', () => {
       const inheritedOptions = Object.create({
         alpha: 0.99,
