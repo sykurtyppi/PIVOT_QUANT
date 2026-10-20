@@ -17,6 +17,7 @@ window.EnhancedFDRCorrection = (() => {
             R3: 0.60, R2: 0.55, R1: 0.52, PIVOT: 0.50, S1: 0.52, S2: 0.55, S3: 0.60
         })
     });
+    const MAX_EXACT_BINOMIAL_TRIALS = 100000;
 
     /**
      * One-sided binomial test: H1: p > p0
@@ -26,8 +27,9 @@ window.EnhancedFDRCorrection = (() => {
      * @param {boolean} oneSided - If true, one-sided test (default), if false, two-sided
      */
     function oneSidedBinomialTest(successes, trials, p0 = 0.5, oneSided = true) {
-        if (!Number.isInteger(successes) || !Number.isInteger(trials)
-            || trials < 0 || !Number.isFinite(p0) || p0 < 0 || p0 > 1
+        if (!Number.isSafeInteger(successes) || !Number.isSafeInteger(trials)
+            || trials < 0 || trials > MAX_EXACT_BINOMIAL_TRIALS
+            || !Number.isFinite(p0) || p0 < 0 || p0 > 1
             || typeof oneSided !== 'boolean') return 1.0;
         if (trials === 0) return 1.0;
         if (successes < 0 || successes > trials) return 1.0;
@@ -54,18 +56,24 @@ window.EnhancedFDRCorrection = (() => {
             return Math.min(1, sumBinomialRange(successes, trials, trials, p0));
         } else {
             const observedLogProb = logBinomialPMF(successes, trials, p0);
-            let logTotal = -Infinity;
-            let logProb = logBinomialPMF(0, trials, p0);
-            for (let k = 0; k <= trials; k++) {
-                if (logProb <= observedLogProb + 1e-12) {
-                    logTotal = logAddExp(logTotal, logProb);
-                }
-                if (k < trials) {
-                    logProb += Math.log(trials - k) - Math.log(k + 1)
-                        + Math.log(p0) - Math.log1p(-p0);
+            let logRelativeTotal = 0;
+            let logRelativeProb = 0;
+            for (let k = successes; k > 0; k--) {
+                logRelativeProb += Math.log(k) - Math.log(trials - k + 1)
+                    + Math.log1p(-p0) - Math.log(p0);
+                if (logRelativeProb <= 1e-12) {
+                    logRelativeTotal = logAddExp(logRelativeTotal, logRelativeProb);
                 }
             }
-            return Math.min(1, Math.exp(logTotal));
+            logRelativeProb = 0;
+            for (let k = successes; k < trials; k++) {
+                logRelativeProb += Math.log(trials - k) - Math.log(k + 1)
+                    + Math.log(p0) - Math.log1p(-p0);
+                if (logRelativeProb <= 1e-12) {
+                    logRelativeTotal = logAddExp(logRelativeTotal, logRelativeProb);
+                }
+            }
+            return Math.min(1, Math.exp(observedLogProb + logRelativeTotal));
         }
     }
 
@@ -300,30 +308,41 @@ window.EnhancedFDRCorrection = (() => {
 
         // Calculate p-values for each level
         levels.forEach(level => {
-            const statsCandidate = Object.prototype.hasOwnProperty.call(pivotStats, level)
-                ? pivotStats[level]
+            const statsDescriptor = Object.getOwnPropertyDescriptor(pivotStats, level);
+            const statsCandidate = statsDescriptor
+                && Object.prototype.hasOwnProperty.call(statsDescriptor, 'value')
+                ? statsDescriptor.value
                 : null;
             const stats = statsCandidate && typeof statsCandidate === 'object'
                 ? statsCandidate
                 : null;
-            const baselineDeclared = Object.prototype.hasOwnProperty.call(baselines, level);
-            const baselineCandidate = baselineDeclared ? baselines[level] : null;
+            const baselineDescriptor = Object.getOwnPropertyDescriptor(baselines, level);
+            const baselineDeclared = baselineDescriptor !== undefined
+                && Object.prototype.hasOwnProperty.call(baselineDescriptor, 'value');
+            const baselineCandidate = baselineDeclared ? baselineDescriptor.value : null;
             const baselineValid = baselineDeclared && Number.isFinite(baselineCandidate)
                 && baselineCandidate >= 0
                 && baselineCandidate <= 1;
             const p0 = baselineValid ? baselineCandidate : 0.5;
-            const ownsTrials = stats !== null
-                && Object.prototype.hasOwnProperty.call(stats, 'trials');
-            const ownsSuccesses = stats !== null
-                && Object.prototype.hasOwnProperty.call(stats, 'successes');
-            const trialsCandidate = ownsTrials ? stats.trials : null;
-            const successesCandidate = ownsSuccesses ? stats.successes : null;
+            const trialsDescriptor = stats === null
+                ? undefined
+                : Object.getOwnPropertyDescriptor(stats, 'trials');
+            const successesDescriptor = stats === null
+                ? undefined
+                : Object.getOwnPropertyDescriptor(stats, 'successes');
+            const ownsTrials = trialsDescriptor !== undefined
+                && Object.prototype.hasOwnProperty.call(trialsDescriptor, 'value');
+            const ownsSuccesses = successesDescriptor !== undefined
+                && Object.prototype.hasOwnProperty.call(successesDescriptor, 'value');
+            const trialsCandidate = ownsTrials ? trialsDescriptor.value : null;
+            const successesCandidate = ownsSuccesses ? successesDescriptor.value : null;
             const countsValid = baselineValid
                 && ownsTrials
                 && ownsSuccesses
-                && Number.isInteger(trialsCandidate)
-                && Number.isInteger(successesCandidate)
+                && Number.isSafeInteger(trialsCandidate)
+                && Number.isSafeInteger(successesCandidate)
                 && trialsCandidate >= 0
+                && trialsCandidate <= MAX_EXACT_BINOMIAL_TRIALS
                 && successesCandidate >= 0
                 && successesCandidate <= trialsCandidate;
             const trials = countsValid ? trialsCandidate : 0;

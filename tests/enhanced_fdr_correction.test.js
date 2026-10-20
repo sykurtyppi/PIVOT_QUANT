@@ -96,6 +96,19 @@ describe('enhanced_fdr_correction.js — EnhancedFDRCorrection', () => {
       expect(out.levels.S3.significant).toBe(false);
     });
 
+    test('two-sided exact probabilities remain correct for skewed and large nulls', () => {
+      expect(E.oneSidedBinomialTest(10000, 10000, 0.999999, false)).toBeCloseTo(1, 12);
+      expect(E.oneSidedBinomialTest(882, 1000, 0.9, false)).toBeCloseTo(0.0647867158, 9);
+      expect(E.oneSidedBinomialTest(4997, 10000, 0.5, false)).toBeCloseTo(0.9601227196, 9);
+    });
+
+    test('unsafe or operationally unbounded counts fail closed', () => {
+      expect(E.oneSidedBinomialTest(
+        Number.MAX_SAFE_INTEGER + 1, Number.MAX_SAFE_INTEGER + 1, 0.5, true,
+      )).toBe(1);
+      expect(E.oneSidedBinomialTest(500000, 1000000, 0.5, true)).toBe(1);
+    });
+
     test('malformed direct-call contracts fail closed', () => {
       for (const baseline of [null, -1, 2, 'bad', NaN]) {
         expect(E.oneSidedBinomialTest(1, 100, baseline, true)).toBe(1.0);
@@ -250,7 +263,7 @@ describe('enhanced_fdr_correction.js — EnhancedFDRCorrection', () => {
       }
     });
 
-    test('count accessors are snapshotted once before validation and inference', () => {
+    test('count accessors are rejected without invocation', () => {
       let successesReads = 0;
       let trialsReads = 0;
       const stats = {};
@@ -274,9 +287,27 @@ describe('enhanced_fdr_correction.js — EnhancedFDRCorrection', () => {
         { WIN: stats }, 'RANGE', 'weekly',
         { customBaselines: { WIN: 0.5 }, overlapHorizon: 1, minN: 1, minNEff: 1 },
       );
-      expect(successesReads).toBe(1);
-      expect(trialsReads).toBe(1);
+      expect(successesReads).toBe(0);
+      expect(trialsReads).toBe(0);
       expect(out.levels.WIN.hasSufficientData).toBe(false);
+      expect(out.levels.WIN.significant).toBe(false);
+    });
+
+    test('cross-field accessors cannot mutate evidence during validation', () => {
+      const stats = { successes: 0 };
+      Object.defineProperty(stats, 'trials', {
+        enumerable: true,
+        get() {
+          stats.successes = 100;
+          return 100;
+        },
+      });
+      const out = E.analyzePivotSignificanceEnhanced(
+        { WIN: stats }, 'RANGE', 'weekly',
+        { customBaselines: { WIN: 0.5 }, overlapHorizon: 1, minN: 1, minNEff: 1 },
+      );
+      expect(out.levels.WIN.hasSufficientData).toBe(false);
+      expect(out.levels.WIN.pValue).toBe(1);
       expect(out.levels.WIN.significant).toBe(false);
     });
 

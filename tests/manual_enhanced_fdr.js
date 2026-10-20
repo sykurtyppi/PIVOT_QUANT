@@ -245,7 +245,12 @@ function testSampleSizeFiltering() {
         const stats = { testLevel: { successes: Math.floor(n * 0.8), trials: n } };
 
         const result = EnhancedFDRCorrection.analyzePivotSignificanceEnhanced(
-            stats, 'RANGE', 'weekly', { minN: 12, minNEff: 10 }
+            stats, 'RANGE', 'weekly', {
+                minN: 12,
+                minNEff: 10,
+                overlapHorizon: 1,
+                customBaselines: { testLevel: 0.5 }
+            }
         );
 
         const hasSufficientData = result.levels.testLevel.hasSufficientData;
