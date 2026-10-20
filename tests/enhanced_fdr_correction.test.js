@@ -235,6 +235,22 @@ describe('enhanced_fdr_correction.js — EnhancedFDRCorrection', () => {
       expect(out.levels.A.significant).toBe(false);
     });
 
+    test('absent levels remain in the declared BH family as p=1', () => {
+      const familyMembers = ['R3', 'R2', 'R1', 'PIVOT', 'S1', 'S2', 'S3'];
+      const out = E.analyzePivotSignificanceEnhanced(
+        { R1: { successes: 62, trials: 100 } },
+        'RANGE', 'weekly',
+        { overlapHorizon: 1 },
+      );
+
+      expect(out.levels.R1.pValue).toBeLessThan(0.05);
+      expect(out.levels.R1.qValue).toBeGreaterThan(0.05);
+      expect(out.levels.R1.significant).toBe(false);
+      expect(out.summary.totalLevels).toBe(7);
+      expect(out.summary.insufficientDataLevels).toBe(6);
+      expect(out.familyInfo.familyMembers).toEqual(familyMembers);
+    });
+
     test('overlap horizon supplies the conservative n_obs / h lower bound', () => {
       const out = E.analyzePivotSignificanceEnhanced(
         { WIN: { successes: 95, trials: 100 } },

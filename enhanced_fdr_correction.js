@@ -230,15 +230,28 @@ window.EnhancedFDRCorrection = (() => {
             permutationTests = false,
             minN = 12,
             minNEff = 10,
-            overlapHorizon = null
+            overlapHorizon = null,
+            familyMembers = null
         } = options;
 
-        pivotStats = pivotStats && typeof pivotStats === 'object' ? pivotStats : {};
+        const pivotStatsValid = pivotStats && typeof pivotStats === 'object';
+        pivotStats = pivotStatsValid ? pivotStats : {};
 
         // Get regime-specific baselines
         const baselines = customBaselines || DEFAULT_REGIME_BASELINES[regime] || DEFAULT_REGIME_BASELINES['RANGE'];
 
-        const levels = Object.keys(pivotStats);
+        // The multiplicity family must not depend on which result keys happen
+        // to be present. Callers may declare it explicitly; otherwise the
+        // selected baseline map is the predeclared family. Invalid top-level
+        // input retains the historical empty-result behavior.
+        const declaredFamily = Array.isArray(familyMembers)
+            && familyMembers.length > 0
+            && familyMembers.every(level => typeof level === 'string' && level.length > 0)
+            ? [...new Set(familyMembers)]
+            : Object.keys(baselines);
+        const levels = pivotStatsValid
+            ? (declaredFamily.length > 0 ? declaredFamily : Object.keys(pivotStats))
+            : [];
         const pValues = [];
         const results = {};
         const validLevels = [];
@@ -343,6 +356,7 @@ window.EnhancedFDRCorrection = (() => {
                 regime: regime,
                 timeframe: timeframe,
                 baselines: baselines,
+                familyMembers: levels,
                 testParameters: { alpha, oneSided, minN, minNEff, overlapHorizon }
             }
         };

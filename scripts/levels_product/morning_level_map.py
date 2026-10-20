@@ -58,10 +58,21 @@ def daily_rth_ohlc(con, symbol):
     b["d"] = t.dt.date
     mins = t.dt.hour * 60 + t.dt.minute
     b["minute_of_day"] = mins
-    # RTH is half-open: 09:30 <= timestamp < the session close. The later
-    # per-date completeness check applies the exchange-specific close; this
-    # broad prefilter must therefore exclude the regular 16:00 boundary too.
-    b = b[(mins >= 570) & (mins < 960) & (b.high >= b.low) & (b.high > 0)]
+    # RTH is a date-specific half-open interval. Applying only the regular
+    # 16:00 boundary would allow 13:00+ bars to contaminate early-close OHLC.
+    close_minutes = b["d"].map(
+        lambda day: (
+            session_close_et(day).hour * 60 + session_close_et(day).minute
+            if is_trading_day(day)
+            else 0
+        )
+    )
+    b = b[
+        (mins >= 570)
+        & (mins < close_minutes)
+        & (b.high >= b.low)
+        & (b.high > 0)
+    ]
     g = b.groupby("d")
     o = pd.DataFrame({"open": g.open.first(), "high": g.high.max(),
                       "low": g.low.min(), "close": g.close.last(),

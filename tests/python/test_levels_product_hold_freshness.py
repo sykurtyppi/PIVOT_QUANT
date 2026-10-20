@@ -222,6 +222,24 @@ class CompletedSessionSelectionTest(unittest.TestCase):
         self.assertEqual(float(daily.iloc[0]["low"]), 99.0)
         self.assertEqual(float(daily.iloc[0]["close"]), 100.5)
 
+    def test_early_close_boundary_bar_is_excluded_from_session_ohlc(self):
+        con = self._bars("2026-11-27 09:30", 210)
+        self.addCleanup(con.close)
+        close_ts = pd.Timestamp("2026-11-27 13:00", tz="America/New_York")
+        con.execute(
+            "INSERT INTO bar_data VALUES (?, ?, ?, ?, ?, ?)",
+            ("SPY", int(close_ts.timestamp() * 1000), 500.0, 999.0, 1.0, 777.0),
+        )
+
+        daily = morning_map.daily_rth_ohlc(con, "SPY")
+
+        self.assertEqual(list(daily["d"]), [date(2026, 11, 27)])
+        self.assertEqual(int(daily.iloc[0]["bars"]), 210)
+        self.assertEqual(int(daily.iloc[0]["last_minute"]), 779)
+        self.assertEqual(float(daily.iloc[0]["high"]), 101.0)
+        self.assertEqual(float(daily.iloc[0]["low"]), 99.0)
+        self.assertEqual(float(daily.iloc[0]["close"]), 100.5)
+
     def test_many_distinct_timestamps_in_two_minute_slots_are_rejected(self):
         con = sqlite3.connect(":memory:")
         self.addCleanup(con.close)
