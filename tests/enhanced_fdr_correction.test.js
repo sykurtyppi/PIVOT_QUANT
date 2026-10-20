@@ -56,6 +56,7 @@ describe('enhanced_fdr_correction.js — EnhancedFDRCorrection', () => {
       expect(E.wilsonConfidenceInterval(1, -1, 0.95)).toEqual(fallback);
       expect(E.wilsonConfidenceInterval(1, 2, 2)).toEqual(fallback);
       expect(E.wilsonConfidenceInterval(0, Number.MIN_VALUE, 0.95)).toEqual(fallback);
+      expect(E.wilsonConfidenceInterval(5, 10, Number.MIN_VALUE)).toEqual(fallback);
     });
   });
 
@@ -123,6 +124,19 @@ describe('enhanced_fdr_correction.js — EnhancedFDRCorrection', () => {
       const out = E.enhancedBenjaminiHochbergCorrection(sparse, 0.05);
       expect(out.qValues).toHaveLength(2);
       expect(out.significant).toEqual([false, true]);
+    });
+
+    test('sparse p-value arrays ignore inherited numeric array properties', () => {
+      const sparse = [];
+      sparse[1] = 0.01;
+      Array.prototype[0] = 0;
+      try {
+        const out = E.enhancedBenjaminiHochbergCorrection(sparse, 0.05);
+        expect(out.qValues[0]).toBe(1);
+        expect(out.significant).toEqual([false, true]);
+      } finally {
+        delete Array.prototype[0];
+      }
     });
   });
 
@@ -200,6 +214,26 @@ describe('enhanced_fdr_correction.js — EnhancedFDRCorrection', () => {
       expect(out.levels.BAD.hasSufficientData).toBe(false);
       expect(out.levels.BAD.significant).toBe(false);
       expect(out.levels.BAD.pValue).toBe(1.0);
+    });
+
+    test('inherited count fields cannot become quantitative evidence', () => {
+      const inherited = Object.create({ successes: 100, trials: 100 });
+      Object.prototype.successes = 100;
+      Object.prototype.trials = 100;
+      try {
+        for (const stats of [inherited, {}]) {
+          const out = E.analyzePivotSignificanceEnhanced(
+            { WIN: stats }, 'RANGE', 'weekly',
+            { customBaselines: { WIN: 0.5 }, overlapHorizon: 1 },
+          );
+          expect(out.levels.WIN.hasSufficientData).toBe(false);
+          expect(out.levels.WIN.pValue).toBe(1);
+          expect(out.levels.WIN.significant).toBe(false);
+        }
+      } finally {
+        delete Object.prototype.successes;
+        delete Object.prototype.trials;
+      }
     });
 
     test('malformed alpha, baselines, and level objects fail closed', () => {
@@ -329,6 +363,16 @@ describe('enhanced_fdr_correction.js — EnhancedFDRCorrection', () => {
       expect(overlap.levels.PIVOT.pValue).toBeCloseTo(direct.levels.PIVOT.pValue, 12);
       expect(overlap.levels.PIVOT.qValue).toBeCloseTo(direct.levels.PIVOT.qValue, 12);
       expect(overlap.levels.PIVOT.significant).toBe(direct.levels.PIVOT.significant);
+    });
+
+    test('fractional effective counts cannot manufacture significance', () => {
+      const out = E.analyzePivotSignificanceEnhanced(
+        { WIN: { successes: 77, trials: 100 } }, 'RANGE', 'weekly',
+        { customBaselines: { WIN: 0.5 }, overlapHorizon: 10 },
+      );
+      expect(out.levels.WIN.successesEffective).toBeCloseTo(7.7, 12);
+      expect(out.levels.WIN.pValue).toBe(1);
+      expect(out.levels.WIN.significant).toBe(false);
     });
 
     test('two-sided overlap inference retains the observed proportion', () => {

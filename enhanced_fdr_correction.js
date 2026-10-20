@@ -66,22 +66,6 @@ window.EnhancedFDRCorrection = (() => {
     }
 
     /**
-     * Score test using a conservative effective sample size while retaining
-     * the observed proportion (no synthetic integer success count).
-     */
-    function effectiveProportionTest(observedRate, nEffective, p0, oneSided) {
-        if (!Number.isFinite(observedRate) || observedRate < 0 || observedRate > 1
-            || !Number.isInteger(nEffective) || nEffective <= 0
-            || !Number.isFinite(p0) || p0 <= 0 || p0 >= 1
-            || typeof oneSided !== 'boolean') return 1.0;
-        const standardError = Math.sqrt(p0 * (1 - p0) / nEffective);
-        const zScore = (observedRate - p0) / standardError;
-        return oneSided
-            ? 1 - normalCDF(zScore)
-            : Math.min(1, 2 * (1 - normalCDF(Math.abs(zScore))));
-    }
-
-    /**
      * Exact one-sided binomial test
      */
     function exactBinomialOneSided(successes, trials, p0, oneSided) {
@@ -117,7 +101,14 @@ window.EnhancedFDRCorrection = (() => {
             return { lower: 0, upper: 1, center: 0 };
         }
 
-        const z = normalInverse((1 + confidence) / 2);
+        const quantile = (1 + confidence) / 2;
+        if (quantile <= 0.5 || quantile >= 1) {
+            return { lower: 0, upper: 1, center: 0 };
+        }
+        const z = normalInverse(quantile);
+        if (!Number.isFinite(z) || z <= 0) {
+            return { lower: 0, upper: 1, center: 0 };
+        }
         const p = successes / trials;
         const n = trials;
 
@@ -174,7 +165,9 @@ window.EnhancedFDRCorrection = (() => {
 
         // Fail closed on malformed statistical inputs. Mapping invalid values to
         // zero would manufacture maximum significance from corrupt data.
-        const validPValues = Array.from(pValues, p => {
+        const validPValues = Array.from({ length: n }, (_, index) => {
+            if (!Object.prototype.hasOwnProperty.call(pValues, index)) return 1;
+            const p = pValues[index];
             if (!Number.isFinite(p) || p < 0 || p > 1) return 1;
             return p;
         });
@@ -231,7 +224,6 @@ window.EnhancedFDRCorrection = (() => {
             : fallback;
         const alpha = ownOption('alpha', 0.05);
         const oneSided = ownOption('oneSided', true);
-        const debugMode = ownOption('debugMode', false);
         const customBaselines = ownOption('customBaselines', null);
         const permutationTests = ownOption('permutationTests', false);
         const minN = ownOption('minN', 12);
@@ -295,6 +287,8 @@ window.EnhancedFDRCorrection = (() => {
                 && baselineCandidate <= 1;
             const p0 = baselineValid ? baselineCandidate : 0.5;
             const countsValid = baselineValid
+                && Object.prototype.hasOwnProperty.call(stats, 'trials')
+                && Object.prototype.hasOwnProperty.call(stats, 'successes')
                 && Number.isInteger(stats.trials)
                 && Number.isInteger(stats.successes)
                 && stats.trials >= 0
@@ -320,7 +314,7 @@ window.EnhancedFDRCorrection = (() => {
                     ? oneSidedBinomialTest(successes, trials, p0, oneSided)
                     : (Number.isInteger(successesEff)
                         ? oneSidedBinomialTest(successesEff, nEff, p0, oneSided)
-                        : effectiveProportionTest(observedRate, nEff, p0, oneSided));
+                        : 1.0);
                 validLevels.push(level);
 
                 // Permutation test if requested
