@@ -186,6 +186,8 @@ def _validate_briefing_integrity(artifact: dict) -> None:
     if briefing_id != expected_id:
         raise ValueError("briefing identity digest mismatch")
     track_record = artifact.get("track_record")
+    if not isinstance(track_record, dict):
+        raise ValueError("briefing track record must be an object")
     expected_track_hash = hashlib.sha256(_canonical_bytes(track_record)).hexdigest()
     if artifact.get("track_record_sha256") != expected_track_hash:
         raise ValueError("briefing track-record digest mismatch")
@@ -240,6 +242,13 @@ def load_or_build_briefing(
         }
         if any(artifact.get(key) != value for key, value in expected.items()):
             raise ValueError(f"existing briefing does not match current snapshot: {immutable}")
+        rebuilt = build_briefing_artifact(
+            mp,
+            artifact.get("track_record"),
+            captured_at_utc=artifact.get("prepared_at_utc"),
+        )
+        if rebuilt != artifact:
+            raise ValueError(f"existing briefing fails semantic validation: {immutable}")
         return artifact, immutable
 
     artifact = build_briefing_artifact(mp, tr, captured_at_utc=captured_at_utc)

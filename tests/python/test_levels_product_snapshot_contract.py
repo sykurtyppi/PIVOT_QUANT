@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 import subprocess
 import sys
@@ -438,6 +439,33 @@ class BriefingArtifactTest(unittest.TestCase):
             immutable.write_text(json.dumps({**artifact, "body": "TAMPERED"}))
 
             with self.assertRaisesRegex(ValueError, "briefing identity digest mismatch"):
+                publish.load_or_build_briefing(
+                    self.snapshot,
+                    self.track_record,
+                    out_dir,
+                    captured_at_utc="2026-10-02T11:02:00Z",
+                )
+
+    def test_rehashed_semantically_tampered_briefing_is_rejected_on_retry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            artifact, immutable = publish.load_or_build_briefing(
+                self.snapshot,
+                self.track_record,
+                out_dir,
+                captured_at_utc="2026-10-02T11:01:00Z",
+            )
+            artifact["track_record"]["symbol"] = "QQQ"
+            artifact["track_record_sha256"] = hashlib.sha256(
+                publish._canonical_bytes(artifact["track_record"])
+            ).hexdigest()
+            core = {key: value for key, value in artifact.items() if key != "briefing_id"}
+            artifact["briefing_id"] = (
+                "brf_" + hashlib.sha256(publish._canonical_bytes(core)).hexdigest()[:24]
+            )
+            immutable.write_text(json.dumps(artifact), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "symbol"):
                 publish.load_or_build_briefing(
                     self.snapshot,
                     self.track_record,

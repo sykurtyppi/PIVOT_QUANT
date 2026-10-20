@@ -40,9 +40,6 @@ HORIZONS = [15, 30, 60]
 BASE_RATE_LOOKBACK_DAYS = 60  # recent window for the unconditional base rate
 
 
-MAX_MISSING_SESSION_BARS = 30
-
-
 def daily_rth_ohlc(con, symbol):
     columns = {
         str(row[1]) for row in con.execute("PRAGMA table_info(bar_data)").fetchall()
@@ -53,7 +50,19 @@ def daily_rth_ohlc(con, symbol):
         + interval_filter
         + " ORDER BY ts",
         con, params=(symbol,))
-    t = pd.to_datetime(b.ts, unit="ms", utc=True).dt.tz_convert(ET)
+    b["ts"] = pd.to_numeric(b["ts"], errors="coerce")
+    valid_numeric_ts = (
+        np.isfinite(b["ts"])
+        & (b["ts"] % 1 == 0)
+        & b["ts"].between(-9_223_372_036_854, 9_223_372_036_854)
+    )
+    b = b[valid_numeric_ts].copy()
+    t = pd.to_datetime(b.ts, unit="ms", utc=True, errors="coerce")
+    valid_ts = t.notna()
+    b = b[valid_ts].copy()
+    b["timestamp_et"] = t[valid_ts].dt.tz_convert(ET)
+    b = b.sort_values("ts").reset_index(drop=True)
+    t = b.pop("timestamp_et")
     b["d"] = t.dt.date
     mins = t.dt.hour * 60 + t.dt.minute
     b["minute_of_day"] = mins
@@ -93,7 +102,8 @@ def daily_rth_ohlc(con, symbol):
     # floor-trader pivots must come from a finished session, never today's partial
     # bars. A morning run → prior session; an after-close run → today's session
     # (i.e. the upcoming day's levels). Account for exchange early closes while
-    # tolerating at most 30 missing one-minute bars within the session.
+    # requiring every expected one-minute bar. Missing interior bars can contain
+    # the true session high or low and therefore cannot feed official pivots.
     open_minute = REGULAR_SESSION_OPEN_ET.hour * 60 + REGULAR_SESSION_OPEN_ET.minute
     complete = []
     for row in o.itertuples():
@@ -106,7 +116,7 @@ def daily_rth_ohlc(con, symbol):
         complete.append(
             row.first_minute == open_minute
             and row.last_minute >= close_minute - 1
-            and row.bars >= expected_bars - MAX_MISSING_SESSION_BARS
+            and row.bars == expected_bars
             and row.all_rows_valid
             and row.max_rows_per_minute == 1
         )

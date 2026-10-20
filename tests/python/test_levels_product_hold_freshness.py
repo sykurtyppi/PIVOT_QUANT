@@ -204,6 +204,20 @@ class CompletedSessionSelectionTest(unittest.TestCase):
         self.assertEqual(list(daily["d"]), [date(2026, 10, 1)])
         self.assertEqual(int(daily.iloc[0]["bars"]), 390)
 
+    def test_session_with_any_interior_gap_is_rejected(self):
+        for start, periods, missing in (
+            ("2026-10-01 09:30", 390, "2026-10-01 12:00"),
+            ("2026-11-27 09:30", 210, "2026-11-27 11:00"),
+        ):
+            with self.subTest(start=start):
+                con = self._bars(start, periods)
+                self.addCleanup(con.close)
+                missing_ts = int(
+                    pd.Timestamp(missing, tz="America/New_York").timestamp() * 1000
+                )
+                con.execute("DELETE FROM bar_data WHERE ts=?", (missing_ts,))
+                self.assertTrue(morning_map.daily_rth_ohlc(con, "SPY").empty)
+
     def test_session_missing_opening_bar_is_rejected(self):
         for start, periods in (("2026-10-01 10:00", 360), ("2026-11-27 10:00", 180)):
             with self.subTest(start=start):
@@ -325,6 +339,19 @@ class CompletedSessionSelectionTest(unittest.TestCase):
         )
         con.execute("UPDATE bar_data SET high=? WHERE ts=?", ("not-a-number", final_ts))
         self.assertTrue(morning_map.daily_rth_ohlc(con, "SPY").empty)
+
+    def test_malformed_timestamps_are_ignored_without_crashing(self):
+        for malformed in ("not-a-timestamp", float("inf"), 1e30):
+            with self.subTest(malformed=malformed):
+                con = self._bars("2026-10-01 09:30", 390)
+                self.addCleanup(con.close)
+                con.execute(
+                    "INSERT INTO bar_data VALUES (?, ?, ?, ?, ?, ?)",
+                    ("SPY", malformed, 100.0, 101.0, 99.0, 100.5),
+                )
+                daily = morning_map.daily_rth_ohlc(con, "SPY")
+                self.assertEqual(list(daily["d"]), [date(2026, 10, 1)])
+                self.assertEqual(int(daily.iloc[0]["bars"]), 390)
 
     def test_duplicate_timestamps_across_intervals_do_not_fake_completeness(self):
         con = sqlite3.connect(":memory:")

@@ -55,6 +55,7 @@ describe('enhanced_fdr_correction.js — EnhancedFDRCorrection', () => {
       expect(E.wilsonConfidenceInterval(2, 1, 0.95)).toEqual(fallback);
       expect(E.wilsonConfidenceInterval(1, -1, 0.95)).toEqual(fallback);
       expect(E.wilsonConfidenceInterval(1, 2, 2)).toEqual(fallback);
+      expect(E.wilsonConfidenceInterval(0, Number.MIN_VALUE, 0.95)).toEqual(fallback);
     });
   });
 
@@ -227,6 +228,33 @@ describe('enhanced_fdr_correction.js — EnhancedFDRCorrection', () => {
       expect(E.analyzePivotSignificanceEnhanced(null).summary.totalLevels).toBe(0);
     });
 
+    test('inherited options and inherited regime maps cannot control inference', () => {
+      const inheritedOptions = Object.create({
+        alpha: 0.99,
+        customBaselines: { WIN: 0.5 },
+        familyMembers: ['WIN'],
+        overlapHorizon: 1,
+      });
+      const inheritedOut = E.analyzePivotSignificanceEnhanced(
+        { WIN: { successes: 1, trials: 2 } }, 'RANGE', 'weekly', inheritedOptions,
+      );
+      expect(inheritedOut.summary.totalLevels).toBe(7);
+      expect(inheritedOut.summary.significantLevels).toBe(0);
+
+      Object.prototype.EVIL = { A: 0.01 };
+      try {
+        const polluted = E.analyzePivotSignificanceEnhanced(
+          { A: { successes: 12, trials: 12 } }, 'EVIL', 'weekly', { overlapHorizon: 1 },
+        );
+        expect(polluted.familyInfo.familyMembers).toEqual([
+          'R3', 'R2', 'R1', 'PIVOT', 'S1', 'S2', 'S3',
+        ]);
+        expect(polluted.summary.significantLevels).toBe(0);
+      } finally {
+        delete Object.prototype.EVIL;
+      }
+    });
+
     test('malformed levels remain in the predeclared BH family as p=1', () => {
       const out = E.analyzePivotSignificanceEnhanced(
         { A: { successes: 16, trials: 20 }, BAD: null },
@@ -279,13 +307,28 @@ describe('enhanced_fdr_correction.js — EnhancedFDRCorrection', () => {
       const r = out.levels.WIN;
       expect(r.nEffective).toBe(20);
       expect(r.successesEffective).toBe(12);
+      expect(r.pValue).toBeCloseTo(E.oneSidedBinomialTest(12, 20, 0.5, true), 12);
       expect(r.pValue).toBeGreaterThan(0.1);
-      expect(r.pValue).toBeLessThan(0.25);
+      expect(r.pValue).toBeLessThan(0.3);
       expect(r.confidenceInterval.lower).toBeCloseTo(
         E.wilsonConfidenceInterval(12, 20, 0.95).lower * 100,
         12,
       );
       expect(r.significant).toBe(false);
+    });
+
+    test('integral effective counts use the same exact test as direct data', () => {
+      const overlap = E.analyzePivotSignificanceEnhanced(
+        { PIVOT: { successes: 90, trials: 100 } }, 'RANGE', 'weekly',
+        { overlapHorizon: 10 },
+      );
+      const direct = E.analyzePivotSignificanceEnhanced(
+        { PIVOT: { successes: 9, trials: 10 } }, 'RANGE', 'weekly',
+        { overlapHorizon: 1, minN: 10, minNEff: 10 },
+      );
+      expect(overlap.levels.PIVOT.pValue).toBeCloseTo(direct.levels.PIVOT.pValue, 12);
+      expect(overlap.levels.PIVOT.qValue).toBeCloseTo(direct.levels.PIVOT.qValue, 12);
+      expect(overlap.levels.PIVOT.significant).toBe(direct.levels.PIVOT.significant);
     });
 
     test('two-sided overlap inference retains the observed proportion', () => {

@@ -111,7 +111,7 @@ window.EnhancedFDRCorrection = (() => {
      * Wilson score confidence interval
      */
     function wilsonConfidenceInterval(successes, trials, confidence = 0.95) {
-        if (!Number.isFinite(successes) || !Number.isFinite(trials)
+        if (!Number.isFinite(successes) || !Number.isInteger(trials)
             || trials <= 0 || successes < 0 || successes > trials
             || !Number.isFinite(confidence) || confidence <= 0 || confidence >= 1) {
             return { lower: 0, upper: 1, center: 0 };
@@ -226,17 +226,18 @@ window.EnhancedFDRCorrection = (() => {
      */
     function analyzePivotSignificanceEnhanced(pivotStats, regime = 'RANGE', timeframe = 'weekly', options = {}) {
         options = options && typeof options === 'object' && !Array.isArray(options) ? options : {};
-        const {
-            alpha = 0.05,
-            oneSided = true,
-            debugMode = false,
-            customBaselines = null,
-            permutationTests = false,
-            minN = 12,
-            minNEff = 10,
-            overlapHorizon = null,
-            familyMembers = null
-        } = options;
+        const ownOption = (name, fallback) => Object.prototype.hasOwnProperty.call(options, name)
+            ? options[name]
+            : fallback;
+        const alpha = ownOption('alpha', 0.05);
+        const oneSided = ownOption('oneSided', true);
+        const debugMode = ownOption('debugMode', false);
+        const customBaselines = ownOption('customBaselines', null);
+        const permutationTests = ownOption('permutationTests', false);
+        const minN = ownOption('minN', 12);
+        const minNEff = ownOption('minNEff', 10);
+        const overlapHorizon = ownOption('overlapHorizon', null);
+        const familyMembers = ownOption('familyMembers', null);
 
         const pivotStatsValid = pivotStats && typeof pivotStats === 'object';
         pivotStats = pivotStatsValid ? pivotStats : {};
@@ -260,8 +261,10 @@ window.EnhancedFDRCorrection = (() => {
         const baselines = customBaselinesValid
             ? customBaselines
             : (customBaselinesProvided
-                ? Object.create(null)
-                : (DEFAULT_REGIME_BASELINES[regime] || DEFAULT_REGIME_BASELINES['RANGE']));
+            ? Object.create(null)
+            : (Object.prototype.hasOwnProperty.call(DEFAULT_REGIME_BASELINES, regime)
+                ? DEFAULT_REGIME_BASELINES[regime]
+                : DEFAULT_REGIME_BASELINES['RANGE']));
 
         // The multiplicity family must not depend on which result keys happen
         // to be present. Callers may declare it explicitly; otherwise the
@@ -315,7 +318,9 @@ window.EnhancedFDRCorrection = (() => {
             if (hasSufficientData) {
                 pValue = nEff === trials
                     ? oneSidedBinomialTest(successes, trials, p0, oneSided)
-                    : effectiveProportionTest(observedRate, nEff, p0, oneSided);
+                    : (Number.isInteger(successesEff)
+                        ? oneSidedBinomialTest(successesEff, nEff, p0, oneSided)
+                        : effectiveProportionTest(observedRate, nEff, p0, oneSided));
                 validLevels.push(level);
 
                 // Permutation test if requested
