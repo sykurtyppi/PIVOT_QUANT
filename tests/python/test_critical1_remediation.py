@@ -14,12 +14,14 @@ Covers, per the remediation spec:
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import pandas as pd
 
@@ -29,6 +31,7 @@ if str(ROOT) not in sys.path:
 
 from scripts import train_rf_artifacts as tra  # noqa: E402
 from scripts import model_governance as gov  # noqa: E402
+from scripts import run_retrain_evidence_pack as evidence_pack  # noqa: E402
 
 
 def _frame(rows: list[dict]) -> pd.DataFrame:
@@ -206,10 +209,13 @@ class TestPartialCoverage(unittest.TestCase):
 
 
 class TestOOSValidationGuard(unittest.TestCase):
+    ATTESTATION_KEY = "unit-test-oos-attestation-key-32-bytes-minimum"
+
     def _write_report(self, d: Path, version, *, oos_passed, promo_ready,
-                      disposition="held_out_oos"):
+                      disposition="held_out_oos", artifact_hashes=None):
         report = {
             "candidate_manifest": {"version": version},
+            "candidate_artifact_sha256": artifact_hashes or {},
             "candidate_readiness": {
                 "oos_validation_passed": oos_passed,
                 "promotion_ready": promo_ready,
@@ -220,8 +226,71 @@ class TestOOSValidationGuard(unittest.TestCase):
         p.write_text(json.dumps(report))
         return p
 
+    def _write_manifest(self, d: Path, version="v500"):
+        p = d / "manifest_candidate.json"
+        p.write_text(json.dumps({"version": version}))
+        return p
+
+    def _check(self, version, report, manifest):
+        report_data = json.loads(report.read_text())
+        report_data = evidence_pack.sign_oos_evidence_report(
+            report_data, self.ATTESTATION_KEY
+        )
+        report.write_text(json.dumps(report_data))
+        with mock.patch.dict(
+            "os.environ",
+            {evidence_pack.OOS_ATTESTATION_KEY_ENV: self.ATTESTATION_KEY},
+        ), mock.patch(
+            "run_retrain_evidence_pack.classify_candidate_readiness",
+            return_value=report_data["candidate_readiness"],
+        ):
+            return gov.check_oos_validation(version, str(report), manifest)
+
+    def test_unsigned_oos_report_blocks_even_when_structurally_valid(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            report = self._write_report(
+                root, "v500", oos_passed=True, promo_ready=True,
+            )
+            manifest = self._write_manifest(root)
+
+            with mock.patch.dict(
+                "os.environ",
+                {evidence_pack.OOS_ATTESTATION_KEY_ENV: self.ATTESTATION_KEY},
+            ):
+                ok, reason, _ = gov.check_oos_validation(
+                    "v500", str(report), manifest
+                )
+
+            self.assertFalse(ok)
+            self.assertEqual(reason, "evidence_report_attestation_missing")
+
+    def test_attested_report_tampering_blocks(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            report = self._write_report(
+                root, "v500", oos_passed=True, promo_ready=True,
+            )
+            manifest = self._write_manifest(root)
+            report_data = evidence_pack.sign_oos_evidence_report(
+                json.loads(report.read_text()), self.ATTESTATION_KEY
+            )
+            report_data["candidate_readiness"]["promotion_disposition"] = "tampered"
+            report.write_text(json.dumps(report_data))
+
+            with mock.patch.dict(
+                "os.environ",
+                {evidence_pack.OOS_ATTESTATION_KEY_ENV: self.ATTESTATION_KEY},
+            ):
+                ok, reason, _ = gov.check_oos_validation(
+                    "v500", str(report), manifest
+                )
+
+            self.assertFalse(ok)
+            self.assertEqual(reason, "evidence_report_attestation_invalid")
+
     def test_no_report_blocks(self):
-        ok, reason, _ = gov.check_oos_validation("v500", "")
+        ok, reason, _ = gov.check_oos_validation("v500", "", None)
         self.assertFalse(ok)
         self.assertIn("no_evidence_report", reason)
 
@@ -231,7 +300,8 @@ class TestOOSValidationGuard(unittest.TestCase):
                 Path(d), "v500", oos_passed=False, promo_ready=False,
                 disposition="threshold_tune_slice",
             )
-            ok, reason, detail = gov.check_oos_validation("v500", str(p))
+            manifest = self._write_manifest(Path(d))
+            ok, reason, detail = self._check("v500", p, manifest)
             self.assertFalse(ok)
             self.assertIn("oos_validation_not_passed", reason)
             self.assertEqual(detail["promotion_disposition"], "threshold_tune_slice")
@@ -241,7 +311,8 @@ class TestOOSValidationGuard(unittest.TestCase):
             p = self._write_report(
                 Path(d), "v499", oos_passed=True, promo_ready=True,
             )
-            ok, reason, _ = gov.check_oos_validation("v500", str(p))
+            manifest = self._write_manifest(Path(d), "v499")
+            ok, reason, _ = self._check("v500", p, manifest)
             self.assertFalse(ok)
             self.assertIn("version_mismatch", reason)
 
@@ -250,7 +321,8 @@ class TestOOSValidationGuard(unittest.TestCase):
             p = self._write_report(
                 Path(d), "v500", oos_passed=True, promo_ready=True,
             )
-            ok, reason, _ = gov.check_oos_validation("v500", str(p))
+            manifest = self._write_manifest(Path(d))
+            ok, reason, _ = self._check("v500", p, manifest)
             self.assertTrue(ok)
             self.assertEqual(reason, "oos_validation_passed")
 
@@ -259,9 +331,90 @@ class TestOOSValidationGuard(unittest.TestCase):
             p = self._write_report(
                 Path(d), "v500", oos_passed=True, promo_ready=False,
             )
-            ok, reason, _ = gov.check_oos_validation("v500", str(p))
+            manifest = self._write_manifest(Path(d))
+            ok, reason, _ = self._check("v500", p, manifest)
             self.assertFalse(ok)
             self.assertIn("not_promotion_ready", reason)
+
+    def test_forged_readiness_flags_block(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            p = self._write_report(
+                root, "v500", oos_passed=True, promo_ready=True,
+            )
+            manifest = self._write_manifest(root)
+            signed = evidence_pack.sign_oos_evidence_report(
+                json.loads(p.read_text()), self.ATTESTATION_KEY
+            )
+            p.write_text(json.dumps(signed))
+
+            with mock.patch.dict(
+                "os.environ",
+                {evidence_pack.OOS_ATTESTATION_KEY_ENV: self.ATTESTATION_KEY},
+            ):
+                ok, reason, _ = gov.check_oos_validation("v500", str(p), manifest)
+
+            self.assertFalse(ok)
+            self.assertIn("readiness_mismatch", reason)
+
+    def test_report_must_match_exact_candidate_manifest(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            p = self._write_report(
+                root, "v500", oos_passed=True, promo_ready=True,
+            )
+            manifest = root / "manifest_candidate.json"
+            manifest.write_text(json.dumps({"version": "v500", "models": {"reject": {}}}))
+            signed = evidence_pack.sign_oos_evidence_report(
+                json.loads(p.read_text()), self.ATTESTATION_KEY
+            )
+            p.write_text(json.dumps(signed))
+
+            with mock.patch.dict(
+                "os.environ",
+                {evidence_pack.OOS_ATTESTATION_KEY_ENV: self.ATTESTATION_KEY},
+            ):
+                ok, reason, _ = gov.check_oos_validation("v500", str(p), manifest)
+
+            self.assertFalse(ok)
+            self.assertIn("candidate_manifest_mismatch", reason)
+
+    def test_artifact_replacement_after_evidence_blocks(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            artifact = root / "candidate.pkl"
+            artifact.write_bytes(b"evaluated-model")
+            manifest_data = {
+                "version": "v500",
+                "models": {"reject": {"15": artifact.name}},
+            }
+            manifest = root / "manifest_candidate.json"
+            manifest.write_text(json.dumps(manifest_data))
+            digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+            report = self._write_report(
+                root, "v500", oos_passed=True, promo_ready=True,
+                artifact_hashes={artifact.name: digest},
+            )
+            report_data = json.loads(report.read_text())
+            report_data["candidate_manifest"] = manifest_data
+            report.write_text(json.dumps(report_data))
+
+            artifact.write_bytes(b"replacement-model")
+            ok, reason, _ = self._check("v500", report, manifest)
+
+            self.assertFalse(ok)
+            self.assertEqual(reason, "evidence_report_candidate_artifact_mismatch")
+
+    def test_approval_hashes_must_still_match_evidence_checked_bytes(self):
+        evidence_detail = {
+            "actual_candidate_artifact_sha256": {"candidate.pkl": "evaluated"},
+        }
+        approval_hashes = {
+            "active_artifact_sha256": {"candidate.pkl": "replacement"},
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "changed after OOS evidence validation"):
+            gov.require_approval_matches_oos_evidence(approval_hashes, evidence_detail)
 
 
 class TestBootstrapRequiresOOS(unittest.TestCase):
@@ -270,6 +423,8 @@ class TestBootstrapRequiresOOS(unittest.TestCase):
     unattended retrain cycle into an unvalidated auto-promote — the one promotion
     path that previously had no OOS check. The only escape is the explicit, loud
     --allow-unvalidated-promotion (or genuine OOS-passing evidence)."""
+
+    ATTESTATION_KEY = "unit-test-oos-attestation-key-32-bytes-minimum"
 
     def _candidate(self):
         return {
@@ -341,7 +496,10 @@ class TestBootstrapRequiresOOS(unittest.TestCase):
             d = Path(dd)
             self._setup(d)
             report = {
-                "candidate_manifest": {"version": "v500"},
+                "candidate_manifest": self._candidate(),
+                "candidate_artifact_sha256": {
+                    "reject_5.pkl": hashlib.sha256(b"stub").hexdigest()
+                },
                 "candidate_readiness": {
                     "oos_validation_passed": True,
                     "promotion_ready": True,
@@ -349,8 +507,18 @@ class TestBootstrapRequiresOOS(unittest.TestCase):
                 },
             }
             rp = d / "evidence.json"
+            report = evidence_pack.sign_oos_evidence_report(
+                report, self.ATTESTATION_KEY
+            )
             rp.write_text(json.dumps(report))
-            rc, out = self._run(self._args(d, evidence_report=str(rp)))
+            with mock.patch.dict(
+                "os.environ",
+                {evidence_pack.OOS_ATTESTATION_KEY_ENV: self.ATTESTATION_KEY},
+            ), mock.patch(
+                "run_retrain_evidence_pack.classify_candidate_readiness",
+                return_value=report["candidate_readiness"],
+            ):
+                rc, out = self._run(self._args(d, evidence_report=str(rp)))
             self.assertEqual(rc, 0)
             self.assertEqual(out["action"], "bootstrap")
             self.assertTrue(out["promoted"])

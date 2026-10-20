@@ -6,17 +6,18 @@
 window.EnhancedFDRCorrection = (() => {
 
     // Default regime-specific baselines (can be customized)
-    const DEFAULT_REGIME_BASELINES = {
-        'UP-TREND': {
+    const DEFAULT_REGIME_BASELINES = Object.freeze({
+        'UP-TREND': Object.freeze({
             R3: 0.45, R2: 0.50, R1: 0.55, PIVOT: 0.50, S1: 0.65, S2: 0.70, S3: 0.75
-        },
-        'DOWN-TREND': {
+        }),
+        'DOWN-TREND': Object.freeze({
             R3: 0.75, R2: 0.70, R1: 0.65, PIVOT: 0.50, S1: 0.55, S2: 0.50, S3: 0.45
-        },
-        'RANGE': {
+        }),
+        'RANGE': Object.freeze({
             R3: 0.60, R2: 0.55, R1: 0.52, PIVOT: 0.50, S1: 0.52, S2: 0.55, S3: 0.60
-        }
-    };
+        })
+    });
+    const MAX_EXACT_BINOMIAL_TRIALS = 100000;
 
     /**
      * One-sided binomial test: H1: p > p0
@@ -26,39 +27,19 @@ window.EnhancedFDRCorrection = (() => {
      * @param {boolean} oneSided - If true, one-sided test (default), if false, two-sided
      */
     function oneSidedBinomialTest(successes, trials, p0 = 0.5, oneSided = true) {
+        if (!Number.isSafeInteger(successes) || !Number.isSafeInteger(trials)
+            || trials < 0 || trials > MAX_EXACT_BINOMIAL_TRIALS
+            || !Number.isFinite(p0) || p0 < 0 || p0 > 1
+            || typeof oneSided !== 'boolean') return 1.0;
         if (trials === 0) return 1.0;
         if (successes < 0 || successes > trials) return 1.0;
+        if (p0 === 0) return successes === 0 ? 1.0 : 0.0;
+        if (p0 === 1) return oneSided ? 1.0 : (successes === trials ? 1.0 : 0.0);
 
-        const _observedRate = successes / trials;
-
-        // Use normal approximation for large samples
-        if (trials * p0 > 5 && trials * (1 - p0) > 5) {
-            return normalApproximationOneSided(successes, trials, p0, oneSided);
-        }
-
-        // Exact binomial test for small samples
+        // Integral observations use the exact binomial test. A normal
+        // approximation can cross the BH decision boundary and manufacture a
+        // discovery that the registered exact test would reject.
         return exactBinomialOneSided(successes, trials, p0, oneSided);
-    }
-
-    /**
-     * Normal approximation for one-sided test
-     */
-    function normalApproximationOneSided(successes, trials, p0, oneSided) {
-        const mean = trials * p0;
-        const variance = trials * p0 * (1 - p0);
-        const stdDev = Math.sqrt(variance);
-
-        // Apply continuity correction
-        const correction = successes > mean ? -0.5 : 0.5;
-        const zScore = (successes + correction - mean) / stdDev;
-
-        if (oneSided) {
-            // One-sided: P(X >= successes) for H1: p > p0
-            return 1 - normalCDF(zScore);
-        } else {
-            // Two-sided test
-            return 2 * (1 - normalCDF(Math.abs(zScore)));
-        }
     }
 
     /**
@@ -66,34 +47,87 @@ window.EnhancedFDRCorrection = (() => {
      */
     function exactBinomialOneSided(successes, trials, p0, oneSided) {
         if (oneSided) {
-            // One-sided: P(X >= successes | H0: p = p0)
-            let pValue = 0;
-            for (let k = successes; k <= trials; k++) {
-                pValue += binomialPMF(k, trials, p0);
+            // P(X >= successes). Sum the shorter side in log space to avoid
+            // coefficient overflow and probability underflow for large n.
+            if (successes <= trials * p0) {
+                const lower = sumBinomialRange(0, successes - 1, trials, p0);
+                return Math.max(0, Math.min(1, 1 - lower));
             }
-            return Math.min(pValue, 1.0);
+            return Math.min(1, sumBinomialRange(successes, trials, trials, p0));
         } else {
-            // Two-sided test (original implementation)
-            const observedProb = binomialPMF(successes, trials, p0);
-            let pValue = 0;
-
-            for (let k = 0; k <= trials; k++) {
-                const prob = binomialPMF(k, trials, p0);
-                if (prob <= observedProb + 1e-10) {
-                    pValue += prob;
+            const observedLogProb = logBinomialPMF(successes, trials, p0);
+            let logRelativeTotal = 0;
+            let logRelativeProb = 0;
+            for (let k = successes; k > 0; k--) {
+                logRelativeProb += Math.log(k) - Math.log(trials - k + 1)
+                    + Math.log1p(-p0) - Math.log(p0);
+                if (logRelativeProb <= 1e-12) {
+                    logRelativeTotal = logAddExp(logRelativeTotal, logRelativeProb);
                 }
             }
-            return Math.min(pValue, 1.0);
+            logRelativeProb = 0;
+            for (let k = successes; k < trials; k++) {
+                logRelativeProb += Math.log(trials - k) - Math.log(k + 1)
+                    + Math.log(p0) - Math.log1p(-p0);
+                if (logRelativeProb <= 1e-12) {
+                    logRelativeTotal = logAddExp(logRelativeTotal, logRelativeProb);
+                }
+            }
+            return Math.min(1, Math.exp(observedLogProb + logRelativeTotal));
         }
+    }
+
+    function logBinomialPMF(k, n, p) {
+        if (k < 0 || k > n) return -Infinity;
+        if (p === 0) return k === 0 ? 0 : -Infinity;
+        if (p === 1) return k === n ? 0 : -Infinity;
+        const reducedK = Math.min(k, n - k);
+        let logCoefficient = 0;
+        for (let i = 1; i <= reducedK; i++) {
+            logCoefficient += Math.log(n - reducedK + i) - Math.log(i);
+        }
+        return logCoefficient + k * Math.log(p) + (n - k) * Math.log1p(-p);
+    }
+
+    function logAddExp(left, right) {
+        if (left === -Infinity) return right;
+        if (right === -Infinity) return left;
+        const maximum = Math.max(left, right);
+        return maximum + Math.log(Math.exp(left - maximum) + Math.exp(right - maximum));
+    }
+
+    function sumBinomialRange(start, end, n, p) {
+        if (start > end) return 0;
+        let logTotal = -Infinity;
+        let logProb = logBinomialPMF(start, n, p);
+        for (let k = start; k <= end; k++) {
+            logTotal = logAddExp(logTotal, logProb);
+            if (k < end) {
+                logProb += Math.log(n - k) - Math.log(k + 1)
+                    + Math.log(p) - Math.log1p(-p);
+            }
+        }
+        return Math.exp(logTotal);
     }
 
     /**
      * Wilson score confidence interval
      */
     function wilsonConfidenceInterval(successes, trials, confidence = 0.95) {
-        if (trials === 0) return { lower: 0, upper: 1, center: 0 };
+        if (!Number.isFinite(successes) || !Number.isInteger(trials)
+            || trials <= 0 || successes < 0 || successes > trials
+            || !Number.isFinite(confidence) || confidence <= 0 || confidence >= 1) {
+            return { lower: 0, upper: 1, center: 0 };
+        }
 
-        const z = normalInverse((1 + confidence) / 2);
+        const quantile = (1 + confidence) / 2;
+        if (quantile <= 0.5 || quantile >= 1) {
+            return { lower: 0, upper: 1, center: 0 };
+        }
+        const z = normalInverse(quantile);
+        if (!Number.isFinite(z) || z <= 0) {
+            return { lower: 0, upper: 1, center: 0 };
+        }
         const p = successes / trials;
         const n = trials;
 
@@ -143,13 +177,17 @@ window.EnhancedFDRCorrection = (() => {
      * Enhanced Benjamini-Hochberg FDR correction with monotonicity guarantee
      */
     function enhancedBenjaminiHochbergCorrection(pValues, alpha = 0.05) {
+        if (!Array.isArray(pValues)) return { qValues: [], significant: [] };
         const n = pValues.length;
         if (n === 0) return { qValues: [], significant: [] };
+        const alphaValid = Number.isFinite(alpha) && alpha >= 0 && alpha <= 1;
 
-        // Handle edge cases
-        const validPValues = pValues.map(p => {
-            if (!Number.isFinite(p) || p < 0) return 0;
-            if (p > 1) return 1;
+        // Fail closed on malformed statistical inputs. Mapping invalid values to
+        // zero would manufacture maximum significance from corrupt data.
+        const validPValues = Array.from({ length: n }, (_, index) => {
+            if (!Object.prototype.hasOwnProperty.call(pValues, index)) return 1;
+            const p = pValues[index];
+            if (!Number.isFinite(p) || p < 0 || p > 1) return 1;
             return p;
         });
 
@@ -174,82 +212,170 @@ window.EnhancedFDRCorrection = (() => {
 
             // Clamp to [0, 1]
             qValues[indexed[i].index] = Math.max(0, Math.min(qValue, 1.0));
-            significant[indexed[i].index] = qValues[indexed[i].index] <= alpha;
+            significant[indexed[i].index] = alphaValid && qValues[indexed[i].index] <= alpha;
         }
 
         return { qValues, significant };
     }
 
-    /**
-     * Calculate effective sample size accounting for regime clustering
-     */
-    function calculateEffectiveN(trials, regime, timeframe) {
-        // Adjust for temporal clustering based on timeframe
-        const clusteringFactors = {
-            daily: 0.9,    // Less clustering in daily data
-            weekly: 0.8,   // Moderate clustering
-            monthly: 0.7   // More clustering in monthly data
-        };
-
-        const factor = clusteringFactors[timeframe] || 0.8;
-        return Math.round(trials * factor);
+    /** Conservative overlap lower bound n_eff = floor(n_obs / horizon). */
+    function calculateEffectiveN(trials, overlapHorizon) {
+        if (!Number.isFinite(trials) || trials < 0
+            || !Number.isInteger(overlapHorizon) || overlapHorizon <= 0) return 0;
+        return Math.floor(trials / overlapHorizon);
     }
 
     /**
-     * Permutation test for additional validation
+     * Aggregate counts cannot implement the protocol's block permutation.
+     * Fail closed until time-ordered labels and a registered seed are supplied.
      */
-    function permutationTest(stats, p0, K = 200) {
-        const { successes, trials } = stats;
-        if (trials === 0) return 1.0;
-
-        const observedP = oneSidedBinomialTest(successes, trials, p0, true);
-        let permutedBetter = 0;
-
-        // Generate K permutations
-        for (let k = 0; k < K; k++) {
-            // Simulate random success count under null hypothesis
-            let permutedSuccesses = 0;
-            for (let i = 0; i < trials; i++) {
-                if (Math.random() < p0) permutedSuccesses++;
-            }
-
-            const permutedP = oneSidedBinomialTest(permutedSuccesses, trials, p0, true);
-            if (permutedP <= observedP) permutedBetter++;
-        }
-
-        return permutedBetter / K;
+    function permutationTest(_stats, _p0, _K = 10000) {
+        return null;
     }
 
     /**
      * Enhanced regime-aware pivot significance analysis
      */
     function analyzePivotSignificanceEnhanced(pivotStats, regime = 'RANGE', timeframe = 'weekly', options = {}) {
-        const {
-            alpha = 0.05,
-            oneSided = true,
-            debugMode = false,
-            customBaselines = null,
-            permutationTests = false,
-            minN = 12,
-            minNEff = 10
-        } = options;
+        options = options && typeof options === 'object' && !Array.isArray(options) ? options : {};
+        const ownOption = (name, fallback) => {
+            const descriptor = Object.getOwnPropertyDescriptor(options, name);
+            if (descriptor === undefined) {
+                return { provided: false, valid: true, value: fallback };
+            }
+            if (!Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
+                return { provided: true, valid: false, value: fallback };
+            }
+            return { provided: true, valid: true, value: descriptor.value };
+        };
+        const alphaOption = ownOption('alpha', 0.05);
+        const oneSidedOption = ownOption('oneSided', true);
+        const customBaselinesOption = ownOption('customBaselines', null);
+        const permutationTestsOption = ownOption('permutationTests', false);
+        const minNOption = ownOption('minN', 12);
+        const minNEffOption = ownOption('minNEff', 10);
+        const overlapHorizonOption = ownOption('overlapHorizon', null);
+        const familyMembersOption = ownOption('familyMembers', null);
+        const optionRecords = [
+            alphaOption, oneSidedOption, customBaselinesOption, permutationTestsOption,
+            minNOption, minNEffOption, overlapHorizonOption, familyMembersOption
+        ];
+        const optionsValid = optionRecords.every(option => option.valid);
+        const alpha = alphaOption.value;
+        const oneSided = oneSidedOption.value;
+        const customBaselines = customBaselinesOption.value;
+        const permutationTests = permutationTestsOption.value;
+        const minN = minNOption.value;
+        const minNEff = minNEffOption.value;
+        const overlapHorizon = overlapHorizonOption.value;
+        const familyMembers = familyMembersOption.value;
 
-        // Get regime-specific baselines
-        const baselines = customBaselines || DEFAULT_REGIME_BASELINES[regime] || DEFAULT_REGIME_BASELINES['RANGE'];
+        const pivotStatsValid = pivotStats && typeof pivotStats === 'object';
+        pivotStats = pivotStatsValid ? pivotStats : {};
+        const thresholdsValid = optionsValid && Number.isInteger(minN) && minN >= 1
+            && Number.isInteger(minNEff) && minNEff >= 1;
 
-        const levels = Object.keys(pivotStats);
+        const isSafeFamilyMember = level => typeof level === 'string'
+            && level.length > 0
+            && level !== '__proto__'
+            && level !== 'prototype'
+            && level !== 'constructor';
+        const customBaselinesProvided = customBaselinesOption.provided;
+        const customBaselinesValid = customBaselines
+            && typeof customBaselines === 'object'
+            && !Array.isArray(customBaselines)
+            && Object.keys(customBaselines).length > 0
+            && Object.keys(customBaselines).every(isSafeFamilyMember);
+
+        // An explicitly supplied but empty/malformed custom map has no valid
+        // predeclared family and therefore fails closed.
+        const baselines = customBaselinesValid
+            ? customBaselines
+            : (customBaselinesProvided
+            ? Object.create(null)
+            : (Object.prototype.hasOwnProperty.call(DEFAULT_REGIME_BASELINES, regime)
+                ? DEFAULT_REGIME_BASELINES[regime]
+                : DEFAULT_REGIME_BASELINES['RANGE']));
+
+        // The multiplicity family must not depend on which result keys happen
+        // to be present. Callers may declare it explicitly; otherwise the
+        // selected baseline map is the predeclared family. Invalid top-level
+        // input retains the historical empty-result behavior.
+        const familyMembersProvided = familyMembersOption.provided;
+        let explicitFamilyValid = Array.isArray(familyMembers) && familyMembers.length > 0;
+        const explicitFamily = [];
+        if (explicitFamilyValid) {
+            for (let index = 0; index < familyMembers.length; index++) {
+                const memberDescriptor = Object.getOwnPropertyDescriptor(familyMembers, index);
+                if (memberDescriptor === undefined
+                    || !Object.prototype.hasOwnProperty.call(memberDescriptor, 'value')) {
+                    explicitFamilyValid = false;
+                    break;
+                }
+                const member = memberDescriptor.value;
+                if (!isSafeFamilyMember(member)) {
+                    explicitFamilyValid = false;
+                    break;
+                }
+                explicitFamily.push(member);
+            }
+        }
+        const declaredFamily = familyMembersProvided
+            ? (explicitFamilyValid ? [...new Set(explicitFamily)] : [])
+            : Object.keys(baselines).filter(isSafeFamilyMember);
+        const levels = pivotStatsValid ? declaredFamily : [];
         const pValues = [];
-        const results = {};
+        const results = Object.create(null);
         const validLevels = [];
 
         // Calculate p-values for each level
         levels.forEach(level => {
-            const stats = pivotStats[level];
-            const p0 = baselines[level] || 0.5; // Fallback to 0.5 if baseline not found
-            const nEff = calculateEffectiveN(stats.trials, regime, timeframe);
+            const statsDescriptor = Object.getOwnPropertyDescriptor(pivotStats, level);
+            const statsCandidate = statsDescriptor
+                && Object.prototype.hasOwnProperty.call(statsDescriptor, 'value')
+                ? statsDescriptor.value
+                : null;
+            const stats = statsCandidate && typeof statsCandidate === 'object'
+                ? statsCandidate
+                : null;
+            const baselineDescriptor = Object.getOwnPropertyDescriptor(baselines, level);
+            const baselineDeclared = baselineDescriptor !== undefined
+                && Object.prototype.hasOwnProperty.call(baselineDescriptor, 'value');
+            const baselineCandidate = baselineDeclared ? baselineDescriptor.value : null;
+            const baselineValid = baselineDeclared && Number.isFinite(baselineCandidate)
+                && baselineCandidate >= 0
+                && baselineCandidate <= 1;
+            const p0 = baselineValid ? baselineCandidate : 0.5;
+            const trialsDescriptor = stats === null
+                ? undefined
+                : Object.getOwnPropertyDescriptor(stats, 'trials');
+            const successesDescriptor = stats === null
+                ? undefined
+                : Object.getOwnPropertyDescriptor(stats, 'successes');
+            const ownsTrials = trialsDescriptor !== undefined
+                && Object.prototype.hasOwnProperty.call(trialsDescriptor, 'value');
+            const ownsSuccesses = successesDescriptor !== undefined
+                && Object.prototype.hasOwnProperty.call(successesDescriptor, 'value');
+            const trialsCandidate = ownsTrials ? trialsDescriptor.value : null;
+            const successesCandidate = ownsSuccesses ? successesDescriptor.value : null;
+            const countsValid = baselineValid
+                && ownsTrials
+                && ownsSuccesses
+                && Number.isSafeInteger(trialsCandidate)
+                && Number.isSafeInteger(successesCandidate)
+                && trialsCandidate >= 0
+                && trialsCandidate <= MAX_EXACT_BINOMIAL_TRIALS
+                && successesCandidate >= 0
+                && successesCandidate <= trialsCandidate;
+            const trials = countsValid ? trialsCandidate : 0;
+            const successes = countsValid ? successesCandidate : 0;
+            const nEff = calculateEffectiveN(trials, overlapHorizon);
+            const observedRate = trials > 0 ? successes / trials : 0;
+            const successesEff = nEff > 0 ? observedRate * nEff : 0;
 
             // Check sample size requirements
-            const hasSufficientData = stats.trials >= minN && nEff >= minNEff;
+            const hasSufficientData = thresholdsValid && countsValid
+                && trials >= minN && nEff >= minNEff;
 
             let pValue = 1.0;
             let qValue = null;
@@ -257,29 +383,34 @@ window.EnhancedFDRCorrection = (() => {
             let permPValue = null;
 
             if (hasSufficientData) {
-                pValue = oneSidedBinomialTest(stats.successes, stats.trials, p0, oneSided);
-                pValues.push(pValue);
+                pValue = nEff === trials
+                    ? oneSidedBinomialTest(successes, trials, p0, oneSided)
+                    : (Number.isInteger(successesEff)
+                        ? oneSidedBinomialTest(successesEff, nEff, p0, oneSided)
+                        : 1.0);
                 validLevels.push(level);
 
                 // Permutation test if requested
-                if (permutationTests && debugMode) {
-                    permPValue = permutationTest(stats, p0);
+                if (permutationTests) {
+                    permPValue = permutationTest({ successes: successesEff, trials: nEff }, p0);
                 }
             }
 
-            // Calculate confidence interval
-            const ci = wilsonConfidenceInterval(stats.successes, stats.trials, 0.95);
+            // Inference uses the conservative effective sample implied by the
+            // overlap horizon; raw counts remain available for descriptive rate.
+            const ci = wilsonConfidenceInterval(successesEff, nEff, 0.95);
 
             // Calculate lift (observed rate - baseline)
-            const observedRate = stats.trials > 0 ? stats.successes / stats.trials : 0;
             const lift = observedRate - p0;
 
             results[level] = {
-                successes: stats.successes,
-                trials: stats.trials,
+                successes,
+                trials,
                 nEffective: nEff,
+                successesEffective: successesEff,
                 successRate: observedRate * 100,
                 baseline: p0 * 100,
+                baselineValid,
                 lift: lift * 100,
                 pValue: pValue,
                 qValue: qValue,
@@ -291,22 +422,28 @@ window.EnhancedFDRCorrection = (() => {
                     center: ci.center * 100
                 },
                 permutationPValue: permPValue,
+                permutationRequested: permutationTests,
+                permutationAvailable: Number.isFinite(permPValue),
                 testType: oneSided ? 'one-sided' : 'two-sided',
                 hypothesis: oneSided ? `H1: p > ${(p0*100).toFixed(1)}%` : `H1: p ≠ ${(p0*100).toFixed(1)}%`
             };
+            pValues.push(pValue);
         });
 
-        // Apply FDR correction only to levels with sufficient data
+        // Preserve the predeclared family: invalid or underpowered levels enter
+        // as p=1 instead of shrinking the multiplicity correction.
         if (pValues.length > 0) {
             const fdrResults = enhancedBenjaminiHochbergCorrection(pValues, alpha);
 
             // Update results with FDR-corrected values
-            let validIndex = 0;
-            levels.forEach(level => {
-                if (results[level].hasSufficientData) {
-                    results[level].qValue = fdrResults.qValues[validIndex];
-                    results[level].significant = fdrResults.significant[validIndex];
-                    validIndex++;
+            levels.forEach((level, index) => {
+                const result = Object.prototype.hasOwnProperty.call(results, level)
+                    ? results[level]
+                    : null;
+                if (result && result.hasSufficientData) {
+                    result.qValue = fdrResults.qValues[index];
+                    result.significant = fdrResults.significant[index]
+                        && (!result.permutationRequested || result.permutationAvailable);
                 }
             });
         }
@@ -316,7 +453,10 @@ window.EnhancedFDRCorrection = (() => {
             summary: {
                 totalLevels: levels.length,
                 validLevels: validLevels.length,
-                significantLevels: validLevels.filter(level => results[level].significant).length,
+                significantLevels: validLevels.filter(level => (
+                    Object.prototype.hasOwnProperty.call(results, level)
+                    && results[level].significant
+                )).length,
                 insufficientDataLevels: levels.length - validLevels.length,
                 fdrLevel: alpha,
                 regime: regime,
@@ -327,7 +467,8 @@ window.EnhancedFDRCorrection = (() => {
                 regime: regime,
                 timeframe: timeframe,
                 baselines: baselines,
-                testParameters: { alpha, oneSided, minN, minNEff }
+                familyMembers: levels,
+                testParameters: { alpha, oneSided, minN, minNEff, overlapHorizon }
             }
         };
     }
@@ -362,6 +503,10 @@ window.EnhancedFDRCorrection = (() => {
         // Sample size information
         parts.push(`Sample Size: n=${result.trials}, n_eff=${result.nEffective}`);
         parts.push(`95% CI: [${result.confidenceInterval.lower.toFixed(1)}%, ${result.confidenceInterval.upper.toFixed(1)}%]`);
+
+        if (result.permutationRequested && !result.permutationAvailable) {
+            parts.push('Permutation validation: unavailable — significance withheld');
+        }
 
         // Debug information
         if (debugMode && result.permutationPValue !== null) {
@@ -402,35 +547,6 @@ window.EnhancedFDRCorrection = (() => {
             `${level}: ${rate}% ${mark}`;
 
         return showTooltip ? { display, tooltip: generateTooltip(level, result) } : display;
-    }
-
-    // Include all original helper functions
-    function binomialPMF(k, n, p) {
-        if (k < 0 || k > n) return 0;
-        if (n === 0) return k === 0 ? 1 : 0;
-        if (p === 0) return k === 0 ? 1 : 0;
-        if (p === 1) return k === n ? 1 : 0;
-
-        return binomialCoefficient(n, k) * Math.pow(p, k) * Math.pow(1 - p, n - k);
-    }
-
-    function binomialCoefficient(n, k) {
-        if (k > n - k) k = n - k;
-        if (k === 0) return 1;
-
-        let result = 1;
-        for (let i = 0; i < k; i++) {
-            result = result * (n - i) / (i + 1);
-        }
-        return result;
-    }
-
-    function normalCDF(z) {
-        const t = 1.0 / (1.0 + 0.2316419 * Math.abs(z));
-        const d = 0.3989423 * Math.exp(-z * z / 2);
-        const prob = d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
-
-        return z > 0 ? 1 - prob : prob;
     }
 
     // Public API

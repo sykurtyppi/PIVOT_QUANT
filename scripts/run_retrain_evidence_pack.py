@@ -34,6 +34,7 @@ import argparse
 import copy
 import datetime as dt
 import hashlib
+import hmac
 import importlib.util
 import json
 import math
@@ -48,6 +49,9 @@ if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
 SCHEMA_VERSION = 1
+OOS_ATTESTATION_SCHEMA = "pivotquant.oos_evidence_attestation.v1"
+OOS_ATTESTATION_KEY_ENV = "MODEL_GOV_OOS_ATTESTATION_KEY"
+OOS_ATTESTATION_MIN_KEY_BYTES = 32
 
 DEFAULT_ACTIVE_MANIFEST_NAME = (
     os.getenv("RF_ACTIVE_MANIFEST", "manifest_active.json").strip()
@@ -68,7 +72,12 @@ DEFAULT_LIVE_MODEL_DIR = os.getenv("RF_MODEL_DIR", "data/models")
 # --metadata-dir CLI protection: the train script accepts it as absolute,
 # so the env equivalent is the same write-redirect risk.
 PROTECTED_ENV_KEYS = frozenset(
-    {"RF_MODEL_DIR", "RF_METADATA_DIR", "RF_CANDIDATE_MANIFEST"}
+    {
+        "RF_MODEL_DIR",
+        "RF_METADATA_DIR",
+        "RF_CANDIDATE_MANIFEST",
+        OOS_ATTESTATION_KEY_ENV,
+    }
 )
 
 # CLI flags --train-arg is not allowed to forward. argparse takes the last
@@ -78,6 +87,73 @@ PROTECTED_ENV_KEYS = frozenset(
 # for the same reason -- the train script lets it be an absolute path and
 # would otherwise write metadata_v*.json outside the isolated tree.
 PROTECTED_TRAIN_ARGS = frozenset({"--out-dir", "--candidate-manifest", "--metadata-dir"})
+
+
+def _oos_attestation_payload(report: dict) -> bytes:
+    """Canonical report bytes, excluding the attestation envelope itself."""
+    unsigned = copy.deepcopy(report)
+    unsigned.pop("oos_evidence_attestation", None)
+    return json.dumps(
+        unsigned,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        default=str,
+    ).encode("utf-8")
+
+
+def sign_oos_evidence_report(report: dict, key: str) -> dict:
+    """Return a copy authenticated by a key held by the trusted producer.
+
+    The key is never written to the report. Governance verifies this HMAC
+    before trusting any report-controlled OOS observations or provenance.
+    """
+    if (
+        not isinstance(key, str)
+        or len(key.encode("utf-8")) < OOS_ATTESTATION_MIN_KEY_BYTES
+    ):
+        raise ValueError("OOS evidence attestation key must be at least 32 bytes")
+    signed = copy.deepcopy(report)
+    signed.pop("oos_evidence_attestation", None)
+    digest = hmac.new(
+        key.encode("utf-8"), _oos_attestation_payload(signed), hashlib.sha256
+    ).hexdigest()
+    signed["oos_evidence_attestation"] = {
+        "schema": OOS_ATTESTATION_SCHEMA,
+        "algorithm": "hmac-sha256",
+        "report_hmac_sha256": digest,
+    }
+    return signed
+
+
+def verify_oos_evidence_attestation(
+    report: dict, key: str | None = None
+) -> tuple[bool, str]:
+    """Verify that the complete evidence report came from the trusted producer."""
+    envelope = report.get("oos_evidence_attestation")
+    if not isinstance(envelope, dict):
+        return False, "evidence_report_attestation_missing"
+    if (
+        envelope.get("schema") != OOS_ATTESTATION_SCHEMA
+        or envelope.get("algorithm") != "hmac-sha256"
+    ):
+        return False, "evidence_report_attestation_invalid"
+    supplied = envelope.get("report_hmac_sha256")
+    if not isinstance(supplied, str) or len(supplied) != 64:
+        return False, "evidence_report_attestation_invalid"
+    trusted_key = key if key is not None else os.environ.get(OOS_ATTESTATION_KEY_ENV, "")
+    if not trusted_key:
+        return False, "evidence_report_attestation_key_unavailable"
+    if len(trusted_key.encode("utf-8")) < OOS_ATTESTATION_MIN_KEY_BYTES:
+        return False, "evidence_report_attestation_key_too_short"
+    expected = hmac.new(
+        trusted_key.encode("utf-8"),
+        _oos_attestation_payload(report),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(supplied, expected):
+        return False, "evidence_report_attestation_invalid"
+    return True, "evidence_report_attestation_verified"
 
 RF_ENV_KEYS = (
     "RF_TRAIN_EMBARGO_MINUTES",
@@ -478,6 +554,9 @@ def invoke_training(
     candidate_manifest_name: str,
 ) -> dict:
     env = os.environ.copy()
+    # The child training process produces the material to be attested; it must
+    # not possess the wrapper-only authentication key used after it exits.
+    env.pop(OOS_ATTESTATION_KEY_ENV, None)
     env.update(pass_through_env)
     # Re-assert isolation AFTER pass_through_env so a misconfigured caller
     # cannot accidentally redirect artifact writes back to the live model
@@ -740,6 +819,7 @@ def _validate_horizon_statistically(
         # the in-sample-vs-OOS routing in the aggregator.
         "score_observations_source": row.get(source_key),
         "signals_on_tune_slice": row.get(signals_key),
+        "oos_slice_bounds": row.get("oos_slice_bounds"),
     }
 
     if observations is None:
@@ -883,14 +963,14 @@ def run_oos_validation(
 # Recognized OOS observation source labels. Anything else (including
 # "threshold_tune_slice", None, "", "unknown") is treated as IN-SAMPLE for
 # promotion purposes. Future OOS-validation PRs MUST pick a source name from
-# this convention (the explicit set OR the ``oos_`` prefix) when they write
+# this explicit allow-list when they write
 # per-signal observations into the manifest; otherwise the readiness
 # classifier will refuse to count their result toward
 # ``oos_validation_passed`` / ``promotion_ready``.
 _OOS_OBSERVATION_SOURCES_EXACT = frozenset({"held_out_slice", "walk_forward_fold"})
 
 
-def _is_oos_source(source: object) -> bool:
+def _is_oos_source(source: object, bounds: object = None) -> bool:
     """Return True iff ``source`` names a recognized OOS observation slice.
 
     Conservatively False for None, empty strings, and any source the
@@ -904,9 +984,28 @@ def _is_oos_source(source: object) -> bool:
     s = source.strip()
     if not s:
         return False
-    if s in _OOS_OBSERVATION_SOURCES_EXACT:
-        return True
-    return s.startswith("oos_")
+    if s not in _OOS_OBSERVATION_SOURCES_EXACT:
+        return False
+    if not isinstance(bounds, list) or not bounds:
+        return False
+    expected_producer = {
+        "walk_forward_fold": "pivotquant.walk_forward_oos.v1",
+        "held_out_slice": "pivotquant.held_out_oos.v1",
+    }[s]
+    for fold in bounds:
+        if (not isinstance(fold, dict)
+                or fold.get("producer") != expected_producer
+                or fold.get("feasible") is not True):
+            return False
+        try:
+            train_end = int(fold["train_end_ts"])
+            test_start = int(fold["test_start_ts"])
+            test_end = int(fold["test_end_ts"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        if not (train_end < test_start <= test_end):
+            return False
+    return True
 
 
 def _aggregate_statistical_validation(
@@ -985,7 +1084,7 @@ def _aggregate_statistical_validation(
     for key, res in per_horizon_results.items():
         status = res.get("status")
         source = res.get("score_observations_source")
-        is_oos = _is_oos_source(source)
+        is_oos = _is_oos_source(source, res.get("oos_slice_bounds"))
         if status in ("passed", "failed"):
             passed_bool = status == "passed"
             overall_ran.append(passed_bool)
@@ -1455,6 +1554,22 @@ def build_report(
         }
         summary = summary_block(per_horizon)
 
+    artifact_hashes: dict[str, str | None] = {}
+    if isinstance(candidate_manifest, dict):
+        models = candidate_manifest.get("models", {})
+        if isinstance(models, dict):
+            for horizons in models.values():
+                if not isinstance(horizons, dict):
+                    continue
+                for filename in horizons.values():
+                    artifact_name = str(filename)
+                    artifact_path = candidate_manifest_path.parent / artifact_name
+                    artifact_hashes[artifact_name] = (
+                        hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+                        if artifact_path.is_file()
+                        else None
+                    )
+
     report = {
         "schema_version": SCHEMA_VERSION,
         "run_id": run_id,
@@ -1463,6 +1578,7 @@ def build_report(
         "training": training_block,
         "candidate_manifest_path": str(candidate_manifest_path),
         "candidate_manifest": candidate_manifest,
+        "candidate_artifact_sha256": artifact_hashes,
         "per_horizon": per_horizon,
         "runtime_safety_dry_run": safety,
         "summary": summary,
@@ -1579,6 +1695,17 @@ def main(argv: list[str] | None = None) -> int:
         candidate_manifest_path=candidate_manifest_path,
         candidate_manifest=candidate_manifest,
     )
+    # Authentication is deliberately separate from structural validation.
+    # Only a real successful training invocation may receive the trusted
+    # producer attestation; --skip-training remains useful for diagnostics but
+    # cannot create promotable OOS evidence.
+    attestation_key = os.environ.get(OOS_ATTESTATION_KEY_ENV, "")
+    if (
+        attestation_key
+        and not bool(training_block.get("skipped"))
+        and training_block.get("exit_code") == 0
+    ):
+        report = sign_oos_evidence_report(report, attestation_key)
     report_path.write_text(json.dumps(report, indent=2, default=str))
     print(f"Evidence pack report written to {report_path}")
     _print_readiness_summary(report.get("candidate_readiness") or {})

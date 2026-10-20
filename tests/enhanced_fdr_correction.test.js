@@ -5,8 +5,8 @@
  *
  * Same browser-global IIFE shape as fdr_correction.js, so we stub `window` on
  * globalThis and load for side effect. Deterministic statistics are pinned to
- * known values; the only randomised routine (permutationTest) is bounded, not
- * pinned, to stay non-flaky.
+ * known values; the aggregate-count permutation helper intentionally fails
+ * closed because protocol-compliant block permutation requires raw labels.
  */
 
 describe('enhanced_fdr_correction.js — EnhancedFDRCorrection', () => {
@@ -49,6 +49,15 @@ describe('enhanced_fdr_correction.js — EnhancedFDRCorrection', () => {
       expect(ci.lower).toBeLessThanOrEqual(ci.center);
       expect(ci.center).toBeLessThanOrEqual(ci.upper);
     });
+
+    test('malformed Wilson inputs return an uninformative interval', () => {
+      const fallback = { lower: 0, upper: 1, center: 0 };
+      expect(E.wilsonConfidenceInterval(2, 1, 0.95)).toEqual(fallback);
+      expect(E.wilsonConfidenceInterval(1, -1, 0.95)).toEqual(fallback);
+      expect(E.wilsonConfidenceInterval(1, 2, 2)).toEqual(fallback);
+      expect(E.wilsonConfidenceInterval(0, Number.MIN_VALUE, 0.95)).toEqual(fallback);
+      expect(E.wilsonConfidenceInterval(5, 10, Number.MIN_VALUE)).toEqual(fallback);
+    });
   });
 
   describe('oneSidedBinomialTest', () => {
@@ -70,8 +79,42 @@ describe('enhanced_fdr_correction.js — EnhancedFDRCorrection', () => {
     test('large-sample one-sided: strong over-performance is tiny', () => {
       expect(E.oneSidedBinomialTest(90, 100, 0.5, true)).toBeLessThan(1e-4);
       const atNull = E.oneSidedBinomialTest(50, 100, 0.5, true);
-      expect(atNull).toBeGreaterThan(0.35);
-      expect(atNull).toBeLessThan(0.65);
+      expect(atNull).toBeCloseTo(0.5398, 3);
+      const largeAtNull = E.oneSidedBinomialTest(5000, 10000, 0.5, true);
+      expect(Number.isFinite(largeAtNull)).toBe(true);
+      expect(largeAtNull).toBeGreaterThan(0.5);
+      expect(largeAtNull).toBeLessThan(0.51);
+    });
+
+    test('integral counts use the exact binomial tail at the BH boundary', () => {
+      expect(E.oneSidedBinomialTest(38, 62, 0.45, true)).toBeCloseTo(0.0072246325, 9);
+      const out = E.analyzePivotSignificanceEnhanced(
+        { S3: { successes: 38, trials: 62 } }, 'DOWN-TREND', 'weekly',
+        { overlapHorizon: 1 },
+      );
+      expect(out.levels.S3.qValue).toBeCloseTo(0.0505724277, 9);
+      expect(out.levels.S3.significant).toBe(false);
+    });
+
+    test('two-sided exact probabilities remain correct for skewed and large nulls', () => {
+      expect(E.oneSidedBinomialTest(10000, 10000, 0.999999, false)).toBeCloseTo(1, 12);
+      expect(E.oneSidedBinomialTest(882, 1000, 0.9, false)).toBeCloseTo(0.0647867158, 9);
+      expect(E.oneSidedBinomialTest(4997, 10000, 0.5, false)).toBeCloseTo(0.9601227196, 9);
+    });
+
+    test('unsafe or operationally unbounded counts fail closed', () => {
+      expect(E.oneSidedBinomialTest(
+        Number.MAX_SAFE_INTEGER + 1, Number.MAX_SAFE_INTEGER + 1, 0.5, true,
+      )).toBe(1);
+      expect(E.oneSidedBinomialTest(500000, 1000000, 0.5, true)).toBe(1);
+    });
+
+    test('malformed direct-call contracts fail closed', () => {
+      for (const baseline of [null, -1, 2, 'bad', NaN]) {
+        expect(E.oneSidedBinomialTest(1, 100, baseline, true)).toBe(1.0);
+      }
+      expect(E.oneSidedBinomialTest(1.5, 100, 0.5, true)).toBe(1.0);
+      expect(E.oneSidedBinomialTest(1, 100.5, 0.5, true)).toBe(1.0);
     });
   });
 
@@ -88,25 +131,47 @@ describe('enhanced_fdr_correction.js — EnhancedFDRCorrection', () => {
       expect(significant).toEqual([true, false, false]);
     });
 
-    test('clamps invalid p-values (NaN/negative -> 0, >1 -> 1)', () => {
+    test('fails closed on invalid p-values', () => {
       const { qValues, significant } = E.enhancedBenjaminiHochbergCorrection([NaN, -0.5, 2.0, 0.01], 0.05);
-      expect(qValues[0]).toBeCloseTo(0, 9);
-      expect(qValues[1]).toBeCloseTo(0, 9);
+      expect(qValues[0]).toBeCloseTo(1, 9);
+      expect(qValues[1]).toBeCloseTo(1, 9);
       expect(qValues[2]).toBeCloseTo(1.0, 9);
-      expect(qValues[3]).toBeCloseTo(0.013333, 5);
-      expect(significant).toEqual([true, true, false, true]);
+      expect(qValues[3]).toBeCloseTo(0.04, 9);
+      expect(significant).toEqual([false, false, false, true]);
+    });
+
+    test('invalid alpha cannot manufacture significance', () => {
+      const out = E.enhancedBenjaminiHochbergCorrection([0], 2);
+      expect(out.significant).toEqual([false]);
+    });
+
+    test('sparse p-value arrays fail closed without throwing', () => {
+      const sparse = [];
+      sparse[1] = 0.01;
+      const out = E.enhancedBenjaminiHochbergCorrection(sparse, 0.05);
+      expect(out.qValues).toHaveLength(2);
+      expect(out.significant).toEqual([false, true]);
+    });
+
+    test('sparse p-value arrays ignore inherited numeric array properties', () => {
+      const sparse = [];
+      sparse[1] = 0.01;
+      Array.prototype[0] = 0;
+      try {
+        const out = E.enhancedBenjaminiHochbergCorrection(sparse, 0.05);
+        expect(out.qValues[0]).toBe(1);
+        expect(out.significant).toEqual([false, true]);
+      } finally {
+        delete Array.prototype[0];
+      }
     });
   });
 
-  describe('permutationTest (randomised — bounded, not pinned)', () => {
-    test('zero trials returns 1.0', () => {
-      expect(E.permutationTest({ successes: 0, trials: 0 }, 0.5)).toBe(1.0);
-    });
-
-    test('always returns a fraction in [0, 1]', () => {
-      const p = E.permutationTest({ successes: 95, trials: 100 }, 0.5, 100);
-      expect(p).toBeGreaterThanOrEqual(0);
-      expect(p).toBeLessThanOrEqual(1);
+  describe('permutationTest', () => {
+    test('fails closed because aggregate counts cannot perform protocol block permutation', () => {
+      expect(E.permutationTest({ successes: 0, trials: 0 }, 0.5)).toBeNull();
+      expect(E.permutationTest({ successes: 95, trials: 100 }, 0.5, 10000)).toBeNull();
+      expect(E.permutationTest({ successes: 95, trials: 100 }, 0.5, 0)).toBeNull();
     });
   });
 
@@ -129,14 +194,14 @@ describe('enhanced_fdr_correction.js — EnhancedFDRCorrection', () => {
       const out = E.analyzePivotSignificanceEnhanced(
         { WIN: { successes: 95, trials: 100 } },
         'RANGE', 'weekly',
-        { customBaselines: { WIN: 0.5 } },
+        { customBaselines: { WIN: 0.5 }, overlapHorizon: 1 },
       );
       const r = out.levels.WIN;
       expect(r.hasSufficientData).toBe(true);
       expect(r.successRate).toBeCloseTo(95, 9);
       expect(r.baseline).toBeCloseTo(50, 9);
       expect(r.lift).toBeCloseTo(45, 9);
-      expect(r.nEffective).toBe(80); // round(100 * 0.8 weekly clustering factor)
+      expect(r.nEffective).toBe(100);
       expect(r.significant).toBe(true);
       expect(r.qValue).toBeLessThanOrEqual(0.05);
       expect(r.testType).toBe('one-sided');
@@ -154,17 +219,408 @@ describe('enhanced_fdr_correction.js — EnhancedFDRCorrection', () => {
       const out = E.analyzePivotSignificanceEnhanced(
         { SMALL: { successes: 4, trials: 5 } },
         'RANGE', 'weekly',
-        { customBaselines: { SMALL: 0.5 } },
+        { customBaselines: { SMALL: 0.5 }, overlapHorizon: 1 },
       );
       const r = out.levels.SMALL;
       expect(r.hasSufficientData).toBe(false);
       expect(r.pValue).toBe(1.0);
       expect(r.qValue).toBeNull();
       expect(r.significant).toBe(false);
-      expect(r.nEffective).toBe(4);
+      expect(r.nEffective).toBe(5);
       expect(r.successRate).toBeCloseTo(80, 9);
       expect(out.summary.validLevels).toBe(0);
       expect(out.summary.insufficientDataLevels).toBe(1);
+    });
+
+    test('malformed counts cannot become significant', () => {
+      const out = E.analyzePivotSignificanceEnhanced(
+        { BAD: { successes: NaN, trials: 100 } },
+        'RANGE', 'weekly',
+        { customBaselines: { BAD: 0.5 }, overlapHorizon: 1 },
+      );
+      expect(out.levels.BAD.hasSufficientData).toBe(false);
+      expect(out.levels.BAD.significant).toBe(false);
+      expect(out.levels.BAD.pValue).toBe(1.0);
+    });
+
+    test('inherited count fields cannot become quantitative evidence', () => {
+      const inherited = Object.create({ successes: 100, trials: 100 });
+      Object.prototype.successes = 100;
+      Object.prototype.trials = 100;
+      try {
+        for (const stats of [inherited, {}]) {
+          const out = E.analyzePivotSignificanceEnhanced(
+            { WIN: stats }, 'RANGE', 'weekly',
+            { customBaselines: { WIN: 0.5 }, overlapHorizon: 1 },
+          );
+          expect(out.levels.WIN.hasSufficientData).toBe(false);
+          expect(out.levels.WIN.pValue).toBe(1);
+          expect(out.levels.WIN.significant).toBe(false);
+        }
+      } finally {
+        delete Object.prototype.successes;
+        delete Object.prototype.trials;
+      }
+    });
+
+    test('count accessors are rejected without invocation', () => {
+      let successesReads = 0;
+      let trialsReads = 0;
+      const stats = {};
+      Object.defineProperties(stats, {
+        successes: {
+          enumerable: true,
+          get() {
+            successesReads += 1;
+            return successesReads === 1 ? 0 : 100;
+          },
+        },
+        trials: {
+          enumerable: true,
+          get() {
+            trialsReads += 1;
+            return trialsReads === 1 ? 0 : 100;
+          },
+        },
+      });
+      const out = E.analyzePivotSignificanceEnhanced(
+        { WIN: stats }, 'RANGE', 'weekly',
+        { customBaselines: { WIN: 0.5 }, overlapHorizon: 1, minN: 1, minNEff: 1 },
+      );
+      expect(successesReads).toBe(0);
+      expect(trialsReads).toBe(0);
+      expect(out.levels.WIN.hasSufficientData).toBe(false);
+      expect(out.levels.WIN.significant).toBe(false);
+    });
+
+    test('cross-field accessors cannot mutate evidence during validation', () => {
+      const stats = { successes: 0 };
+      Object.defineProperty(stats, 'trials', {
+        enumerable: true,
+        get() {
+          stats.successes = 100;
+          return 100;
+        },
+      });
+      const out = E.analyzePivotSignificanceEnhanced(
+        { WIN: stats }, 'RANGE', 'weekly',
+        { customBaselines: { WIN: 0.5 }, overlapHorizon: 1, minN: 1, minNEff: 1 },
+      );
+      expect(out.levels.WIN.hasSufficientData).toBe(false);
+      expect(out.levels.WIN.pValue).toBe(1);
+      expect(out.levels.WIN.significant).toBe(false);
+    });
+
+    test('result maps and summary reads ignore polluted Object prototypes', () => {
+      Object.defineProperty(Object.prototype, 'WIN', {
+        configurable: true,
+        get() {
+          return { hasSufficientData: true, significant: true };
+        },
+        set() {},
+      });
+      try {
+        const out = E.analyzePivotSignificanceEnhanced(
+          { WIN: { successes: 0, trials: 100 } }, 'RANGE', 'weekly',
+          { customBaselines: { WIN: 0.5 }, overlapHorizon: 1 },
+        );
+        expect(Object.prototype.hasOwnProperty.call(out.levels, 'WIN')).toBe(true);
+        expect(out.levels.WIN.pValue).toBe(1);
+        expect(out.summary.significantLevels).toBe(0);
+      } finally {
+        delete Object.prototype.WIN;
+      }
+    });
+
+    test('malformed alpha, baselines, and level objects fail closed', () => {
+      const invalidAlpha = E.analyzePivotSignificanceEnhanced(
+        { WIN: { successes: 100, trials: 100 } },
+        'RANGE', 'weekly',
+        { alpha: 2, customBaselines: { WIN: 0.5 }, overlapHorizon: 1 },
+      );
+      expect(invalidAlpha.levels.WIN.significant).toBe(false);
+
+      const invalidBaseline = E.analyzePivotSignificanceEnhanced(
+        { WIN: { successes: 100, trials: 100 }, BAD: null },
+        'RANGE', 'weekly',
+        { customBaselines: { WIN: NaN, BAD: 0.5 }, overlapHorizon: 1 },
+      );
+      expect(invalidBaseline.levels.WIN.hasSufficientData).toBe(false);
+      expect(invalidBaseline.levels.WIN.significant).toBe(false);
+      expect(invalidBaseline.levels.BAD.hasSufficientData).toBe(false);
+
+      const zeroBaseline = E.analyzePivotSignificanceEnhanced(
+        { ZERO: { successes: 1, trials: 100 } },
+        'RANGE', 'weekly',
+        { customBaselines: { ZERO: 0 }, overlapHorizon: 1 },
+      );
+      expect(zeroBaseline.levels.ZERO.baseline).toBe(0);
+      expect(E.analyzePivotSignificanceEnhanced(null).summary.totalLevels).toBe(0);
+    });
+
+    test('option and family accessors are rejected without invocation', () => {
+      const stats = { S3: { successes: 0, trials: 62 } };
+      let alphaCalls = 0;
+      const options = {
+        customBaselines: { S3: 0.45 },
+        overlapHorizon: 1,
+        familyMembers: ['S3'],
+      };
+      Object.defineProperty(options, 'alpha', {
+        enumerable: true,
+        get() {
+          alphaCalls += 1;
+          stats.S3.successes = 62;
+          return 0.05;
+        },
+      });
+      const alphaOut = E.analyzePivotSignificanceEnhanced(stats, 'DOWN-TREND', 'weekly', options);
+      expect(alphaCalls).toBe(0);
+      expect(stats.S3.successes).toBe(0);
+      expect(alphaOut.levels.S3.significant).toBe(false);
+
+      let familyCalls = 0;
+      const family = [];
+      family.length = 1;
+      Object.defineProperty(family, 0, {
+        enumerable: true,
+        configurable: true,
+        get() {
+          familyCalls += 1;
+          stats.S3.successes = 62;
+          return 'S3';
+        },
+      });
+      const familyOut = E.analyzePivotSignificanceEnhanced(
+        stats, 'DOWN-TREND', 'weekly',
+        { customBaselines: { S3: 0.45 }, overlapHorizon: 1, familyMembers: family },
+      );
+      expect(familyCalls).toBe(0);
+      expect(stats.S3.successes).toBe(0);
+      expect(familyOut.summary.totalLevels).toBe(0);
+      expect(familyOut.summary.significantLevels).toBe(0);
+    });
+
+    test('inherited options and inherited regime maps cannot control inference', () => {
+      const inheritedOptions = Object.create({
+        alpha: 0.99,
+        customBaselines: { WIN: 0.5 },
+        familyMembers: ['WIN'],
+        overlapHorizon: 1,
+      });
+      const inheritedOut = E.analyzePivotSignificanceEnhanced(
+        { WIN: { successes: 1, trials: 2 } }, 'RANGE', 'weekly', inheritedOptions,
+      );
+      expect(inheritedOut.summary.totalLevels).toBe(7);
+      expect(inheritedOut.summary.significantLevels).toBe(0);
+
+      Object.prototype.EVIL = { A: 0.01 };
+      try {
+        const polluted = E.analyzePivotSignificanceEnhanced(
+          { A: { successes: 12, trials: 12 } }, 'EVIL', 'weekly', { overlapHorizon: 1 },
+        );
+        expect(polluted.familyInfo.familyMembers).toEqual([
+          'R3', 'R2', 'R1', 'PIVOT', 'S1', 'S2', 'S3',
+        ]);
+        expect(polluted.summary.significantLevels).toBe(0);
+      } finally {
+        delete Object.prototype.EVIL;
+      }
+    });
+
+    test('malformed levels remain in the predeclared BH family as p=1', () => {
+      const out = E.analyzePivotSignificanceEnhanced(
+        { A: { successes: 16, trials: 20 }, BAD: null },
+        'RANGE', 'weekly',
+        { customBaselines: { A: 0.56, BAD: 0.5 }, overlapHorizon: 1 },
+      );
+      expect(out.levels.A.pValue).toBeLessThan(0.05);
+      expect(out.levels.BAD.pValue).toBe(1);
+      expect(out.levels.A.qValue).toBeCloseTo(out.levels.A.pValue * 2, 12);
+      expect(out.levels.A.significant).toBe(out.levels.A.qValue <= 0.05);
+    });
+
+    test('absent levels remain in the declared BH family as p=1', () => {
+      const familyMembers = ['R3', 'R2', 'R1', 'PIVOT', 'S1', 'S2', 'S3'];
+      const out = E.analyzePivotSignificanceEnhanced(
+        { R1: { successes: 62, trials: 100 } },
+        'RANGE', 'weekly',
+        { overlapHorizon: 1 },
+      );
+
+      expect(out.levels.R1.pValue).toBeLessThan(0.05);
+      expect(out.levels.R1.qValue).toBeGreaterThan(0.05);
+      expect(out.levels.R1.significant).toBe(false);
+      expect(out.summary.totalLevels).toBe(7);
+      expect(out.summary.insufficientDataLevels).toBe(6);
+      expect(out.familyInfo.familyMembers).toEqual(familyMembers);
+    });
+
+    test('overlap horizon supplies the conservative n_obs / h lower bound', () => {
+      const out = E.analyzePivotSignificanceEnhanced(
+        { WIN: { successes: 95, trials: 100 } },
+        'RANGE', 'weekly',
+        { customBaselines: { WIN: 0.5 }, overlapHorizon: 5 },
+      );
+      expect(out.levels.WIN.nEffective).toBe(20);
+      const missing = E.analyzePivotSignificanceEnhanced(
+        { WIN: { successes: 95, trials: 100 } },
+        'RANGE', 'weekly',
+        { customBaselines: { WIN: 0.5 } },
+      );
+      expect(missing.levels.WIN.nEffective).toBe(0);
+      expect(missing.levels.WIN.hasSufficientData).toBe(false);
+    });
+
+    test('overlap correction uses effective observations for inference', () => {
+      const out = E.analyzePivotSignificanceEnhanced(
+        { WIN: { successes: 60, trials: 100 } },
+        'RANGE', 'weekly',
+        { customBaselines: { WIN: 0.5 }, overlapHorizon: 5 },
+      );
+      const r = out.levels.WIN;
+      expect(r.nEffective).toBe(20);
+      expect(r.successesEffective).toBe(12);
+      expect(r.pValue).toBeCloseTo(E.oneSidedBinomialTest(12, 20, 0.5, true), 12);
+      expect(r.pValue).toBeGreaterThan(0.1);
+      expect(r.pValue).toBeLessThan(0.3);
+      expect(r.confidenceInterval.lower).toBeCloseTo(
+        E.wilsonConfidenceInterval(12, 20, 0.95).lower * 100,
+        12,
+      );
+      expect(r.significant).toBe(false);
+    });
+
+    test('integral effective counts use the same exact test as direct data', () => {
+      const overlap = E.analyzePivotSignificanceEnhanced(
+        { PIVOT: { successes: 90, trials: 100 } }, 'RANGE', 'weekly',
+        { overlapHorizon: 10 },
+      );
+      const direct = E.analyzePivotSignificanceEnhanced(
+        { PIVOT: { successes: 9, trials: 10 } }, 'RANGE', 'weekly',
+        { overlapHorizon: 1, minN: 10, minNEff: 10 },
+      );
+      expect(overlap.levels.PIVOT.pValue).toBeCloseTo(direct.levels.PIVOT.pValue, 12);
+      expect(overlap.levels.PIVOT.qValue).toBeCloseTo(direct.levels.PIVOT.qValue, 12);
+      expect(overlap.levels.PIVOT.significant).toBe(direct.levels.PIVOT.significant);
+    });
+
+    test('fractional effective counts cannot manufacture significance', () => {
+      const out = E.analyzePivotSignificanceEnhanced(
+        { WIN: { successes: 77, trials: 100 } }, 'RANGE', 'weekly',
+        { customBaselines: { WIN: 0.5 }, overlapHorizon: 10 },
+      );
+      expect(out.levels.WIN.successesEffective).toBeCloseTo(7.7, 12);
+      expect(out.levels.WIN.pValue).toBe(1);
+      expect(out.levels.WIN.significant).toBe(false);
+    });
+
+    test('two-sided overlap inference retains the observed proportion', () => {
+      const out = E.analyzePivotSignificanceEnhanced(
+        { WIN: { successes: 29, trials: 100 } },
+        'RANGE', 'weekly',
+        { customBaselines: { WIN: 0.5 }, overlapHorizon: 5, oneSided: false },
+      );
+      const r = out.levels.WIN;
+      expect(r.nEffective).toBe(20);
+      expect(r.successesEffective).toBeCloseTo(5.8, 12);
+      expect(r.confidenceInterval.center).toBeGreaterThan(29);
+      expect(r.confidenceInterval.center).toBeLessThan(50);
+      expect(r.pValue).toBeGreaterThan(0.05);
+      expect(r.significant).toBe(false);
+    });
+
+    test('empty custom baselines fail closed without deriving family from results', () => {
+      const sparse = E.analyzePivotSignificanceEnhanced(
+        { A: { successes: 60, trials: 100 } },
+        'RANGE', 'weekly',
+        { customBaselines: {}, overlapHorizon: 1 },
+      );
+      const expanded = E.analyzePivotSignificanceEnhanced(
+        { A: { successes: 60, trials: 100 }, B: null },
+        'RANGE', 'weekly',
+        { customBaselines: {}, overlapHorizon: 1 },
+      );
+      expect(sparse.summary.totalLevels).toBe(0);
+      expect(expanded.summary.totalLevels).toBe(0);
+      expect(sparse.familyInfo.familyMembers).toEqual([]);
+      expect(expanded.familyInfo.familyMembers).toEqual([]);
+    });
+
+    test('unsafe explicit family members fail closed', () => {
+      const out = E.analyzePivotSignificanceEnhanced(
+        JSON.parse('{"__proto__":{"successes":100,"trials":100}}'),
+        'RANGE', 'weekly',
+        { familyMembers: ['__proto__'], overlapHorizon: 1 },
+      );
+      expect(out.summary.totalLevels).toBe(0);
+      expect(out.summary.validLevels).toBe(0);
+      expect(Object.prototype.hasOwnProperty.call(out.levels, '__proto__')).toBe(false);
+      expect(JSON.stringify(out.levels)).toBe('{}');
+    });
+
+    test('sparse explicit families fail closed and ignore inherited array entries', () => {
+      const sparse = new Array(1);
+      Array.prototype[0] = 'WIN';
+      try {
+        const out = E.analyzePivotSignificanceEnhanced(
+          { WIN: { successes: 100, trials: 100 }, undefined: { successes: 100, trials: 100 } },
+          'RANGE', 'weekly',
+          {
+            customBaselines: { WIN: 0.5, undefined: 0.5 },
+            familyMembers: sparse,
+            overlapHorizon: 1,
+          },
+        );
+        expect(out.familyInfo.familyMembers).toEqual([]);
+        expect(out.summary.totalLevels).toBe(0);
+        expect(out.summary.significantLevels).toBe(0);
+      } finally {
+        delete Array.prototype[0];
+      }
+    });
+
+    test('requested unavailable permutation validation blocks significance visibly', () => {
+      const out = E.analyzePivotSignificanceEnhanced(
+        { WIN: { successes: 100, trials: 100 } }, 'RANGE', 'weekly',
+        { customBaselines: { WIN: 0.5 }, overlapHorizon: 1, permutationTests: true },
+      );
+      expect(out.levels.WIN.permutationPValue).toBeNull();
+      expect(out.levels.WIN.permutationAvailable).toBe(false);
+      expect(out.levels.WIN.significant).toBe(false);
+      expect(out.summary.significantLevels).toBe(0);
+      expect(E.generateTooltip('WIN', out.levels.WIN)).toContain('Permutation validation: unavailable');
+    });
+
+    test('explicit family member without registered baseline remains p=1', () => {
+      const out = E.analyzePivotSignificanceEnhanced(
+        { A: { successes: 100, trials: 100 }, B: { successes: 100, trials: 100 } },
+        'RANGE', 'weekly',
+        { customBaselines: { A: 0.5 }, familyMembers: ['A', 'B'], overlapHorizon: 1 },
+      );
+      expect(out.levels.B.baselineValid).toBe(false);
+      expect(out.levels.B.pValue).toBe(1);
+      expect(out.levels.B.significant).toBe(false);
+    });
+
+    test('malformed thresholds fail closed', () => {
+      const out = E.analyzePivotSignificanceEnhanced(
+        { WIN: { successes: 1, trials: 1 } }, 'RANGE', 'weekly',
+        { customBaselines: { WIN: 0.01 }, overlapHorizon: 1, minN: -1, minNEff: -1 },
+      );
+      expect(out.levels.WIN.hasSufficientData).toBe(false);
+      expect(out.levels.WIN.pValue).toBe(1);
+      expect(out.levels.WIN.significant).toBe(false);
+    });
+
+    test('inherited pivot statistics are ignored', () => {
+      const inherited = Object.create({ WIN: { successes: 100, trials: 100 } });
+      const out = E.analyzePivotSignificanceEnhanced(
+        inherited, 'RANGE', 'weekly',
+        { customBaselines: { WIN: 0.5 }, overlapHorizon: 1 },
+      );
+      expect(out.levels.WIN.pValue).toBe(1);
+      expect(out.levels.WIN.significant).toBe(false);
     });
   });
 
@@ -174,7 +630,7 @@ describe('enhanced_fdr_correction.js — EnhancedFDRCorrection', () => {
       out = E.analyzePivotSignificanceEnhanced(
         { WIN: { successes: 95, trials: 100 }, SMALL: { successes: 4, trials: 5 } },
         'RANGE', 'weekly',
-        { customBaselines: { WIN: 0.5, SMALL: 0.5 } },
+        { customBaselines: { WIN: 0.5, SMALL: 0.5 }, overlapHorizon: 1 },
       );
     });
 

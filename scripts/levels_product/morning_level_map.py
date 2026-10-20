@@ -32,6 +32,7 @@ sys.path.insert(0, str(REPO / "scripts" / "levels_product"))
 from backfill_events import calculate_pivots  # noqa: E402
 from hold_engine import label_coverage  # noqa: E402
 from level_snapshot import build_snapshot, write_snapshot  # noqa: E402
+from trading_calendar import REGULAR_SESSION_OPEN_ET, is_trading_day, session_close_et  # noqa: E402
 
 DB = REPO / "data" / "pivot_events.sqlite"
 ET = ZoneInfo("America/New_York")
@@ -39,27 +40,87 @@ HORIZONS = [15, 30, 60]
 BASE_RATE_LOOKBACK_DAYS = 60  # recent window for the unconditional base rate
 
 
-MIN_SESSION_BARS = 360  # a complete RTH 1-min session is ~390 bars; require most of it
-
-
 def daily_rth_ohlc(con, symbol):
+    columns = {
+        str(row[1]) for row in con.execute("PRAGMA table_info(bar_data)").fetchall()
+    }
+    interval_filter = " AND bar_interval_sec=60" if "bar_interval_sec" in columns else ""
     b = pd.read_sql_query(
-        "SELECT ts,open,high,low,close FROM bar_data WHERE symbol=? ORDER BY ts",
+        "SELECT ts,open,high,low,close FROM bar_data WHERE symbol=?"
+        + interval_filter
+        + " ORDER BY ts",
         con, params=(symbol,))
-    t = pd.to_datetime(b.ts, unit="ms", utc=True).dt.tz_convert(ET)
+    b["ts"] = pd.to_numeric(b["ts"], errors="coerce")
+    valid_numeric_ts = (
+        np.isfinite(b["ts"])
+        & (b["ts"] % 1 == 0)
+        & b["ts"].between(-9_223_372_036_854, 9_223_372_036_854)
+    )
+    b = b[valid_numeric_ts].copy()
+    t = pd.to_datetime(b.ts, unit="ms", utc=True, errors="coerce")
+    valid_ts = t.notna()
+    b = b[valid_ts].copy()
+    b["timestamp_et"] = t[valid_ts].dt.tz_convert(ET)
+    b = b.sort_values("ts").reset_index(drop=True)
+    t = b.pop("timestamp_et")
     b["d"] = t.dt.date
     mins = t.dt.hour * 60 + t.dt.minute
-    b = b[(mins >= 570) & (mins <= 960) & (b.high >= b.low) & (b.high > 0)]
+    b["minute_of_day"] = mins
+    # RTH is a date-specific half-open interval. Applying only the regular
+    # 16:00 boundary would allow 13:00+ bars to contaminate early-close OHLC.
+    close_minutes = b["d"].map(
+        lambda day: (
+            session_close_et(day).hour * 60 + session_close_et(day).minute
+            if is_trading_day(day)
+            else 0
+        )
+    )
+    b = b[(mins >= 570) & (mins < close_minutes)]
+    price_columns = ["open", "high", "low", "close"]
+    b[price_columns] = b[price_columns].apply(pd.to_numeric, errors="coerce")
+    prices = b[price_columns]
+    b["row_valid"] = (
+        np.isfinite(prices).all(axis=1)
+        & (prices > 0).all(axis=1)
+        & (b.low <= b.open)
+        & (b.open <= b.high)
+        & (b.low <= b.close)
+        & (b.close <= b.high)
+    )
+    b["minute_rows"] = b.groupby(["d", "minute_of_day"])["ts"].transform("size")
     g = b.groupby("d")
     o = pd.DataFrame({"open": g.open.first(), "high": g.high.max(),
                       "low": g.low.min(), "close": g.close.last(),
-                      "bars": g.size()}).reset_index()
-    # Use the most recent COMPLETE session (by bar count), regardless of run hour:
+                      "bars": g.minute_of_day.nunique(),
+                      "first_minute": g.minute_of_day.min(),
+                      "all_rows_valid": g.row_valid.all(),
+                      "max_rows_per_minute": g.minute_rows.max(),
+                      "last_minute": g.minute_of_day.max()}).reset_index()
+    # Use the most recent COMPLETE session, regardless of run hour. Reaching an
+    # arbitrary bar-count floor is insufficient: a feed truncated before the
+    # close must never be stamped as the official completed-session close.
     # floor-trader pivots must come from a finished session, never today's partial
     # bars. A morning run → prior session; an after-close run → today's session
-    # (i.e. the upcoming day's levels). Today's partial session has < MIN bars and
-    # is excluded automatically, so no explicit "exclude today" is needed.
-    o = o[o.bars >= MIN_SESSION_BARS]
+    # (i.e. the upcoming day's levels). Account for exchange early closes while
+    # requiring every expected one-minute bar. Missing interior bars can contain
+    # the true session high or low and therefore cannot feed official pivots.
+    open_minute = REGULAR_SESSION_OPEN_ET.hour * 60 + REGULAR_SESSION_OPEN_ET.minute
+    complete = []
+    for row in o.itertuples():
+        if not is_trading_day(row.d):
+            complete.append(False)
+            continue
+        close = session_close_et(row.d)
+        close_minute = close.hour * 60 + close.minute
+        expected_bars = close_minute - open_minute
+        complete.append(
+            row.first_minute == open_minute
+            and row.last_minute >= close_minute - 1
+            and row.bars == expected_bars
+            and row.all_rows_valid
+            and row.max_rows_per_minute == 1
+        )
+    o = o[pd.Series(complete, index=o.index, dtype=bool)]
     return o.sort_values("d").reset_index(drop=True)
 
 

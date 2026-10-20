@@ -12,14 +12,27 @@ aren't" framing. Read-only; no DB access.
 from __future__ import annotations
 
 import argparse
+import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
-
-import notify
-from level_snapshot import load_snapshot
+import sys
+from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 
 REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO / "scripts"))
+sys.path.insert(0, str(REPO / "scripts" / "levels_product"))
+
+import notify  # noqa: E402
+from level_snapshot import (  # noqa: E402
+    _atomic_latest_link,
+    _create_immutable_json,
+    load_snapshot,
+)
+from trading_calendar import REGULAR_SESSION_OPEN_ET, is_trading_day  # noqa: E402
+
 ART = REPO / "evidence" / "levels_product"
 
 
@@ -94,6 +107,155 @@ def render(mp, tr) -> str:
     return "\n".join(L)
 
 
+def _canonical_bytes(value) -> bytes:
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+
+
+def _parse_utc(value: object, field: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        raise ValueError(f"{field} must include a timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+def build_briefing_artifact(mp, tr, *, captured_at_utc: str | None = None) -> dict:
+    """Freeze the exact pre-market message and the evidence it was built from."""
+    if tr.get("symbol") != mp.get("symbol"):
+        raise ValueError("track record symbol must match snapshot symbol")
+    source_session = (mp.get("source") or {}).get("session_date")
+    if tr.get("report_session_date") != source_session:
+        raise ValueError("track record session must match snapshot source session")
+    captured_text = captured_at_utc or mp["generated_at_utc"]
+    captured = _parse_utc(captured_text, "captured_at_utc")
+    snapshot_generated = _parse_utc(mp["generated_at_utc"], "generated_at_utc")
+    track_as_of = _parse_utc(tr.get("as_of_utc"), "track_record_as_of_utc")
+    source_as_of = _parse_utc((mp.get("source") or {}).get("as_of_utc"), "source_as_of_utc")
+    session_day = date.fromisoformat(mp["session_date"])
+    if not is_trading_day(session_day):
+        raise ValueError("session_date must be a trading day")
+    session_open = datetime.combine(
+        session_day, REGULAR_SESSION_OPEN_ET, ZoneInfo("America/New_York")
+    ).astimezone(timezone.utc)
+    if snapshot_generated > captured:
+        raise ValueError("snapshot was generated after briefing capture")
+    if track_as_of > captured:
+        raise ValueError("track record evidence is later than briefing capture")
+    if track_as_of < source_as_of:
+        raise ValueError("track record evidence is older than snapshot source")
+    if captured > session_open:
+        raise ValueError("briefing capture must occur no later than session open")
+
+    track_record_sha256 = hashlib.sha256(_canonical_bytes(tr)).hexdigest()
+    core = {
+        "contract": "pivotquant.morning_briefing",
+        "contract_version": 1,
+        "symbol": mp["symbol"],
+        "session_date": mp["session_date"],
+        "prepared_at_utc": captured.isoformat().replace("+00:00", "Z"),
+        "snapshot_generated_at_utc": mp["generated_at_utc"],
+        "snapshot_id": mp["snapshot_id"],
+        "track_record_as_of_utc": tr.get("as_of_utc"),
+        "track_record_sha256": track_record_sha256,
+        "track_record": tr,
+        "body": render(mp, tr),
+    }
+    digest = hashlib.sha256(_canonical_bytes(core)).hexdigest()[:24]
+    return {**core, "briefing_id": f"brf_{digest}"}
+
+
+def _load_briefing(path: Path) -> dict:
+    try:
+        artifact = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"could not read morning briefing {path}: {exc}") from exc
+    _validate_briefing_integrity(artifact)
+    return artifact
+
+
+def _validate_briefing_integrity(artifact: dict) -> None:
+    if not isinstance(artifact, dict):
+        raise ValueError("briefing artifact must be an object")
+    briefing_id = artifact.get("briefing_id")
+    core = {key: value for key, value in artifact.items() if key != "briefing_id"}
+    expected_id = f"brf_{hashlib.sha256(_canonical_bytes(core)).hexdigest()[:24]}"
+    if briefing_id != expected_id:
+        raise ValueError("briefing identity digest mismatch")
+    track_record = artifact.get("track_record")
+    if not isinstance(track_record, dict):
+        raise ValueError("briefing track record must be an object")
+    expected_track_hash = hashlib.sha256(_canonical_bytes(track_record)).hexdigest()
+    if artifact.get("track_record_sha256") != expected_track_hash:
+        raise ValueError("briefing track-record digest mismatch")
+
+
+def write_briefing_artifact(artifact: dict, out_dir: Path) -> tuple[Path, Path]:
+    """Create one immutable pre-market briefing plus a monotonic latest pointer."""
+    immutable = out_dir / (
+        f"morning_briefing_{artifact['symbol']}_{artifact['session_date']}.json"
+    )
+    latest = out_dir / f"morning_briefing_{artifact['symbol']}_latest.json"
+    if not _create_immutable_json(immutable, artifact):
+        existing = _load_briefing(immutable)
+        if existing != artifact:
+            raise ValueError(
+                f"immutable briefing already exists with different contents: {immutable}"
+            )
+
+    lock_path = out_dir / f".{latest.name}.lock"
+    with lock_path.open("a+b") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        try:
+            if latest.exists() or latest.is_symlink():
+                current = _load_briefing(latest)
+                if current["session_date"] > artifact["session_date"]:
+                    return immutable, latest
+                if (
+                    current["session_date"] == artifact["session_date"]
+                    and current != artifact
+                ):
+                    raise ValueError(
+                        "latest briefing conflicts with immutable session artifact"
+                    )
+            _atomic_latest_link(latest, immutable)
+        finally:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+    return immutable, latest
+
+
+def load_or_build_briefing(
+    mp: dict, tr: dict, out_dir: Path, *, captured_at_utc: str
+) -> tuple[dict, Path]:
+    """Reuse the frozen session briefing on retries; never rebuild its evidence."""
+    immutable = out_dir / f"morning_briefing_{mp['symbol']}_{mp['session_date']}.json"
+    if immutable.exists():
+        artifact = _load_briefing(immutable)
+        expected = {
+            "contract": "pivotquant.morning_briefing",
+            "symbol": mp["symbol"],
+            "session_date": mp["session_date"],
+            "snapshot_id": mp["snapshot_id"],
+        }
+        if any(artifact.get(key) != value for key, value in expected.items()):
+            raise ValueError(f"existing briefing does not match current snapshot: {immutable}")
+        rebuilt = build_briefing_artifact(
+            mp,
+            artifact.get("track_record"),
+            captured_at_utc=artifact.get("prepared_at_utc"),
+        )
+        if rebuilt != artifact:
+            raise ValueError(f"existing briefing fails semantic validation: {immutable}")
+        return artifact, immutable
+
+    artifact = build_briefing_artifact(mp, tr, captured_at_utc=captured_at_utc)
+    immutable, _ = write_briefing_artifact(artifact, out_dir)
+    return artifact, immutable
+
+
 def _resolve_channel(requested: str) -> str:
     """auto → email if SMTP configured, else webhook if set, else dry-run."""
     if requested != "auto":
@@ -106,6 +268,75 @@ def _resolve_channel(requested: str) -> str:
     return "dryrun"
 
 
+def _delivery_receipt_path(artifact: dict, channel: str, out_dir: Path) -> Path:
+    return out_dir / f"morning_delivery_{artifact['briefing_id']}_{channel}.json"
+
+
+def deliver_briefing(
+    artifact: dict,
+    *,
+    channel: str,
+    out_dir: Path,
+    dry_run: bool = False,
+) -> tuple[bool, str]:
+    """Deduplicate confirmed delivery.
+
+    Remote acceptance followed by a local crash remains an at-least-once
+    ambiguity unless the configured provider honors an idempotency key.
+    """
+    _validate_briefing_integrity(artifact)
+    if dry_run or channel == "dryrun":
+        print(artifact["body"])
+        return False, "dry-run"
+    if channel not in {"email", "webhook"}:
+        raise ValueError(f"unsupported delivery channel: {channel}")
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    receipt_path = _delivery_receipt_path(artifact, channel, out_dir)
+    lock_path = out_dir / f".{receipt_path.name}.lock"
+    with lock_path.open("a+b") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        try:
+            if receipt_path.exists():
+                try:
+                    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError) as exc:
+                    raise ValueError(f"could not read delivery receipt {receipt_path}: {exc}") from exc
+                if (
+                    receipt.get("briefing_id") != artifact["briefing_id"]
+                    or receipt.get("channel") != channel
+                ):
+                    raise ValueError(f"delivery receipt identity conflict: {receipt_path}")
+                return True, "already-delivered"
+
+            if channel == "email":
+                subject = (
+                    f"{artifact['symbol']} Levels — "
+                    f"{artifact['session_date']} session"
+                )
+                sent = notify.email_post(subject, artifact["body"], dry_run=False)
+            else:
+                sent = notify.post(artifact["body"])
+            if not sent:
+                return False, "delivery-failed"
+
+            receipt = {
+                "contract": "pivotquant.morning_delivery_receipt",
+                "contract_version": 1,
+                "briefing_id": artifact["briefing_id"],
+                "snapshot_id": artifact["snapshot_id"],
+                "channel": channel,
+                "delivered_at_utc": datetime.now(timezone.utc).isoformat().replace(
+                    "+00:00", "Z"
+                ),
+            }
+            if not _create_immutable_json(receipt_path, receipt):
+                raise ValueError(f"delivery receipt appeared during locked send: {receipt_path}")
+            return True, "sent"
+        finally:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--symbol", default="SPY")
@@ -114,20 +345,19 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="build but do not actually send")
     args = ap.parse_args()
     mp, tr = _latest(args.symbol)
-    body = render(mp, tr)
-    subject = f"{mp['symbol']} Levels — {mp['session_date']} session"
+    captured_at_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    briefing, immutable = load_or_build_briefing(
+        mp, tr, ART, captured_at_utc=captured_at_utc
+    )
     channel = _resolve_channel(args.channel)
-    if channel == "email":
-        ok = notify.email_post(subject, body, dry_run=args.dry_run)
-    elif channel == "webhook":
-        ok = False if args.dry_run else notify.post(body)
-        if args.dry_run:
-            print(body)
-    else:  # dryrun
-        print(body)
-        ok = False
-    print(f"\n[channel={channel} {'sent' if ok else 'dry-run/not-sent'}]")
+    ok, status = deliver_briefing(
+        briefing, channel=channel, out_dir=ART, dry_run=args.dry_run
+    )
+    print(f"\n[channel={channel} status={status}]")
+    if status == "delivery-failed":
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

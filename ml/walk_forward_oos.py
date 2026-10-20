@@ -400,6 +400,7 @@ def run_walk_forward_oos(
         )
         bounds.append(
             {
+                "producer": "pivotquant.walk_forward_oos.v1",
                 "fold": fr.fold_index,
                 "train_end_ts": fr.train_end_ts,
                 "test_start_ts": fr.test_start_ts,

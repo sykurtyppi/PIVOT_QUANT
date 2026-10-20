@@ -163,6 +163,229 @@ class HoldRateFreshnessTest(unittest.TestCase):
         self.assertEqual(snapshot["coverage"][30]["missing_count"], 35)
 
 
+class CompletedSessionSelectionTest(unittest.TestCase):
+    @staticmethod
+    def _bars(start: str, periods: int):
+        index = pd.date_range(start, periods=periods, freq="min", tz="America/New_York")
+        bars = pd.DataFrame(
+            {"Open": 100.0, "High": 101.0, "Low": 99.0, "Close": 100.5},
+            index=index,
+        )
+        con = sqlite3.connect(":memory:")
+        con.execute(
+            "CREATE TABLE bar_data "
+            "(symbol TEXT, ts INTEGER, open REAL, high REAL, low REAL, close REAL)"
+        )
+        con.executemany(
+            "INSERT INTO bar_data VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    "SPY", int(ts.timestamp() * 1000), row.Open, row.High, row.Low, row.Close
+                )
+                for ts, row in bars.iterrows()
+            ],
+        )
+        return con
+
+    def test_incomplete_session_with_360_bars_is_not_canonicalized(self):
+        con = self._bars("2026-10-01 09:30", 360)  # final observation is 15:29 ET
+        self.addCleanup(con.close)
+
+        daily = morning_map.daily_rth_ohlc(con, "SPY")
+
+        self.assertTrue(daily.empty)
+
+    def test_session_reaching_final_one_minute_bar_is_accepted(self):
+        con = self._bars("2026-10-01 09:30", 390)  # final observation is 15:59 ET
+        self.addCleanup(con.close)
+
+        daily = morning_map.daily_rth_ohlc(con, "SPY")
+
+        self.assertEqual(list(daily["d"]), [date(2026, 10, 1)])
+        self.assertEqual(int(daily.iloc[0]["bars"]), 390)
+
+    def test_session_with_any_interior_gap_is_rejected(self):
+        for start, periods, missing in (
+            ("2026-10-01 09:30", 390, "2026-10-01 12:00"),
+            ("2026-11-27 09:30", 210, "2026-11-27 11:00"),
+        ):
+            with self.subTest(start=start):
+                con = self._bars(start, periods)
+                self.addCleanup(con.close)
+                missing_ts = int(
+                    pd.Timestamp(missing, tz="America/New_York").timestamp() * 1000
+                )
+                con.execute("DELETE FROM bar_data WHERE ts=?", (missing_ts,))
+                self.assertTrue(morning_map.daily_rth_ohlc(con, "SPY").empty)
+
+    def test_session_missing_opening_bar_is_rejected(self):
+        for start, periods in (("2026-10-01 10:00", 360), ("2026-11-27 10:00", 180)):
+            with self.subTest(start=start):
+                con = self._bars(start, periods)
+                self.addCleanup(con.close)
+                self.assertTrue(morning_map.daily_rth_ohlc(con, "SPY").empty)
+
+    def test_close_boundary_bar_is_excluded_from_completed_session_ohlc(self):
+        con = self._bars("2026-10-01 09:30", 390)
+        self.addCleanup(con.close)
+        close_ts = pd.Timestamp("2026-10-01 16:00", tz="America/New_York")
+        con.execute(
+            "INSERT INTO bar_data VALUES (?, ?, ?, ?, ?, ?)",
+            ("SPY", int(close_ts.timestamp() * 1000), 500.0, 999.0, 1.0, 777.0),
+        )
+
+        daily = morning_map.daily_rth_ohlc(con, "SPY")
+
+        self.assertEqual(len(daily), 1)
+        self.assertEqual(int(daily.iloc[0]["bars"]), 390)
+        self.assertEqual(int(daily.iloc[0]["last_minute"]), 959)
+        self.assertEqual(float(daily.iloc[0]["high"]), 101.0)
+        self.assertEqual(float(daily.iloc[0]["low"]), 99.0)
+        self.assertEqual(float(daily.iloc[0]["close"]), 100.5)
+
+    def test_early_close_boundary_bar_is_excluded_from_session_ohlc(self):
+        con = self._bars("2026-11-27 09:30", 210)
+        self.addCleanup(con.close)
+        close_ts = pd.Timestamp("2026-11-27 13:00", tz="America/New_York")
+        con.execute(
+            "INSERT INTO bar_data VALUES (?, ?, ?, ?, ?, ?)",
+            ("SPY", int(close_ts.timestamp() * 1000), 500.0, 999.0, 1.0, 777.0),
+        )
+
+        daily = morning_map.daily_rth_ohlc(con, "SPY")
+
+        self.assertEqual(list(daily["d"]), [date(2026, 11, 27)])
+        self.assertEqual(int(daily.iloc[0]["bars"]), 210)
+        self.assertEqual(int(daily.iloc[0]["last_minute"]), 779)
+        self.assertEqual(float(daily.iloc[0]["high"]), 101.0)
+        self.assertEqual(float(daily.iloc[0]["low"]), 99.0)
+        self.assertEqual(float(daily.iloc[0]["close"]), 100.5)
+
+    def test_many_distinct_timestamps_in_two_minute_slots_are_rejected(self):
+        con = sqlite3.connect(":memory:")
+        self.addCleanup(con.close)
+        con.execute(
+            "CREATE TABLE bar_data "
+            "(symbol TEXT, ts INTEGER, open REAL, high REAL, low REAL, close REAL)"
+        )
+        open_ts = pd.Timestamp("2026-10-01 09:30", tz="America/New_York")
+        close_ts = pd.Timestamp("2026-10-01 15:59", tz="America/New_York")
+        timestamps = [open_ts + pd.Timedelta(milliseconds=i) for i in range(389)]
+        timestamps.append(close_ts)
+        con.executemany(
+            "INSERT INTO bar_data VALUES (?, ?, ?, ?, ?, ?)",
+            [("SPY", int(ts.timestamp() * 1000), 100, 101, 99, 100.5) for ts in timestamps],
+        )
+
+        daily = morning_map.daily_rth_ohlc(con, "SPY")
+
+        self.assertTrue(daily.empty)
+
+    def test_second_timestamp_in_a_complete_minute_bucket_rejects_session(self):
+        con = self._bars("2026-10-01 09:30", 390)
+        self.addCleanup(con.close)
+        jitter_ts = pd.Timestamp("2026-10-01 15:59:30", tz="America/New_York")
+        con.execute(
+            "INSERT INTO bar_data VALUES (?, ?, ?, ?, ?, ?)",
+            ("SPY", int(jitter_ts.timestamp() * 1000), 500.0, 999.0, 1.0, 777.0),
+        )
+
+        self.assertTrue(morning_map.daily_rth_ohlc(con, "SPY").empty)
+
+    def test_conflicting_rows_at_exact_timestamp_reject_session_regardless_of_order(self):
+        final_ts = pd.Timestamp("2026-10-01 15:59", tz="America/New_York")
+        conflict = ("SPY", int(final_ts.timestamp() * 1000), 100.0, 110.0, 90.0, 109.0)
+        for insert_first in (False, True):
+            with self.subTest(insert_first=insert_first):
+                con = self._bars("2026-10-01 09:30", 390)
+                self.addCleanup(con.close)
+                if insert_first:
+                    existing = con.execute(
+                        "SELECT * FROM bar_data WHERE ts=?", (conflict[1],)
+                    ).fetchone()
+                    con.execute("DELETE FROM bar_data WHERE ts=?", (conflict[1],))
+                    con.execute("INSERT INTO bar_data VALUES (?, ?, ?, ?, ?, ?)", conflict)
+                    con.execute("INSERT INTO bar_data VALUES (?, ?, ?, ?, ?, ?)", existing)
+                else:
+                    con.execute("INSERT INTO bar_data VALUES (?, ?, ?, ?, ?, ?)", conflict)
+
+                self.assertTrue(morning_map.daily_rth_ohlc(con, "SPY").empty)
+
+    def test_malformed_physical_bar_rejects_entire_session(self):
+        malformed = (
+            (100.0, 101.0, 99.0, 109.0),
+            (100.0, 99.0, 101.0, 100.0),
+            (0.0, 101.0, 99.0, 100.0),
+            (100.0, 101.0, 0.0, 100.0),
+            (100.0, float("nan"), 99.0, 100.0),
+        )
+        final_ts = int(pd.Timestamp("2026-10-01 15:59", tz="America/New_York").timestamp() * 1000)
+        for values in malformed:
+            with self.subTest(values=values):
+                con = self._bars("2026-10-01 09:30", 390)
+                self.addCleanup(con.close)
+                con.execute("DELETE FROM bar_data WHERE ts=?", (final_ts,))
+                con.execute(
+                    "INSERT INTO bar_data VALUES (?, ?, ?, ?, ?, ?)",
+                    ("SPY", final_ts, *values),
+                )
+                self.assertTrue(morning_map.daily_rth_ohlc(con, "SPY").empty)
+
+    def test_textual_ohlc_rejects_session_without_crashing(self):
+        con = self._bars("2026-10-01 09:30", 390)
+        self.addCleanup(con.close)
+        final_ts = int(
+            pd.Timestamp("2026-10-01 15:59", tz="America/New_York").timestamp() * 1000
+        )
+        con.execute("UPDATE bar_data SET high=? WHERE ts=?", ("not-a-number", final_ts))
+        self.assertTrue(morning_map.daily_rth_ohlc(con, "SPY").empty)
+
+    def test_malformed_timestamps_are_ignored_without_crashing(self):
+        for malformed in ("not-a-timestamp", float("inf"), 1e30):
+            with self.subTest(malformed=malformed):
+                con = self._bars("2026-10-01 09:30", 390)
+                self.addCleanup(con.close)
+                con.execute(
+                    "INSERT INTO bar_data VALUES (?, ?, ?, ?, ?, ?)",
+                    ("SPY", malformed, 100.0, 101.0, 99.0, 100.5),
+                )
+                daily = morning_map.daily_rth_ohlc(con, "SPY")
+                self.assertEqual(list(daily["d"]), [date(2026, 10, 1)])
+                self.assertEqual(int(daily.iloc[0]["bars"]), 390)
+
+    def test_duplicate_timestamps_across_intervals_do_not_fake_completeness(self):
+        con = sqlite3.connect(":memory:")
+        self.addCleanup(con.close)
+        con.execute(
+            "CREATE TABLE bar_data (symbol TEXT, ts INTEGER, open REAL, high REAL, "
+            "low REAL, close REAL, bar_interval_sec INTEGER)"
+        )
+        timestamps = pd.date_range(
+            "2026-10-01 09:30", "2026-10-01 15:59", periods=181,
+            tz="America/New_York",
+        )
+        rows = []
+        for ts in timestamps:
+            for interval in (60, 300):
+                rows.append((
+                    "SPY", int(ts.timestamp() * 1000), 100.0, 101.0, 99.0,
+                    100.5, interval,
+                ))
+        con.executemany("INSERT INTO bar_data VALUES (?, ?, ?, ?, ?, ?, ?)", rows)
+
+        daily = morning_map.daily_rth_ohlc(con, "SPY")
+
+        self.assertTrue(daily.empty)
+
+
+    def test_weekend_and_exchange_holiday_sessions_are_rejected(self):
+        for start in ("2026-10-03 09:30", "2026-07-03 09:30"):
+            with self.subTest(start=start):
+                con = self._bars(start, 390)
+                self.addCleanup(con.close)
+                self.assertTrue(morning_map.daily_rth_ohlc(con, "SPY").empty)
+
+
 class TrackRecordWindowTest(unittest.TestCase):
     def test_recent_scoreboard_is_anchored_to_reporting_session(self):
         april = pd.DataFrame(

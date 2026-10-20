@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -17,6 +18,16 @@ try:
 except Exception:  # pragma: no cover
     ZoneInfo = None
 
+
+def _ensure_current_event_loop() -> None:
+    """Provide the loop that eventkit still requires during module import."""
+    try:
+        asyncio.get_event_loop_policy().get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
+
+_ensure_current_event_loop()
 from ib_insync import IB, Index, Option, Stock, ContFuture
 
 ROOT = Path(__file__).resolve().parents[1]

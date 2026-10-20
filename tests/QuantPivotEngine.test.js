@@ -254,6 +254,8 @@ describe('QuantPivotEngine - Institutional Testing Suite', () => {
                         expect(levelResult.pValue).toBeGreaterThanOrEqual(0);
                         expect(levelResult.pValue).toBeLessThanOrEqual(1);
                         expect(typeof levelResult.isSignificant).toBe('boolean');
+                        expect(levelResult.isSignificant).toBe(false);
+                        expect(levelResult.methodology).toBe('disabled_without_point_in_time_levels');
                     }
                 });
             });

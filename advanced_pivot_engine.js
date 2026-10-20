@@ -41,10 +41,10 @@ window.advancedPivotEngine = (() => {
             PIVOT: pivot,
             R1: 2 * pivot - low,
             R2: pivot + (high - low),
-            R3: 2 * pivot + (high - low),
+            R3: high + 2 * (pivot - low),
             S1: 2 * pivot - high,
             S2: pivot - (high - low),
-            S3: 2 * pivot - (high - low)
+            S3: low - 2 * (high - pivot)
         };
     }
 

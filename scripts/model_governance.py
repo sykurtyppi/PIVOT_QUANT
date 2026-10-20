@@ -233,6 +233,16 @@ def build_approval_hashes(
     }
 
 
+def require_approval_matches_oos_evidence(
+    approval_hashes: dict[str, Any], evidence_detail: dict[str, Any]
+) -> None:
+    """Close the evidence-check/preflight TOCTOU window for model bytes."""
+    evidence_hashes = evidence_detail.get("actual_candidate_artifact_sha256")
+    approval_artifact_hashes = approval_hashes.get("active_artifact_sha256")
+    if evidence_hashes != approval_artifact_hashes:
+        raise RuntimeError("Candidate artifacts changed after OOS evidence validation")
+
+
 def activate_manifest(
     models_dir: Path,
     source_path: Path,
@@ -1007,6 +1017,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 def check_oos_validation(
     candidate_version: str,
     evidence_report_path: str | None,
+    candidate_manifest_path: str | Path | None,
 ) -> tuple[bool, str, dict[str, Any]]:
     """Verify an OOS-validated evidence report exists for ``candidate_version``.
 
@@ -1038,6 +1049,43 @@ def check_oos_validation(
     if not isinstance(report, dict):
         return (False, "evidence_report_not_a_json_object", detail)
 
+    # Strings, timestamps, fold metadata, and even recomputed readiness remain
+    # self-asserted unless the complete report is authenticated by the trusted
+    # evidence producer. Verify this before consuming any report-controlled
+    # OOS content. The explicit --allow-unvalidated-promotion escape hatch is
+    # handled by the caller and remains loud/auditable.
+    try:
+        from run_retrain_evidence_pack import verify_oos_evidence_attestation
+
+        attested, attestation_reason = verify_oos_evidence_attestation(report)
+    except Exception as exc:  # noqa: BLE001
+        return (False, f"evidence_report_attestation_check_failed:{exc}", detail)
+    detail["oos_evidence_attestation"] = attestation_reason
+    if not attested:
+        return (False, attestation_reason, detail)
+
+    manifest_path = Path(candidate_manifest_path) if candidate_manifest_path else None
+    if manifest_path is None or not manifest_path.is_file():
+        return (False, "candidate_manifest_not_available_for_evidence_binding", detail)
+    try:
+        actual_manifest = load_json(manifest_path)
+    except Exception as exc:  # noqa: BLE001
+        return (False, f"candidate_manifest_unreadable:{exc}", detail)
+    if report.get("candidate_manifest") != actual_manifest:
+        return (False, "evidence_report_candidate_manifest_mismatch", detail)
+
+    try:
+        actual_artifact_hashes = build_approval_hashes(
+            manifest_path.parent, manifest_path, actual_manifest
+        )["active_artifact_sha256"]
+    except Exception as exc:  # noqa: BLE001
+        return (False, f"candidate_artifact_hashing_failed:{exc}", detail)
+    evidence_artifact_hashes = report.get("candidate_artifact_sha256")
+    detail["evidence_candidate_artifact_sha256"] = evidence_artifact_hashes
+    detail["actual_candidate_artifact_sha256"] = actual_artifact_hashes
+    if evidence_artifact_hashes != actual_artifact_hashes:
+        return (False, "evidence_report_candidate_artifact_mismatch", detail)
+
     # Tie the report to THIS candidate version.
     cand_manifest = report.get("candidate_manifest")
     report_version = None
@@ -1058,6 +1106,14 @@ def check_oos_validation(
     readiness = report.get("candidate_readiness")
     if not isinstance(readiness, dict):
         return (False, "evidence_report_missing_candidate_readiness", detail)
+    try:
+        from run_retrain_evidence_pack import classify_candidate_readiness
+
+        recomputed_readiness = classify_candidate_readiness(report)
+    except Exception as exc:  # noqa: BLE001
+        return (False, f"evidence_report_readiness_recompute_failed:{exc}", detail)
+    if readiness != recomputed_readiness:
+        return (False, "evidence_report_readiness_mismatch", detail)
     oos_passed = readiness.get("oos_validation_passed")
     promotion_ready = readiness.get("promotion_ready")
     disposition = readiness.get("promotion_disposition")
@@ -1197,7 +1253,7 @@ def _cmd_evaluate_locked(args: argparse.Namespace) -> int:
         require_oos = bool(getattr(args, "require_oos_validation", True))
         allow_unvalidated = bool(getattr(args, "allow_unvalidated_promotion", False))
         oos_ok, oos_reason, oos_detail = check_oos_validation(
-            candidate_version, getattr(args, "evidence_report", "")
+            candidate_version, getattr(args, "evidence_report", ""), candidate_path
         )
         if require_oos and not oos_ok and not allow_unvalidated:
             reason = "bootstrap blocked: OOS validation required"
@@ -1242,6 +1298,8 @@ def _cmd_evaluate_locked(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
         approval_hashes = build_approval_hashes(models_dir, candidate_path, candidate)
+        if require_oos and oos_ok:
+            require_approval_matches_oos_evidence(approval_hashes, oos_detail)
         state.update(
             {
                 "active_version": candidate_version,
@@ -1364,7 +1422,7 @@ def _cmd_evaluate_locked(args: argparse.Namespace) -> int:
     require_oos = bool(getattr(args, "require_oos_validation", True))
     allow_unvalidated = bool(getattr(args, "allow_unvalidated_promotion", False))
     oos_ok, oos_reason, oos_detail = check_oos_validation(
-        candidate_version, getattr(args, "evidence_report", "")
+        candidate_version, getattr(args, "evidence_report", ""), candidate_path
     )
     if require_oos and not oos_ok and not allow_unvalidated:
         reason = "candidate blocked: OOS validation required"
@@ -1413,6 +1471,8 @@ def _cmd_evaluate_locked(args: argparse.Namespace) -> int:
         )
 
     approval_hashes = build_approval_hashes(models_dir, candidate_path, candidate)
+    if require_oos and oos_ok:
+        require_approval_matches_oos_evidence(approval_hashes, oos_detail)
 
     state.update(
         {

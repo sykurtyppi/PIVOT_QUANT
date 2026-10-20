@@ -35,9 +35,12 @@ def correct_prior_shift(
         Corrected probability clamped to [1e-6, 1-1e-6].
     """
     eps = 1e-6
-    p = max(eps, min(1.0 - eps, float(p_raw)))
-    pi_t = max(eps, min(1.0 - eps, float(pi_train)))
-    pi_c = max(eps, min(1.0 - eps, float(pi_current)))
+    raw_values = (float(p_raw), float(pi_train), float(pi_current))
+    if not all(math.isfinite(value) for value in raw_values):
+        raise ValueError("prior-shift inputs must be finite")
+    p = max(eps, min(1.0 - eps, raw_values[0]))
+    pi_t = max(eps, min(1.0 - eps, raw_values[1]))
+    pi_c = max(eps, min(1.0 - eps, raw_values[2]))
 
     if math.isclose(pi_t, pi_c, rel_tol=1e-4):
         return p
@@ -82,22 +85,24 @@ def rolling_class_rate(
     try:
         con = sqlite3.connect(db_path, timeout=5)
         try:
-            # Join prediction_log (for ts_prediction timestamp) with
-            # event_labels (for labels). prediction_log has one row per event
-            # (not per horizon), so we join on event_id only and filter
-            # horizon_min from event_labels. We do NOT filter resolution_min:
-            # unresolved chops are real negatives in the full population that
-            # pi_train also includes.
+            # Count the labeled event population, not prediction rows. The log
+            # intentionally permits one row per (event_id, model_version), so a
+            # direct join would overweight events scored by more model versions.
+            # EXISTS preserves the rolling prediction-window eligibility while
+            # giving every labeled event exactly one vote.
             cur = con.execute(
                 f"""
                 SELECT COUNT(*)                                           AS total,
                        SUM(CASE WHEN el.{col} = 1 THEN 1 ELSE 0 END)    AS pos_count
-                FROM   prediction_log   AS pl
-                JOIN   event_labels     AS el
-                       ON  el.event_id    = pl.event_id
-                WHERE  el.horizon_min           = ?
-                  AND  el.{col}                 IS NOT NULL
-                  AND  pl.ts_prediction         >= ?
+                FROM   event_labels AS el
+                WHERE  el.horizon_min = ?
+                  AND  el.{col} IS NOT NULL
+                  AND  EXISTS (
+                       SELECT 1
+                       FROM prediction_log AS pl
+                       WHERE pl.event_id = el.event_id
+                         AND pl.ts_prediction >= ?
+                  )
                 """,
                 (horizon, cutoff_ms),
             )

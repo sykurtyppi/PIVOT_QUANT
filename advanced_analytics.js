@@ -50,7 +50,10 @@ window.AdvancedAnalytics = (() => {
      * Calculate walk-forward stability metrics
      */
     function calculateWalkForwardStability(timeSeries, windowSize = 60, stepSize = 20) {
-        if (!timeSeries || timeSeries.length < windowSize + stepSize) {
+        if (!Array.isArray(timeSeries)
+            || !Number.isInteger(windowSize) || windowSize <= 0
+            || !Number.isInteger(stepSize) || stepSize <= 0
+            || timeSeries.length < windowSize + stepSize) {
             return { variance: null, trend: null, stability: 'UNKNOWN' };
         }
 
@@ -181,7 +184,7 @@ window.AdvancedAnalytics = (() => {
             .filter(([_level, result]) => result.hasSufficientData)
             .map(([level, result]) => {
                 const score = computeLevelScore({
-                    q: result.qValue || 1,
+                    q: result.qValue ?? 1,
                     lift: result.lift,
                     ciWidth: result.confidenceInterval.upper - result.confidenceInterval.lower,
                     nEff: result.nEffective,
@@ -249,8 +252,7 @@ window.AdvancedAnalytics = (() => {
             priceData
         } = params;
 
-        // Calculate SHA1 of closes for data integrity
-        const sha1 = calculateSHA1(priceData);
+        const checksum32 = calculateChecksum32(priceData);
 
         return {
             timestamp: new Date().toISOString(),
@@ -277,7 +279,7 @@ window.AdvancedAnalytics = (() => {
             },
             data_source: dataSource,
             data_integrity: {
-                sha1_closes: sha1,
+                checksum32_closes: checksum32,
                 record_count: priceData.length
             },
             computation: {
@@ -288,10 +290,9 @@ window.AdvancedAnalytics = (() => {
     }
 
     /**
-     * Simple SHA1 calculation for data integrity
+     * Non-cryptographic 32-bit checksum for accidental-change detection.
      */
-    function calculateSHA1(data) {
-        // Simplified hash for browser environment
+    function calculateChecksum32(data) {
         const str = JSON.stringify(data.map(d => d.close));
         let hash = 0;
         for (let i = 0; i < str.length; i++) {
@@ -301,6 +302,9 @@ window.AdvancedAnalytics = (() => {
         }
         return Math.abs(hash).toString(16).padStart(8, '0');
     }
+
+    // Compatibility alias. Do not use this as a cryptographic digest.
+    const calculateSHA1 = calculateChecksum32;
 
     /**
      * Generate unique computation ID
@@ -361,8 +365,10 @@ window.AdvancedAnalytics = (() => {
         // Stability alerts
         if (stability && stability.variance !== null) {
             Object.entries(alertRules.stability).forEach(([type, rule]) => {
-                if (stability.variance >= rule.variance_threshold &&
-                    Math.abs(stability.trend) >= Math.abs(rule.trend_threshold)) {
+                const trendMatches = rule.trend_threshold < 0
+                    ? stability.trend <= rule.trend_threshold
+                    : stability.trend >= rule.trend_threshold;
+                if (stability.variance >= rule.variance_threshold && trendMatches) {
 
                     alerts.push({
                         type: 'stability',
@@ -397,14 +403,15 @@ window.AdvancedAnalytics = (() => {
     }
 
     /**
-     * Calculate ATR-based stops and targets
+     * Calculate ATR-based stops and targets from an explicit price ATR.
      */
     function calculateATRStops(result, bias, atrMultiplier = 2.0) {
-        // Mock ATR calculation - in practice, would use actual ATR
-        const estimatedATR = result.confidenceInterval.upper * 0.02; // Rough approximation
+        const atr = Number(result && result.atr);
+        if (!Number.isFinite(atr) || atr <= 0
+            || !Number.isFinite(atrMultiplier) || atrMultiplier <= 0) return null;
 
-        const stopDistance = atrMultiplier * estimatedATR;
-        const targetDistance = atrMultiplier * 1.5 * estimatedATR; // 1.5:1 reward:risk
+        const stopDistance = atrMultiplier * atr;
+        const targetDistance = atrMultiplier * 1.5 * atr; // 1.5:1 reward:risk
 
         return {
             atr_multiplier: atrMultiplier,
@@ -464,6 +471,7 @@ window.AdvancedAnalytics = (() => {
         // Utility functions
         calculateWindowStats,
         calculateBinomialTest,
+        calculateChecksum32,
         calculateSHA1,
         generateComputationId
     };

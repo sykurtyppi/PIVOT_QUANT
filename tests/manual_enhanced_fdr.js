@@ -180,32 +180,17 @@ function testBenjaminiHochbergCorrection() {
 }
 
 /**
- * Test permutation test
+ * Verify aggregate-count permutation fails closed. Protocol-compliant block
+ * permutation is performed only where time-ordered labels are available.
  */
 function testPermutationTest() {
-    // Test with extreme case (should have low permutation p-value)
-    const extremeStats = { successes: 19, trials: 20 };
-    const p0 = 0.5;
-    const permP = EnhancedFDRCorrection.permutationTest(extremeStats, p0, 100);
-
-    if (!Number.isFinite(permP) || permP < 0 || permP > 1) {
-        throw new Error(`Invalid permutation p-value: ${permP}`);
+    const permP = EnhancedFDRCorrection.permutationTest(
+        { successes: 19, trials: 20 }, 0.5, 10000,
+    );
+    if (permP !== null) {
+        throw new Error(`Aggregate permutation helper must fail closed, got: ${permP}`);
     }
-
-    // Test with null case (should have high permutation p-value)
-    const nullStats = { successes: 10, trials: 20 };
-    const nullPermP = EnhancedFDRCorrection.permutationTest(nullStats, p0, 100);
-
-    if (!Number.isFinite(nullPermP) || nullPermP < 0 || nullPermP > 1) {
-        throw new Error(`Invalid null permutation p-value: ${nullPermP}`);
-    }
-
-    // Extreme case should generally have lower permutation p-value
-    if (permP > nullPermP) {
-        console.warn(`   ⚠️ Unexpected permutation p-value relationship: extreme=${permP}, null=${nullPermP}`);
-    }
-
-    console.log(`   ✓ Permutation test validated: extreme case p=${permP.toFixed(3)}, null case p=${nullPermP.toFixed(3)}`);
+    console.log('   ✓ Aggregate permutation helper fails closed');
 }
 
 /**
@@ -260,7 +245,12 @@ function testSampleSizeFiltering() {
         const stats = { testLevel: { successes: Math.floor(n * 0.8), trials: n } };
 
         const result = EnhancedFDRCorrection.analyzePivotSignificanceEnhanced(
-            stats, 'RANGE', 'weekly', { minN: 12, minNEff: 10 }
+            stats, 'RANGE', 'weekly', {
+                minN: 12,
+                minNEff: 10,
+                overlapHorizon: 1,
+                customBaselines: { testLevel: 0.5 }
+            }
         );
 
         const hasSufficientData = result.levels.testLevel.hasSufficientData;

@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
+import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from datetime import date
 from pathlib import Path
@@ -325,6 +328,233 @@ class SnapshotContractTest(unittest.TestCase):
                 out_dir / "levels_snapshot_SPY_latest.json"
             )
             self.assertEqual(latest["session_date"], newer["session_date"])
+
+
+class BriefingArtifactTest(unittest.TestCase):
+    def setUp(self):
+        self.snapshot = snapshot_contract.build_snapshot(
+            symbol="SPY",
+            source_session_date=date(2026, 10, 1),
+            source_ohlc={"high": 680.0, "low": 670.0, "close": 676.0},
+            generated_at_utc="2026-10-02T11:00:00Z",
+            raw_levels=calculate_pivots(high=680.0, low=670.0, close=676.0),
+            evidence={"hold_rates_publishable": False, "label_coverage": {}},
+        )
+        self.track_record = {
+            "symbol": "SPY",
+            "as_of_utc": "2026-10-02T10:59:00Z",
+            "report_session_date": "2026-10-01",
+            "hold_rates_publishable": False,
+            "label_coverage": {},
+            "horizons": {},
+        }
+
+    def test_publish_cli_imports_from_repo_root(self):
+        result = subprocess.run(
+            [sys.executable, str(LEVELS_DIR / "publish.py"), "--help"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("usage: publish.py", result.stdout)
+        self.assertIn("--channel", result.stdout)
+
+    def test_builds_content_addressed_briefing_bound_to_snapshot(self):
+        artifact = publish.build_briefing_artifact(self.snapshot, self.track_record)
+
+        self.assertEqual(artifact["contract"], "pivotquant.morning_briefing")
+        self.assertEqual(artifact["contract_version"], 1)
+        self.assertEqual(artifact["snapshot_id"], self.snapshot["snapshot_id"])
+        self.assertEqual(artifact["prepared_at_utc"], self.snapshot["generated_at_utc"])
+        self.assertEqual(
+            artifact["snapshot_generated_at_utc"], self.snapshot["generated_at_utc"]
+        )
+        self.assertEqual(artifact["track_record"], self.track_record)
+        self.assertRegex(artifact["briefing_id"], r"^brf_[0-9a-f]{24}$")
+        self.assertIn("SPY LEVELS — 2026-10-02 session", artifact["body"])
+
+    def test_rejects_post_open_or_future_evidence_capture(self):
+        with self.assertRaisesRegex(ValueError, "later than briefing capture"):
+            publish.build_briefing_artifact(
+                self.snapshot,
+                {**self.track_record, "as_of_utc": "2026-10-02T12:01:00Z"},
+                captured_at_utc="2026-10-02T12:00:00Z",
+            )
+        with self.assertRaisesRegex(ValueError, "no later than session open"):
+            publish.build_briefing_artifact(
+                self.snapshot,
+                self.track_record,
+                captured_at_utc="2026-10-02T14:00:00Z",
+            )
+
+    def test_rejects_cross_symbol_or_stale_track_record(self):
+        with self.assertRaisesRegex(ValueError, "symbol"):
+            publish.build_briefing_artifact(
+                self.snapshot, {**self.track_record, "symbol": "QQQ"}
+            )
+        with self.assertRaisesRegex(ValueError, "session"):
+            publish.build_briefing_artifact(
+                self.snapshot,
+                {**self.track_record, "report_session_date": "2025-01-02"},
+            )
+        with self.assertRaisesRegex(ValueError, "older than snapshot source"):
+            publish.build_briefing_artifact(
+                self.snapshot,
+                {**self.track_record, "as_of_utc": "2026-10-01T12:00:00Z"},
+            )
+
+    def test_retry_reuses_frozen_briefing_even_if_track_record_file_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            first, immutable = publish.load_or_build_briefing(
+                self.snapshot,
+                self.track_record,
+                out_dir,
+                captured_at_utc="2026-10-02T11:01:00Z",
+            )
+            changed = {**self.track_record, "as_of_utc": "2026-10-02T11:05:00Z"}
+            retry, retry_path = publish.load_or_build_briefing(
+                self.snapshot,
+                changed,
+                out_dir,
+                captured_at_utc="2026-10-02T11:06:00Z",
+            )
+
+            self.assertEqual(retry, first)
+            self.assertEqual(retry_path, immutable)
+            self.assertEqual(retry["track_record"], self.track_record)
+
+    def test_tampered_frozen_briefing_is_rejected_before_reuse(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            artifact, immutable = publish.load_or_build_briefing(
+                self.snapshot,
+                self.track_record,
+                out_dir,
+                captured_at_utc="2026-10-02T11:01:00Z",
+            )
+            immutable.write_text(json.dumps({**artifact, "body": "TAMPERED"}))
+
+            with self.assertRaisesRegex(ValueError, "briefing identity digest mismatch"):
+                publish.load_or_build_briefing(
+                    self.snapshot,
+                    self.track_record,
+                    out_dir,
+                    captured_at_utc="2026-10-02T11:02:00Z",
+                )
+
+    def test_rehashed_semantically_tampered_briefing_is_rejected_on_retry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            artifact, immutable = publish.load_or_build_briefing(
+                self.snapshot,
+                self.track_record,
+                out_dir,
+                captured_at_utc="2026-10-02T11:01:00Z",
+            )
+            artifact["track_record"]["symbol"] = "QQQ"
+            artifact["track_record_sha256"] = hashlib.sha256(
+                publish._canonical_bytes(artifact["track_record"])
+            ).hexdigest()
+            core = {key: value for key, value in artifact.items() if key != "briefing_id"}
+            artifact["briefing_id"] = (
+                "brf_" + hashlib.sha256(publish._canonical_bytes(core)).hexdigest()[:24]
+            )
+            immutable.write_text(json.dumps(artifact), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "symbol"):
+                publish.load_or_build_briefing(
+                    self.snapshot,
+                    self.track_record,
+                    out_dir,
+                    captured_at_utc="2026-10-02T11:02:00Z",
+                )
+
+    def test_write_freezes_first_briefing_and_rejects_changed_rerun(self):
+        first = publish.build_briefing_artifact(self.snapshot, self.track_record)
+        changed_track_record = dict(self.track_record)
+        changed_track_record["hold_rates_publishable"] = True
+        changed_track_record["horizons"] = {
+            "h15": {"rolling_scoreboard_alerted": {"actual_hold_rate": 0.75, "n": 20}}
+        }
+        changed = publish.build_briefing_artifact(self.snapshot, changed_track_record)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            immutable, latest = publish.write_briefing_artifact(first, Path(tmp))
+            before = immutable.read_bytes()
+
+            self.assertEqual(immutable.name, "morning_briefing_SPY_2026-10-02.json")
+            self.assertEqual(json.loads(latest.read_text()), first)
+            with self.assertRaisesRegex(ValueError, "immutable briefing"):
+                publish.write_briefing_artifact(changed, Path(tmp))
+            self.assertEqual(immutable.read_bytes(), before)
+
+    def test_failed_delivery_has_no_receipt_and_returns_failure(self):
+        artifact = publish.build_briefing_artifact(self.snapshot, self.track_record)
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            publish.notify, "post", return_value=False
+        ) as post:
+            ok, status = publish.deliver_briefing(
+                artifact, channel="webhook", out_dir=Path(tmp)
+            )
+
+            self.assertFalse(ok)
+            self.assertEqual(status, "delivery-failed")
+            self.assertEqual(post.call_count, 1)
+            self.assertEqual(list(Path(tmp).glob("morning_delivery_*.json")), [])
+
+    def test_dry_run_has_no_receipt_and_does_not_send(self):
+        artifact = publish.build_briefing_artifact(self.snapshot, self.track_record)
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            publish.notify, "post"
+        ) as post:
+            ok, status = publish.deliver_briefing(
+                artifact, channel="webhook", out_dir=Path(tmp), dry_run=True
+            )
+
+            self.assertFalse(ok)
+            self.assertEqual(status, "dry-run")
+            post.assert_not_called()
+            self.assertEqual(list(Path(tmp).glob("morning_delivery_*.json")), [])
+
+    def test_concurrent_delivery_sends_once_and_reuses_receipt(self):
+        artifact = publish.build_briefing_artifact(self.snapshot, self.track_record)
+        outcomes = []
+
+        def slow_success(_body):
+            time.sleep(0.05)
+            return True
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            publish.notify, "post", side_effect=slow_success
+        ) as post:
+            out_dir = Path(tmp)
+
+            def deliver():
+                outcomes.append(
+                    publish.deliver_briefing(
+                        artifact, channel="webhook", out_dir=out_dir
+                    )
+                )
+
+            threads = [threading.Thread(target=deliver) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=5)
+
+            self.assertEqual(post.call_count, 1)
+            self.assertEqual(sorted(status for _, status in outcomes), [
+                "already-delivered", "sent"
+            ])
+            receipts = list(out_dir.glob("morning_delivery_*.json"))
+            self.assertEqual(len(receipts), 1)
+            receipt = json.loads(receipts[0].read_text())
+            self.assertEqual(receipt["briefing_id"], artifact["briefing_id"])
+            self.assertEqual(receipt["channel"], "webhook")
 
 
 class SnapshotConsumerParityTest(unittest.TestCase):
