@@ -126,3 +126,8 @@ coverage/
 # Evidence pack reports (keep the directory marker only)
 evidence/*
 !evidence/.gitkeep
+
+# Python coverage data (report-only CI job + local `coverage run`)
+.coverage
+.coverage.*
+htmlcov/
