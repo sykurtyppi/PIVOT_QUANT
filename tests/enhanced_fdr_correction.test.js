@@ -80,6 +80,20 @@ describe('enhanced_fdr_correction.js — EnhancedFDRCorrection', () => {
       expect(E.oneSidedBinomialTest(90, 100, 0.5, true)).toBeLessThan(1e-4);
       const atNull = E.oneSidedBinomialTest(50, 100, 0.5, true);
       expect(atNull).toBeCloseTo(0.5398, 3);
+      const largeAtNull = E.oneSidedBinomialTest(5000, 10000, 0.5, true);
+      expect(Number.isFinite(largeAtNull)).toBe(true);
+      expect(largeAtNull).toBeGreaterThan(0.5);
+      expect(largeAtNull).toBeLessThan(0.51);
+    });
+
+    test('integral counts use the exact binomial tail at the BH boundary', () => {
+      expect(E.oneSidedBinomialTest(38, 62, 0.45, true)).toBeCloseTo(0.0072246325, 9);
+      const out = E.analyzePivotSignificanceEnhanced(
+        { S3: { successes: 38, trials: 62 } }, 'DOWN-TREND', 'weekly',
+        { overlapHorizon: 1 },
+      );
+      expect(out.levels.S3.qValue).toBeCloseTo(0.0505724277, 9);
+      expect(out.levels.S3.significant).toBe(false);
     });
 
     test('malformed direct-call contracts fail closed', () => {
@@ -236,6 +250,57 @@ describe('enhanced_fdr_correction.js — EnhancedFDRCorrection', () => {
       }
     });
 
+    test('count accessors are snapshotted once before validation and inference', () => {
+      let successesReads = 0;
+      let trialsReads = 0;
+      const stats = {};
+      Object.defineProperties(stats, {
+        successes: {
+          enumerable: true,
+          get() {
+            successesReads += 1;
+            return successesReads === 1 ? 0 : 100;
+          },
+        },
+        trials: {
+          enumerable: true,
+          get() {
+            trialsReads += 1;
+            return trialsReads === 1 ? 0 : 100;
+          },
+        },
+      });
+      const out = E.analyzePivotSignificanceEnhanced(
+        { WIN: stats }, 'RANGE', 'weekly',
+        { customBaselines: { WIN: 0.5 }, overlapHorizon: 1, minN: 1, minNEff: 1 },
+      );
+      expect(successesReads).toBe(1);
+      expect(trialsReads).toBe(1);
+      expect(out.levels.WIN.hasSufficientData).toBe(false);
+      expect(out.levels.WIN.significant).toBe(false);
+    });
+
+    test('result maps and summary reads ignore polluted Object prototypes', () => {
+      Object.defineProperty(Object.prototype, 'WIN', {
+        configurable: true,
+        get() {
+          return { hasSufficientData: true, significant: true };
+        },
+        set() {},
+      });
+      try {
+        const out = E.analyzePivotSignificanceEnhanced(
+          { WIN: { successes: 0, trials: 100 } }, 'RANGE', 'weekly',
+          { customBaselines: { WIN: 0.5 }, overlapHorizon: 1 },
+        );
+        expect(Object.prototype.hasOwnProperty.call(out.levels, 'WIN')).toBe(true);
+        expect(out.levels.WIN.pValue).toBe(1);
+        expect(out.summary.significantLevels).toBe(0);
+      } finally {
+        delete Object.prototype.WIN;
+      }
+    });
+
     test('malformed alpha, baselines, and level objects fail closed', () => {
       const invalidAlpha = E.analyzePivotSignificanceEnhanced(
         { WIN: { successes: 100, trials: 100 } },
@@ -296,8 +361,9 @@ describe('enhanced_fdr_correction.js — EnhancedFDRCorrection', () => {
         { customBaselines: { A: 0.56, BAD: 0.5 }, overlapHorizon: 1 },
       );
       expect(out.levels.A.pValue).toBeLessThan(0.05);
-      expect(out.levels.A.qValue).toBeGreaterThan(0.05);
-      expect(out.levels.A.significant).toBe(false);
+      expect(out.levels.BAD.pValue).toBe(1);
+      expect(out.levels.A.qValue).toBeCloseTo(out.levels.A.pValue * 2, 12);
+      expect(out.levels.A.significant).toBe(out.levels.A.qValue <= 0.05);
     });
 
     test('absent levels remain in the declared BH family as p=1', () => {
@@ -417,6 +483,27 @@ describe('enhanced_fdr_correction.js — EnhancedFDRCorrection', () => {
       expect(out.summary.validLevels).toBe(0);
       expect(Object.prototype.hasOwnProperty.call(out.levels, '__proto__')).toBe(false);
       expect(JSON.stringify(out.levels)).toBe('{}');
+    });
+
+    test('sparse explicit families fail closed and ignore inherited array entries', () => {
+      const sparse = new Array(1);
+      Array.prototype[0] = 'WIN';
+      try {
+        const out = E.analyzePivotSignificanceEnhanced(
+          { WIN: { successes: 100, trials: 100 }, undefined: { successes: 100, trials: 100 } },
+          'RANGE', 'weekly',
+          {
+            customBaselines: { WIN: 0.5, undefined: 0.5 },
+            familyMembers: sparse,
+            overlapHorizon: 1,
+          },
+        );
+        expect(out.familyInfo.familyMembers).toEqual([]);
+        expect(out.summary.totalLevels).toBe(0);
+        expect(out.summary.significantLevels).toBe(0);
+      } finally {
+        delete Array.prototype[0];
+      }
     });
 
     test('requested unavailable permutation validation blocks significance visibly', () => {

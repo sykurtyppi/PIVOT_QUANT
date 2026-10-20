@@ -31,38 +31,13 @@ window.EnhancedFDRCorrection = (() => {
             || typeof oneSided !== 'boolean') return 1.0;
         if (trials === 0) return 1.0;
         if (successes < 0 || successes > trials) return 1.0;
+        if (p0 === 0) return successes === 0 ? 1.0 : 0.0;
+        if (p0 === 1) return oneSided ? 1.0 : (successes === trials ? 1.0 : 0.0);
 
-        const _observedRate = successes / trials;
-
-        // Use normal approximation for large samples
-        if (trials * p0 > 5 && trials * (1 - p0) > 5) {
-            return normalApproximationOneSided(successes, trials, p0, oneSided);
-        }
-
-        // Exact binomial test for small samples
+        // Integral observations use the exact binomial test. A normal
+        // approximation can cross the BH decision boundary and manufacture a
+        // discovery that the registered exact test would reject.
         return exactBinomialOneSided(successes, trials, p0, oneSided);
-    }
-
-    /**
-     * Normal approximation for one-sided test
-     */
-    function normalApproximationOneSided(successes, trials, p0, oneSided) {
-        const mean = trials * p0;
-        const variance = trials * p0 * (1 - p0);
-        const stdDev = Math.sqrt(variance);
-
-        // For the upper tail P(X >= k), the continuous boundary is k - 0.5.
-        // A two-sided approximation instead corrects toward the null mean.
-        const correction = oneSided ? -0.5 : (successes > mean ? -0.5 : 0.5);
-        const zScore = (successes + correction - mean) / stdDev;
-
-        if (oneSided) {
-            // One-sided: P(X >= successes) for H1: p > p0
-            return 1 - normalCDF(zScore);
-        } else {
-            // Two-sided test
-            return 2 * (1 - normalCDF(Math.abs(zScore)));
-        }
     }
 
     /**
@@ -70,25 +45,61 @@ window.EnhancedFDRCorrection = (() => {
      */
     function exactBinomialOneSided(successes, trials, p0, oneSided) {
         if (oneSided) {
-            // One-sided: P(X >= successes | H0: p = p0)
-            let pValue = 0;
-            for (let k = successes; k <= trials; k++) {
-                pValue += binomialPMF(k, trials, p0);
+            // P(X >= successes). Sum the shorter side in log space to avoid
+            // coefficient overflow and probability underflow for large n.
+            if (successes <= trials * p0) {
+                const lower = sumBinomialRange(0, successes - 1, trials, p0);
+                return Math.max(0, Math.min(1, 1 - lower));
             }
-            return Math.min(pValue, 1.0);
+            return Math.min(1, sumBinomialRange(successes, trials, trials, p0));
         } else {
-            // Two-sided test (original implementation)
-            const observedProb = binomialPMF(successes, trials, p0);
-            let pValue = 0;
-
+            const observedLogProb = logBinomialPMF(successes, trials, p0);
+            let logTotal = -Infinity;
+            let logProb = logBinomialPMF(0, trials, p0);
             for (let k = 0; k <= trials; k++) {
-                const prob = binomialPMF(k, trials, p0);
-                if (prob <= observedProb + 1e-10) {
-                    pValue += prob;
+                if (logProb <= observedLogProb + 1e-12) {
+                    logTotal = logAddExp(logTotal, logProb);
+                }
+                if (k < trials) {
+                    logProb += Math.log(trials - k) - Math.log(k + 1)
+                        + Math.log(p0) - Math.log1p(-p0);
                 }
             }
-            return Math.min(pValue, 1.0);
+            return Math.min(1, Math.exp(logTotal));
         }
+    }
+
+    function logBinomialPMF(k, n, p) {
+        if (k < 0 || k > n) return -Infinity;
+        if (p === 0) return k === 0 ? 0 : -Infinity;
+        if (p === 1) return k === n ? 0 : -Infinity;
+        const reducedK = Math.min(k, n - k);
+        let logCoefficient = 0;
+        for (let i = 1; i <= reducedK; i++) {
+            logCoefficient += Math.log(n - reducedK + i) - Math.log(i);
+        }
+        return logCoefficient + k * Math.log(p) + (n - k) * Math.log1p(-p);
+    }
+
+    function logAddExp(left, right) {
+        if (left === -Infinity) return right;
+        if (right === -Infinity) return left;
+        const maximum = Math.max(left, right);
+        return maximum + Math.log(Math.exp(left - maximum) + Math.exp(right - maximum));
+    }
+
+    function sumBinomialRange(start, end, n, p) {
+        if (start > end) return 0;
+        let logTotal = -Infinity;
+        let logProb = logBinomialPMF(start, n, p);
+        for (let k = start; k <= end; k++) {
+            logTotal = logAddExp(logTotal, logProb);
+            if (k < end) {
+                logProb += Math.log(n - k) - Math.log(k + 1)
+                    + Math.log(p) - Math.log1p(-p);
+            }
+        }
+        return Math.exp(logTotal);
     }
 
     /**
@@ -263,39 +274,60 @@ window.EnhancedFDRCorrection = (() => {
         // selected baseline map is the predeclared family. Invalid top-level
         // input retains the historical empty-result behavior.
         const familyMembersProvided = familyMembers !== null && familyMembers !== undefined;
-        const explicitFamilyValid = Array.isArray(familyMembers)
-            && familyMembers.length > 0
-            && familyMembers.every(isSafeFamilyMember);
+        let explicitFamilyValid = Array.isArray(familyMembers) && familyMembers.length > 0;
+        const explicitFamily = [];
+        if (explicitFamilyValid) {
+            for (let index = 0; index < familyMembers.length; index++) {
+                if (!Object.prototype.hasOwnProperty.call(familyMembers, index)) {
+                    explicitFamilyValid = false;
+                    break;
+                }
+                const member = familyMembers[index];
+                if (!isSafeFamilyMember(member)) {
+                    explicitFamilyValid = false;
+                    break;
+                }
+                explicitFamily.push(member);
+            }
+        }
         const declaredFamily = familyMembersProvided
-            ? (explicitFamilyValid ? [...new Set(familyMembers)] : [])
+            ? (explicitFamilyValid ? [...new Set(explicitFamily)] : [])
             : Object.keys(baselines).filter(isSafeFamilyMember);
         const levels = pivotStatsValid ? declaredFamily : [];
         const pValues = [];
-        const results = {};
+        const results = Object.create(null);
         const validLevels = [];
 
         // Calculate p-values for each level
         levels.forEach(level => {
-            const stats = Object.prototype.hasOwnProperty.call(pivotStats, level)
-                && pivotStats[level] && typeof pivotStats[level] === 'object'
+            const statsCandidate = Object.prototype.hasOwnProperty.call(pivotStats, level)
                 ? pivotStats[level]
-                : {};
+                : null;
+            const stats = statsCandidate && typeof statsCandidate === 'object'
+                ? statsCandidate
+                : null;
             const baselineDeclared = Object.prototype.hasOwnProperty.call(baselines, level);
             const baselineCandidate = baselineDeclared ? baselines[level] : null;
             const baselineValid = baselineDeclared && Number.isFinite(baselineCandidate)
                 && baselineCandidate >= 0
                 && baselineCandidate <= 1;
             const p0 = baselineValid ? baselineCandidate : 0.5;
+            const ownsTrials = stats !== null
+                && Object.prototype.hasOwnProperty.call(stats, 'trials');
+            const ownsSuccesses = stats !== null
+                && Object.prototype.hasOwnProperty.call(stats, 'successes');
+            const trialsCandidate = ownsTrials ? stats.trials : null;
+            const successesCandidate = ownsSuccesses ? stats.successes : null;
             const countsValid = baselineValid
-                && Object.prototype.hasOwnProperty.call(stats, 'trials')
-                && Object.prototype.hasOwnProperty.call(stats, 'successes')
-                && Number.isInteger(stats.trials)
-                && Number.isInteger(stats.successes)
-                && stats.trials >= 0
-                && stats.successes >= 0
-                && stats.successes <= stats.trials;
-            const trials = countsValid ? stats.trials : 0;
-            const successes = countsValid ? stats.successes : 0;
+                && ownsTrials
+                && ownsSuccesses
+                && Number.isInteger(trialsCandidate)
+                && Number.isInteger(successesCandidate)
+                && trialsCandidate >= 0
+                && successesCandidate >= 0
+                && successesCandidate <= trialsCandidate;
+            const trials = countsValid ? trialsCandidate : 0;
+            const successes = countsValid ? successesCandidate : 0;
             const nEff = calculateEffectiveN(trials, overlapHorizon);
             const observedRate = trials > 0 ? successes / trials : 0;
             const successesEff = nEff > 0 ? observedRate * nEff : 0;
@@ -364,11 +396,13 @@ window.EnhancedFDRCorrection = (() => {
 
             // Update results with FDR-corrected values
             levels.forEach((level, index) => {
-                if (results[level].hasSufficientData) {
-                    results[level].qValue = fdrResults.qValues[index];
-                    results[level].significant = fdrResults.significant[index]
-                        && (!results[level].permutationRequested
-                            || results[level].permutationAvailable);
+                const result = Object.prototype.hasOwnProperty.call(results, level)
+                    ? results[level]
+                    : null;
+                if (result && result.hasSufficientData) {
+                    result.qValue = fdrResults.qValues[index];
+                    result.significant = fdrResults.significant[index]
+                        && (!result.permutationRequested || result.permutationAvailable);
                 }
             });
         }
@@ -378,7 +412,10 @@ window.EnhancedFDRCorrection = (() => {
             summary: {
                 totalLevels: levels.length,
                 validLevels: validLevels.length,
-                significantLevels: validLevels.filter(level => results[level].significant).length,
+                significantLevels: validLevels.filter(level => (
+                    Object.prototype.hasOwnProperty.call(results, level)
+                    && results[level].significant
+                )).length,
                 insufficientDataLevels: levels.length - validLevels.length,
                 fdrLevel: alpha,
                 regime: regime,
@@ -469,35 +506,6 @@ window.EnhancedFDRCorrection = (() => {
             `${level}: ${rate}% ${mark}`;
 
         return showTooltip ? { display, tooltip: generateTooltip(level, result) } : display;
-    }
-
-    // Include all original helper functions
-    function binomialPMF(k, n, p) {
-        if (k < 0 || k > n) return 0;
-        if (n === 0) return k === 0 ? 1 : 0;
-        if (p === 0) return k === 0 ? 1 : 0;
-        if (p === 1) return k === n ? 1 : 0;
-
-        return binomialCoefficient(n, k) * Math.pow(p, k) * Math.pow(1 - p, n - k);
-    }
-
-    function binomialCoefficient(n, k) {
-        if (k > n - k) k = n - k;
-        if (k === 0) return 1;
-
-        let result = 1;
-        for (let i = 0; i < k; i++) {
-            result = result * (n - i) / (i + 1);
-        }
-        return result;
-    }
-
-    function normalCDF(z) {
-        const t = 1.0 / (1.0 + 0.2316419 * Math.abs(z));
-        const d = 0.3989423 * Math.exp(-z * z / 2);
-        const prob = d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
-
-        return z > 0 ? 1 - prob : prob;
     }
 
     // Public API
