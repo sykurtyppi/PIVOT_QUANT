@@ -44,14 +44,33 @@ def parse_args() -> argparse.Namespace:
 
 
 def _print_text(report: dict, report_path: Path) -> None:
-    print("PivotQuant realized_vol_60d strict validation")
-    print(f"Status: {report['status']}")
-    print(f"Symbol: {report['symbol']}")
-    print(f"Train years: {', '.join(report['train_years'])}")
-    print(f"Test year: {report['test_year']}")
-    print(f"Validated: {report['validated']}")
-    print(f"Degradation warning: {report['degradation_warning']}")
-    print(f"Report: {report_path}")
+    print("PivotQuant Stage 2 OOS validation")
+    print(f"Status:             {report.get('status')}")
+    print(f"Symbol:             {report.get('symbol')}")
+    print(f"Candidate:          {report.get('candidate_id') or '(none)'}")
+    print(f"Test period:        {report.get('test_period') or report.get('test_year')}")
+    print(f"Validated:          {report.get('validated')}")
+    print(f"Degradation warning:{report.get('degradation_warning')}")
+    print(f"Report:             {report_path}")
+    if "n_signal_oos" in report:
+        print(f"\n[OOS metrics]")
+        print(f"  n_all:               {report.get('n_all_oos')}")
+        print(f"  n_signal:            {report.get('n_signal_oos')}")
+        print(f"  baseline_break_rate: {report.get('baseline_break_rate')}")
+        print(f"  signal_break_rate:   {report.get('signal_break_rate')}")
+        print(f"  delta_break_rate:    {report.get('delta_break_rate')}")
+    sv = report.get("statistical_validity")
+    if isinstance(sv, dict):
+        print(f"\n[statistical validity]")
+        print(f"  n_obs:              {sv.get('n_obs')}")
+        print(f"  n_eff:              {sv.get('n_eff')} (floor={sv.get('n_eff_floor')})")
+        print(f"  ci:                 [{sv.get('ci_lower'):.6f}, {sv.get('ci_upper'):.6f}]")
+        print(f"  permutation_p:      {sv.get('permutation_p_value'):.4f}"
+              f" (alpha={sv.get('permutation_alpha')})")
+        print(f"  statistical_pass:   {sv.get('statistical_pass')}")
+        if sv.get("suppression_reasons"):
+            for r in sv["suppression_reasons"]:
+                print(f"  [!] {r}")
 
     if "regime_definition" in report:
         definition = report["regime_definition"]
@@ -518,22 +537,51 @@ def _print_text(report: dict, report_path: Path) -> None:
 
 
 def main() -> int:
+    from datetime import datetime, timezone
+
     from services.research_protocol.cli_protocol import enforce_protocol_from_args
+    from services.research_protocol.statistical_guard import STATISTICAL_VALIDITY_KEY
+    from services.research_protocol.validation_ladder import record_stage_result
 
     args = parse_args()
-    enforce_protocol_from_args(args, expected_stage=PROTOCOL_STAGE)
+    registration = enforce_protocol_from_args(args, expected_stage=PROTOCOL_STAGE)
+
     result = run_ml_regime_validation(
         symbol=args.symbol,
         train_years=[str(year) for year in args.train_years],
         test_year=str(args.test_year),
+        candidate_id=getattr(args, "candidate_id", None),
     )
+
     report_path = write_ml_regime_validation_report(result.report)
+
     if args.json:
         payload = dict(result.report)
         payload["report_path"] = str(report_path)
         print(json.dumps(payload, indent=2, default=str))
     else:
         _print_text(result.report, report_path)
+
+    # Record the stage result in the validation ladder when enforcement is on.
+    if registration is not None:
+        metadata = {
+            "run_timestamp": datetime.now(tz=timezone.utc).isoformat(),
+            "dataset_identifier": (
+                result.report.get("dataset_identifier")
+                or result.report.get("test_period")
+                or f"{args.symbol}_{args.test_year}_oos"
+            ),
+            STATISTICAL_VALIDITY_KEY: result.report.get(STATISTICAL_VALIDITY_KEY),
+        }
+        record_stage_result(
+            candidate_id=args.candidate_id,
+            stage=PROTOCOL_STAGE,
+            passed=bool(result.report.get("validated")),
+            report_path=str(report_path),
+            metadata=metadata,
+            registration_hash=registration.registration_hash,
+        )
+
     return 0 if result.report.get("status") in {"pass", "warn"} else 1
 
 
