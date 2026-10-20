@@ -119,6 +119,8 @@
       "advanced_analytics.js",
       "advanced_pivot_engine.js",
       "pivot_fdr_integration.js",
+      "enhanced_pivot_display.js",
+      "advanced_ui_components.js",
       "!src/**/*.test.js"
     ],
     "coverageThreshold": {
