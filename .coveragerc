@@ -8,6 +8,10 @@
 #   coverage report
 [run]
 branch = True
+# Inventory unexecuted files under namespace-package dirs (no __init__.py),
+# e.g. scripts/gamma_signal/*, so they appear in the report at 0% rather than
+# being silently omitted.
+include_namespace_packages = True
 source =
     ml
     server

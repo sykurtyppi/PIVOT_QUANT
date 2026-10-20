@@ -95,14 +95,15 @@ jobs:
         run: python -m unittest discover -s tests/unit/test_research_protocol -p "test_*.py" -v
 
   python-coverage:
-    # Report-only: runs the full tests/python suite under coverage and prints a
-    # per-file report for the source packages (see .coveragerc). continue-on-error
-    # keeps it non-blocking — it never gates merges and is intentionally NOT a
-    # required check; the gating full suite runs in "Python Ops Smoke". Its
-    # purpose is to make untested Python surface visible over time.
+    # Report-only coverage across ALL Python suites (tests/python, the
+    # research-protocol unit tests, and the daily-report dedup suite), printing a
+    # per-file report for the source packages (see .coveragerc). No fail_under,
+    # and this job is intentionally NOT a required check, so it never blocks
+    # merges — but there is deliberately NO continue-on-error, so if the
+    # instrumentation itself breaks (install/run/report) the job goes red and the
+    # failure is visible rather than silently green.
     name: Python Coverage (report-only)
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -120,7 +121,9 @@ jobs:
           python -m pip install -r .github/ci/requirements-smoke.txt
           python -m pip install "coverage==7.6.1"
 
-      - name: Run tests under coverage (report-only; does not gate merges)
+      - name: Run tests under coverage (report-only; not a required check)
         run: |
           coverage run -m unittest discover -s tests/python -p "test_*.py"
+          coverage run --append -m unittest discover -s tests/unit/test_research_protocol -p "test_*.py"
+          coverage run --append tests/test_daily_report_dedup.py
           coverage report
