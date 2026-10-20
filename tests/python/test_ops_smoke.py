@@ -13696,7 +13696,12 @@ class OpsSmokeTests(unittest.TestCase):
             "retrain_evidence_pack_protected_keys",
             REPO_ROOT / "scripts" / "run_retrain_evidence_pack.py",
         )
-        for protected in ("RF_MODEL_DIR", "RF_METADATA_DIR", "RF_CANDIDATE_MANIFEST"):
+        for protected in (
+            "RF_MODEL_DIR",
+            "RF_METADATA_DIR",
+            "RF_CANDIDATE_MANIFEST",
+            "MODEL_GOV_OOS_ATTESTATION_KEY",
+        ):
             with self.subTest(key=protected):
                 with self.assertRaises(SystemExit) as ctx:
                     module.parse_pass_through([f"{protected}=/tmp/foo"])
@@ -13835,12 +13840,16 @@ class OpsSmokeTests(unittest.TestCase):
         try:
             out_dir = Path(self.tmp) / "resolver_run"
             out_dir.mkdir(parents=True, exist_ok=True)
-            block = module.invoke_training(
-                out_dir,
-                pass_through_env={},
-                extra_args=[],
-                candidate_manifest_name="manifest_runtime_latest.json",
-            )
+            with patch.dict(
+                os.environ,
+                {module.OOS_ATTESTATION_KEY_ENV: "must-not-reach-training-child"},
+            ):
+                block = module.invoke_training(
+                    out_dir,
+                    pass_through_env={},
+                    extra_args=[],
+                    candidate_manifest_name="manifest_runtime_latest.json",
+                )
         finally:
             module.resolve_training_python = original_resolver
             module.subprocess.run = original_subprocess_run
@@ -13853,6 +13862,9 @@ class OpsSmokeTests(unittest.TestCase):
         self.assertEqual(block["training_python_resolution_source"], fake_source)
         self.assertEqual(block["cmd"][0], fake_python)
         self.assertEqual(block["exit_code"], 0)
+        self.assertNotIn(
+            module.OOS_ATTESTATION_KEY_ENV, captured["kwargs"]["env"]
+        )
 
     def test_resolve_training_python_delegates_to_shared_pybin(self) -> None:
         """The evidence pack's resolver is a thin wrapper over

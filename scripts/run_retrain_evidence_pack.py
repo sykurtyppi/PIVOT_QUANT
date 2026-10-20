@@ -34,6 +34,7 @@ import argparse
 import copy
 import datetime as dt
 import hashlib
+import hmac
 import importlib.util
 import json
 import math
@@ -48,6 +49,9 @@ if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
 SCHEMA_VERSION = 1
+OOS_ATTESTATION_SCHEMA = "pivotquant.oos_evidence_attestation.v1"
+OOS_ATTESTATION_KEY_ENV = "MODEL_GOV_OOS_ATTESTATION_KEY"
+OOS_ATTESTATION_MIN_KEY_BYTES = 32
 
 DEFAULT_ACTIVE_MANIFEST_NAME = (
     os.getenv("RF_ACTIVE_MANIFEST", "manifest_active.json").strip()
@@ -68,7 +72,12 @@ DEFAULT_LIVE_MODEL_DIR = os.getenv("RF_MODEL_DIR", "data/models")
 # --metadata-dir CLI protection: the train script accepts it as absolute,
 # so the env equivalent is the same write-redirect risk.
 PROTECTED_ENV_KEYS = frozenset(
-    {"RF_MODEL_DIR", "RF_METADATA_DIR", "RF_CANDIDATE_MANIFEST"}
+    {
+        "RF_MODEL_DIR",
+        "RF_METADATA_DIR",
+        "RF_CANDIDATE_MANIFEST",
+        OOS_ATTESTATION_KEY_ENV,
+    }
 )
 
 # CLI flags --train-arg is not allowed to forward. argparse takes the last
@@ -78,6 +87,73 @@ PROTECTED_ENV_KEYS = frozenset(
 # for the same reason -- the train script lets it be an absolute path and
 # would otherwise write metadata_v*.json outside the isolated tree.
 PROTECTED_TRAIN_ARGS = frozenset({"--out-dir", "--candidate-manifest", "--metadata-dir"})
+
+
+def _oos_attestation_payload(report: dict) -> bytes:
+    """Canonical report bytes, excluding the attestation envelope itself."""
+    unsigned = copy.deepcopy(report)
+    unsigned.pop("oos_evidence_attestation", None)
+    return json.dumps(
+        unsigned,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        default=str,
+    ).encode("utf-8")
+
+
+def sign_oos_evidence_report(report: dict, key: str) -> dict:
+    """Return a copy authenticated by a key held by the trusted producer.
+
+    The key is never written to the report. Governance verifies this HMAC
+    before trusting any report-controlled OOS observations or provenance.
+    """
+    if (
+        not isinstance(key, str)
+        or len(key.encode("utf-8")) < OOS_ATTESTATION_MIN_KEY_BYTES
+    ):
+        raise ValueError("OOS evidence attestation key must be at least 32 bytes")
+    signed = copy.deepcopy(report)
+    signed.pop("oos_evidence_attestation", None)
+    digest = hmac.new(
+        key.encode("utf-8"), _oos_attestation_payload(signed), hashlib.sha256
+    ).hexdigest()
+    signed["oos_evidence_attestation"] = {
+        "schema": OOS_ATTESTATION_SCHEMA,
+        "algorithm": "hmac-sha256",
+        "report_hmac_sha256": digest,
+    }
+    return signed
+
+
+def verify_oos_evidence_attestation(
+    report: dict, key: str | None = None
+) -> tuple[bool, str]:
+    """Verify that the complete evidence report came from the trusted producer."""
+    envelope = report.get("oos_evidence_attestation")
+    if not isinstance(envelope, dict):
+        return False, "evidence_report_attestation_missing"
+    if (
+        envelope.get("schema") != OOS_ATTESTATION_SCHEMA
+        or envelope.get("algorithm") != "hmac-sha256"
+    ):
+        return False, "evidence_report_attestation_invalid"
+    supplied = envelope.get("report_hmac_sha256")
+    if not isinstance(supplied, str) or len(supplied) != 64:
+        return False, "evidence_report_attestation_invalid"
+    trusted_key = key if key is not None else os.environ.get(OOS_ATTESTATION_KEY_ENV, "")
+    if not trusted_key:
+        return False, "evidence_report_attestation_key_unavailable"
+    if len(trusted_key.encode("utf-8")) < OOS_ATTESTATION_MIN_KEY_BYTES:
+        return False, "evidence_report_attestation_key_too_short"
+    expected = hmac.new(
+        trusted_key.encode("utf-8"),
+        _oos_attestation_payload(report),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(supplied, expected):
+        return False, "evidence_report_attestation_invalid"
+    return True, "evidence_report_attestation_verified"
 
 RF_ENV_KEYS = (
     "RF_TRAIN_EMBARGO_MINUTES",
@@ -478,6 +554,9 @@ def invoke_training(
     candidate_manifest_name: str,
 ) -> dict:
     env = os.environ.copy()
+    # The child training process produces the material to be attested; it must
+    # not possess the wrapper-only authentication key used after it exits.
+    env.pop(OOS_ATTESTATION_KEY_ENV, None)
     env.update(pass_through_env)
     # Re-assert isolation AFTER pass_through_env so a misconfigured caller
     # cannot accidentally redirect artifact writes back to the live model
@@ -1616,6 +1695,17 @@ def main(argv: list[str] | None = None) -> int:
         candidate_manifest_path=candidate_manifest_path,
         candidate_manifest=candidate_manifest,
     )
+    # Authentication is deliberately separate from structural validation.
+    # Only a real successful training invocation may receive the trusted
+    # producer attestation; --skip-training remains useful for diagnostics but
+    # cannot create promotable OOS evidence.
+    attestation_key = os.environ.get(OOS_ATTESTATION_KEY_ENV, "")
+    if (
+        attestation_key
+        and not bool(training_block.get("skipped"))
+        and training_block.get("exit_code") == 0
+    ):
+        report = sign_oos_evidence_report(report, attestation_key)
     report_path.write_text(json.dumps(report, indent=2, default=str))
     print(f"Evidence pack report written to {report_path}")
     _print_readiness_summary(report.get("candidate_readiness") or {})

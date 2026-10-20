@@ -1049,6 +1049,21 @@ def check_oos_validation(
     if not isinstance(report, dict):
         return (False, "evidence_report_not_a_json_object", detail)
 
+    # Strings, timestamps, fold metadata, and even recomputed readiness remain
+    # self-asserted unless the complete report is authenticated by the trusted
+    # evidence producer. Verify this before consuming any report-controlled
+    # OOS content. The explicit --allow-unvalidated-promotion escape hatch is
+    # handled by the caller and remains loud/auditable.
+    try:
+        from run_retrain_evidence_pack import verify_oos_evidence_attestation
+
+        attested, attestation_reason = verify_oos_evidence_attestation(report)
+    except Exception as exc:  # noqa: BLE001
+        return (False, f"evidence_report_attestation_check_failed:{exc}", detail)
+    detail["oos_evidence_attestation"] = attestation_reason
+    if not attested:
+        return (False, attestation_reason, detail)
+
     manifest_path = Path(candidate_manifest_path) if candidate_manifest_path else None
     if manifest_path is None or not manifest_path.is_file():
         return (False, "candidate_manifest_not_available_for_evidence_binding", detail)

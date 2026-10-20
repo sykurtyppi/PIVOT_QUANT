@@ -58,7 +58,10 @@ def daily_rth_ohlc(con, symbol):
     b["d"] = t.dt.date
     mins = t.dt.hour * 60 + t.dt.minute
     b["minute_of_day"] = mins
-    b = b[(mins >= 570) & (mins <= 960) & (b.high >= b.low) & (b.high > 0)]
+    # RTH is half-open: 09:30 <= timestamp < the session close. The later
+    # per-date completeness check applies the exchange-specific close; this
+    # broad prefilter must therefore exclude the regular 16:00 boundary too.
+    b = b[(mins >= 570) & (mins < 960) & (b.high >= b.low) & (b.high > 0)]
     g = b.groupby("d")
     o = pd.DataFrame({"open": g.open.first(), "high": g.high.max(),
                       "low": g.low.min(), "close": g.close.last(),
