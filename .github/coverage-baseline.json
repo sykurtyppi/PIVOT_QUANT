@@ -1,0 +1,10 @@
+{
+  "_comment": "JS coverage high-water mark over src/** (see scripts/check-coverage-ratchet.mjs). These are the CONSERVATIVE MINIMUM percentages observed over several `npm test` runs (fast-check property tests jitter run-to-run), so the required `js` check never reddens on jitter. Raise with `npm run coverage:baseline` only when coverage genuinely improves, and re-confirm the new value is a floor (re-run a few times), not a lucky peak.",
+  "tolerance_pct": 0.75,
+  "metrics": {
+    "statements": 66.16,
+    "branches": 59.42,
+    "functions": 73.16,
+    "lines": 66.85
+  }
+}

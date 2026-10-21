@@ -38,6 +38,22 @@ jobs:
       - name: Run Jest
         run: npm test -- --runInBand
 
+      - name: Check coverage ratchet
+        # Tight gate on top of jest's coarse coverageThreshold floor: fails if
+        # src/** coverage drops below the committed .github/coverage-baseline.json
+        # high-water mark (minus a small jitter tolerance). See
+        # scripts/check-coverage-ratchet.mjs.
+        run: npm run coverage:check
+
+      - name: Upload JS coverage report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: js-coverage
+          path: coverage/
+          retention-days: 14
+          if-no-files-found: warn
+
   python-smoke:
     # Keep this check name stable because main branch protection requires it.
     name: Python Ops Smoke
@@ -127,3 +143,13 @@ jobs:
           coverage run --append -m unittest discover -s tests/unit/test_research_protocol -p "test_*.py"
           coverage run --append tests/test_daily_report_dedup.py
           coverage report
+          coverage xml
+
+      - name: Upload Python coverage report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-coverage
+          path: coverage.xml
+          retention-days: 14
+          if-no-files-found: warn
