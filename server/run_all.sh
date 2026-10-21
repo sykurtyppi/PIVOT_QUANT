@@ -6,6 +6,22 @@ LOG_DIR="${ROOT_DIR}/logs"
 LOCK_DIR="${LOG_DIR}/run_all.lock"
 mkdir -p "${LOG_DIR}"
 
+# Allow operators to pin the dashboard to a patched Node runtime without
+# replacing the system/Homebrew installation. The default preserves existing
+# behavior for development and CI.
+NODE_BIN="${NODE_BIN:-node}"
+if ! command -v "${NODE_BIN}" >/dev/null 2>&1; then
+  echo "[ERROR] Node executable not found: ${NODE_BIN}" >&2
+  exit 1
+fi
+if ! "${NODE_BIN}" -e '
+  const [major, minor, patch] = process.versions.node.split(".").map(Number);
+  process.exit(major === 24 && (minor > 22 || (minor === 22 && patch >= 1)) ? 0 : 1);
+'; then
+  echo "[ERROR] Node 24.22.1 or newer in the Node 24 release line is required; found $("${NODE_BIN}" --version 2>/dev/null || echo unknown)" >&2
+  exit 1
+fi
+
 PIDS=()
 OPTIONAL_PIDS=()
 STARTUP_TIMEOUT_SEC="${STARTUP_TIMEOUT_SEC:-120}"
@@ -436,7 +452,7 @@ fi
 start_service "event_writer" "5002" "false" bash server/run_event_writer.sh
 start_service "gamma_bridge" "5001" "true" bash server/run_gamma_bridge.sh
 start_service "ml_server" "5003" "false" bash server/run_ml_server.sh
-start_service "dashboard" "3000" "false" node server/yahoo_proxy.js
+start_service "dashboard" "3000" "false" "${NODE_BIN}" server/yahoo_proxy.js
 
 verify_service "event_writer" "5002" "http://127.0.0.1:5002/health"
 # gamma_bridge is optional — depends on IBKR Gateway which may not run
