@@ -114,33 +114,15 @@
     "testEnvironment": "node",
     "collectCoverageFrom": [
       "src/**/*.js",
-      "fdr_correction.js",
-      "enhanced_fdr_correction.js",
-      "advanced_analytics.js",
-      "advanced_pivot_engine.js",
-      "pivot_fdr_integration.js",
-      "enhanced_pivot_display.js",
-      "advanced_ui_components.js",
-      "volatility_analysis.js",
-      "weekly_backtest_panel.js",
       "!src/**/*.test.js"
     ],
     "coverageThreshold": {
       "global": {
-        "branches": 45,
-        "functions": 60,
-        "lines": 58,
-        "statements": 58
-      },
-      "./fdr_correction.js": { "branches": 85, "lines": 95 },
-      "./enhanced_fdr_correction.js": { "branches": 60, "lines": 85 },
-      "./advanced_analytics.js": { "branches": 72, "lines": 88 },
-      "./advanced_pivot_engine.js": { "branches": 72, "lines": 90 },
-      "./pivot_fdr_integration.js": { "branches": 60, "lines": 85 },
-      "./enhanced_pivot_display.js": { "branches": 62, "lines": 88 },
-      "./advanced_ui_components.js": { "branches": 45, "lines": 72 },
-      "./volatility_analysis.js": { "branches": 62, "lines": 90 },
-      "./weekly_backtest_panel.js": { "branches": 8, "lines": 12 }
+        "branches": 56,
+        "functions": 70,
+        "lines": 63,
+        "statements": 63
+      }
     },
     "testMatch": [
       "<rootDir>/tests/**/*.test.js"

@@ -1,6 +1,6 @@
 # Root Module Classification
 
-**Status:** classification + recommendation only (no gate change applied here — see [Recommendations](#recommendations)).
+**Status:** classification complete; coverage-gate recommendation (#1) applied in the same change. File archival + doc fixes (#2–#4) left for later, per the owner's decision.
 **Date:** 2026-10-21
 **Scope:** the 15 root-level browser `*.js` modules (repo-root `*.js`, excluding the build configs `eslint.config.js` and `rollup.config.js`).
 
@@ -65,13 +65,13 @@ This is the discipline-contract failure mode in reverse: an authoritative-soundi
 
 ## Impact on the coverage campaign
 
-The per-file floors added for these modules are **regression tests of stat/engine logic, not a production-coverage gate** — they enforce coverage on code that never executes in any served surface. The tests are not worthless as library-level regression guards, but they were mis-targeted as a production gate, and the green numbers give a false sense of production safety. Some floors are high (`fdr_correction` 85/95, `advanced_pivot_engine` 72/90, `volatility_analysis` 62/90) and partly prop up the global threshold.
+The per-file floors added for these modules are **regression tests of stat/engine logic, not a production-coverage gate** — they enforce coverage on code that never executes in any served surface. The tests are not worthless as library-level regression guards, but they were mis-targeted as a production gate, and the green numbers give a false sense of production safety. Some floors are high (`fdr_correction` 85/95, `advanced_pivot_engine` 72/90, `volatility_analysis` 62/90). Note Jest **subtracts** path-keyed files from the global pool (the behaviour the per-file floors were designed around), so these never inflated the global threshold — the global floor was simply left loose (`src/**` was already the global pool, yet the floor sat at branches 45 / lines 58 while real `src/**` coverage is ~66% lines).
 
 ## Recommendations
 
 These are **direction-changing** and are left for a human to land explicitly (per the discipline contract — no archival/gate edit as a side effect of a classification). Suggested staging, lowest-risk first:
 
-1. **Coverage gate (low risk, do first, its own PR).** Drop the nine root-module entries from `collectCoverageFrom` (`package.json:117–125`) and the nine per-file `coverageThreshold` entries (`:135–143`), leaving only `src/**/*.js` (+ the `!src/**/*.test.js` exclusion). Then **recalibrate the global floor** (`:129–134`, currently branches 45 / functions 60 / lines 58 / statements 58): with the legacy modules gone the global number is computed over `src/**` alone and will shift — re-measure and set the floor from the real `src/**` number rather than carrying the inflated legacy figure.
+1. **Coverage gate (low risk).** ✅ **Applied in this change.** Dropped the nine root-module entries from `collectCoverageFrom` and the nine per-file `coverageThreshold` entries, leaving only `src/**/*.js` (+ the `!src/**/*.test.js` exclusion). The global pool was already `src/**` (Jest subtracts path-keyed files), so nothing shifted — but the previously-loose global floor (branches 45 / functions 60 / lines 58 / statements 58) was tightened to an honest ratchet a few points below the measured `src/**` coverage (statements 66.2% / branches 59.6% / functions 73.2% / lines 66.9%): **branches 56 / functions 70 / lines 63 / statements 63**. The nine Jest tests still run and pass (328 tests, 18 suites); they just no longer contribute to the coverage denominator. `npm run lint` and `jest --coverage` both green.
 2. **Archive the files + retire their tests (bigger, separate reviewed PR).** Moving the `.js` files into `archive/` **will break**, and must be handled in the same change: the nine `tests/*.test.js` that import them, and the Python source-text assertions in `tests/python/test_ops_smoke.py` (`:5936` and the `test_fdr_display_modules_guard_missing_global_engines` test) that `read_text()` `alert_system.js`, `pivot_fdr_integration.js`, `enhanced_pivot_display.js`, and `enhanced_fdr_correction.js`. Either relocate/retire those tests or keep the files in place and only do step 1.
 3. **Fix the misleading self-audit.** Update `server/yahoo_proxy.js` `buildRuntimeArchitectureSnapshot()` (note at `~:269`) to describe the real `src/`-backed surface, or it will re-mislead the next audit.
 4. **Update `CLAUDE.md`** "Project Shape" — its JS-half description (`advanced_*.js`, `alert_system.js`, … as the live "institutional-grade pivot point analysis surface") should note these root modules are legacy/archived, not live.
