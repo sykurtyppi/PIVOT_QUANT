@@ -26,6 +26,8 @@
     "docs": "jsdoc -c jsdoc.config.json",
     "benchmark": "node benchmarks/pivot-benchmark.js",
     "validate": "npm run lint && npm run test",
+    "coverage:check": "node scripts/check-coverage-ratchet.mjs",
+    "coverage:baseline": "node scripts/check-coverage-ratchet.mjs --update",
     "prepare": "npm run validate && npm run build",
     "start:dev": "node --experimental-modules examples/development-example.js",
     "start:prod": "node --experimental-modules examples/production-example.js",
@@ -115,6 +117,12 @@
     "collectCoverageFrom": [
       "src/**/*.js",
       "!src/**/*.test.js"
+    ],
+    "coverageReporters": [
+      "text",
+      "text-summary",
+      "json-summary",
+      "lcov"
     ],
     "coverageThreshold": {
       "global": {

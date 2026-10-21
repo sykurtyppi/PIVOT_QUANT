@@ -17,9 +17,11 @@ PIVOT_QUANT has **two coexisting halves**:
 
 ```bash
 # JS suite (Jest)
-npm test                                          # full suite
+npm test                                          # full suite (jest --coverage; emits coverage/ with lcov + coverage-summary.json)
 npm test -- --testNamePattern="<pattern>"          # subset by test name
 npm run test:performance                          # perf tests only
+npm run coverage:check                            # ratchet: fail if src/** coverage fell below .github/coverage-baseline.json (run `npm test` first)
+npm run coverage:baseline                         # ratchet UP: rewrite the baseline from the latest run, then commit it
 
 # Python ops smoke (most ML/research tests live here)
 .venv/bin/python -m unittest discover -s tests/python -p test_ops_smoke.py
@@ -65,6 +67,8 @@ bash scripts/run_retrain_cycle.sh                 # backfill → labels → expo
 GitHub Actions runs three jobs on push to `main` and on PRs: `JS Lint and Test`, `Python Fast Tests`, `Python Ops Smoke`. All three must be green before merging. See `.github/workflows/ci.yml`.
 
 The `Python Ops Smoke` job now runs the **full** `tests/python` discovery (`discover -s tests/python -p "test_*.py"`), not just `test_ops_smoke.py` — its display name is retained for branch-protection check-name stability. A guard inside `test_ops_smoke.py` (`CiPythonDiscoveryPolicyTests`) fails the suite if that step is ever reverted to a partial selector, disabled, or scoped off the default branch.
+
+A fourth job, `Python Coverage (report-only)`, is deliberately **not** a required check (no `fail_under`, never blocks merges). Both it and the `js` job upload machine-readable coverage as workflow artifacts (`python-coverage` → `coverage.xml`; `js-coverage` → the `coverage/` dir with `lcov.info` + `coverage-summary.json`). The `js` job additionally enforces a **coverage ratchet** (`scripts/check-coverage-ratchet.mjs`): a tight gate on top of jest's coarse `coverageThreshold` floor that fails if `src/**` coverage drops below `.github/coverage-baseline.json` (minus a small jitter tolerance). Raise the baseline with `npm run coverage:baseline` when coverage genuinely improves, or re-baseline with justification when code is intentionally removed.
 
 ## Architecture — Python Half
 

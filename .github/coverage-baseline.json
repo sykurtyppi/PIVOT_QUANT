@@ -1,0 +1,10 @@
+{
+  "_comment": "JS coverage high-water mark over src/** (see scripts/check-coverage-ratchet.mjs). Regenerate with `npm run coverage:baseline`; never hand-edit upward past the measured number.",
+  "tolerance_pct": 0.5,
+  "metrics": {
+    "statements": 66.21,
+    "branches": 59.59,
+    "functions": 73.16,
+    "lines": 66.9
+  }
+}
