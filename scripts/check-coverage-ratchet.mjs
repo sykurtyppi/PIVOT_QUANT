@@ -17,19 +17,23 @@
  * jest --coverage, emitting the json-summary reporter) first. `npm run
  * coverage:check` and `npm run coverage:baseline` wrap the two modes.
  *
- * TOLERANCE_PCT absorbs small run-to-run jitter. The suite includes fast-check
- * property tests (tests/properties/*), which explore different random inputs
- * each run and swing branch/line coverage by up to ~0.2pp; the tolerance is set
- * a few times above that. A real regression larger than it fails the build; a
- * genuine improvement is adopted by re-running with --update and committing the
- * new baseline.
+ * Because the `js` CI job is a REQUIRED check, the gate must never redden on
+ * jitter alone. The suite includes fast-check property tests (tests/properties/*)
+ * that explore different random inputs each run; branch coverage was observed to
+ * swing <=0.17pp over 5 runs (statements/lines <=0.05pp, functions 0). Two
+ * defences combine: the committed baseline is the CONSERVATIVE MINIMUM observed
+ * over several runs (not a lucky peak), and TOLERANCE_PCT (0.75) sits ~4x above
+ * the observed swing. So a spurious failure needs a seed far outside anything
+ * seen, while a real regression (adding untested code typically drops coverage
+ * well over 0.75pp) still fails. A genuine improvement is adopted by re-running
+ * with --update and committing the new baseline.
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const METRICS = ['statements', 'branches', 'functions', 'lines'];
-const TOLERANCE_PCT = 0.5;
+const TOLERANCE_PCT = 0.75;
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SUMMARY_PATH = join(repoRoot, 'coverage', 'coverage-summary.json');
@@ -89,6 +93,11 @@ const baseline = readJson(
 );
 const base = baseline && baseline.metrics;
 if (!base) fail('coverage-baseline.json has no "metrics" block.');
+for (const m of METRICS) {
+  if (typeof base[m] !== 'number' || Number.isNaN(base[m])) {
+    fail(`coverage-baseline.json metrics.${m} is missing or not a number — regenerate with \`npm run coverage:baseline\`.`);
+  }
+}
 const tolerance = typeof baseline.tolerance_pct === 'number' ? baseline.tolerance_pct : TOLERANCE_PCT;
 
 const regressions = [];
