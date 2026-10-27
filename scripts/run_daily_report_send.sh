@@ -117,6 +117,8 @@ SCHEDULE_MODE="${ML_REPORT_SCHEDULE_MODE:-}"
 SCHEDULE_MODE_EFFECTIVE="${SCHEDULE_MODE:-manual}"
 FORCE_SEND="${ML_REPORT_FORCE_SEND:-false}"
 FORCE_SEND_LC="$(printf '%s' "${FORCE_SEND}" | tr '[:upper:]' '[:lower:]')"
+GENERATION_ONLY="${ML_REPORT_GENERATION_ONLY:-false}"
+GENERATION_ONLY_LC="$(printf '%s' "${GENERATION_ONLY}" | tr '[:upper:]' '[:lower:]')"
 
 echo "[$(timestamp)] START daily_report_send (${PYTHON_INFO})" >> "${LOG_DIR}/report_delivery.log"
 
@@ -223,7 +225,7 @@ fi
 
 echo "[$(timestamp)] INFO current_et_date=${CURRENT_ET_DATE} report_date=${REPORT_DATE} schedule_mode=${SCHEDULE_MODE:-unset} date_mode=${REPORT_DATE_MODE}" >> "${LOG_DIR}/report_delivery.log"
 
-if [[ "${FORCE_SEND_LC}" != "true" ]]; then
+if [[ "${FORCE_SEND_LC}" != "true" && "${GENERATION_ONLY_LC}" != "true" ]]; then
   if state_has_sent "${REPORT_DATE}" "${SCHEDULE_MODE_EFFECTIVE}"; then
     echo "[$(timestamp)] INFO report already sent for report_date=${REPORT_DATE} schedule_mode=${SCHEDULE_MODE_EFFECTIVE}; skipping" >> "${LOG_DIR}/report_delivery.log"
     exit 0
@@ -244,6 +246,32 @@ if [[ -z "${REPORT_PATH}" || ! -f "${REPORT_PATH}" ]]; then
   exit 1
 fi
 
+# ---------------------------------------------------------------------------
+# Gamma vol-regime signal (non-delivery add-on). Generation-only scheduling
+# needs this snapshot before exiting, while deliberate notification callers run
+# it only after delivery so a network stall cannot hold up the notification.
+# Failures remain non-fatal. Disable with GAMMA_SIGNAL_SKIP=1.
+# ---------------------------------------------------------------------------
+run_gamma_snapshot() {
+  if [[ "${GAMMA_SIGNAL_SKIP:-0}" == "1" ]]; then
+    return 0
+  fi
+  # prefer the .venv that carries yfinance/scipy (gamma_signal deps); fall back to PYTHON
+  GAMMA_PY="${ROOT_DIR}/.venv/bin/python"; [[ -x "${GAMMA_PY}" ]] || GAMMA_PY="${PYTHON}"
+  if "${GAMMA_PY}" "${ROOT_DIR}/scripts/gamma_signal/gex_signal.py" --symbol SPY \
+       >> "${LOG_DIR}/report_delivery.log" 2>&1; then
+    echo "[$(timestamp)] DONE  gamma_signal snapshot" >> "${LOG_DIR}/report_delivery.log"
+  else
+    echo "[$(timestamp)] WARN gamma_signal step failed (non-fatal; check yfinance/network)" >> "${LOG_DIR}/report_delivery.log"
+  fi
+}
+
+if [[ "${GENERATION_ONLY_LC}" == "true" ]]; then
+  run_gamma_snapshot
+  echo "[$(timestamp)] DONE  daily_report_generate_only" >> "${LOG_DIR}/report_delivery.log"
+  exit 0
+fi
+
 SEND_OUTPUT=""
 if SEND_OUTPUT="$("${PYTHON}" "${ROOT_DIR}/scripts/send_daily_report.py" --report "${REPORT_PATH}" --db "${PIVOT_DB_PATH}" 2>&1)"; then
   printf '%s\n' "${SEND_OUTPUT}" >> "${LOG_DIR}/report_delivery.log"
@@ -260,6 +288,8 @@ else
   exit 1
 fi
 
+run_gamma_snapshot
+
 # ---------------------------------------------------------------------------
 # Levels data product (read-only add-on). We only reach here on a trading day
 # after a successful report send, so it inherits this wrapper's trading-day gate
@@ -274,23 +304,5 @@ if [[ "${LEVELS_PRODUCT_SKIP:-0}" != "1" ]]; then
     echo "[$(timestamp)] DONE  levels_product email" >> "${LOG_DIR}/report_delivery.log"
   else
     echo "[$(timestamp)] WARN levels_product step failed (non-fatal)" >> "${LOG_DIR}/report_delivery.log"
-  fi
-fi
-
-# ---------------------------------------------------------------------------
-# Gamma vol-regime signal (read-only add-on). Reached only on a trading day, so
-# it inherits the trading-day gate. Appends today's free-chain GEX snapshot to
-# data/gamma_signal.sqlite so the regime calibrates over ~20 live days. Fully
-# guarded — needs network (yfinance) and the gamma_signal deps; any failure is
-# logged and ignored. Disable with GAMMA_SIGNAL_SKIP=1.
-# ---------------------------------------------------------------------------
-if [[ "${GAMMA_SIGNAL_SKIP:-0}" != "1" ]]; then
-  # prefer the .venv that carries yfinance/scipy (gamma_signal deps); fall back to PYTHON
-  GAMMA_PY="${ROOT_DIR}/.venv/bin/python"; [[ -x "${GAMMA_PY}" ]] || GAMMA_PY="${PYTHON}"
-  if "${GAMMA_PY}" "${ROOT_DIR}/scripts/gamma_signal/gex_signal.py" --symbol SPY \
-       >> "${LOG_DIR}/report_delivery.log" 2>&1; then
-    echo "[$(timestamp)] DONE  gamma_signal snapshot" >> "${LOG_DIR}/report_delivery.log"
-  else
-    echo "[$(timestamp)] WARN gamma_signal step failed (non-fatal; check yfinance/network)" >> "${LOG_DIR}/report_delivery.log"
   fi
 fi

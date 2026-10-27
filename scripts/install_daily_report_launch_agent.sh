@@ -13,6 +13,7 @@ CLOSE_MINUTE="${ML_REPORT_CLOSE_MINUTE:-10}"
 MORNING_HOUR="${ML_REPORT_MORNING_HOUR:-8}"
 MORNING_MINUTE="${ML_REPORT_MORNING_MINUTE:-5}"
 REPORT_DATE_MODE="${ML_REPORT_REPORT_DATE_MODE:-auto}"
+GENERATION_ONLY="${ML_REPORT_GENERATION_ONLY:-true}"
 
 mkdir -p "${LOG_DIR}" "${HOME}/Library/LaunchAgents"
 
@@ -184,6 +185,8 @@ ${SCHEDULE_BLOCK}
     <string>${SCHEDULE_MODE}</string>
     <key>ML_REPORT_REPORT_DATE_MODE</key>
     <string>${REPORT_DATE_MODE}</string>
+    <key>ML_REPORT_GENERATION_ONLY</key>
+    <string>${GENERATION_ONLY}</string>
   </dict>
 </dict>
 </plist>
