@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import math
 import sys
+import tempfile
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -44,17 +47,253 @@ class RuntimeReadinessTests(unittest.TestCase):
         self.assertIn("ML governance identity is not verified", errors)
         self.assertIn("ML runtime has no loaded models", errors)
 
-    def test_ml_health_accepts_governed_stale_runtime_with_models(self) -> None:
+    @staticmethod
+    def _ready_ml_health(**overrides: object) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "status": "ok",
+            "runtime_identity": {"governance_verified": True},
+            "models": {"reject": [5, 15, 30, 60]},
+            "serving_state": {
+                "state": "active",
+                "source": "file",
+                "load_error": None,
+            },
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_ml_health_rejects_stale_active_model(self) -> None:
+        errors = self.module.validate_ml_health(
+            self._ready_ml_health(status="stale")
+        )
+        self.assertEqual(errors, ["ML active model is stale"])
+
+    def test_ml_health_distinguishes_intentionally_dormant_model(self) -> None:
+        errors = self.module.validate_ml_health(
+            self._ready_ml_health(
+                status="stale",
+                serving_state={
+                    "state": "dormant_audit_fail",
+                    "source": "file",
+                    "load_error": None,
+                },
+            )
+        )
         self.assertEqual(
-            self.module.validate_ml_health(
-                {
-                    "status": "stale",
-                    "runtime_identity": {"governance_verified": True},
-                    "models": {"reject": [5, 15, 30, 60]},
+            errors,
+            ["ML serving is intentionally dormant: dormant_audit_fail"],
+        )
+
+    def test_ml_health_rejects_missing_serving_state_file(self) -> None:
+        errors = self.module.validate_ml_health(
+            self._ready_ml_health(
+                serving_state={
+                    "state": "active",
+                    "source": "default_missing_file",
+                    "load_error": None,
                 }
+            )
+        )
+        self.assertEqual(errors, ["ML serving state file is missing"])
+
+    def test_ml_health_rejects_missing_serving_state_payload(self) -> None:
+        health = self._ready_ml_health()
+        del health["serving_state"]
+        self.assertEqual(
+            self.module.validate_ml_health(health),
+            ["ML serving state is missing"],
+        )
+
+    def test_ml_health_rejects_untrusted_serving_state_source(self) -> None:
+        errors = self.module.validate_ml_health(
+            self._ready_ml_health(
+                serving_state={
+                    "state": "active",
+                    "source": "",
+                    "load_error": None,
+                }
+            )
+        )
+        self.assertEqual(errors, ["ML serving state source is invalid: missing"])
+
+    def test_ml_health_rejects_invalid_serving_state_file(self) -> None:
+        errors = self.module.validate_ml_health(
+            self._ready_ml_health(
+                serving_state={
+                    "state": "dormant_data_quality",
+                    "source": "invalid_file",
+                    "load_error": "schema_invalid: state_invalid",
+                }
+            )
+        )
+        self.assertEqual(errors, ["ML serving state file is invalid"])
+
+    def test_ml_health_accepts_fresh_active_governed_runtime(self) -> None:
+        self.assertEqual(
+            self.module.validate_ml_health(self._ready_ml_health()),
+            [],
+        )
+
+    def test_alert_freshness_requires_recent_semantic_checks(self) -> None:
+        now_ts = 1_800_000_000
+        self.assertEqual(
+            self.module.validate_alert_freshness(
+                {
+                    "services": {
+                        "ml": {"last_check_ts": now_ts - 30},
+                        "collector": {"last_check_ts": now_ts - 45},
+                    }
+                },
+                now_ts=now_ts,
+                max_age_sec=120,
             ),
             [],
         )
+
+    def test_alert_freshness_rejects_stale_service_checks(self) -> None:
+        now_ts = 1_800_000_000
+        errors = self.module.validate_alert_freshness(
+            {
+                "services": {
+                    "ml": {"last_check_ts": now_ts - 121},
+                    "collector": {"last_check_ts": now_ts - 10},
+                }
+            },
+            now_ts=now_ts,
+            max_age_sec=120,
+        )
+        self.assertEqual(errors, ["alert checks are stale for: ml"])
+
+    def test_alert_freshness_rejects_missing_or_invalid_state(self) -> None:
+        self.assertEqual(
+            self.module.validate_alert_freshness(
+                {}, now_ts=1_800_000_000, max_age_sec=120
+            ),
+            ["alert state has no service checks"],
+        )
+        self.assertEqual(
+            self.module.validate_alert_freshness(
+                {"services": {"ml": {"last_check_ts": "bad"}}},
+                now_ts=1_800_000_000,
+                max_age_sec=120,
+            ),
+            [
+                "alert check timestamp is invalid for: ml",
+                "alert check is missing for: collector",
+            ],
+        )
+        self.assertEqual(
+            self.module.validate_alert_freshness(
+                {"services": {"ml": {"last_check_ts": float("inf")}}},
+                now_ts=1_800_000_000,
+                max_age_sec=120,
+            ),
+            [
+                "alert check timestamp is invalid for: ml",
+                "alert check is missing for: collector",
+            ],
+        )
+
+    def test_run_checks_includes_alert_freshness_and_scores_only_ready_ml(self) -> None:
+        now_ts = 1_800_000_000
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            alert_state_path = Path(tmp_dir) / "health_alert_state.json"
+            alert_state_path.write_text(
+                json.dumps(
+                    {
+                        "services": {
+                            "ml": {"last_check_ts": now_ts - 121},
+                            "collector": {"last_check_ts": now_ts - 10},
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            responses = [
+                self._ready_ml_health(
+                    runtime_identity={
+                        "governance_verified": True,
+                        "active_version": "v001",
+                    }
+                ),
+                {"status": "ok"},
+                {
+                    "status": "ok",
+                    "model_version": "v001",
+                    "scores": {"prob_reject_5m": 0.4},
+                    "signals": {"signal_5m": "no_edge"},
+                },
+            ]
+            with mock.patch.object(
+                self.module, "_request_json", side_effect=responses
+            ) as request_json:
+                errors = self.module.run_checks(
+                    ml_base_url="http://127.0.0.1:5003",
+                    collector_url="http://127.0.0.1:5004/health",
+                    timeout=1.0,
+                    alert_state_path=alert_state_path,
+                    alert_max_age_sec=120,
+                    now_ts=now_ts,
+                )
+
+        self.assertEqual(errors, ["alert checks are stale for: ml"])
+        self.assertEqual(request_json.call_count, 3)
+
+    def test_run_checks_does_not_score_intentionally_dormant_ml(self) -> None:
+        now_ts = 1_800_000_000
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            alert_state_path = Path(tmp_dir) / "health_alert_state.json"
+            alert_state_path.write_text(
+                json.dumps(
+                    {
+                        "services": {
+                            "ml": {"last_check_ts": now_ts - 10},
+                            "collector": {"last_check_ts": now_ts - 10},
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            responses = [
+                self._ready_ml_health(
+                    status="stale",
+                    serving_state={
+                        "state": "dormant_audit_fail",
+                        "source": "file",
+                        "load_error": None,
+                    },
+                ),
+                {"status": "ok"},
+            ]
+            with mock.patch.object(
+                self.module, "_request_json", side_effect=responses
+            ) as request_json:
+                errors = self.module.run_checks(
+                    ml_base_url="http://127.0.0.1:5003",
+                    collector_url="http://127.0.0.1:5004/health",
+                    timeout=1.0,
+                    alert_state_path=alert_state_path,
+                    alert_max_age_sec=120,
+                    now_ts=now_ts,
+                )
+
+        self.assertEqual(
+            errors, ["ML serving is intentionally dormant: dormant_audit_fail"]
+        )
+        self.assertEqual(request_json.call_count, 2)
+
+    def test_parse_args_reads_alert_readiness_environment(self) -> None:
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "ML_READINESS_ALERT_STATE_FILE": "/tmp/alert-state.json",
+                "ML_READINESS_ALERT_MAX_AGE_SEC": "240",
+            },
+            clear=False,
+        ):
+            args = self.module.parse_args([])
+        self.assertEqual(args.alert_state_path, Path("/tmp/alert-state.json"))
+        self.assertEqual(args.alert_max_age_sec, 240)
 
     def test_collector_health_requires_ok_status(self) -> None:
         self.assertEqual(

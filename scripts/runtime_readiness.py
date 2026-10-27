@@ -10,6 +10,7 @@ import math
 import os
 import re
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,9 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 ROOT_DIR = Path(__file__).resolve().parents[1]
 SCORE_KEY_PATTERN = re.compile(r"^prob_(?:reject|break)_(\d+)m$")
 VALID_SIGNAL_VALUES = {"break", "reject", "no_edge"}
+DEFAULT_ALERT_STATE_PATH = ROOT_DIR / "logs" / "health_alert_state.json"
+DEFAULT_ALERT_MAX_AGE_SEC = 180
+REQUIRED_ALERT_SERVICES = ("ml", "collector")
 
 
 class _NoRedirectHandler(HTTPRedirectHandler):
@@ -33,8 +37,37 @@ def validate_ml_health(payload: object) -> list[str]:
         return ["ML health response is not a JSON object"]
 
     errors: list[str] = []
-    status = str(payload.get("status") or "missing")
-    if status not in {"ok", "stale"}:
+    status = str(payload.get("status") or "missing").strip().lower()
+
+    serving_state = payload.get("serving_state")
+    serving_ready = False
+    intentionally_dormant = False
+    if not isinstance(serving_state, dict):
+        errors.append("ML serving state is missing")
+    else:
+        state = str(serving_state.get("state") or "").strip().lower()
+        source = str(serving_state.get("source") or "").strip().lower()
+        load_error = serving_state.get("load_error")
+        if source == "default_missing_file":
+            errors.append("ML serving state file is missing")
+        elif source == "invalid_file" or load_error:
+            errors.append("ML serving state file is invalid")
+        elif source != "file":
+            errors.append(f"ML serving state source is invalid: {source or 'missing'}")
+        elif state == "active":
+            serving_ready = True
+        elif state.startswith("dormant_") or state == "manual_pause":
+            intentionally_dormant = True
+            errors.append(f"ML serving is intentionally dormant: {state}")
+        else:
+            errors.append(f"ML serving state is invalid: {state or 'missing'}")
+
+    if serving_ready:
+        if status == "stale":
+            errors.append("ML active model is stale")
+        elif status != "ok":
+            errors.append(f"ML status is {status}")
+    elif not intentionally_dormant and status not in {"ok", "stale"}:
         errors.append(f"ML status is {status}")
 
     runtime_identity = payload.get("runtime_identity")
@@ -50,6 +83,47 @@ def validate_ml_health(payload: object) -> list[str]:
     )
     if not has_models:
         errors.append("ML runtime has no loaded models")
+    return errors
+
+
+def validate_alert_freshness(
+    payload: object, *, now_ts: int, max_age_sec: int
+) -> list[str]:
+    if not isinstance(payload, dict):
+        return ["alert state is not a JSON object"]
+    services = payload.get("services")
+    if not isinstance(services, dict) or not services:
+        return ["alert state has no service checks"]
+
+    invalid: list[str] = []
+    missing: list[str] = []
+    stale: list[str] = []
+    for name in REQUIRED_ALERT_SERVICES:
+        service = services.get(name)
+        if not isinstance(service, dict):
+            missing.append(name)
+            continue
+        raw_ts = service.get("last_check_ts")
+        if isinstance(raw_ts, bool) or not isinstance(raw_ts, (int, float, str)):
+            invalid.append(name)
+            continue
+        try:
+            checked_ts = int(raw_ts)
+        except (TypeError, ValueError, OverflowError):
+            invalid.append(name)
+            continue
+        if checked_ts <= 0 or checked_ts > now_ts:
+            invalid.append(name)
+        elif now_ts - checked_ts > max_age_sec:
+            stale.append(name)
+
+    errors: list[str] = []
+    if invalid:
+        errors.append(f"alert check timestamp is invalid for: {', '.join(invalid)}")
+    if missing:
+        errors.append(f"alert check is missing for: {', '.join(missing)}")
+    if stale:
+        errors.append(f"alert checks are stale for: {', '.join(stale)}")
     return errors
 
 
@@ -206,14 +280,25 @@ def _request_json(
         raise RuntimeError(f"invalid JSON from {url}") from exc
 
 
-def run_checks(*, ml_base_url: str, collector_url: str, timeout: float) -> list[str]:
+def run_checks(
+    *,
+    ml_base_url: str,
+    collector_url: str,
+    timeout: float,
+    alert_state_path: Path = DEFAULT_ALERT_STATE_PATH,
+    alert_max_age_sec: int = DEFAULT_ALERT_MAX_AGE_SEC,
+    now_ts: int | None = None,
+) -> list[str]:
     errors: list[str] = []
     token = os.getenv("ML_WRITE_AUTH_TOKEN") or _env_file_value("ML_WRITE_AUTH_TOKEN")
     active_version = ""
+    ml_ready = False
 
     try:
         ml_health = _request_json(f"{ml_base_url.rstrip('/')}/health", timeout=timeout)
-        errors.extend(validate_ml_health(ml_health))
+        ml_errors = validate_ml_health(ml_health)
+        errors.extend(ml_errors)
+        ml_ready = not ml_errors
         if isinstance(ml_health, dict):
             runtime_identity = ml_health.get("runtime_identity")
             if isinstance(runtime_identity, dict):
@@ -229,31 +314,67 @@ def run_checks(*, ml_base_url: str, collector_url: str, timeout: float) -> list[
     except RuntimeError as exc:
         errors.append(str(exc))
 
+    if ml_ready:
+        try:
+            score_url = f"{ml_base_url.rstrip('/')}/score"
+            _require_loopback_url(score_url)
+            score = _request_json(
+                score_url,
+                timeout=timeout,
+                payload={"event": build_readiness_event()},
+                token=token,
+            )
+            errors.extend(
+                validate_score_response(score, expected_model_version=active_version)
+            )
+        except (RuntimeError, ValueError) as exc:
+            errors.append(str(exc))
+
     try:
-        score_url = f"{ml_base_url.rstrip('/')}/score"
-        _require_loopback_url(score_url)
-        score = _request_json(
-            score_url,
-            timeout=timeout,
-            payload={"event": build_readiness_event()},
-            token=token,
-        )
+        alert_state = json.loads(alert_state_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        errors.append(f"alert state file is missing: {alert_state_path}")
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        errors.append(f"alert state file is invalid: {type(exc).__name__}")
+    else:
         errors.extend(
-            validate_score_response(score, expected_model_version=active_version)
+            validate_alert_freshness(
+                alert_state,
+                now_ts=int(time.time()) if now_ts is None else now_ts,
+                max_age_sec=alert_max_age_sec,
+            )
         )
-    except (RuntimeError, ValueError) as exc:
-        errors.append(str(exc))
 
     return errors
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    alert_state_path = (
+        os.getenv("ML_READINESS_ALERT_STATE_FILE")
+        or _env_file_value("ML_READINESS_ALERT_STATE_FILE")
+        or str(DEFAULT_ALERT_STATE_PATH)
+    )
+    alert_max_age_sec = (
+        os.getenv("ML_READINESS_ALERT_MAX_AGE_SEC")
+        or _env_file_value("ML_READINESS_ALERT_MAX_AGE_SEC")
+        or str(DEFAULT_ALERT_MAX_AGE_SEC)
+    )
     parser.add_argument("--ml-base-url", default="http://127.0.0.1:5003")
     parser.add_argument(
         "--collector-url", default="http://127.0.0.1:5004/health"
     )
     parser.add_argument("--timeout", type=float, default=5.0)
+    parser.add_argument(
+        "--alert-state-path",
+        type=Path,
+        default=Path(alert_state_path),
+    )
+    parser.add_argument(
+        "--alert-max-age-sec",
+        type=int,
+        default=int(alert_max_age_sec),
+    )
     return parser.parse_args(argv)
 
 
@@ -263,12 +384,17 @@ def main(argv: list[str] | None = None) -> int:
         ml_base_url=args.ml_base_url,
         collector_url=args.collector_url,
         timeout=max(0.1, args.timeout),
+        alert_state_path=args.alert_state_path,
+        alert_max_age_sec=max(1, args.alert_max_age_sec),
     )
     if errors:
         for error in errors:
             print(f"[ERR] {error}", file=sys.stderr)
         return 1
-    print("[OK] ML governance, loaded models, collector, and live scoring verified")
+    print(
+        "[OK] ML serving state/freshness, loaded models, collector, live scoring, "
+        "and alert-check freshness verified"
+    )
     return 0
 
 
