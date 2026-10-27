@@ -6,10 +6,10 @@ These rules apply to the entire repository.
 
 - Work in an isolated checkout or worktree; never repurpose a user's active checkout.
 - Use `npm ci`; the root `package-lock.json` is authoritative for JavaScript dependencies.
-- For a clean checkout, create the repository-local Python 3.11 environment and install the pinned runtime/smoke dependencies before running Python checks:
+- For a clean checkout, create the repository-local Python 3.11 environment and install the pinned smoke-test dependencies before running Python checks. The smoke requirements include the runtime requirements and test-only packages used by the canonical suite:
   ```bash
   python3.11 -m venv .venv
-  .venv/bin/python -m pip install -r requirements-runtime.txt
+  .venv/bin/python -m pip install -r .github/ci/requirements-smoke.txt
   ```
   `scripts/_pybin_exec.sh` (and therefore `npm run ml:test:smoke`) follows the repository resolver order: an explicit `PYTHON_BIN`, then `.venv313`, then `.venv`, then a compatible system `python3`. In a clean checkout with no higher-precedence override, it selects the `.venv` created above.
 - Python utilities must run through `scripts/_pybin_exec.sh` and their documented environment. Do not assume a bare `python` command or mutate the operator's environment.
