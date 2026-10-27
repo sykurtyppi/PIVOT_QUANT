@@ -658,6 +658,7 @@ class OpsSmokeTests(unittest.TestCase):
         report_date = "2026-02-18"
         env = {
             "ML_REPORT_FAKE_ET_DATE": report_date,
+            "ML_REPORT_GENERATION_ONLY": "false",
             "ML_REPORT_NOTIFY_CHANNELS": "none",
             "ML_REPORT_REPORT_DATE": report_date,
             "ML_REPORT_SCHEDULE_MODE": "close",

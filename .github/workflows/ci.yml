@@ -77,6 +77,11 @@ jobs:
       - name: Run full Python test suite
         run: python -m unittest discover -s tests/python -p "test_*.py" -v
 
+      - name: Run daily-report scheduling and transport regressions
+        run: |
+          python tests/test_daily_report_dedup.py
+          python tests/test_report_delivery_transport.py
+
       - name: Run reload/score stress harness self-test
         run: python scripts/stress_ml_reload_score.py --self-test --duration-sec 1.5 --score-workers 3 --reload-interval-ms 80 --fail-on-error
 
@@ -142,6 +147,7 @@ jobs:
           coverage run -m unittest discover -s tests/python -p "test_*.py"
           coverage run --append -m unittest discover -s tests/unit/test_research_protocol -p "test_*.py"
           coverage run --append tests/test_daily_report_dedup.py
+          coverage run --append tests/test_report_delivery_transport.py
           coverage report
           coverage xml
 
