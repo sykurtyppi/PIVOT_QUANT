@@ -1414,7 +1414,16 @@ def build_full_email_body(summary: str, report_text: str, log_tail_text: str | N
 
 def is_placeholder_value(value: str) -> bool:
     stripped = value.strip()
-    return len(stripped) >= 2 and stripped.startswith("<") and stripped.endswith(">")
+    normalized = stripped.casefold()
+    if len(stripped) >= 2 and stripped.startswith("<") and stripped.endswith(">"):
+        return True
+    if normalized in {
+        "you@example.com",
+        "your_app_password",
+        "replace_with_app_password",
+    }:
+        return True
+    return normalized == "https://your-webhook-endpoint"
 
 
 def send_email(
@@ -1443,6 +1452,7 @@ def send_email(
     if any(is_placeholder_value(recipient) for recipient in recipients):
         placeholder_fields.append("ML_REPORT_EMAIL_TO")
     for field, value in (
+        ("ML_REPORT_SMTP_HOST", host),
         ("ML_REPORT_SMTP_USER", username),
         ("ML_REPORT_SMTP_PASS", password),
         ("ML_REPORT_EMAIL_FROM", sender),
@@ -1534,6 +1544,8 @@ def send_webhook(
 ) -> tuple[bool, str]:
     if not url:
         return False, "webhook: ML_REPORT_WEBHOOK_URL not set"
+    if is_placeholder_value(url):
+        return False, "webhook: placeholder configuration in ML_REPORT_WEBHOOK_URL"
 
     payload: dict[str, Any] = {
         "subject": subject,

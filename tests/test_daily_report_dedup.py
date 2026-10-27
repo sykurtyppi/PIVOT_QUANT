@@ -25,6 +25,7 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from typing import Mapping
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PYTHON = str(Path(sys.executable).resolve())
@@ -141,7 +142,7 @@ def _make_stub_scripts_dir(tmp: Path, report_path: Path) -> Path:
 
 
 def _run_wrapper(
-    env_overrides: dict[str, str],
+    env_overrides: Mapping[str, str | None],
     tmp: Path,
 ) -> subprocess.CompletedProcess[str]:
     """Run run_daily_report_send.sh inside a sandboxed tmp root.
@@ -225,7 +226,11 @@ def _run_wrapper(
     env["ML_REPORT_ENV_FILE"] = "/dev/null"
     # Most tests below exercise the retained low-level delivery path explicitly.
     env["ML_REPORT_GENERATION_ONLY"] = "false"
-    env.update(env_overrides)
+    for key, value in env_overrides.items():
+        if value is None:
+            env.pop(key, None)
+        else:
+            env[key] = value
 
     return subprocess.run(
         ["bash", str(wrapper_copy)],
@@ -438,11 +443,91 @@ class TestCalendarGate(unittest.TestCase):
             log_text = (tmp / "logs" / "report_delivery.log").read_text(encoding="utf-8")
             self.assertIn("DONE  daily_report_generate_only", log_text)
 
+    def test_wrapper_default_preserves_deliberate_notification_callers(self) -> None:
+        """Calling the notification wrapper without an override must still send."""
+        with tempfile.TemporaryDirectory(prefix="pivotquant_test_") as raw_tmp:
+            tmp = Path(raw_tmp)
+            result = _run_wrapper(
+                {
+                    "ML_REPORT_FAKE_ET_DATE": "2026-05-14",
+                    "ML_REPORT_REPORT_DATE": "2026-05-14",
+                    "ML_REPORT_SCHEDULE_MODE": "close",
+                    "ML_REPORT_FORCE_SEND": "false",
+                    "ML_REPORT_GENERATION_ONLY": None,
+                },
+                tmp,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(
+                (tmp / "SEND_CALLED").exists(),
+                "the wrapper's default must preserve explicit notification entry points",
+            )
+
+    def test_notification_mode_delivers_before_gamma_snapshot(self) -> None:
+        """A stalled gamma collector must not sit ahead of deliberate delivery."""
+        with tempfile.TemporaryDirectory(prefix="pivotquant_test_") as raw_tmp:
+            tmp = Path(raw_tmp)
+            gamma_dir = tmp / "scripts" / "gamma_signal"
+            gamma_dir.mkdir(parents=True)
+            gamma_script = gamma_dir / "gex_signal.py"
+            gamma_script.write_text(
+                "from pathlib import Path\n"
+                f"root = Path(r'{tmp}')\n"
+                "if (root / 'SEND_CALLED').exists():\n"
+                "    (root / 'GAMMA_SAW_SEND').touch()\n",
+                encoding="utf-8",
+            )
+            result = _run_wrapper(
+                {
+                    "ML_REPORT_FAKE_ET_DATE": "2026-05-14",
+                    "ML_REPORT_REPORT_DATE": "2026-05-14",
+                    "ML_REPORT_SCHEDULE_MODE": "close",
+                    "ML_REPORT_FORCE_SEND": "false",
+                    "ML_REPORT_GENERATION_ONLY": "false",
+                    "LEVELS_PRODUCT_SKIP": "1",
+                },
+                tmp,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue((tmp / "SEND_CALLED").exists())
+            self.assertTrue(
+                (tmp / "GAMMA_SAW_SEND").exists(),
+                "notification mode must complete delivery before running gamma collection",
+            )
+
+    def test_generation_only_mode_still_runs_gamma_snapshot(self) -> None:
+        """Disabling delivery must not stop non-delivery calibration collection."""
+        with tempfile.TemporaryDirectory(prefix="pivotquant_test_") as raw_tmp:
+            tmp = Path(raw_tmp)
+            gamma_dir = tmp / "scripts" / "gamma_signal"
+            gamma_dir.mkdir(parents=True)
+            gamma_script = gamma_dir / "gex_signal.py"
+            gamma_script.write_text(
+                "from pathlib import Path\n"
+                f"Path(r'{tmp / 'GAMMA_CALLED'}').touch()\n",
+                encoding="utf-8",
+            )
+            result = _run_wrapper(
+                {
+                    "ML_REPORT_FAKE_ET_DATE": "2026-05-14",
+                    "ML_REPORT_REPORT_DATE": "2026-05-14",
+                    "ML_REPORT_SCHEDULE_MODE": "close",
+                    "ML_REPORT_FORCE_SEND": "false",
+                    "ML_REPORT_GENERATION_ONLY": "true",
+                },
+                tmp,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(
+                (tmp / "GAMMA_CALLED").exists(),
+                "generation-only mode must retain the daily gamma calibration snapshot",
+            )
+
     def test_launch_agent_defaults_to_generation_only_mode(self) -> None:
         installer = (REPO_ROOT / "scripts" / "install_daily_report_launch_agent.sh").read_text(encoding="utf-8")
         wrapper = (REPO_ROOT / "scripts" / "run_daily_report_send.sh").read_text(encoding="utf-8")
         self.assertIn('GENERATION_ONLY="${ML_REPORT_GENERATION_ONLY:-true}"', installer)
-        self.assertIn('GENERATION_ONLY="${ML_REPORT_GENERATION_ONLY:-true}"', wrapper)
+        self.assertIn('GENERATION_ONLY="${ML_REPORT_GENERATION_ONLY:-false}"', wrapper)
         self.assertIn("<key>ML_REPORT_GENERATION_ONLY</key>", installer)
         self.assertIn("<string>${GENERATION_ONLY}</string>", installer)
 

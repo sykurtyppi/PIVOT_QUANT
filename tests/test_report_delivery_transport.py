@@ -55,6 +55,57 @@ class TestReportDeliveryTransport(unittest.TestCase):
         self.assertIn("placeholder", detail.lower())
         smtp.assert_not_called()
 
+    def test_email_rejects_documented_placeholder_values_before_smtp(self) -> None:
+        env = {
+            "ML_REPORT_SMTP_HOST": "smtp.gmail.com",
+            "ML_REPORT_SMTP_PORT": "587",
+            "ML_REPORT_SMTP_USER": "you@example.com",
+            "ML_REPORT_SMTP_PASS": "your_app_password",
+            "ML_REPORT_EMAIL_FROM": "you@example.com",
+        }
+        with patch.dict(os.environ, env, clear=False), patch.object(
+            self.sender.smtplib, "SMTP"
+        ) as smtp:
+            ok, detail = self.sender.send_email(
+                recipients=["you@example.com"],
+                subject="subject",
+                body_text="body",
+                report_text="# report",
+                report_path=Path("report.md"),
+                log_tail_text=None,
+                dry_run=False,
+            )
+
+        self.assertFalse(ok)
+        self.assertIn("placeholder", detail.lower())
+        smtp.assert_not_called()
+
+    def test_webhook_rejects_documented_placeholder_before_network(self) -> None:
+        with patch.object(self.sender.request, "urlopen") as urlopen:
+            ok, detail = self.sender.send_webhook(
+                url="https://your-webhook-endpoint",
+                subject="subject",
+                body_summary="summary",
+                report_path=Path("report.md"),
+                dry_run=False,
+            )
+
+        self.assertFalse(ok)
+        self.assertIn("placeholder", detail.lower())
+        urlopen.assert_not_called()
+
+    def test_webhook_accepts_realistic_custom_domain_in_dry_run(self) -> None:
+        ok, detail = self.sender.send_webhook(
+            url="https://your-company.example/hooks/report",
+            subject="subject",
+            body_summary="summary",
+            report_path=Path("report.md"),
+            dry_run=True,
+        )
+
+        self.assertTrue(ok, detail)
+        self.assertIn("dry-run", detail)
+
     def test_imessage_rejects_placeholder_recipient_before_osascript(self) -> None:
         with patch.object(self.sender.subprocess, "run") as run:
             ok, detail = self.sender.send_imessage(
