@@ -634,6 +634,26 @@ def parse_candles(payload: dict) -> list[dict]:
     return normalized
 
 
+def normalize_candles_to_interval(candles: list[dict], interval_sec: int) -> list[dict]:
+    """Snap provider timestamps to their bar grid and keep the latest value per bucket.
+
+    Some providers timestamp the still-open candle with the current wall-clock
+    second. Persisting that timestamp creates a second, off-grid row beside the
+    finalized candle and makes otherwise complete label windows fail coverage.
+    """
+    interval_sec = int(interval_sec)
+    if interval_sec <= 0:
+        raise ValueError("interval_sec must be positive")
+
+    by_timestamp: dict[int, dict] = {}
+    for candle in candles:
+        normalized = dict(candle)
+        raw_ts = int(normalized["time"])
+        normalized["time"] = raw_ts - (raw_ts % interval_sec)
+        by_timestamp[normalized["time"]] = normalized
+    return [by_timestamp[ts] for ts in sorted(by_timestamp)]
+
+
 def _to_float(value):
     try:
         # Reject bool: float(True)==1.0 is finite and would slip past the
@@ -2126,7 +2146,7 @@ def main() -> None:
         try:
             log.info("Processing %s (interval=%s, range=%s)", symbol, args.interval, range_str)
             payload, source = fetch_market(symbol, args.interval, range_str, args.source)
-            candles = parse_candles(payload)
+            candles = normalize_candles_to_interval(parse_candles(payload), interval_sec)
             if not candles:
                 log.warning("No candles for %s. Skipping.", symbol)
                 continue
