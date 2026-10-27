@@ -1412,6 +1412,11 @@ def build_full_email_body(summary: str, report_text: str, log_tail_text: str | N
     return "\n\n".join(parts)
 
 
+def is_placeholder_value(value: str) -> bool:
+    stripped = value.strip()
+    return len(stripped) >= 2 and stripped.startswith("<") and stripped.endswith(">")
+
+
 def send_email(
     recipients: list[str],
     subject: str,
@@ -1434,6 +1439,18 @@ def send_email(
         return False, "email: ML_REPORT_SMTP_HOST not set"
     if not sender:
         return False, "email: ML_REPORT_EMAIL_FROM or ML_REPORT_SMTP_USER must be set"
+    placeholder_fields = []
+    if any(is_placeholder_value(recipient) for recipient in recipients):
+        placeholder_fields.append("ML_REPORT_EMAIL_TO")
+    for field, value in (
+        ("ML_REPORT_SMTP_USER", username),
+        ("ML_REPORT_SMTP_PASS", password),
+        ("ML_REPORT_EMAIL_FROM", sender),
+    ):
+        if is_placeholder_value(value):
+            placeholder_fields.append(field)
+    if placeholder_fields:
+        return False, "email: placeholder configuration in " + ", ".join(placeholder_fields)
 
     message = EmailMessage()
     message["Subject"] = subject
@@ -1473,6 +1490,8 @@ def send_imessage(
 ) -> tuple[bool, str]:
     if not recipients:
         return False, "imessage: ML_REPORT_IMESSAGE_TO is empty"
+    if any(is_placeholder_value(recipient) for recipient in recipients):
+        return False, "imessage: placeholder configuration in ML_REPORT_IMESSAGE_TO"
 
     if dry_run:
         return True, f"imessage: dry-run to {', '.join(recipients)}"
@@ -1486,12 +1505,17 @@ def send_imessage(
             f'send "{escape_applescript(message_text)}" to targetParticipant',
             "end tell",
         ]
-        result = subprocess.run(
-            ["osascript", *sum([["-e", line] for line in script], [])],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        try:
+            result = subprocess.run(
+                ["osascript", *sum([["-e", line] for line in script], [])],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            failures.append(f"{recipient}: osascript timed out after 30 seconds")
+            continue
         if result.returncode != 0:
             stderr = (result.stderr or "").strip()
             failures.append(f"{recipient}: {stderr or 'osascript failed'}")
