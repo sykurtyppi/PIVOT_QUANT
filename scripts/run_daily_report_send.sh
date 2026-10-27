@@ -117,7 +117,7 @@ SCHEDULE_MODE="${ML_REPORT_SCHEDULE_MODE:-}"
 SCHEDULE_MODE_EFFECTIVE="${SCHEDULE_MODE:-manual}"
 FORCE_SEND="${ML_REPORT_FORCE_SEND:-false}"
 FORCE_SEND_LC="$(printf '%s' "${FORCE_SEND}" | tr '[:upper:]' '[:lower:]')"
-GENERATION_ONLY="${ML_REPORT_GENERATION_ONLY:-false}"
+GENERATION_ONLY="${ML_REPORT_GENERATION_ONLY:-true}"
 GENERATION_ONLY_LC="$(printf '%s' "${GENERATION_ONLY}" | tr '[:upper:]' '[:lower:]')"
 
 echo "[$(timestamp)] START daily_report_send (${PYTHON_INFO})" >> "${LOG_DIR}/report_delivery.log"

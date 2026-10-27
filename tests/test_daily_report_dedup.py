@@ -223,6 +223,8 @@ def _run_wrapper(
     env["PIVOT_DB"] = str(tmp / "data" / "pivot_events.sqlite")
     # Remove any live .env influence
     env["ML_REPORT_ENV_FILE"] = "/dev/null"
+    # Most tests below exercise the retained low-level delivery path explicitly.
+    env["ML_REPORT_GENERATION_ONLY"] = "false"
     env.update(env_overrides)
 
     return subprocess.run(
@@ -438,7 +440,9 @@ class TestCalendarGate(unittest.TestCase):
 
     def test_launch_agent_defaults_to_generation_only_mode(self) -> None:
         installer = (REPO_ROOT / "scripts" / "install_daily_report_launch_agent.sh").read_text(encoding="utf-8")
+        wrapper = (REPO_ROOT / "scripts" / "run_daily_report_send.sh").read_text(encoding="utf-8")
         self.assertIn('GENERATION_ONLY="${ML_REPORT_GENERATION_ONLY:-true}"', installer)
+        self.assertIn('GENERATION_ONLY="${ML_REPORT_GENERATION_ONLY:-true}"', wrapper)
         self.assertIn("<key>ML_REPORT_GENERATION_ONLY</key>", installer)
         self.assertIn("<string>${GENERATION_ONLY}</string>", installer)
 
