@@ -410,6 +410,38 @@ class TestCalendarGate(unittest.TestCase):
             self.assertEqual(result.returncode, 0, f"Wrapper failed on trading day. stderr={result.stderr}")
             self.assertTrue(send_called, "send_daily_report.py must be called on a trading day")
 
+    def test_generation_only_mode_generates_without_calling_sender(self) -> None:
+        """Slack publication mode must leave launchd as a healthy generator only."""
+        with tempfile.TemporaryDirectory(prefix="pivotquant_test_") as raw_tmp:
+            tmp = Path(raw_tmp)
+            result = _run_wrapper(
+                {
+                    "ML_REPORT_FAKE_ET_DATE": "2026-05-14",
+                    "ML_REPORT_REPORT_DATE": "2026-05-14",
+                    "ML_REPORT_SCHEDULE_MODE": "close",
+                    "ML_REPORT_FORCE_SEND": "false",
+                    "ML_REPORT_GENERATION_ONLY": "true",
+                },
+                tmp,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(
+                (tmp / "SEND_CALLED").exists(),
+                "generation-only mode must not invoke a legacy notification transport",
+            )
+            self.assertTrue(
+                (tmp / "logs" / "reports" / "daily_ml_report_test.md").is_file(),
+                "generation-only mode must still create the report artifact",
+            )
+            log_text = (tmp / "logs" / "report_delivery.log").read_text(encoding="utf-8")
+            self.assertIn("DONE  daily_report_generate_only", log_text)
+
+    def test_launch_agent_defaults_to_generation_only_mode(self) -> None:
+        installer = (REPO_ROOT / "scripts" / "install_daily_report_launch_agent.sh").read_text(encoding="utf-8")
+        self.assertIn('GENERATION_ONLY="${ML_REPORT_GENERATION_ONLY:-true}"', installer)
+        self.assertIn("<key>ML_REPORT_GENERATION_ONLY</key>", installer)
+        self.assertIn("<string>${GENERATION_ONLY}</string>", installer)
+
 
 # ---------------------------------------------------------------------------
 # Test: weekend gate ordering — current ET date checked before rollback

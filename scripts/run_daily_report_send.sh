@@ -117,6 +117,8 @@ SCHEDULE_MODE="${ML_REPORT_SCHEDULE_MODE:-}"
 SCHEDULE_MODE_EFFECTIVE="${SCHEDULE_MODE:-manual}"
 FORCE_SEND="${ML_REPORT_FORCE_SEND:-false}"
 FORCE_SEND_LC="$(printf '%s' "${FORCE_SEND}" | tr '[:upper:]' '[:lower:]')"
+GENERATION_ONLY="${ML_REPORT_GENERATION_ONLY:-false}"
+GENERATION_ONLY_LC="$(printf '%s' "${GENERATION_ONLY}" | tr '[:upper:]' '[:lower:]')"
 
 echo "[$(timestamp)] START daily_report_send (${PYTHON_INFO})" >> "${LOG_DIR}/report_delivery.log"
 
@@ -223,7 +225,7 @@ fi
 
 echo "[$(timestamp)] INFO current_et_date=${CURRENT_ET_DATE} report_date=${REPORT_DATE} schedule_mode=${SCHEDULE_MODE:-unset} date_mode=${REPORT_DATE_MODE}" >> "${LOG_DIR}/report_delivery.log"
 
-if [[ "${FORCE_SEND_LC}" != "true" ]]; then
+if [[ "${FORCE_SEND_LC}" != "true" && "${GENERATION_ONLY_LC}" != "true" ]]; then
   if state_has_sent "${REPORT_DATE}" "${SCHEDULE_MODE_EFFECTIVE}"; then
     echo "[$(timestamp)] INFO report already sent for report_date=${REPORT_DATE} schedule_mode=${SCHEDULE_MODE_EFFECTIVE}; skipping" >> "${LOG_DIR}/report_delivery.log"
     exit 0
@@ -242,6 +244,11 @@ fi
 if [[ -z "${REPORT_PATH}" || ! -f "${REPORT_PATH}" ]]; then
   echo "[$(timestamp)] ERROR report path missing after generation" >> "${LOG_DIR}/report_delivery.log"
   exit 1
+fi
+
+if [[ "${GENERATION_ONLY_LC}" == "true" ]]; then
+  echo "[$(timestamp)] DONE  daily_report_generate_only" >> "${LOG_DIR}/report_delivery.log"
+  exit 0
 fi
 
 SEND_OUTPUT=""
