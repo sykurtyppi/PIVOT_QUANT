@@ -33,6 +33,7 @@ from backfill_events import (
     fetch_market,
     insert_bars,
     insert_events,
+    normalize_candles_to_interval,
     normalize_range_for_source,
     parse_candles,
 )
@@ -506,7 +507,7 @@ def _collect_symbol(conn: sqlite3.Connection, symbol: str) -> tuple[Dict[str, An
     #
     # No additional proxy attempt should be added here — one call, one proxy try.
     payload, resolved_source = fetch_market(symbol, INTERVAL, range_str, SOURCE)
-    candles = parse_candles(payload)
+    candles = normalize_candles_to_interval(parse_candles(payload), INTERVAL_SEC)
     if not candles:
         return (
             {
