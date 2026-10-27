@@ -259,7 +259,7 @@ class ProductionConfigurationTest(unittest.TestCase):
                 )
             self.assertIn("state unchanged", output.getvalue())
 
-    def test_snapshot_contract_failure_does_not_deliver_or_advance_cursor(self):
+    def test_snapshot_contract_failure_is_audited_before_cursor_advances(self):
         with tempfile.TemporaryDirectory() as td:
             read_db = Path(td) / "read.sqlite"
             state_db = Path(td) / "state.sqlite"
@@ -305,9 +305,92 @@ class ProductionConfigurationTest(unittest.TestCase):
             with closing(sqlite3.connect(state_db)) as check:
                 self.assertEqual(
                     check.execute("SELECT last_ts, last_event_id FROM alert_state").fetchone(),
-                    (100, "old-event"),
+                    (1_797_431_400_000, "new-event"),
                 )
-            self.assertIn("state unchanged", output.getvalue())
+                disposition = check.execute(
+                    """SELECT disposition, session_date, detail
+                       FROM alert_event_dispositions
+                       WHERE symbol='SPY' AND event_id='new-event'"""
+                ).fetchone()
+            self.assertEqual(disposition[0], "snapshot_mismatch")
+            self.assertEqual(disposition[1], "2026-12-16")
+            self.assertIn("missing canonical snapshot", disposition[2])
+            self.assertIn("recorded snapshot_mismatch", output.getvalue())
+
+    def test_delivery_retry_uses_snapshot_binding_captured_before_rollover(self):
+        with tempfile.TemporaryDirectory() as td:
+            read_db = Path(td) / "read.sqlite"
+            state_db = Path(td) / "state.sqlite"
+            event_ts = 1_797_431_400_000
+            with closing(sqlite3.connect(read_db)) as rcon:
+                rcon.execute("""CREATE TABLE touch_events (
+                    ts_event INTEGER, event_id TEXT, symbol TEXT, data_quality REAL,
+                    confluence_count INTEGER, level_type TEXT, level_price REAL,
+                    touch_side INTEGER)""")
+                rcon.execute(
+                    "INSERT INTO touch_events VALUES (?,?,?,?,?,?,?,?)",
+                    (event_ts, "poison-event", "SPY", 1.0, 1, "M1", 766.1820, 1),
+                )
+                rcon.commit()
+            with closing(sqlite3.connect(state_db)) as scon:
+                scon.execute("""CREATE TABLE alert_state (
+                    symbol TEXT PRIMARY KEY, last_ts INTEGER NOT NULL,
+                    last_event_id TEXT NOT NULL)""")
+                scon.execute("INSERT INTO alert_state VALUES (?,?,?)", ("SPY", 100, "old-event"))
+                scon.commit()
+
+            bound = intraday_alert.SimpleNamespace(
+                ts_event=event_ts,
+                event_id="poison-event",
+                level_type="M1",
+                level_price=766.1820,
+                touch_side=1,
+                confluence_count=1,
+                snapshot_id="lvs_original",
+                level_id="lvl_original_m1",
+            )
+            with mock.patch.dict(
+                    os.environ,
+                    {intraday_alert.notify.WEBHOOK_ENV: "https://example.test/webhook"},
+                    clear=False), mock.patch.object(
+                    intraday_alert, "_read_con",
+                    side_effect=lambda: sqlite3.connect(read_db)), mock.patch.object(
+                    intraday_alert, "_state_con",
+                    side_effect=lambda: sqlite3.connect(state_db)), mock.patch.object(
+                    intraday_alert, "_snapshot_for_event",
+                    return_value={"snapshot_id": "lvs_original"}) as load_snapshot, mock.patch.object(
+                    intraday_alert, "bind_snapshot_identity",
+                    side_effect=[bound, ValueError("newer snapshot no longer matches M1")]
+                    ) as bind_identity, mock.patch.object(
+                    intraday_alert, "current_rates", return_value={}), mock.patch.object(
+                    intraday_alert.notify, "post", side_effect=[False, True]) as post:
+                first_output = io.StringIO()
+                with redirect_stdout(first_output):
+                    first_rc = intraday_alert.main([])
+                second_output = io.StringIO()
+                with redirect_stdout(second_output):
+                    second_rc = intraday_alert.main([])
+
+            self.assertEqual(first_rc, 1)
+            self.assertEqual(second_rc, 0)
+            self.assertEqual(post.call_count, 2)
+            self.assertEqual(load_snapshot.call_count, 1)
+            self.assertEqual(bind_identity.call_count, 1)
+            with closing(sqlite3.connect(state_db)) as check:
+                self.assertEqual(
+                    check.execute("SELECT last_ts, last_event_id FROM alert_state").fetchone(),
+                    (event_ts, "poison-event"),
+                )
+                self.assertEqual(
+                    check.execute(
+                        """SELECT snapshot_id, level_id, disposition
+                           FROM alert_event_dispositions
+                           WHERE symbol='SPY' AND event_id='poison-event'"""
+                    ).fetchone(),
+                    ("lvs_original", "lvl_original_m1", "delivered"),
+                )
+            self.assertIn("pending retry", first_output.getvalue())
+            self.assertIn("delivered 1 alert(s)", second_output.getvalue())
 
     def test_deferred_contract_failure_does_not_block_bounded_valid_prefix(self):
         with tempfile.TemporaryDirectory() as td:
@@ -335,15 +418,17 @@ class ProductionConfigurationTest(unittest.TestCase):
                 scon.execute("INSERT INTO alert_state VALUES (?,?,?)", ("SPY", 100, "old-event"))
                 scon.commit()
 
-            def bind_prefix(frame, symbol):
+            def resolve_prefix(frame, symbol, scon, persist):
                 self.assertEqual(symbol, "SPY")
+                self.assertIsInstance(scon, sqlite3.Connection)
+                self.assertTrue(persist)
                 self.assertEqual(len(frame), 12)
                 if "event-12" in set(frame.event_id):
                     raise ValueError("deferred row should not be bound")
                 bound = frame.copy()
                 bound["snapshot_id"] = "lvs_test"
                 bound["level_id"] = "lvl_test"
-                return bound
+                return bound, None
 
             with mock.patch.dict(
                     os.environ,
@@ -353,8 +438,8 @@ class ProductionConfigurationTest(unittest.TestCase):
                     side_effect=lambda: sqlite3.connect(read_db)), mock.patch.object(
                     intraday_alert, "_state_con",
                     side_effect=lambda: sqlite3.connect(state_db)), mock.patch.object(
-                    intraday_alert, "bind_snapshot_rows",
-                    side_effect=bind_prefix), mock.patch.object(
+                    intraday_alert, "resolve_pending_rows",
+                    side_effect=resolve_prefix), mock.patch.object(
                     intraday_alert, "current_rates",
                     return_value={}), mock.patch.object(
                     intraday_alert.notify, "post", return_value=True) as post:

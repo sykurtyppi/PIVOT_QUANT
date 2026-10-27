@@ -19,7 +19,7 @@ import argparse
 import os
 import sqlite3
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
@@ -44,10 +44,26 @@ def _read_con():
 
 def _state_con():
     con = sqlite3.connect(PRODUCT_DB)
+    _ensure_state_schema(con)
+    return con
+
+
+def _ensure_state_schema(con):
     con.execute("""CREATE TABLE IF NOT EXISTS alert_state (
         symbol TEXT PRIMARY KEY, last_ts INTEGER NOT NULL, last_event_id TEXT NOT NULL)""")
+    con.execute("""CREATE TABLE IF NOT EXISTS alert_event_dispositions (
+        symbol TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        ts_event INTEGER NOT NULL,
+        session_date TEXT NOT NULL,
+        snapshot_id TEXT,
+        level_id TEXT,
+        disposition TEXT NOT NULL,
+        detail TEXT,
+        created_at_utc TEXT NOT NULL,
+        updated_at_utc TEXT NOT NULL,
+        PRIMARY KEY (symbol, event_id))""")
     con.commit()
-    return con
 
 
 def _max_touch(rcon, symbol, dq_min):
@@ -129,7 +145,113 @@ def bind_snapshot_rows(new, symbol, art_dir=ART):
     return pd.DataFrame(bound)
 
 
+def _utc_now():
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _session_date(ts_event):
+    return datetime.fromtimestamp(int(ts_event) / 1000, tz=ET).date().isoformat()
+
+
+def _saved_disposition(scon, symbol, event_id):
+    return scon.execute(
+        """SELECT snapshot_id, level_id, disposition, detail, session_date
+           FROM alert_event_dispositions WHERE symbol=? AND event_id=?""",
+        (symbol, event_id),
+    ).fetchone()
+
+
+def _record_disposition(scon, symbol, row, *, disposition, snapshot_id=None,
+                        level_id=None, detail=None):
+    now = _utc_now()
+    scon.execute(
+        """INSERT INTO alert_event_dispositions (
+               symbol, event_id, ts_event, session_date, snapshot_id, level_id,
+               disposition, detail, created_at_utc, updated_at_utc)
+           VALUES (?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(symbol, event_id) DO UPDATE SET
+               snapshot_id=excluded.snapshot_id,
+               level_id=excluded.level_id,
+               disposition=excluded.disposition,
+               detail=excluded.detail,
+               updated_at_utc=excluded.updated_at_utc""",
+        (symbol, row.event_id, int(row.ts_event), _session_date(row.ts_event),
+         snapshot_id, level_id, disposition, detail, now, now),
+    )
+    scon.commit()
+
+
+def resolve_pending_rows(new, symbol, scon, persist=True, art_dir=ART):
+    """Resolve rows once, then reuse their durable snapshot binding on retries.
+
+    Returns the valid ordered prefix and the first contract-mismatch row, if any.
+    The mismatch is durably recorded before it can be checkpointed as terminal.
+    """
+    cache = {}
+    bound = []
+    for row in new.itertuples(index=False):
+        saved = _saved_disposition(scon, symbol, row.event_id)
+        if saved:
+            snapshot_id, level_id, disposition, detail, session_date = saved
+            if disposition == "snapshot_mismatch":
+                return pd.DataFrame(bound), SimpleNamespace(
+                    **row._asdict(), session_date=session_date,
+                    snapshot_id=snapshot_id, detail=detail,
+                )
+            if disposition in {"pending", "delivered"} and snapshot_id and level_id:
+                bound.append({**row._asdict(), "snapshot_id": snapshot_id, "level_id": level_id})
+                continue
+            raise ValueError(
+                f"unsupported saved disposition {disposition!r} for event {row.event_id}"
+            )
+
+        session_date = _session_date(row.ts_event)
+        try:
+            if session_date not in cache:
+                cache[session_date] = _snapshot_for_event(symbol, row.ts_event, art_dir)
+            snapshot = cache[session_date]
+            resolved = bind_snapshot_identity(row, snapshot)
+        except ValueError as exc:
+            if persist:
+                _record_disposition(
+                    scon, symbol, row, disposition="snapshot_mismatch",
+                    snapshot_id=(cache.get(session_date) or {}).get("snapshot_id"),
+                    detail=str(exc),
+                )
+            return pd.DataFrame(bound), SimpleNamespace(
+                **row._asdict(), session_date=session_date,
+                snapshot_id=(cache.get(session_date) or {}).get("snapshot_id"),
+                detail=str(exc),
+            )
+
+        values = vars(resolved)
+        if persist:
+            _record_disposition(
+                scon, symbol, row, disposition="pending",
+                snapshot_id=resolved.snapshot_id, level_id=resolved.level_id,
+            )
+        bound.append(values)
+    return pd.DataFrame(bound), None
+
+
 def _checkpoint(scon, symbol, row):
+    _ensure_state_schema(scon)
+    scon.execute("INSERT OR REPLACE INTO alert_state VALUES (?,?,?)",
+                 (symbol, int(row.ts_event), row.event_id))
+    scon.execute(
+        """UPDATE alert_event_dispositions
+           SET disposition='delivered', detail=NULL, updated_at_utc=?
+           WHERE symbol=? AND event_id=?""",
+        (_utc_now(), symbol, row.event_id),
+    )
+    scon.commit()
+
+
+def _checkpoint_mismatch(scon, symbol, row):
+    """Advance only after the rejected event has a durable audit disposition."""
+    saved = _saved_disposition(scon, symbol, row.event_id)
+    if not saved or saved[2] != "snapshot_mismatch":
+        raise ValueError(f"event {row.event_id} lacks a snapshot_mismatch disposition")
     scon.execute("INSERT OR REPLACE INTO alert_state VALUES (?,?,?)",
                  (symbol, int(row.ts_event), row.event_id))
     scon.commit()
@@ -195,6 +317,7 @@ def main(argv=None):
         return 2
 
     rcon, scon = _read_con(), _state_con()
+    _ensure_state_schema(scon)
     st = scon.execute("SELECT last_ts, last_event_id FROM alert_state WHERE symbol=?",
                       (args.symbol,)).fetchone()
     if st is None:
@@ -226,15 +349,37 @@ def main(argv=None):
     pending_count = len(new)
     bounded = new.iloc[:max(0, args.max_alerts)].copy()
     try:
-        bounded = bind_snapshot_rows(bounded, args.symbol)
+        bounded, mismatch = resolve_pending_rows(
+            bounded, args.symbol, scon, not args.dry_run
+        )
     except ValueError as exc:
-        print(f"levels snapshot contract error: {exc}; state unchanged")
+        print(f"levels snapshot disposition error: {exc}; state unchanged")
+        rcon.close(); scon.close()
+        return 3
+
+    if mismatch is not None and bounded.empty:
+        if args.dry_run:
+            print(f"levels snapshot contract error: {mismatch.detail}; state unchanged")
+            rcon.close(); scon.close()
+            return 3
+        _checkpoint_mismatch(scon, args.symbol, mismatch)
+        print(f"levels snapshot contract error: {mismatch.detail}; "
+              f"recorded snapshot_mismatch for event_id={mismatch.event_id}")
         rcon.close(); scon.close()
         return 3
 
     rates = current_rates(rcon, args.symbol, args.dq_min)
     rc = deliver_alerts(bounded, rates, scon, args.symbol, args.max_alerts,
-                        dry_run=args.dry_run, pending_count=pending_count)
+                        dry_run=args.dry_run,
+                        pending_count=(len(bounded) if mismatch is not None else pending_count))
+    if rc == 0 and mismatch is not None:
+        if args.dry_run:
+            print(f"levels snapshot contract error: {mismatch.detail}; state unchanged")
+        else:
+            _checkpoint_mismatch(scon, args.symbol, mismatch)
+            print(f"levels snapshot contract error: {mismatch.detail}; "
+                  f"recorded snapshot_mismatch for event_id={mismatch.event_id}")
+        rc = 3
     rcon.close(); scon.close()
     return rc
 
