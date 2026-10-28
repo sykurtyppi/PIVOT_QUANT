@@ -432,59 +432,19 @@ function PivotAnalysis({ ohlcData }) {
 }
 ```
 
-## 🚀 Deployment
+## 🚀 Production Operations
 
-### Production Checklist
-- [ ] Configure environment variables
-- [ ] Set up monitoring and alerting
-- [ ] Implement rate limiting
-- [ ] Configure logging and metrics
-- [ ] Set up data validation pipelines
-- [ ] Implement circuit breakers
-- [ ] Configure caching layer
-- [ ] Set up health checks
+The live system is operated as a macOS launchd deployment, not from the generic Docker or Kubernetes examples previously shown here.
 
-### Docker Deployment
-```dockerfile
-FROM node:24.22.1-alpine
+Use the [Production Operations Runbook](./docs/PRODUCTION_OPERATIONS_RUNBOOK.md) for:
 
-WORKDIR /app
-COPY package*.json ./
-RUN npm ci --only=production
+- evidence-based health checks that separate configuration, registration, execution, persistence, publication, and monitoring;
+- exact-SHA deployment, runtime registration, smoke testing, and release tagging;
+- daily report, gamma, watchdog, collector, label, SQLite, and deployment-drift validation;
+- incident response and rollback procedures;
+- the 3–5 ordinary-session evidence gate required before scheduler consolidation.
 
-COPY src/ src/
-EXPOSE 3000
-
-CMD ["node", "src/server.js"]
-```
-
-### Kubernetes
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: pivot-quant-service
-spec:
-  replicas: 3
-  selector:
-    matchLabels:
-      app: pivot-quant
-  template:
-    metadata:
-      labels:
-        app: pivot-quant
-    spec:
-      containers:
-      - name: pivot-quant
-        image: pivot-quant:2.0.0
-        resources:
-          requests:
-            memory: "256Mi"
-            cpu: "250m"
-          limits:
-            memory: "512Mi"
-            cpu: "500m"
-```
+Do not treat a successful command, healthy endpoint, generated artifact, or green process as end-to-end proof by itself. Preserve pre-change evidence and verify the terminal user-visible outcome.
 
 ## 📚 Documentation
 
