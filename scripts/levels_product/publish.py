@@ -16,9 +16,11 @@ import fcntl
 import hashlib
 import json
 import os
+import re
+import stat
 from pathlib import Path
 import sys
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 REPO = Path(__file__).resolve().parents[2]
@@ -27,6 +29,7 @@ sys.path.insert(0, str(REPO / "scripts" / "levels_product"))
 
 import notify  # noqa: E402
 from level_snapshot import (  # noqa: E402
+    SYMBOL_PATTERN,
     _atomic_latest_link,
     _create_immutable_json,
     load_snapshot,
@@ -135,6 +138,22 @@ def _parse_canonical_session_date(value: object, field: str) -> date:
     return parsed
 
 
+def _parse_canonical_utc(value: object, field: str) -> datetime:
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a canonical UTC timestamp ending in Z")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(
+            f"{field} must be a canonical UTC timestamp ending in Z"
+        ) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
+        raise ValueError(f"{field} must be a canonical UTC timestamp ending in Z")
+    if parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z") != value:
+        raise ValueError(f"{field} must be a canonical UTC timestamp ending in Z")
+    return parsed
+
+
 def build_briefing_artifact(mp, tr, *, captured_at_utc: str | None = None) -> dict:
     """Freeze the exact pre-market message and the evidence it was built from."""
     if tr.get("symbol") != mp.get("symbol"):
@@ -187,6 +206,20 @@ def _read_briefing(path: Path) -> dict:
         raise ValueError(f"could not read morning briefing {path}: {exc}") from exc
 
 
+def _read_regular_briefing(path: Path, *, out_dir: Path) -> dict:
+    try:
+        if path.parent.resolve(strict=False) != out_dir.resolve(strict=False):
+            raise ValueError(
+                "briefing artifact must be directly contained by its artifact directory"
+            )
+        metadata = path.lstat()
+    except OSError as exc:
+        raise ValueError(f"could not inspect morning briefing {path}: {exc}") from exc
+    if not stat.S_ISREG(metadata.st_mode):
+        raise ValueError("immutable briefing path must be a regular file, not a symlink")
+    return _read_briefing(path)
+
+
 def _load_briefing(path: Path) -> dict:
     artifact = _read_briefing(path)
     _validate_briefing_integrity(artifact)
@@ -225,14 +258,37 @@ def _validate_briefing_integrity(artifact: dict) -> None:
         raise ValueError("unsupported modern briefing contract")
     if artifact.get("contract_version") != 1:
         raise ValueError("unsupported modern briefing contract version")
+    symbol = artifact.get("symbol")
+    if not isinstance(symbol, str) or not SYMBOL_PATTERN.fullmatch(symbol):
+        raise ValueError("briefing symbol must be a filename-safe market identifier")
     _parse_canonical_session_date(
         artifact.get("session_date"), "modern briefing session_date"
     )
+    prepared_at = _parse_canonical_utc(
+        artifact.get("prepared_at_utc"), "prepared_at_utc"
+    )
+    snapshot_generated_at = _parse_canonical_utc(
+        artifact.get("snapshot_generated_at_utc"), "snapshot_generated_at_utc"
+    )
+    track_record_as_of = _parse_canonical_utc(
+        artifact.get("track_record_as_of_utc"), "track_record_as_of_utc"
+    )
+    snapshot_id = artifact.get("snapshot_id")
+    if not isinstance(snapshot_id, str) or not re.fullmatch(
+        r"lvs_[0-9a-f]{24}", snapshot_id
+    ):
+        raise ValueError("snapshot_id must be a content-addressed levels snapshot ID")
+    if snapshot_generated_at > prepared_at:
+        raise ValueError("snapshot_generated_at_utc must not be after prepared_at_utc")
+    if track_record_as_of > prepared_at:
+        raise ValueError("track_record_as_of_utc must not be after prepared_at_utc")
     track_record = artifact.get("track_record")
     if not isinstance(track_record, dict):
         raise ValueError("briefing track record must be an object")
-    if track_record.get("symbol") != artifact.get("symbol"):
+    if track_record.get("symbol") != symbol:
         raise ValueError("briefing track record symbol must match briefing symbol")
+    if track_record.get("as_of_utc") != artifact.get("track_record_as_of_utc"):
+        raise ValueError("briefing track record as-of time must match briefing metadata")
     expected_track_hash = hashlib.sha256(_canonical_bytes(track_record)).hexdigest()
     if artifact.get("track_record_sha256") != expected_track_hash:
         raise ValueError("briefing track-record digest mismatch")
@@ -249,6 +305,7 @@ def _load_latest_briefing(
     ordering before a newer fully-verifiable briefing replaces the pointer.
     """
     link_target = None
+    target_path = path
     if path.is_symlink():
         link_target = Path(os.readlink(path))
         if link_target.is_absolute() or link_target.parent != Path("."):
@@ -261,7 +318,8 @@ def _load_latest_briefing(
                 "latest briefing symlink must point directly to an immutable artifact"
             )
 
-    artifact = _read_briefing(path)
+    read_path = target_path if link_target is not None else path
+    artifact = _read_regular_briefing(read_path, out_dir=path.parent)
     _validate_briefing_identity(artifact)
     if artifact.get("symbol") != expected_symbol:
         raise ValueError("latest briefing symbol does not match requested symbol")
@@ -318,12 +376,12 @@ def write_briefing_artifact(artifact: dict, out_dir: Path) -> tuple[Path, Path]:
         f"morning_briefing_{artifact['symbol']}_{artifact['session_date']}.json"
     )
     latest = out_dir / f"morning_briefing_{artifact['symbol']}_latest.json"
-    if not _create_immutable_json(immutable, artifact):
-        existing = _load_briefing(immutable)
-        if existing != artifact:
-            raise ValueError(
-                f"immutable briefing already exists with different contents: {immutable}"
-            )
+    _create_immutable_json(immutable, artifact)
+    existing = _read_regular_briefing(immutable, out_dir=out_dir)
+    if existing != artifact:
+        raise ValueError(
+            f"immutable briefing already exists with different contents: {immutable}"
+        )
 
     lock_path = out_dir / f".{latest.name}.lock"
     with lock_path.open("a+b") as lock_handle:
@@ -357,8 +415,9 @@ def load_or_build_briefing(
 ) -> tuple[dict, Path]:
     """Reuse the frozen session briefing on retries; never rebuild its evidence."""
     immutable = out_dir / f"morning_briefing_{mp['symbol']}_{mp['session_date']}.json"
-    if immutable.exists():
-        artifact = _load_briefing(immutable)
+    if immutable.exists() or immutable.is_symlink():
+        artifact = _read_regular_briefing(immutable, out_dir=out_dir)
+        _validate_briefing_integrity(artifact)
         expected = {
             "contract": "pivotquant.morning_briefing",
             "symbol": mp["symbol"],
@@ -374,6 +433,8 @@ def load_or_build_briefing(
         )
         if rebuilt != artifact:
             raise ValueError(f"existing briefing fails semantic validation: {immutable}")
+        # Intentional write-on-load: retrying repairs a missing or legacy latest
+        # pointer while preserving the already-frozen immutable artifact.
         write_briefing_artifact(artifact, out_dir)
         return artifact, immutable
 

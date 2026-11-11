@@ -349,6 +349,16 @@ class BriefingArtifactTest(unittest.TestCase):
             "horizons": {},
         }
 
+    def _rehash_briefing(self, artifact):
+        artifact["track_record_sha256"] = hashlib.sha256(
+            publish._canonical_bytes(artifact["track_record"])
+        ).hexdigest()
+        core = {key: value for key, value in artifact.items() if key != "briefing_id"}
+        artifact["briefing_id"] = (
+            "brf_" + hashlib.sha256(publish._canonical_bytes(core)).hexdigest()[:24]
+        )
+        return artifact
+
     def test_publish_cli_imports_from_repo_root(self):
         result = subprocess.run(
             [sys.executable, str(LEVELS_DIR / "publish.py"), "--help"],
@@ -472,6 +482,71 @@ class BriefingArtifactTest(unittest.TestCase):
                     out_dir,
                     captured_at_utc="2026-10-02T11:02:00Z",
                 )
+
+    def test_writer_rejects_path_unsafe_briefing_symbol(self):
+        artifact = publish.build_briefing_artifact(self.snapshot, self.track_record)
+        artifact["symbol"] = "../../../ESCAPE"
+        artifact["track_record"]["symbol"] = artifact["symbol"]
+        self._rehash_briefing(artifact)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(ValueError, "filename-safe"):
+                publish.write_briefing_artifact(artifact, Path(tmp) / "artifacts")
+
+    def test_writer_rejects_symlink_at_immutable_briefing_path(self):
+        artifact = publish.build_briefing_artifact(self.snapshot, self.track_record)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            out_dir = root / "artifacts"
+            out_dir.mkdir()
+            external = root / "external.json"
+            external.write_text(json.dumps(artifact), encoding="utf-8")
+            immutable = out_dir / "morning_briefing_SPY_2026-10-02.json"
+            immutable.symlink_to(external)
+
+            with self.assertRaisesRegex(ValueError, "regular file"):
+                publish.write_briefing_artifact(artifact, out_dir)
+
+            self.assertFalse((out_dir / "morning_briefing_SPY_latest.json").exists())
+
+    def test_modern_briefing_rejects_malformed_identity_and_timestamps(self):
+        mutations = {
+            "snapshot_id": "garbage",
+            "prepared_at_utc": "garbage",
+            "snapshot_generated_at_utc": "garbage",
+            "track_record_as_of_utc": "garbage",
+        }
+
+        for field, malformed in mutations.items():
+            with self.subTest(field=field):
+                artifact = publish.build_briefing_artifact(
+                    self.snapshot, self.track_record
+                )
+                artifact[field] = malformed
+                self._rehash_briefing(artifact)
+
+                with self.assertRaisesRegex(ValueError, field):
+                    publish._validate_briefing_integrity(artifact)
+
+    def test_modern_briefing_rejects_evidence_after_preparation(self):
+        mutations = {
+            "snapshot_generated_at_utc": "2026-10-02T11:01:00Z",
+            "track_record_as_of_utc": "2026-10-02T11:01:00Z",
+        }
+
+        for field, future_time in mutations.items():
+            with self.subTest(field=field):
+                artifact = publish.build_briefing_artifact(
+                    self.snapshot, self.track_record
+                )
+                artifact[field] = future_time
+                if field == "track_record_as_of_utc":
+                    artifact["track_record"]["as_of_utc"] = future_time
+                self._rehash_briefing(artifact)
+
+                with self.assertRaisesRegex(ValueError, field):
+                    publish._validate_briefing_integrity(artifact)
 
     def test_write_replaces_older_content_addressed_legacy_latest_pointer(self):
         current = publish.build_briefing_artifact(self.snapshot, self.track_record)
