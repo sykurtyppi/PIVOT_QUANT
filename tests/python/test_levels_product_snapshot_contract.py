@@ -349,6 +349,16 @@ class BriefingArtifactTest(unittest.TestCase):
             "horizons": {},
         }
 
+    def _rehash_briefing(self, artifact):
+        artifact["track_record_sha256"] = hashlib.sha256(
+            publish._canonical_bytes(artifact["track_record"])
+        ).hexdigest()
+        core = {key: value for key, value in artifact.items() if key != "briefing_id"}
+        artifact["briefing_id"] = (
+            "brf_" + hashlib.sha256(publish._canonical_bytes(core)).hexdigest()[:24]
+        )
+        return artifact
+
     def test_publish_cli_imports_from_repo_root(self):
         result = subprocess.run(
             [sys.executable, str(LEVELS_DIR / "publish.py"), "--help"],
@@ -472,6 +482,352 @@ class BriefingArtifactTest(unittest.TestCase):
                     out_dir,
                     captured_at_utc="2026-10-02T11:02:00Z",
                 )
+
+    def test_writer_rejects_path_unsafe_briefing_symbol(self):
+        artifact = publish.build_briefing_artifact(self.snapshot, self.track_record)
+        artifact["symbol"] = "../../../ESCAPE"
+        artifact["track_record"]["symbol"] = artifact["symbol"]
+        self._rehash_briefing(artifact)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(ValueError, "filename-safe"):
+                publish.write_briefing_artifact(artifact, Path(tmp) / "artifacts")
+
+    def test_writer_rejects_symlink_at_immutable_briefing_path(self):
+        artifact = publish.build_briefing_artifact(self.snapshot, self.track_record)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            out_dir = root / "artifacts"
+            out_dir.mkdir()
+            external = root / "external.json"
+            external.write_text(json.dumps(artifact), encoding="utf-8")
+            immutable = out_dir / "morning_briefing_SPY_2026-10-02.json"
+            immutable.symlink_to(external)
+
+            with self.assertRaisesRegex(ValueError, "regular file"):
+                publish.write_briefing_artifact(artifact, out_dir)
+
+            self.assertFalse((out_dir / "morning_briefing_SPY_latest.json").exists())
+
+    def test_modern_briefing_rejects_malformed_identity_and_timestamps(self):
+        mutations = {
+            "snapshot_id": "garbage",
+            "prepared_at_utc": "garbage",
+            "snapshot_generated_at_utc": "garbage",
+            "track_record_as_of_utc": "garbage",
+        }
+
+        for field, malformed in mutations.items():
+            with self.subTest(field=field):
+                artifact = publish.build_briefing_artifact(
+                    self.snapshot, self.track_record
+                )
+                artifact[field] = malformed
+                self._rehash_briefing(artifact)
+
+                with self.assertRaisesRegex(ValueError, field):
+                    publish._validate_briefing_integrity(artifact)
+
+    def test_modern_briefing_rejects_evidence_after_preparation(self):
+        mutations = {
+            "snapshot_generated_at_utc": "2026-10-02T11:01:00Z",
+            "track_record_as_of_utc": "2026-10-02T11:01:00Z",
+        }
+
+        for field, future_time in mutations.items():
+            with self.subTest(field=field):
+                artifact = publish.build_briefing_artifact(
+                    self.snapshot, self.track_record
+                )
+                artifact[field] = future_time
+                if field == "track_record_as_of_utc":
+                    artifact["track_record"]["as_of_utc"] = future_time
+                self._rehash_briefing(artifact)
+
+                with self.assertRaisesRegex(ValueError, field):
+                    publish._validate_briefing_integrity(artifact)
+
+    def test_write_replaces_older_content_addressed_legacy_latest_pointer(self):
+        current = publish.build_briefing_artifact(self.snapshot, self.track_record)
+        legacy_core = {
+            "contract": "pivotquant.morning_briefing",
+            "contract_version": 1,
+            "symbol": "SPY",
+            "session_date": "2026-10-01",
+            "prepared_at_utc": "2026-10-01T11:00:00Z",
+            "snapshot_id": "lvs_legacy",
+            "track_record_as_of_utc": "2026-10-01T10:59:00Z",
+            "track_record_sha256": "a" * 64,
+            "body": "legacy briefing",
+        }
+        legacy = {
+            **legacy_core,
+            "briefing_id": (
+                "brf_"
+                + hashlib.sha256(publish._canonical_bytes(legacy_core)).hexdigest()[:24]
+            ),
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            legacy_path = out_dir / "morning_briefing_SPY_2026-10-01.json"
+            legacy_path.write_text(json.dumps(legacy), encoding="utf-8")
+            publish._atomic_latest_link(
+                out_dir / "morning_briefing_SPY_latest.json", legacy_path
+            )
+
+            immutable, latest = publish.write_briefing_artifact(current, out_dir)
+
+            self.assertEqual(json.loads(latest.read_text()), current)
+            self.assertEqual(json.loads(immutable.read_text()), current)
+            self.assertEqual(json.loads(legacy_path.read_text()), legacy)
+
+    def test_write_rejects_tampered_legacy_latest_pointer(self):
+        current = publish.build_briefing_artifact(self.snapshot, self.track_record)
+        legacy = {
+            "contract": "pivotquant.morning_briefing",
+            "contract_version": 1,
+            "symbol": "SPY",
+            "session_date": "2026-10-01",
+            "prepared_at_utc": "2026-10-01T11:00:00Z",
+            "snapshot_id": "lvs_legacy",
+            "track_record_as_of_utc": "2026-10-01T10:59:00Z",
+            "track_record_sha256": "a" * 64,
+            "body": "tampered legacy briefing",
+            "briefing_id": "brf_not_the_content_digest",
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            legacy_path = out_dir / "morning_briefing_SPY_2026-10-01.json"
+            legacy_path.write_text(json.dumps(legacy), encoding="utf-8")
+            publish._atomic_latest_link(
+                out_dir / "morning_briefing_SPY_latest.json", legacy_path
+            )
+
+            with self.assertRaisesRegex(ValueError, "briefing identity digest mismatch"):
+                publish.write_briefing_artifact(current, out_dir)
+
+    def test_write_rejects_future_cross_symbol_legacy_latest_pointer(self):
+        current = publish.build_briefing_artifact(self.snapshot, self.track_record)
+        legacy_core = {
+            "contract": "pivotquant.morning_briefing",
+            "contract_version": 1,
+            "symbol": "QQQ",
+            "session_date": "2026-10-03",
+            "prepared_at_utc": "2026-10-03T11:00:00Z",
+            "snapshot_id": "lvs_legacy",
+            "track_record_as_of_utc": "2026-10-03T10:59:00Z",
+            "track_record_sha256": "a" * 64,
+            "body": "legacy briefing",
+        }
+        legacy = {
+            **legacy_core,
+            "briefing_id": (
+                "brf_"
+                + hashlib.sha256(publish._canonical_bytes(legacy_core)).hexdigest()[:24]
+            ),
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            legacy_path = out_dir / "morning_briefing_QQQ_2026-10-03.json"
+            legacy_path.write_text(json.dumps(legacy), encoding="utf-8")
+            publish._atomic_latest_link(
+                out_dir / "morning_briefing_SPY_latest.json", legacy_path
+            )
+
+            with self.assertRaisesRegex(ValueError, "symbol"):
+                publish.write_briefing_artifact(current, out_dir)
+
+    def test_write_rejects_latest_symlink_outside_artifact_directory(self):
+        current = publish.build_briefing_artifact(self.snapshot, self.track_record)
+        legacy_core = {
+            "contract": "pivotquant.morning_briefing",
+            "contract_version": 1,
+            "symbol": "SPY",
+            "session_date": "2026-10-01",
+            "prepared_at_utc": "2026-10-01T11:00:00Z",
+            "snapshot_id": "lvs_legacy",
+            "track_record_as_of_utc": "2026-10-01T10:59:00Z",
+            "track_record_sha256": "a" * 64,
+            "body": "legacy briefing",
+        }
+        legacy = {
+            **legacy_core,
+            "briefing_id": (
+                "brf_"
+                + hashlib.sha256(publish._canonical_bytes(legacy_core)).hexdigest()[:24]
+            ),
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            out_dir = root / "artifacts"
+            out_dir.mkdir()
+            external = root / "morning_briefing_SPY_2026-10-01.json"
+            external.write_text(json.dumps(legacy), encoding="utf-8")
+            (out_dir / "morning_briefing_SPY_latest.json").symlink_to(external)
+
+            with self.assertRaisesRegex(ValueError, "same artifact directory"):
+                publish.write_briefing_artifact(current, out_dir)
+
+    def test_write_rejects_semantically_malformed_modern_latest_pointer(self):
+        current = publish.build_briefing_artifact(self.snapshot, self.track_record)
+        mutations = {
+            "contract": lambda artifact: artifact.update(contract="wrong.contract"),
+            "contract version": lambda artifact: artifact.update(contract_version=999),
+            "track record symbol": lambda artifact: artifact["track_record"].update(
+                symbol="QQQ"
+            ),
+        }
+
+        for expected_error, mutate in mutations.items():
+            with self.subTest(expected_error=expected_error):
+                malicious = json.loads(json.dumps(current))
+                malicious["session_date"] = "2099-01-01"
+                mutate(malicious)
+                malicious["track_record_sha256"] = hashlib.sha256(
+                    publish._canonical_bytes(malicious["track_record"])
+                ).hexdigest()
+                core = {
+                    key: value
+                    for key, value in malicious.items()
+                    if key != "briefing_id"
+                }
+                malicious["briefing_id"] = (
+                    "brf_"
+                    + hashlib.sha256(publish._canonical_bytes(core)).hexdigest()[:24]
+                )
+
+                with tempfile.TemporaryDirectory() as tmp:
+                    out_dir = Path(tmp)
+                    malicious_path = (
+                        out_dir / "morning_briefing_SPY_2099-01-01.json"
+                    )
+                    malicious_path.write_text(
+                        json.dumps(malicious), encoding="utf-8"
+                    )
+                    publish._atomic_latest_link(
+                        out_dir / "morning_briefing_SPY_latest.json",
+                        malicious_path,
+                    )
+
+                    with self.assertRaisesRegex(ValueError, expected_error):
+                        publish.write_briefing_artifact(current, out_dir)
+
+    def test_write_replaces_older_noncanonical_legacy_session_date(self):
+        current = publish.build_briefing_artifact(self.snapshot, self.track_record)
+        legacy_core = {
+            "contract": "pivotquant.morning_briefing",
+            "contract_version": 1,
+            "symbol": "SPY",
+            "session_date": "2026-W40-4",
+            "prepared_at_utc": "2026-10-01T11:00:00Z",
+            "snapshot_id": "lvs_legacy",
+            "track_record_as_of_utc": "2026-10-01T10:59:00Z",
+            "track_record_sha256": "a" * 64,
+            "body": "legacy briefing",
+        }
+        legacy = {
+            **legacy_core,
+            "briefing_id": (
+                "brf_"
+                + hashlib.sha256(publish._canonical_bytes(legacy_core)).hexdigest()[:24]
+            ),
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            legacy_path = out_dir / "morning_briefing_SPY_2026-W40-4.json"
+            legacy_path.write_text(json.dumps(legacy), encoding="utf-8")
+            latest = out_dir / "morning_briefing_SPY_latest.json"
+            publish._atomic_latest_link(latest, legacy_path)
+
+            with self.assertRaisesRegex(ValueError, "canonical YYYY-MM-DD"):
+                publish.write_briefing_artifact(current, out_dir)
+
+    def test_retry_repairs_same_session_legacy_latest_file(self):
+        current = publish.build_briefing_artifact(self.snapshot, self.track_record)
+        legacy_core = {
+            "contract": "pivotquant.morning_briefing",
+            "contract_version": 1,
+            "symbol": "SPY",
+            "session_date": "2026-10-02",
+            "prepared_at_utc": "2026-10-02T11:00:00Z",
+            "snapshot_id": "lvs_legacy",
+            "track_record_as_of_utc": "2026-10-02T10:59:00Z",
+            "track_record_sha256": "a" * 64,
+            "body": "legacy briefing",
+        }
+        legacy = {
+            **legacy_core,
+            "briefing_id": (
+                "brf_"
+                + hashlib.sha256(publish._canonical_bytes(legacy_core)).hexdigest()[:24]
+            ),
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            immutable = out_dir / "morning_briefing_SPY_2026-10-02.json"
+            immutable.write_text(json.dumps(current), encoding="utf-8")
+            latest = out_dir / "morning_briefing_SPY_latest.json"
+            latest.write_text(json.dumps(legacy), encoding="utf-8")
+
+            artifact, reused = publish.load_or_build_briefing(
+                self.snapshot,
+                self.track_record,
+                out_dir,
+                captured_at_utc="2026-10-02T11:30:00Z",
+            )
+
+            self.assertEqual(reused, immutable)
+            self.assertEqual(artifact, current)
+            self.assertTrue(latest.is_symlink())
+            self.assertEqual(json.loads(latest.read_text()), current)
+
+    def test_retry_repairs_legacy_latest_pointer_from_frozen_briefing(self):
+        current = publish.build_briefing_artifact(self.snapshot, self.track_record)
+        legacy_core = {
+            "contract": "pivotquant.morning_briefing",
+            "contract_version": 1,
+            "symbol": "SPY",
+            "session_date": "2026-10-01",
+            "prepared_at_utc": "2026-10-01T11:00:00Z",
+            "snapshot_id": "lvs_legacy",
+            "track_record_as_of_utc": "2026-10-01T10:59:00Z",
+            "track_record_sha256": "a" * 64,
+            "body": "legacy briefing",
+        }
+        legacy = {
+            **legacy_core,
+            "briefing_id": (
+                "brf_"
+                + hashlib.sha256(publish._canonical_bytes(legacy_core)).hexdigest()[:24]
+            ),
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            immutable = out_dir / "morning_briefing_SPY_2026-10-02.json"
+            immutable.write_text(json.dumps(current), encoding="utf-8")
+            legacy_path = out_dir / "morning_briefing_SPY_2026-10-01.json"
+            legacy_path.write_text(json.dumps(legacy), encoding="utf-8")
+            latest = out_dir / "morning_briefing_SPY_latest.json"
+            publish._atomic_latest_link(latest, legacy_path)
+
+            artifact, reused = publish.load_or_build_briefing(
+                self.snapshot,
+                {**self.track_record, "hold_rates_publishable": True},
+                out_dir,
+                captured_at_utc="2026-10-02T11:30:00Z",
+            )
+
+            self.assertEqual(reused, immutable)
+            self.assertEqual(artifact, current)
+            self.assertEqual(json.loads(latest.read_text()), current)
 
     def test_write_freezes_first_briefing_and_rejects_changed_rerun(self):
         first = publish.build_briefing_artifact(self.snapshot, self.track_record)
