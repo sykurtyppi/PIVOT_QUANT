@@ -634,12 +634,14 @@ def parse_candles(payload: dict) -> list[dict]:
     return normalized
 
 
-def normalize_candles_to_interval(candles: list[dict], interval_sec: int) -> list[dict]:
-    """Snap provider timestamps to their bar grid and keep the latest value per bucket.
+def normalize_candles_to_interval(
+    candles: list[dict], interval_sec: int, *, snap_provisional_minute: bool = False
+) -> list[dict]:
+    """Preserve provider bar opens; sort and keep the last input at each timestamp.
 
-    Some providers timestamp the still-open candle with the current wall-clock
-    second. Persisting that timestamp creates a second, off-grid row beside the
-    finalized candle and makes otherwise complete label windows fail coverage.
+    Only the explicit Yahoo 1m caller contract opts into flooring provisional
+    wall-clock seconds. A duration alone does not define a provider's grid
+    origin: hourly and other bars may be session-anchored, not epoch-anchored.
     """
     interval_sec = int(interval_sec)
     if interval_sec <= 0:
@@ -649,7 +651,7 @@ def normalize_candles_to_interval(candles: list[dict], interval_sec: int) -> lis
     for candle in candles:
         normalized = dict(candle)
         raw_ts = int(normalized["time"])
-        normalized["time"] = raw_ts - (raw_ts % interval_sec)
+        normalized["time"] = raw_ts - (raw_ts % 60) if snap_provisional_minute and interval_sec == 60 else raw_ts
         by_timestamp[normalized["time"]] = normalized
     return [by_timestamp[ts] for ts in sorted(by_timestamp)]
 
@@ -2146,7 +2148,10 @@ def main() -> None:
         try:
             log.info("Processing %s (interval=%s, range=%s)", symbol, args.interval, range_str)
             payload, source = fetch_market(symbol, args.interval, range_str, args.source)
-            candles = normalize_candles_to_interval(parse_candles(payload), interval_sec)
+            candles = normalize_candles_to_interval(
+                parse_candles(payload), interval_sec,
+                snap_provisional_minute=args.interval == "1m" and source.lower() == "yahoo",
+            )
             if not candles:
                 log.warning("No candles for %s. Skipping.", symbol)
                 continue

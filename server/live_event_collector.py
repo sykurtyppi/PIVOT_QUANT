@@ -507,7 +507,10 @@ def _collect_symbol(conn: sqlite3.Connection, symbol: str) -> tuple[Dict[str, An
     #
     # No additional proxy attempt should be added here — one call, one proxy try.
     payload, resolved_source = fetch_market(symbol, INTERVAL, range_str, SOURCE)
-    candles = normalize_candles_to_interval(parse_candles(payload), INTERVAL_SEC)
+    candles = normalize_candles_to_interval(
+        parse_candles(payload), INTERVAL_SEC,
+        snap_provisional_minute=INTERVAL == "1m" and resolved_source.lower() == "yahoo",
+    )
     if not candles:
         return (
             {
