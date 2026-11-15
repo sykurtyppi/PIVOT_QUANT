@@ -38,6 +38,19 @@ jobs:
       - name: Run Jest
         run: npm test -- --runInBand
 
+      - name: Setup Python for canonical snapshot integration
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install canonical snapshot test dependencies
+        run: python -m pip install -r .github/ci/requirements-smoke.txt
+
+      - name: Run canonical API and DOM workflow regressions
+        run: |
+          npx --no-install eslint server/levels_snapshot.js tests/levels_snapshot_api.node.mjs tests/daily_levels_canonical.node.mjs
+          PYTHON_BIN="$(command -v python)" npm run test:canonical
+
       - name: Check coverage ratchet
         # Tight gate on top of jest's coarse coverageThreshold floor: fails if
         # src/** coverage drops below the committed .github/coverage-baseline.json

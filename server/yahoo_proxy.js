@@ -5,6 +5,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { buildConversionSnapshot, convertLevels, normalizeInstrument } from './level_converter.js';
+import { handleLevelsSnapshot } from './levels_snapshot.js';
 
 const fsp = fs.promises;
 const HOST = process.env.HOST || '127.0.0.1';
@@ -3122,6 +3123,12 @@ const server = http.createServer(async (req, res) => {
       error: 'Forbidden',
       message: 'Cross-origin write requests are not permitted.',
     });
+    return;
+  }
+
+  // Canonical artifacts share the dashboard auth gate above; never provider fallback.
+  if (url.pathname === '/api/levels/snapshot') {
+    await handleLevelsSnapshot(req, res, url);
     return;
   }
 
