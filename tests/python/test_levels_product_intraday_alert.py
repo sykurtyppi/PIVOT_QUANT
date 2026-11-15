@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import json
+from datetime import date, datetime, timezone
 import os
 import sqlite3
 import tempfile
@@ -455,6 +457,174 @@ class ProductionConfigurationTest(unittest.TestCase):
                     (base_ts + 11, "event-11"),
                 )
             self.assertIn("1 deferred", output.getvalue())
+
+
+class SnapshotUnavailablePollTest(unittest.TestCase):
+    """Real poll/SQLite/filesystem regressions; only rates and transport are stubbed."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.read_db = self.root / "touches.sqlite"
+        self.state_db = self.root / "state.sqlite"
+        import level_snapshot
+        self.contract = level_snapshot
+        self.snapshots = [level_snapshot.build_snapshot(
+            symbol="SPY", source_session_date=source,
+            source_ohlc={"high": 770, "low": 750, "close": 760},
+            generated_at_utc=f"{source.isoformat()}T22:00:00Z",
+            raw_levels=level_snapshot.calculate_pivots(770, 750, 760), evidence={},
+        ) for source in (date(2026, 11, 11), date(2026, 11, 12), date(2026, 11, 13))]
+        self.timestamps = [int(datetime.fromisoformat(
+            snapshot["session_date"] + "T15:00:00+00:00").timestamp() * 1000)
+            for snapshot in self.snapshots]
+        with closing(sqlite3.connect(self.read_db)) as con:
+            con.execute("""CREATE TABLE touch_events (
+                ts_event INTEGER, event_id TEXT, symbol TEXT, data_quality REAL,
+                confluence_count INTEGER, level_type TEXT, level_price REAL,
+                touch_side INTEGER)""")
+            con.commit()
+        with closing(sqlite3.connect(self.state_db)) as con:
+            intraday_alert._ensure_state_schema(con)
+            con.execute("INSERT INTO alert_state VALUES (?,?,?)", ("SPY", 100, "old"))
+            con.commit()
+        self.post = mock.Mock(return_value=True)
+        real_snapshot_loader = intraday_alert._snapshot_for_event
+
+        def snapshot_loader(symbol, ts_event, art_dir):
+            return real_snapshot_loader(symbol, ts_event, self.root)
+        for patcher in (
+            mock.patch.dict(os.environ, {intraday_alert.notify.WEBHOOK_ENV: "https://example.test/unused"}),
+            mock.patch.object(intraday_alert, "_read_con", side_effect=lambda: sqlite3.connect(self.read_db)),
+            mock.patch.object(intraday_alert, "_state_con", side_effect=lambda: sqlite3.connect(self.state_db)),
+            mock.patch.object(intraday_alert, "_snapshot_for_event", side_effect=snapshot_loader),
+            mock.patch.object(intraday_alert, "current_rates", return_value={}),
+            mock.patch.object(intraday_alert.notify, "post", self.post),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        clock_patcher = mock.patch.object(intraday_alert, "datetime", wraps=datetime)
+        clock = clock_patcher.start()
+        self.addCleanup(clock_patcher.stop)
+        clock.now.return_value = datetime(2026, 11, 17, 15, tzinfo=timezone.utc)
+
+    def add_event(self, index, *, price=760):
+        with closing(sqlite3.connect(self.read_db)) as con:
+            con.execute("INSERT INTO touch_events VALUES (?,?,?,?,?,?,?,?)",
+                        (self.timestamps[index], f"e{index}", "SPY", 1, 2, "PP", price, 1))
+            con.commit()
+
+    def publish(self, index):
+        return self.contract.write_snapshot(self.snapshots[index], self.root)[0]
+
+    def state(self):
+        with closing(sqlite3.connect(self.state_db)) as con:
+            return (con.execute("SELECT last_ts, last_event_id FROM alert_state").fetchone(),
+                    con.execute("SELECT event_id, disposition FROM alert_event_dispositions ORDER BY ts_event").fetchall())
+
+    def poll(self, *args):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            rc = intraday_alert.main(list(args))
+        return rc, output.getvalue()
+
+    def test_missing_then_published_delivers_once_without_terminal_disposition(self):
+        self.add_event(0)
+        rc, output = self.poll()
+        self.assertEqual(rc, 3)
+        self.assertEqual(self.state(), ((100, "old"), []))
+        self.assertIn("snapshot unavailable", output)
+        self.assertIn("event_id=e0", output)
+        self.assertIn("session_date=2026-11-12", output)
+        self.assertIn("age_seconds=432000", output)
+        self.assertIn("pending retry", output)
+        self.publish(0)
+        self.assertEqual(self.poll()[0], 0)
+        self.assertEqual(self.poll()[0], 0)
+        self.assertEqual(self.post.call_count, 1)
+        self.assertEqual(self.state(), ((self.timestamps[0], "e0"), [("e0", "delivered")]))
+
+    def test_valid_prefix_missing_middle_and_later_stay_ordered_across_polls(self):
+        for index in range(3):
+            self.add_event(index)
+        self.publish(0)
+        self.publish(2)
+        self.assertEqual(self.poll()[0], 3)
+        self.assertEqual(self.post.call_count, 1)
+        self.assertEqual(self.state(), ((self.timestamps[0], "e0"), [("e0", "delivered")]))
+        # Each main call opens fresh connections: durable behavior across restart.
+        for cap in (1, 2, 12):
+            self.assertEqual(self.poll("--max-alerts", str(cap))[0], 3)
+            self.assertEqual(self.post.call_count, 1)
+            self.assertEqual(self.state()[0], (self.timestamps[0], "e0"))
+        self.publish(1)
+        self.assertEqual(self.poll("--max-alerts", "1")[0], 0)
+        self.assertEqual(self.state()[0], (self.timestamps[1], "e1"))
+        self.assertEqual(self.poll()[0], 0)
+        self.assertEqual(self.post.call_count, 3)
+        self.assertEqual(self.poll()[0], 0)
+        self.assertEqual(self.post.call_count, 3)
+
+    def test_unavailable_dry_run_never_binds_or_checkpoints_valid_prefix(self):
+        self.add_event(0)
+        self.add_event(1)
+        self.publish(0)
+        self.assertEqual(self.poll("--dry-run")[0], 3)
+        self.assertEqual(self.state(), ((100, "old"), []))
+        self.post.assert_not_called()
+
+    def test_unavailable_does_not_override_notifier_failure_or_saved_binding(self):
+        self.add_event(0)
+        self.add_event(1)
+        path = self.publish(0)
+        self.post.side_effect = [False, True, True]
+        self.assertEqual(self.poll()[0], 1)
+        self.assertEqual(self.state(), ((100, "old"), [("e0", "pending")]))
+        path.unlink()
+        (self.root / "levels_snapshot_SPY_latest.json").unlink()
+        self.assertEqual(self.poll()[0], 3)
+        self.assertEqual(self.state()[0], (self.timestamps[0], "e0"))
+        self.publish(1)
+        self.assertEqual(self.poll()[0], 0)
+        self.assertEqual(self.post.call_count, 3)
+
+    def test_file_disappearing_between_exists_and_load_remains_retryable(self):
+        self.add_event(0)
+        path = self.publish(0)
+        real_load = intraday_alert.load_snapshot
+
+        def disappear(target):
+            target.unlink()
+            return real_load(target)
+
+        with mock.patch.object(intraday_alert, "load_snapshot", side_effect=disappear):
+            self.assertEqual(self.poll()[0], 3)
+        self.assertFalse(path.exists())
+        self.assertEqual(self.state(), ((100, "old"), []))
+        self.publish(0)
+        self.assertEqual(self.poll()[0], 0)
+        self.assertEqual(self.post.call_count, 1)
+
+    def test_actual_price_mismatch_is_quarantined_and_allows_later_progress(self):
+        self.add_event(0, price=999)
+        self.add_event(1)
+        self.publish(0)
+        self.publish(1)
+        self.assertEqual(self.poll()[0], 3)
+        self.assertEqual(self.state(), ((self.timestamps[0], "e0"), [("e0", "snapshot_mismatch")]))
+        self.assertEqual(self.poll()[0], 0)
+        self.assertEqual(self.post.call_count, 1)
+        self.assertEqual(self.state()[0], (self.timestamps[1], "e1"))
+
+    def test_actual_identity_mismatch_is_quarantined(self):
+        self.add_event(0)
+        # Valid snapshot for the wrong session in the requested session filename.
+        path = self.root / "levels_snapshot_SPY_2026-11-12.json"
+        path.write_text(json.dumps(self.snapshots[1]))
+        self.assertEqual(self.poll()[0], 3)
+        self.assertEqual(self.state(), ((self.timestamps[0], "e0"), [("e0", "snapshot_mismatch")]))
+        self.post.assert_not_called()
 
 
 if __name__ == "__main__":

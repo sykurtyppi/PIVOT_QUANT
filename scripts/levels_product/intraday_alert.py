@@ -16,6 +16,7 @@ Designed to be run on a short interval (e.g. every 1-2 min during RTH) by launch
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sqlite3
 import sys
@@ -122,12 +123,25 @@ def bind_snapshot_identity(row, snapshot):
     )
 
 
+class SnapshotUnavailable(Exception):
+    """Canonical input cannot currently be read; not a proven contract mismatch."""
+
+
 def _snapshot_for_event(symbol, ts_event, art_dir=ART):
     session_date = datetime.fromtimestamp(int(ts_event) / 1000, tz=ET).date().isoformat()
     path = art_dir / f"levels_snapshot_{symbol}_{session_date}.json"
     if not path.exists():
-        raise ValueError(f"missing canonical levels snapshot for {symbol} session {session_date}")
-    snapshot = load_snapshot(path)
+        raise SnapshotUnavailable(f"missing canonical levels snapshot for {symbol} session {session_date}")
+    try:
+        snapshot = load_snapshot(path)
+    except OSError as exc:
+        raise SnapshotUnavailable(f"could not read levels snapshot {path}: {exc}") from exc
+    except ValueError as exc:
+        # load_snapshot wraps read/decode failures, including disappearance after
+        # exists(). Only a successfully read contract can prove a mismatch.
+        if isinstance(exc.__cause__, (OSError, json.JSONDecodeError)):
+            raise SnapshotUnavailable(str(exc)) from exc
+        raise
     if snapshot["symbol"] != symbol or snapshot["session_date"] != session_date:
         raise ValueError(f"snapshot identity mismatch for {symbol} session {session_date}")
     return snapshot
@@ -184,8 +198,8 @@ def _record_disposition(scon, symbol, row, *, disposition, snapshot_id=None,
 def resolve_pending_rows(new, symbol, scon, persist=True, art_dir=ART):
     """Resolve rows once, then reuse their durable snapshot binding on retries.
 
-    Returns the valid ordered prefix and the first contract-mismatch row, if any.
-    The mismatch is durably recorded before it can be checkpointed as terminal.
+    Returns the valid ordered prefix and the first blocked row, if any.
+    Unavailable input blocks without a disposition; proven mismatches are durable.
     """
     cache = {}
     bound = []
@@ -211,6 +225,11 @@ def resolve_pending_rows(new, symbol, scon, persist=True, art_dir=ART):
                 cache[session_date] = _snapshot_for_event(symbol, row.ts_event, art_dir)
             snapshot = cache[session_date]
             resolved = bind_snapshot_identity(row, snapshot)
+        except SnapshotUnavailable as exc:
+            return pd.DataFrame(bound), SimpleNamespace(
+                **row._asdict(), session_date=session_date,
+                detail=str(exc), unavailable=True,
+            )
         except ValueError as exc:
             if persist:
                 _record_disposition(
@@ -357,6 +376,17 @@ def main(argv=None):
         rcon.close(); scon.close()
         return 3
 
+    unavailable = mismatch is not None and getattr(mismatch, "unavailable", False)
+    if unavailable and mismatch is not None:
+        age_seconds = max(0, int(datetime.now(timezone.utc).timestamp()
+                                 - int(mismatch.ts_event) / 1000))
+        print(f"levels snapshot unavailable: {mismatch.detail}; "
+              f"event_id={mismatch.event_id} session_date={mismatch.session_date} "
+              f"age_seconds={age_seconds}; pending retry (cursor cannot pass event)")
+        if bounded.empty:
+            rcon.close(); scon.close()
+            return 3
+
     if mismatch is not None and bounded.empty:
         if args.dry_run:
             print(f"levels snapshot contract error: {mismatch.detail}; state unchanged")
@@ -373,7 +403,9 @@ def main(argv=None):
                         dry_run=args.dry_run,
                         pending_count=(len(bounded) if mismatch is not None else pending_count))
     if rc == 0 and mismatch is not None:
-        if args.dry_run:
+        if unavailable:
+            pass  # validated prefix may advance; unavailable event must not
+        elif args.dry_run:
             print(f"levels snapshot contract error: {mismatch.detail}; state unchanged")
         else:
             _checkpoint_mismatch(scon, args.symbol, mismatch)
