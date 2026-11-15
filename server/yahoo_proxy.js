@@ -1,3 +1,4 @@
+import './node_runtime.js';
 import http from 'http';
 import https from 'https';
 import fs from 'fs';
