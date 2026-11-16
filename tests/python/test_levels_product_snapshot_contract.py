@@ -536,6 +536,197 @@ class BriefingArtifactTest(unittest.TestCase):
                 publish.write_briefing_artifact(changed, Path(tmp))
             self.assertEqual(immutable.read_bytes(), before)
 
+    @staticmethod
+    def _rehash(artifact):
+        core = {key: value for key, value in artifact.items() if key != "briefing_id"}
+        return {**core, "briefing_id": "brf_" + hashlib.sha256(
+            publish._canonical_bytes(core)
+        ).hexdigest()[:24]}
+
+    def _legacy(self, **changes):
+        artifact = publish.build_briefing_artifact(self.snapshot, self.track_record)
+        artifact.pop("track_record")
+        artifact.pop("snapshot_generated_at_utc")
+        artifact.update(session_date="2026-10-01", prepared_at_utc="2026-10-01T11:00:00Z",
+                        track_record_as_of_utc="2026-10-01T10:59:00Z")
+        artifact.update(changes)
+        return self._rehash(artifact)
+
+    @staticmethod
+    def _seed_latest(out_dir, artifact):
+        immutable = out_dir / (
+            f"morning_briefing_{artifact['symbol']}_{artifact['session_date']}.json"
+        )
+        immutable.write_text(json.dumps(artifact, indent=2) + "\n", encoding="utf-8")
+        latest = out_dir / "morning_briefing_SPY_latest.json"
+        latest.symlink_to(immutable.name)
+        return immutable, latest
+
+    def test_older_legacy_pointer_advances_without_rewriting_legacy(self):
+        modern = publish.build_briefing_artifact(self.snapshot, self.track_record)
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            legacy_path, latest = self._seed_latest(out_dir, self._legacy())
+            before = legacy_path.read_bytes()
+            immutable, returned_latest = publish.write_briefing_artifact(modern, out_dir)
+            self.assertEqual(returned_latest, latest)
+            self.assertEqual(latest.resolve(), immutable.resolve())
+            self.assertEqual(publish._load_briefing(latest), modern)
+            self.assertEqual(legacy_path.read_bytes(), before)
+
+    def test_existing_immutable_retry_reconciles_legacy_pointer_without_redelivery(self):
+        modern = publish.build_briefing_artifact(self.snapshot, self.track_record)
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            publish.notify, "post", return_value=True
+        ) as post:
+            out_dir = Path(tmp)
+            legacy_path, latest = self._seed_latest(out_dir, self._legacy())
+            immutable = out_dir / "morning_briefing_SPY_2026-10-02.json"
+            immutable.write_text(json.dumps(modern) + "\n", encoding="utf-8")
+            before = immutable.read_bytes(), legacy_path.read_bytes()
+            self.assertEqual(publish.deliver_briefing(
+                modern, channel="webhook", out_dir=out_dir
+            ), (True, "sent"))
+            retry, retry_path = publish.load_or_build_briefing(
+                self.snapshot, {**self.track_record, "symbol": "CHANGED"}, out_dir,
+                captured_at_utc="2026-10-02T15:00:00Z",
+            )
+            self.assertEqual(retry, modern)
+            self.assertEqual(retry_path, immutable)
+            self.assertEqual(latest.resolve(), immutable.resolve())
+            self.assertEqual((immutable.read_bytes(), legacy_path.read_bytes()), before)
+            self.assertEqual(publish.deliver_briefing(
+                retry, channel="webhook", out_dir=out_dir
+            ), (True, "already-delivered"))
+            post.assert_called_once()
+
+    def test_tampered_legacy_identity_cannot_be_superseded(self):
+        legacy = {**self._legacy(), "body": "tampered without rehash"}
+        modern = publish.build_briefing_artifact(self.snapshot, self.track_record)
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            legacy_path, latest = self._seed_latest(out_dir, legacy)
+            with self.assertRaisesRegex(ValueError, "identity digest mismatch"):
+                publish.write_briefing_artifact(modern, out_dir)
+            self.assertEqual(latest.resolve(), legacy_path.resolve())
+
+    def test_only_exact_recognizable_legacy_schema_can_be_superseded(self):
+        variants = [
+            {"track_record": None}, {"snapshot_generated_at_utc": "2026-10-01T11:00:00Z"},
+            {"unknown": True}, {"contract": "not-a-briefing"}, {"contract_version": 2},
+            {"symbol": "QQQ"}, {"session_date": "2026-1-01"},
+            {"prepared_at_utc": "bad"}, {"track_record_as_of_utc": None},
+            {"snapshot_id": "bad"}, {"track_record_sha256": "bad"}, {"body": None},
+        ]
+        modern = publish.build_briefing_artifact(self.snapshot, self.track_record)
+        for changes in variants:
+            with self.subTest(changes=changes), tempfile.TemporaryDirectory() as tmp:
+                out_dir = Path(tmp)
+                legacy_path, latest = self._seed_latest(out_dir, self._legacy(**changes))
+                with self.assertRaises(ValueError):
+                    publish.write_briefing_artifact(modern, out_dir)
+                self.assertEqual(latest.resolve(), legacy_path.resolve())
+
+    def test_same_or_future_legacy_pointer_fails_closed(self):
+        modern = publish.build_briefing_artifact(self.snapshot, self.track_record)
+        for session in ("2026-10-02", "2026-10-05"):
+            with self.subTest(session=session), tempfile.TemporaryDirectory() as tmp:
+                out_dir = Path(tmp)
+                legacy_path, latest = self._seed_latest(
+                    out_dir, self._legacy(session_date=session)
+                )
+                with self.assertRaises(ValueError):
+                    publish.write_briefing_artifact(modern, out_dir)
+                self.assertEqual(latest.resolve(), legacy_path.resolve())
+
+    def test_legacy_is_never_reusable_or_deliverable(self):
+        legacy = self._legacy(session_date="2026-10-02")
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            publish.notify, "post"
+        ) as post:
+            out_dir = Path(tmp)
+            legacy_path, latest = self._seed_latest(out_dir, legacy)
+            with self.assertRaises(ValueError):
+                publish._load_briefing(latest)
+            with self.assertRaises(ValueError):
+                publish.load_or_build_briefing(
+                    self.snapshot, self.track_record, out_dir,
+                    captured_at_utc="2026-10-02T11:01:00Z",
+                )
+            for dry_run in (True, False):
+                with self.assertRaises(ValueError):
+                    publish.deliver_briefing(
+                        legacy, channel="webhook", out_dir=out_dir, dry_run=dry_run
+                    )
+            post.assert_not_called()
+            self.assertEqual(latest.resolve(), legacy_path.resolve())
+            self.assertEqual(list(out_dir.glob("morning_delivery_*.json")), [])
+
+    def test_invalid_new_briefing_is_rejected_before_any_artifact_write(self):
+        modern = publish.build_briefing_artifact(self.snapshot, self.track_record)
+        variants = [{**modern, "body": "tampered"}]
+        for field in ("track_record", "snapshot_generated_at_utc", "contract"):
+            partial = dict(modern)
+            partial.pop(field)
+            variants.append(self._rehash(partial))
+        variants.append(self._rehash({**modern, "track_record": None}))
+        variants.append(self._rehash({**modern, "track_record_sha256": "0" * 64}))
+        for artifact in variants:
+            with self.subTest(keys=artifact.keys()), tempfile.TemporaryDirectory() as tmp:
+                out_dir = Path(tmp)
+                with self.assertRaises(ValueError):
+                    publish.write_briefing_artifact(artifact, out_dir)
+                self.assertEqual(list(out_dir.iterdir()), [])
+
+    def test_partial_modern_latest_cannot_use_legacy_transition(self):
+        modern = publish.build_briefing_artifact(self.snapshot, self.track_record)
+        partial = self._legacy(track_record=self.track_record)
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            old_path, latest = self._seed_latest(out_dir, partial)
+            with self.assertRaises(ValueError):
+                publish.write_briefing_artifact(modern, out_dir)
+            self.assertEqual(latest.resolve(), old_path.resolve())
+
+    def test_modern_briefing_latest_remains_monotonic_on_retry(self):
+        older = publish.build_briefing_artifact(self.snapshot, self.track_record)
+        newer_snapshot = snapshot_contract.build_snapshot(
+            symbol="SPY", source_session_date=date(2026, 10, 2),
+            source_ohlc=SnapshotContractTest.SOURCE_OHLC,
+            generated_at_utc="2026-10-05T11:00:00Z",
+            raw_levels=calculate_pivots(**SnapshotContractTest.SOURCE_OHLC), evidence={},
+        )
+        newer = publish.build_briefing_artifact(newer_snapshot, {
+            **self.track_record, "report_session_date": "2026-10-02",
+            "as_of_utc": "2026-10-05T10:59:00Z",
+        })
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            publish.write_briefing_artifact(older, out_dir)
+            immutable, latest = publish.write_briefing_artifact(newer, out_dir)
+            publish.load_or_build_briefing(
+                self.snapshot, self.track_record, out_dir,
+                captured_at_utc="2026-10-02T11:01:00Z",
+            )
+            self.assertEqual(latest.resolve(), immutable.resolve())
+            self.assertEqual(publish._load_briefing(latest), newer)
+
+    def test_writer_preserves_snapshot_supported_symbol_format(self):
+        for symbol in ("1ABC", "ABC_DEF", "A" * 32):
+            with self.subTest(symbol=symbol), tempfile.TemporaryDirectory() as tmp:
+                snapshot = snapshot_contract.build_snapshot(
+                    symbol=symbol, source_session_date=date(2026, 10, 1),
+                    source_ohlc=SnapshotContractTest.SOURCE_OHLC,
+                    generated_at_utc="2026-10-02T11:00:00Z",
+                    raw_levels=calculate_pivots(**SnapshotContractTest.SOURCE_OHLC), evidence={},
+                )
+                modern = publish.build_briefing_artifact(
+                    snapshot, {**self.track_record, "symbol": symbol}
+                )
+                immutable, latest = publish.write_briefing_artifact(modern, Path(tmp))
+                self.assertEqual(latest.resolve(), immutable.resolve())
+                self.assertEqual(publish._load_briefing(latest), modern)
+
     def test_failed_delivery_has_no_receipt_and_returns_failure(self):
         artifact = publish.build_briefing_artifact(self.snapshot, self.track_record)
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
