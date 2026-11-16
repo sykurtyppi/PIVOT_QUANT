@@ -90,6 +90,61 @@ print(json.dumps({'snapshot':snapshot,'briefing':briefing,'receipt':receipt,'del
   }
 });
 
+test('self-consistently hashed malformed artifacts fail closed through reader, HTTP and DOM', async () => {
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), 'canonical-invalid-'));
+  let server;
+  try {
+    const code = `import sys,json
+from pathlib import Path
+from datetime import datetime,timedelta
+sys.path[:0]=['scripts','scripts/levels_product']
+import level_snapshot as c
+from read_snapshot import target_session
+from trading_calendar import is_trading_day
+from backfill_events import calculate_pivots
+source=target_session(datetime.now(c.UTC))-timedelta(days=1)
+while not is_trading_day(source): source-=timedelta(days=1)
+s=c.build_snapshot(symbol='SPY',source_session_date=source,source_ohlc={'high':605,'low':595,'close':601},generated_at_utc=c._session_close_utc(source),raw_levels=calculate_pivots(605,595,601),evidence={})
+if sys.argv[2]=='string': s['levels'][0]['price']=str(s['levels'][0]['price'])
+elif sys.argv[2]=='subcent': s['levels'][0]['price']+=0.001
+elif sys.argv[2]=='reference': s['reference_price']=str(s['reference_price'])
+elif sys.argv[2]=='source': s['source']['ohlc']['high']=str(s['source']['ohlc']['high'])
+elif sys.argv[2]=='confluence': s['levels'][0]['confluence_components']={}
+for l in s['levels']: l['level_id']=c._digest('lvl',c._level_identity_core(symbol=s['symbol'],session_date=s['session_date'],label=l['label'],price=l['price']))
+s['snapshot_id']=c._digest('lvs',c._identity_core(s))
+(Path(sys.argv[1])/'levels_snapshot_SPY_latest.json').write_text(json.dumps(s))`;
+    server = http.createServer((req, res) => handleLevelsSnapshot(req, res,
+      new URL(req.url, 'http://localhost'), { read: (symbol) => readLevelsSnapshot(symbol,
+        { env: { ...process.env, LEVELS_SNAPSHOT_DIR: root } }) }));
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    for (const kind of ['string', 'subcent', 'reference', 'source', 'confluence']) {
+      execFileSync('./scripts/_pybin_exec.sh', ['-c', code, root, kind], { encoding: 'utf8' });
+      const { dom, pending, run, response } = setup();
+      // Start with visible valid rows so failure must also clear old content.
+      run('load()');
+      pending.find((p) => p.url.startsWith('/api/levels/snapshot')).resolve(response(snapshot()));
+      await flush();
+      assert.equal(dom.window.document.getElementById('canonical-levels').children.length, 1);
+      run('load()');
+      const request = pending.filter((p) => p.url.startsWith('/api/levels/snapshot')).at(-1);
+      const result = await fetch(`http://127.0.0.1:${server.address().port}${request.url}`);
+      const payload = await result.clone().json();
+      assert.equal(payload.status, 'unavailable', kind);
+      assert.equal(payload.reason, 'invalid', kind);
+      assert.equal(Object.hasOwn(payload, 'snapshot'), false, kind);
+      request.resolve(result);
+      await flush();
+      await flush();
+      assert.equal(dom.window.document.getElementById('canonical-levels').children.length, 0, kind);
+      assert.ok(dom.window.document.getElementById('canonical-status').textContent.includes('invalid'), kind);
+      assert.equal(dom.window.document.getElementById('canonical-map').getAttribute('aria-busy'), 'false');
+    }
+  } finally {
+    if (server?.listening) await new Promise((resolve) => server.close(resolve));
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 function snapshot(symbol = 'SPY') {
   return { status: 'available', symbol, snapshot: {
     symbol, snapshot_id: 'lvs_fixture', session_date: '2026-11-16', generated_at_utc: '2026-11-13T21:01:00Z',

@@ -11,7 +11,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT / 'scripts'), str(ROOT / 'scripts/levels_product')]
 from backfill_events import calculate_pivots
-from level_snapshot import build_snapshot, write_snapshot
+from level_snapshot import (
+    build_snapshot, write_snapshot, validate_snapshot,
+    _digest, _identity_core, _level_identity_core,
+)
 from read_snapshot import read_current_snapshot, target_session
 
 
@@ -106,6 +109,57 @@ class SnapshotReaderTests(unittest.TestCase):
         for data in [b'[]', b'null', b'{', b'\xff']:
             path.write_bytes(data)
             self.assertEqual(self.read()['reason'], 'invalid')
+
+    def test_self_consistently_hashed_malformed_numbers_fail_closed(self):
+        # Re-sign every mutation: identity checking alone is not schema validation.
+        cases = [
+            ('string level price', ('levels', 0, 'price'), str),
+            ('subcent level price', ('levels', 0, 'price'), lambda price: price + 0.001),
+            ('boolean level price', ('levels', 0, 'price'), True),
+            ('null level price', ('levels', 0, 'price'), None),
+            ('string reference', ('reference_price',), '601.0'),
+            ('boolean source high', ('source', 'ohlc', 'high'), True),
+            ('string source high', ('source', 'ohlc', 'high'), '605.0'),
+            ('string distance', ('levels', 0, 'distance_from_reference_bps'), '255.1'),
+            ('object confluence', ('levels', 0, 'confluence_components'), {}),
+        ]
+        path = self.root / 'levels_snapshot_SPY_latest.json'
+        for name, keys, value in cases:
+            with self.subTest(case=name):
+                snapshot = fixture()
+                owner = snapshot
+                for key in keys[:-1]:
+                    owner = owner[key]
+                owner[keys[-1]] = value(owner[keys[-1]]) if callable(value) else value
+                for level in snapshot['levels']:
+                    level['level_id'] = _digest('lvl', _level_identity_core(
+                        symbol=snapshot['symbol'], session_date=snapshot['session_date'],
+                        label=level['label'], price=level['price']))
+                snapshot['snapshot_id'] = _digest('lvs', _identity_core(snapshot))
+                path.write_text(json.dumps(snapshot))
+                result = self.read()
+                self.assertEqual(result['status'], 'unavailable')
+                self.assertEqual(result.get('reason'), 'invalid')
+                self.assertNotIn('snapshot', result)
+                with self.assertRaises(ValueError):
+                    validate_snapshot(snapshot)
+
+    def test_nonfinite_numeric_fields_fail_closed(self):
+        path = self.root / 'levels_snapshot_SPY_latest.json'
+        for value in [float('nan'), float('inf'), -float('inf')]:
+            for keys in [('reference_price',), ('source', 'ohlc', 'high'),
+                         ('levels', 0, 'price'),
+                         ('levels', 0, 'distance_from_reference_bps')]:
+                with self.subTest(value=value, keys=keys):
+                    snapshot = fixture()
+                    owner = snapshot
+                    for key in keys[:-1]:
+                        owner = owner[key]
+                    owner[keys[-1]] = value
+                    path.write_text(json.dumps(snapshot))
+                    self.assertEqual(self.read()['reason'], 'invalid')
+                    with self.assertRaises(ValueError):
+                        validate_snapshot(snapshot)
 
     def test_uncovered_calendar_year_fails_closed(self):
         self.assertEqual(self.read(now=clock('2028-01-03T15:00:00Z'))['reason'], 'calendar_unavailable')

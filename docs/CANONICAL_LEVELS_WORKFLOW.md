@@ -30,6 +30,8 @@ The Python reader validates the stored artifact with `level_snapshot.load_snapsh
 
 Clock policy targets today's exchange session before close, then the next session at/after close or on non-trading days. Existing holiday/early-close tables and New York timezone rules apply. Calendar dates outside the existing 2025–2027 coverage fail closed. Missing, malformed, stale, future, oversized and wrong-symbol artifacts return explicit unavailable states.
 
+Stored numeric fields are validated without coercion: source OHLC, reference price, level price and distance must be finite JSON numbers, not strings, booleans or null. Stored reference/level prices must already be normalized to cents; the reader does not silently round malformed artifacts into validity. Source OHLC retains its original precision. Confluence components must be an array. These checks precede acceptance even when an artifact carries self-consistent hashes. Valid artifacts and the existing identity algorithm are unchanged.
+
 The dashboard displays exact stored prices, snapshot identity, source session/as-of/freshness, calculation version and expiry in a separate canonical panel. Live/exploratory analytics remain separately labeled. The canonical panel remains usable during a live-market-feed outage. Selection/load generations guard late successes, errors and loading-state updates.
 
 ## Verification — local, isolated
@@ -38,15 +40,15 @@ Delivery regressions were added before the fix and reproduced expired first send
 
 Verified on Node 24.22.1 and the repository Python 3.11 virtualenv:
 
-- Full Python smoke suite: 894 tests, OK, two skips.
+- Full Python smoke suite: 896 tests, OK, two skips.
 - Research-protocol suite: 336 tests, OK, one skip.
 - Jest: 18 suites, 328 tests passed.
-- `npm run test:canonical`: 13 API/DOM/integration tests passed, including reader saturation and capacity recovery after success, callback failure and synchronous spawn failure.
+- `npm run test:canonical`: 14 API/DOM/integration tests passed, including reader saturation/recovery and malformed self-consistently hashed artifacts rejected through the real Python reader, HTTP handler and DOM renderer.
 - Standard JS lint, explicit lint for the new helper/Node tests, proxy syntax, build, coverage ratchet and `git diff --check` passed.
 
 The synthetic integration exercises snapshot writing, frozen briefing construction, mocked transport plus receipt, the HTTP read handler and the actual page's DOM renderer. It checks matching snapshot/level identities and prices across these surfaces even when the live feed fails. It uses only temporary artifacts and an ephemeral loopback listener. It is not a real-browser visual test or a full proxy/service-stack test. Restore and intraday-alert delivery are outside that integrated fixture.
 
-`npm run test:canonical` is wired into CI with explicit Python dependencies and lint. Hosted CI has not been run for these uncommitted changes. Independent scoped review found no blocking security or logic defects. Its concurrency-coverage suggestion was addressed and rerun successfully. Full-proxy authentication-dispatch regression remains follow-up; current route placement was independently reviewed and parent-confirmed below the authentication gate. Agent scratch logs use `pivot-canonical-*-final.log`; these are local verification evidence, not committed product data.
+`npm run test:canonical` is wired into CI with explicit Python dependencies and lint. The original PR head passed hosted CI and the initial scoped review. A subsequent deep review found that self-consistently hashed string/subcent prices could pass validation; that blocked merge. Regressions reproduced the failure before the local validation correction and now pass, including clearing previously displayed canonical rows on an invalid artifact. Independent scoped review of the correction found no reproduced blockers: 8 reader, 32 contract/consumer and 14 Node tests passed, plus 50 independent malformed-number rejection probes and valid-artifact identity/precision compatibility checks. Hosted CI for this correction must be verified on its committed head. Parent-run VM dispatcher probes also verified the current authentication gate; a committed full-proxy authentication-dispatch regression remains follow-up. These are isolated verification results, not deployed-stack or production-clearance claims.
 
 ## Follow-up work (not completed by this increment)
 
