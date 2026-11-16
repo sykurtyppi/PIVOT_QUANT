@@ -184,6 +184,16 @@
     <button type="button" data-symbol="QQQ" aria-pressed="false">QQQ</button>
     <button type="button" data-symbol="IWM" aria-pressed="false">IWM</button>
   </div>
+  <section id="canonical-map" aria-label="Canonical morning map" aria-busy="false">
+    <div class="sec-title">Canonical morning map</div>
+    <div class="sec-sub">Published snapshot · fixed levels, not live calculations</div>
+    <div id="canonical-status" class="note" role="status">Loading canonical snapshot…</div>
+    <div id="canonical-meta" class="note" style="overflow-wrap:anywhere;white-space:pre-line"></div>
+    <div id="canonical-levels" class="ladder"></div>
+    <div class="disclaimer">Today's session before the exchange close; next session at/after close, on weekends and holidays. Unavailable means no canonical map — live analytics below are not a substitute.</div>
+  </section>
+  <div class="sec-title">Live / exploratory analytics</div>
+  <div class="disclaimer">Market-feed calculations and historical research below are separate from the published canonical morning map.</div>
   <div class="price-row">
     <div>
       <div class="price-label" id="price-label">Last</div>
@@ -264,6 +274,10 @@ const TZ = 'America/New_York';
 const RV_WINDOW = 20;
 let pivotMethod = 'standard';
 let lastData = null;
+let symbolGeneration = 0;
+let loadGeneration = 0;
+const sameSelection = (generation, requestedSymbol) => generation === symbolGeneration && requestedSymbol === symbol;
+const sameLoad = (generation, requestedSymbol) => generation === loadGeneration && requestedSymbol === symbol;
 
 const $ = (id) => document.getElementById(id);
 const fmt = (v, d = 2) => (Number.isFinite(v) ? v.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d }) : '—');
@@ -291,11 +305,45 @@ function setStatus(msg, isErr = false) {
   el.classList.toggle('err', isErr);
 }
 
-async function fetchMarket() {
-  const q = new URLSearchParams({ symbol, range: '1y', interval: '1d' });
+async function fetchMarket(requestedSymbol) {
+  const q = new URLSearchParams({ symbol: requestedSymbol, range: '1y', interval: '1d' });
   const res = await fetch(`/api/market?${q}`, { headers: { accept: 'application/json' } });
   if (!res.ok) throw new Error(`market data ${res.status}`);
   return res.json();
+}
+
+// Do not recalculate or merge canonical values with the live ladder. Python owns
+// validation/identity/freshness; the UI checks selection and renders exact prices.
+async function loadCanonical(generation, requestedSymbol) {
+  $('canonical-map').setAttribute('aria-busy', 'true');
+  $('canonical-status').textContent = `Loading ${requestedSymbol} canonical snapshot…`;
+  $('canonical-meta').textContent = '';
+  $('canonical-levels').replaceChildren();
+  try {
+    const response = await fetch(`/api/levels/snapshot?${new URLSearchParams({ symbol: requestedSymbol })}`, { cache: 'no-store', headers: { accept: 'application/json' } });
+    if (!response.ok) throw new Error(`snapshot API ${response.status}`);
+    const payload = await response.json();
+    if (!sameLoad(generation, requestedSymbol)) return;
+    if (payload.symbol !== requestedSymbol || (payload.snapshot && payload.snapshot.symbol !== requestedSymbol)) throw new Error('symbol_mismatch');
+    if (payload.status !== 'available') throw new Error(payload.reason || 'unavailable');
+    const snapshot = payload.snapshot;
+    $('canonical-meta').textContent = `${snapshot.symbol} · session ${snapshot.session_date}\nSnapshot ${snapshot.snapshot_id}\nSource ${snapshot.source.kind} · session ${snapshot.source.session_date} · as of ${snapshot.source.as_of_utc} · ${snapshot.source.freshness}\nCalculation ${snapshot.calculation.family} · ${snapshot.calculation.version}\nGenerated ${snapshot.generated_at_utc} · expires ${snapshot.levels[0].validity.expires_at_utc}`;
+    for (const level of snapshot.levels) {
+      const row = document.createElement('div');
+      row.className = 'ev-row num';
+      row.dataset.levelId = level.level_id;
+      row.textContent = `${level.label}  ${level.price.toFixed(2)}`;
+      $('canonical-levels').appendChild(row);
+    }
+    $('canonical-status').textContent = 'Available · validated canonical snapshot';
+  } catch (error) {
+    if (!sameLoad(generation, requestedSymbol)) return;
+    $('canonical-meta').textContent = '';
+    $('canonical-levels').replaceChildren();
+    $('canonical-status').textContent = `Canonical map unavailable — ${error.message}. No fallback calculations.`;
+  } finally {
+    if (sameLoad(generation, requestedSymbol)) $('canonical-map').setAttribute('aria-busy', 'false');
+  }
 }
 
 function toBars(candles) {
@@ -527,10 +575,13 @@ function renderAll() {
 let evidence = null;
 async function loadEvidence() {
   if (evidence) return;
+  const generation = symbolGeneration, requestedSymbol = symbol;
   try {
-    const res = await fetch(`/app/levels/${symbol}/daily_touch_rates.json`, { headers: { accept: 'application/json' } });
+    const res = await fetch(`/app/levels/${requestedSymbol}/daily_touch_rates.json`, { headers: { accept: 'application/json' } });
     if (!res.ok) return;
-    evidence = await res.json();
+    const value = await res.json();
+    if (!sameSelection(generation, requestedSymbol) || (value.symbol && value.symbol !== requestedSymbol)) return;
+    evidence = value;
     renderEvidence();
   } catch { /* drawer stays hidden when the artifact is unavailable */ }
 }
@@ -563,9 +614,14 @@ function renderEvidence() {
 // --- today's setup: gap-conditioned historical touch rate (the out-of-sample edge) ---
 let regimeRates = null;
 async function loadRegime() {
+  const generation = symbolGeneration, requestedSymbol = symbol;
   try {
-    const res = await fetch(`/app/levels/${symbol}/regime_calibration.json`, { headers: { accept: 'application/json' } });
-    if (res.ok) { regimeRates = await res.json(); if (lastData) renderSetupFromLast(); }
+    const res = await fetch(`/app/levels/${requestedSymbol}/regime_calibration.json`, { headers: { accept: 'application/json' } });
+    if (res.ok) {
+      const value = await res.json();
+      if (!sameSelection(generation, requestedSymbol) || (value.symbol && value.symbol !== requestedSymbol)) return;
+      regimeRates = value; if (lastData) renderSetupFromLast();
+    }
   } catch { /* setup line stays hidden when unavailable */ }
 }
 function gapBucket(g) { return g > 0.003 ? 'up' : (g < -0.003 ? 'down' : 'flat'); }
@@ -620,9 +676,14 @@ function renderSetupFromLast() {
 // --- per-level behaviour: gap-conditioned touch & close-beyond, honest fallback (prereg §8) ---
 let levelProbs = null;
 async function loadLevelProbabilities() {
+  const generation = symbolGeneration, requestedSymbol = symbol;
   try {
-    const res = await fetch(`/app/levels/${symbol}/level_probabilities.json`, { headers: { accept: 'application/json' } });
-    if (res.ok) { levelProbs = await res.json(); if (lastData) renderLevelBehaviour(); }
+    const res = await fetch(`/app/levels/${requestedSymbol}/level_probabilities.json`, { headers: { accept: 'application/json' } });
+    if (res.ok) {
+      const value = await res.json();
+      if (!sameSelection(generation, requestedSymbol) || (value.symbol && value.symbol !== requestedSymbol)) return;
+      levelProbs = value; if (lastData) renderLevelBehaviour();
+    }
   } catch { /* drawer stays hidden when the artifact is unavailable */ }
 }
 function currentGap() {
@@ -671,9 +732,14 @@ function renderLevelBehaviour() {
 // --- intraday behaviour: post-touch acceptance/rejection + first-side + time-to-touch (prereg §3) ---
 let intraday = null;
 async function loadIntraday() {
+  const generation = symbolGeneration, requestedSymbol = symbol;
   try {
-    const res = await fetch(`/app/levels/${symbol}/intraday_outcomes.json`, { headers: { accept: 'application/json' } });
-    if (res.ok) { intraday = await res.json(); renderIntraday(); }
+    const res = await fetch(`/app/levels/${requestedSymbol}/intraday_outcomes.json`, { headers: { accept: 'application/json' } });
+    if (res.ok) {
+      const value = await res.json();
+      if (!sameSelection(generation, requestedSymbol) || (value.symbol && value.symbol !== requestedSymbol)) return;
+      intraday = value; renderIntraday();
+    }
   } catch { /* drawer stays hidden when the artifact is unavailable */ }
 }
 function renderIntraday() {
@@ -714,8 +780,12 @@ function renderIntraday() {
 }
 
 async function load() {
+  const generation = ++loadGeneration, requestedSymbol = symbol;
+  void loadCanonical(generation, requestedSymbol);
   try {
-    const data = await fetchMarket();
+    const data = await fetchMarket(requestedSymbol);
+    if (!sameLoad(generation, requestedSymbol)) return;
+    if (data.symbol !== requestedSymbol) throw new Error('symbol_mismatch');
     const candles = Array.isArray(data.candles) ? data.candles : [];
     if (candles.length < 30) throw new Error('not enough history');
     const bars = toBars(candles);
@@ -743,6 +813,7 @@ async function load() {
     lastData = { data, result, priorBar, asOf };
     renderAll();
   } catch (err) {
+    if (!sameLoad(generation, requestedSymbol)) return;
     if (!lastData) setStatus(`Couldn’t load levels — ${err.message}. Tap Refresh to retry.`, true);
     else $('stamp').textContent = `Stale — retry failed (${err.message})`;
   }
@@ -763,7 +834,9 @@ document.querySelectorAll('[aria-label="Pivot method"] button').forEach((btn) =>
 
 // Instrument switch (SPY | QQQ): reset per-symbol state, hide prior content, re-fetch.
 function selectSymbol(sym) {
+  if (!['SPY', 'QQQ', 'IWM'].includes(sym)) return;
   if (sym === symbol) return;
+  symbolGeneration += 1;
   symbol = sym;
   $('sym').textContent = sym;
   document.querySelectorAll('#symbol-toggle button').forEach((b) =>

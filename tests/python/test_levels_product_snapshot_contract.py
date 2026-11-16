@@ -10,7 +10,7 @@ import tempfile
 import threading
 import time
 import unittest
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -332,6 +332,9 @@ class SnapshotContractTest(unittest.TestCase):
 
 class BriefingArtifactTest(unittest.TestCase):
     def setUp(self):
+        # Delivery uses the real wall clock in production; pin fixture time explicitly.
+        self.clock = self.enterContext(mock.patch.object(publish, "datetime", wraps=datetime))
+        self.clock.now.return_value = datetime(2026, 10, 2, 11, 2, tzinfo=timezone.utc)
         self.snapshot = snapshot_contract.build_snapshot(
             symbol="SPY",
             source_session_date=date(2026, 10, 1),
@@ -472,6 +475,47 @@ class BriefingArtifactTest(unittest.TestCase):
                     out_dir,
                     captured_at_utc="2026-10-02T11:02:00Z",
                 )
+
+    def test_first_delivery_after_open_is_rejected_without_receipt(self):
+        artifact = publish.build_briefing_artifact(self.snapshot, self.track_record)
+        self.clock.now.return_value = datetime(2026, 10, 2, 13, 30, 1, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            publish.notify, "post", return_value=True
+        ) as send:
+            with self.assertRaisesRegex(ValueError, "delivery window"):
+                publish.deliver_briefing(artifact, out_dir=Path(tmp), channel="webhook", dry_run=False)
+            send.assert_not_called()
+            self.assertFalse(list(Path(tmp).glob("morning_delivery_*.json")))
+
+    def test_delivery_before_capture_is_rejected(self):
+        artifact = publish.build_briefing_artifact(self.snapshot, self.track_record)
+        self.clock.now.return_value = datetime(2026, 10, 2, 10, 59, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(publish.notify, "post") as send:
+            with self.assertRaisesRegex(ValueError, "before briefing capture"):
+                publish.deliver_briefing(artifact, out_dir=Path(tmp), channel="webhook", dry_run=False)
+            send.assert_not_called()
+
+    def test_delivery_at_open_remains_allowed(self):
+        artifact = publish.build_briefing_artifact(self.snapshot, self.track_record)
+        self.clock.now.return_value = datetime(2026, 10, 2, 13, 30, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            publish.notify, "post", return_value=True
+        ) as send:
+            result = publish.deliver_briefing(artifact, out_dir=Path(tmp), channel="webhook", dry_run=False)
+            self.assertEqual(result, (True, "sent"))
+            send.assert_called_once()
+
+    def test_already_sent_retry_after_open_still_returns_existing_receipt(self):
+        artifact = publish.build_briefing_artifact(self.snapshot, self.track_record)
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            publish.notify, "post", return_value=True
+        ) as send:
+            first = publish.deliver_briefing(artifact, out_dir=Path(tmp), channel="webhook", dry_run=False)
+            self.clock.now.return_value = datetime(2026, 10, 5, 14, 0, tzinfo=timezone.utc)
+            retry = publish.deliver_briefing(artifact, out_dir=Path(tmp), channel="webhook", dry_run=False)
+            self.assertEqual(first, (True, "sent"))
+            self.assertEqual(retry, (True, "already-delivered"))
+            send.assert_called_once()
 
     def test_write_freezes_first_briefing_and_rejects_changed_rerun(self):
         first = publish.build_briefing_artifact(self.snapshot, self.track_record)

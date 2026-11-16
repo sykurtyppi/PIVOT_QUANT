@@ -16,6 +16,7 @@
   "scripts": {
     "test": "jest --coverage --verbose",
     "test:watch": "jest --watch",
+    "test:canonical": "node --test tests/levels_snapshot_api.node.mjs tests/daily_levels_canonical.node.mjs",
     "test:performance": "jest --testNamePattern=\"Performance\"",
     "test:stress": "jest --testNamePattern=\"Stress\"",
     "lint": "eslint src/ enhanced_fdr_correction.js \"tests/**/*.test.js\"",

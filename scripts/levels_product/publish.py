@@ -309,6 +309,22 @@ def deliver_briefing(
                     raise ValueError(f"delivery receipt identity conflict: {receipt_path}")
                 return True, "already-delivered"
 
+            # Check inside the delivery lock, immediately before the first send.
+            # Frozen content remains valid historical evidence after this window,
+            # but must not become a new, stale morning notification on retry.
+            now = datetime.now(timezone.utc)
+            prepared = _parse_utc(artifact.get("prepared_at_utc"), "prepared_at_utc")
+            session_day = date.fromisoformat(artifact["session_date"])
+            if not is_trading_day(session_day):
+                raise ValueError("briefing delivery session must be a trading day")
+            session_open = datetime.combine(
+                session_day, REGULAR_SESSION_OPEN_ET, ZoneInfo("America/New_York")
+            ).astimezone(timezone.utc)
+            if now < prepared:
+                raise ValueError("cannot deliver before briefing capture")
+            if now > session_open:
+                raise ValueError("morning briefing delivery window has closed")
+
             if channel == "email":
                 subject = (
                     f"{artifact['symbol']} Levels — "
