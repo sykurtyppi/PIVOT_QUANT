@@ -10,6 +10,7 @@ break/reject ML surface.
 from __future__ import annotations
 
 import json
+import re
 import unittest
 from pathlib import Path
 
@@ -38,7 +39,7 @@ class NoMisleadingProbabilityTest(unittest.TestCase):
 
 class HonestPerLevelContractTest(unittest.TestCase):
     def test_consumes_per_level_artifact(self):
-        self.assertIn("${symbol}/level_probabilities.json", PAGE)
+        self.assertIn("${requestedSymbol}/level_probabilities.json", PAGE)
 
     def test_sample_size_and_ci_shown(self):
         self.assertIn("n=", PAGE)
@@ -59,14 +60,18 @@ class HonestPerLevelContractTest(unittest.TestCase):
 
     def test_does_not_wire_page_to_retired_ml(self):
         # The retired RF reject/break surface is /api/levels; the phone page must not touch it.
-        self.assertNotIn("/api/levels", PAGE)
+        # Match fetch targets, not a substring that also bans the safe snapshot API.
+        paths = {target.split("?", 1)[0] for target in
+                 re.findall(r"fetch\(\s*['\"`]([^'\"`]+)", PAGE)}
+        levels_paths = {p for p in paths if p == "/api/levels" or p.startswith("/api/levels/")}
+        self.assertEqual(levels_paths, {"/api/levels/snapshot"})
         self.assertNotIn("hist_reject_rate", PAGE)
         self.assertNotIn("manifest_active", PAGE)
 
 
 class IntradaySurfaceTest(unittest.TestCase):
     def test_consumes_intraday_artifact(self):
-        self.assertIn("${symbol}/intraday_outcomes.json", PAGE)
+        self.assertIn("${requestedSymbol}/intraday_outcomes.json", PAGE)
 
     def test_intraday_honest_labels_and_gate(self):
         self.assertIn("insufficient data", PAGE)   # abstention is surfaced, not hidden
@@ -97,7 +102,7 @@ class MultiInstrumentTest(unittest.TestCase):
 
     def test_artifacts_fetched_symbol_scoped(self):
         for name in ("daily_touch_rates", "regime_calibration", "level_probabilities", "intraday_outcomes"):
-            self.assertIn(f"${{symbol}}/{name}.json", PAGE)
+            self.assertIn(f"${{requestedSymbol}}/{name}.json", PAGE)
 
     def test_server_symbol_route_allowlisted(self):
         self.assertIn("levelsArtifactMatch", SERVER)

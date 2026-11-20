@@ -14,16 +14,12 @@ if ! command -v "${NODE_BIN}" >/dev/null 2>&1; then
   echo "[ERROR] Node executable not found: ${NODE_BIN}" >&2
   exit 1
 fi
-if ! "${NODE_BIN}" -e '
-  const [major, minor, patch] = process.versions.node.split(".").map(Number);
-  process.exit(major === 24 && (minor > 22 || (minor === 22 && patch >= 1)) ? 0 : 1);
-'; then
-  echo "[ERROR] Node 24.22.1 or newer in the Node 24 release line is required; found $("${NODE_BIN}" --version 2>/dev/null || echo unknown)" >&2
-  exit 1
-fi
+# Share the actual entrypoint check: package.json is authoritative.
+"${NODE_BIN}" "${ROOT_DIR}/server/node_runtime.js"
 
 PIDS=()
 OPTIONAL_PIDS=()
+DASHBOARD_PID=""
 STARTUP_TIMEOUT_SEC="${STARTUP_TIMEOUT_SEC:-120}"
 MONITOR_INTERVAL_SEC="${MONITOR_INTERVAL_SEC:-20}"
 MONITOR_HEALTH_TIMEOUT_SEC="${MONITOR_HEALTH_TIMEOUT_SEC:-4}"
@@ -161,6 +157,9 @@ start_service() {
   local optional="${3:-false}"
   shift 3
   if [[ -n "${port}" ]] && is_listening "${port}"; then
+    if [[ "${name}" == "dashboard" ]]; then
+      die "dashboard port ${port} is occupied. Refusing to adopt or stop an existing listener. Inspect it with lsof -nP -iTCP:${port} -sTCP:LISTEN; stop it through its owning supervisor, then restart this launcher with an approved NODE_BIN."
+    fi
     echo "${name} already running on port ${port}. Skipping."
     return 0
   fi
@@ -168,6 +167,9 @@ start_service() {
   "$@" > "${LOG_DIR}/${name}.log" 2>&1 &
   local pid=$!
   PIDS+=("${pid}")
+  if [[ "${name}" == "dashboard" ]]; then
+    DASHBOARD_PID="${pid}"
+  fi
   if [[ "${optional}" == "true" ]]; then
     OPTIONAL_PIDS+=("${pid}")
   fi
@@ -250,6 +252,11 @@ verify_service() {
   local port="$2"
   local health_url="${3:-}"
 
+  if [[ "${name}" == "dashboard" ]]; then
+    verify_dashboard "${port}" "${health_url}"
+    return
+  fi
+
   if ! wait_for_port "${port}"; then
     die "${name} failed to bind to port ${port} within ${STARTUP_TIMEOUT_SEC}s. Check ${LOG_DIR}/${name}.log"
   fi
@@ -259,6 +266,32 @@ verify_service() {
   fi
 
   echo "${name} ready on port ${port}"
+}
+
+# A foreign listener can win the bind race. Require the dashboard child we
+# started, not just a successful port/HTTP probe, before declaring readiness.
+dashboard_owns_port() {
+  local port="$1"
+  [[ -n "${DASHBOARD_PID}" ]] && kill -0 "${DASHBOARD_PID}" 2>/dev/null &&
+    lsof -nP -a -p "${DASHBOARD_PID}" -iTCP:"${port}" -sTCP:LISTEN >/dev/null 2>&1
+}
+
+verify_dashboard() {
+  local port="$1"
+  local health_url="$2"
+  local elapsed=0
+  while [[ "${elapsed}" -lt "${STARTUP_TIMEOUT_SEC}" ]]; do
+    if ! kill -0 "${DASHBOARD_PID}" 2>/dev/null; then
+      die "dashboard child exited before readiness. Check ${LOG_DIR}/dashboard.log; inspect port ${port} and restart with an approved NODE_BIN. Existing listeners were not stopped."
+    fi
+    if dashboard_owns_port "${port}" && curl -fsS --max-time 2 "${health_url}" >/dev/null 2>&1 && dashboard_owns_port "${port}"; then
+      echo "dashboard ready on port ${port}"
+      return 0
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+  die "dashboard did not own port ${port} and pass health within ${STARTUP_TIMEOUT_SEC}s. Check ${LOG_DIR}/dashboard.log; inspect the listener and restart. Existing listeners were not stopped."
 }
 
 quick_check_service() {
@@ -443,6 +476,11 @@ run_db_migrations() {
 
 cd "${ROOT_DIR}"
 acquire_lock
+# Refuse before migrations or service starts; no metadata can authorize reuse.
+command -v lsof >/dev/null 2>&1 || die "lsof is required to verify dashboard listener ownership. Install it and restart."
+if is_listening "3000"; then
+  die "dashboard port 3000 is occupied. Refusing to adopt or stop an existing listener. Inspect it with lsof -nP -iTCP:3000 -sTCP:LISTEN; stop it through its owning supervisor, then restart this launcher with an approved NODE_BIN."
+fi
 run_db_migrations
 
 if is_truthy "${LIVE_COLLECTOR_ENABLED}"; then

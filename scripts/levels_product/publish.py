@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sys
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
@@ -27,6 +28,7 @@ sys.path.insert(0, str(REPO / "scripts" / "levels_product"))
 
 import notify  # noqa: E402
 from level_snapshot import (  # noqa: E402
+    SYMBOL_PATTERN,
     _atomic_latest_link,
     _create_immutable_json,
     load_snapshot,
@@ -168,16 +170,31 @@ def build_briefing_artifact(mp, tr, *, captured_at_utc: str | None = None) -> di
     return {**core, "briefing_id": f"brf_{digest}"}
 
 
-def _load_briefing(path: Path) -> dict:
+_LEGACY_BRIEFING_FIELDS = frozenset({
+    "body", "briefing_id", "contract", "contract_version", "prepared_at_utc",
+    "session_date", "snapshot_id", "symbol", "track_record_as_of_utc",
+    "track_record_sha256",
+})
+_MODERN_BRIEFING_FIELDS = _LEGACY_BRIEFING_FIELDS | {
+    "track_record", "snapshot_generated_at_utc",
+}
+
+
+def _read_briefing(path: Path) -> dict:
     try:
-        artifact = json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"could not read morning briefing {path}: {exc}") from exc
+
+
+def _load_briefing(path: Path) -> dict:
+    artifact = _read_briefing(path)
     _validate_briefing_integrity(artifact)
     return artifact
 
 
-def _validate_briefing_integrity(artifact: dict) -> None:
+def _validate_briefing_envelope(artifact: dict) -> None:
+    """Validate shared metadata and content identity, not embedded evidence."""
     if not isinstance(artifact, dict):
         raise ValueError("briefing artifact must be an object")
     briefing_id = artifact.get("briefing_id")
@@ -185,6 +202,33 @@ def _validate_briefing_integrity(artifact: dict) -> None:
     expected_id = f"brf_{hashlib.sha256(_canonical_bytes(core)).hexdigest()[:24]}"
     if briefing_id != expected_id:
         raise ValueError("briefing identity digest mismatch")
+    if not _LEGACY_BRIEFING_FIELDS <= artifact.keys():
+        raise ValueError("briefing envelope fields are incomplete")
+    if (artifact["contract"] != "pivotquant.morning_briefing"
+            or type(artifact["contract_version"]) is not int
+            or artifact["contract_version"] != 1):
+        raise ValueError("unsupported briefing contract")
+    for field, pattern in (
+        ("symbol", SYMBOL_PATTERN.pattern),
+        ("snapshot_id", r"lvs_[0-9a-f]{24}"),
+        ("track_record_sha256", r"[0-9a-f]{64}"),
+        ("session_date", r"\d{4}-\d{2}-\d{2}"),
+    ):
+        value = artifact[field]
+        if not isinstance(value, str) or not re.fullmatch(pattern, value):
+            raise ValueError(f"invalid briefing {field}")
+    date.fromisoformat(artifact["session_date"])
+    for field in ("prepared_at_utc", "track_record_as_of_utc"):
+        _parse_utc(artifact[field], field)
+    if not isinstance(artifact["body"], str) or not artifact["body"].strip():
+        raise ValueError("briefing body must be nonempty text")
+
+
+def _validate_briefing_integrity(artifact: dict) -> None:
+    _validate_briefing_envelope(artifact)
+    if not _MODERN_BRIEFING_FIELDS <= artifact.keys():
+        raise ValueError("modern briefing fields are incomplete")
+    _parse_utc(artifact["snapshot_generated_at_utc"], "snapshot_generated_at_utc")
     track_record = artifact.get("track_record")
     if not isinstance(track_record, dict):
         raise ValueError("briefing track record must be an object")
@@ -193,8 +237,27 @@ def _validate_briefing_integrity(artifact: dict) -> None:
         raise ValueError("briefing track-record digest mismatch")
 
 
+def _load_latest_for_supersession(path: Path, replacement: dict) -> dict:
+    """Recognize historical envelopes ONLY to retire a strictly older pointer.
+
+    This is not a reuse/delivery loader: legacy evidence cannot be reconstructed.
+    The caller validates the modern replacement before entering the pointer lock.
+    """
+    current = _read_briefing(path)
+    if isinstance(current, dict) and current.keys() == _LEGACY_BRIEFING_FIELDS:
+        _validate_briefing_envelope(current)
+        if current["session_date"] >= replacement["session_date"]:
+            raise ValueError("legacy latest briefing must be strictly older than replacement")
+    else:
+        _validate_briefing_integrity(current)
+    if current["symbol"] != replacement["symbol"]:
+        raise ValueError("latest briefing symbol must match replacement")
+    return current
+
+
 def write_briefing_artifact(artifact: dict, out_dir: Path) -> tuple[Path, Path]:
     """Create one immutable pre-market briefing plus a monotonic latest pointer."""
+    _validate_briefing_integrity(artifact)
     immutable = out_dir / (
         f"morning_briefing_{artifact['symbol']}_{artifact['session_date']}.json"
     )
@@ -211,7 +274,7 @@ def write_briefing_artifact(artifact: dict, out_dir: Path) -> tuple[Path, Path]:
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
         try:
             if latest.exists() or latest.is_symlink():
-                current = _load_briefing(latest)
+                current = _load_latest_for_supersession(latest, artifact)
                 if current["session_date"] > artifact["session_date"]:
                     return immutable, latest
                 if (
@@ -249,6 +312,7 @@ def load_or_build_briefing(
         )
         if rebuilt != artifact:
             raise ValueError(f"existing briefing fails semantic validation: {immutable}")
+        write_briefing_artifact(artifact, out_dir)
         return artifact, immutable
 
     artifact = build_briefing_artifact(mp, tr, captured_at_utc=captured_at_utc)
@@ -308,6 +372,22 @@ def deliver_briefing(
                 ):
                     raise ValueError(f"delivery receipt identity conflict: {receipt_path}")
                 return True, "already-delivered"
+
+            # Check inside the delivery lock, immediately before the first send.
+            # Frozen content remains valid historical evidence after this window,
+            # but must not become a new, stale morning notification on retry.
+            now = datetime.now(timezone.utc)
+            prepared = _parse_utc(artifact.get("prepared_at_utc"), "prepared_at_utc")
+            session_day = date.fromisoformat(artifact["session_date"])
+            if not is_trading_day(session_day):
+                raise ValueError("briefing delivery session must be a trading day")
+            session_open = datetime.combine(
+                session_day, REGULAR_SESSION_OPEN_ET, ZoneInfo("America/New_York")
+            ).astimezone(timezone.utc)
+            if now < prepared:
+                raise ValueError("cannot deliver before briefing capture")
+            if now > session_open:
+                raise ValueError("morning briefing delivery window has closed")
 
             if channel == "email":
                 subject = (
