@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib.util
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -535,6 +536,50 @@ class BriefingArtifactTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "immutable briefing"):
                 publish.write_briefing_artifact(changed, Path(tmp))
             self.assertEqual(immutable.read_bytes(), before)
+
+    def test_write_rejects_symlink_immutable_path(self):
+        """F2: a pre-existing symlink at the immutable path is rejected, not
+        followed, when the writer finds an artifact already present."""
+        artifact = publish.build_briefing_artifact(self.snapshot, self.track_record)
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            decoy = out_dir / "decoy.json"
+            decoy.write_text("{}", encoding="utf-8")
+            immutable = out_dir / "morning_briefing_SPY_2026-10-02.json"
+            immutable.symlink_to(decoy.name)
+
+            with self.assertRaisesRegex(ValueError, "symlink"):
+                publish.write_briefing_artifact(artifact, out_dir)
+
+    def test_load_or_build_rejects_symlink_immutable_path(self):
+        """F2: the reuse path refuses a symlinked immutable rather than reading
+        through it to an attacker-chosen target."""
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            decoy = out_dir / "decoy.json"
+            decoy.write_text("{}", encoding="utf-8")
+            immutable = out_dir / "morning_briefing_SPY_2026-10-02.json"
+            immutable.symlink_to(decoy.name)
+
+            with self.assertRaisesRegex(ValueError, "symlink"):
+                publish.load_or_build_briefing(
+                    self.snapshot,
+                    self.track_record,
+                    out_dir,
+                    captured_at_utc="2026-10-02T11:01:00Z",
+                )
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "requires os.mkfifo")
+    def test_write_rejects_non_regular_immutable_path(self):
+        """F2: a non-regular file (FIFO) at the immutable path is rejected."""
+        artifact = publish.build_briefing_artifact(self.snapshot, self.track_record)
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            immutable = out_dir / "morning_briefing_SPY_2026-10-02.json"
+            os.mkfifo(immutable)
+
+            with self.assertRaisesRegex(ValueError, "regular file"):
+                publish.write_briefing_artifact(artifact, out_dir)
 
     @staticmethod
     def _rehash(artifact):
