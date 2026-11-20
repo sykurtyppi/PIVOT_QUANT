@@ -66,7 +66,16 @@ class DashboardRuntimeTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         (self.root / "server").mkdir()
         (self.root / "scripts").mkdir()
-        for name in ("yahoo_proxy.js", "level_converter.js", "node_runtime.js"):
+        # yahoo_proxy.js imports these local server modules; the fixture must copy
+        # every one it resolves at startup or the entrypoint dies with
+        # ERR_MODULE_NOT_FOUND. levels_snapshot.js was added to those imports after
+        # this test was first written, so it is included here explicitly.
+        for name in (
+            "yahoo_proxy.js",
+            "level_converter.js",
+            "levels_snapshot.js",
+            "node_runtime.js",
+        ):
             source = ROOT / "server" / name
             if source.exists():
                 shutil.copy2(source, self.root / "server" / name)
