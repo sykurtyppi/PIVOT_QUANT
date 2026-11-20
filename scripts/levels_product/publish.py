@@ -18,6 +18,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import sys
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
@@ -193,6 +194,26 @@ def _load_briefing(path: Path) -> dict:
     return artifact
 
 
+def _require_regular_file_within(path: Path, base: Path, *, field: str) -> None:
+    """Reject a symlink or non-regular pre-existing artifact and confirm containment.
+
+    An immutable briefing must be a real write-once file living directly in the
+    artifact directory. A symlink or FIFO/device at that path would let the
+    subsequent read follow out of the directory (or block on a device), so it is
+    refused before the artifact is read back.
+    """
+    if path.is_symlink():
+        raise ValueError(f"{field} must be a regular file, not a symlink: {path}")
+    try:
+        mode = path.lstat().st_mode
+    except OSError as exc:
+        raise ValueError(f"could not stat {field} {path}: {exc}") from exc
+    if not stat.S_ISREG(mode):
+        raise ValueError(f"{field} must be a regular file: {path}")
+    if path.resolve().parent != base.resolve():
+        raise ValueError(f"{field} escapes its artifact directory: {path}")
+
+
 def _validate_briefing_envelope(artifact: dict) -> None:
     """Validate shared metadata and content identity, not embedded evidence."""
     if not isinstance(artifact, dict):
@@ -263,6 +284,7 @@ def write_briefing_artifact(artifact: dict, out_dir: Path) -> tuple[Path, Path]:
     )
     latest = out_dir / f"morning_briefing_{artifact['symbol']}_latest.json"
     if not _create_immutable_json(immutable, artifact):
+        _require_regular_file_within(immutable, out_dir, field="immutable briefing")
         existing = _load_briefing(immutable)
         if existing != artifact:
             raise ValueError(
@@ -296,6 +318,7 @@ def load_or_build_briefing(
     """Reuse the frozen session briefing on retries; never rebuild its evidence."""
     immutable = out_dir / f"morning_briefing_{mp['symbol']}_{mp['session_date']}.json"
     if immutable.exists():
+        _require_regular_file_within(immutable, out_dir, field="immutable briefing")
         artifact = _load_briefing(immutable)
         expected = {
             "contract": "pivotquant.morning_briefing",
