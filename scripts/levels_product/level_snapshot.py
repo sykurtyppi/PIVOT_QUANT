@@ -236,8 +236,26 @@ def build_snapshot(
     return snapshot
 
 
+def _require_stored_number(name: str, value: Any, *, cents: bool = False) -> None:
+    """Validate stored JSON numbers without coercion or silent rounding.
+
+    Builders may normalize inputs, but an accepted artifact must already be safe
+    for JSON/JavaScript consumers. bool is an int subclass, not a price.
+    """
+    try:
+        finite = type(value) in (int, float) and math.isfinite(value)
+    except OverflowError:
+        finite = False
+    if not finite:
+        raise ValueError(f"{name} must be a finite JSON number")
+    if cents and value != round(value, 2):
+        raise ValueError(f"{name} must already be normalized to cents")
+
+
 def validate_snapshot(snapshot: Mapping[str, Any]) -> None:
     """Fail closed when a snapshot is malformed or its identity no longer matches."""
+    if not isinstance(snapshot, Mapping):
+        raise ValueError("levels snapshot must be an object")
     if snapshot.get("contract") != CONTRACT:
         raise ValueError(f"unsupported levels contract: {snapshot.get('contract')!r}")
     if snapshot.get("contract_version") != CONTRACT_VERSION:
@@ -280,11 +298,14 @@ def validate_snapshot(snapshot: Mapping[str, Any]) -> None:
     source_ohlc = source.get("ohlc", {})
     if set(source_ohlc) != {"high", "low", "close"}:
         raise ValueError("source OHLC must contain exactly high, low, and close")
+    for field in ("high", "low", "close"):
+        _require_stored_number(f"source.ohlc.{field}", source_ohlc[field])
     _validate_pivot_inputs(source_ohlc)
 
     seen_ids: set[str] = set()
     seen_labels: set[str] = set()
-    reference_price = float(snapshot["reference_price"])
+    _require_stored_number("reference_price", snapshot.get("reference_price"), cents=True)
+    reference_price = snapshot["reference_price"]
     normalized_source_close = round(float(source_ohlc["close"]), 2)
     if (not math.isfinite(reference_price) or reference_price <= 0
             or reference_price != normalized_source_close):
@@ -293,6 +314,12 @@ def validate_snapshot(snapshot: Mapping[str, Any]) -> None:
         )
     expected_expiry = _session_close_utc(snapshot_session_date)
     for level in snapshot["levels"]:
+        _require_stored_number("level.price", level.get("price"), cents=True)
+        _require_stored_number(
+            "level.distance_from_reference_bps", level.get("distance_from_reference_bps")
+        )
+        if not isinstance(level.get("confluence_components"), list):
+            raise ValueError("level.confluence_components must be an array")
         expected_level_id = _digest(
             "lvl",
             _level_identity_core(
